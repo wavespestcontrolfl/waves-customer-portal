@@ -42,7 +42,7 @@ const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePr
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null, invoice = null } = {}) {
   if (liveVisitProbe === undefined) liveVisitProbe = scheduledService;
   const writes = [];
   const trx = (table) => {
@@ -57,6 +57,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
       if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : scheduledService;
       if (table === 'setup_fee_claims') return q._where && 'scheduled_service_id' in q._where ? siblingClaim : claim;
       if (table === 'annual_prepay_terms') return prepayTerm;
+      if (table === 'invoices') return invoice;
       if (table === 'services') return catalog;
       // The realignment rollout instant — every root fixture below was
       // created AFTER it (post-rollout direct series owe the live fee).
@@ -133,9 +134,15 @@ describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P
     const claimRow = { id: 'claim-1', scheduled_service_id: null, amount: '99.00' };
     expect(await settledSetupClaimForInvoice(conn({ claim: claimRow }), 'inv-prepay')).toEqual(claimRow);
     expect(await settledSetupClaimForInvoice(conn({ claim: claimRow }), null)).toBeNull();
-    expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: { prepay_invoice_id: 'inv-prepay' } }), 'est-1')).toEqual(claimRow);
+    expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: { prepay_invoice_id: 'inv-prepay' }, invoice: { status: 'sent' } }), 'est-1')).toEqual(claimRow);
     // No term for the estimate (standard accept won the race) = no settlement.
     expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: null }), 'est-1')).toBeNull();
+    // A VOIDED/REFUNDED prepay keeps its anchor-less claim for recovery —
+    // that is an open obligation, never a settlement (codex #3591 r68 P1).
+    for (const status of ['void', 'refunded', 'cancelled']) {
+      expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: { prepay_invoice_id: 'inv-prepay' }, invoice: { status } }), 'est-1')).toBeNull();
+    }
+    expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: { prepay_invoice_id: 'inv-prepay' }, invoice: null }), 'est-1')).toBeNull();
   });
   test('estimateSetupCarriedElsewhere: a live stamp or a claim on ANOTHER root of the estimate blocks a second stamp (codex #3591 r66 P1)', async () => {
     const { estimateSetupCarriedElsewhere } = plans;
@@ -372,6 +379,18 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
       .toEqual({ anchorId: 'root-rb', amount: 99 });
   });
 
+  test('a CANCELLED rodent root whose later child is still live is STILL the series — its obligation is reported, never a second anchor-less setup (codex #3591 r68 P1)', async () => {
+    const cancelledRoot = { ...rodentRoot, status: 'cancelled' };
+    // Live child present (the whereIn probe) → the root still counts.
+    const withChild = conn({ rootsForCoverage: [cancelledRoot], scheduledService: { id: 'root-rb', customer_id: 'cust-1', recurring_parent_id: null, pending_setup_fee: null, created_at: '2026-09-01T12:00:00.000Z', source_estimate_id: null }, liveVisitProbe: { id: 'child-live' } });
+    expect(await findDirectRodentSetupObligationForCoverage(withChild, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }))
+      .toEqual({ anchorId: 'root-rb', amount: 99 });
+    // No live child → the dead root is skipped (falls through to the no-root rule as before).
+    const dead = conn({ rootsForCoverage: [cancelledRoot], liveVisitProbe: null });
+    expect(await findDirectRodentSetupObligationForCoverage(dead, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }))
+      .toEqual({ anchorId: null, amount: 99 });
+  });
+
   test('TWO live direct rodent roots that both owe their setup → refused (switchConflict) with both anchors, never the first one alone (codex #3591 r67 P1)', async () => {
     const secondRoot = { ...rodentRoot, id: 'root-rb-2' };
     const c = conn({ rootsForCoverage: [rodentRoot, secondRoot] });
@@ -517,6 +536,14 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+
+  test('public accept: strict waiver re-check, setup in both commercial prepay tax blends, and a ledgered claim on the standard invoice (codex #3591 r68 P1)', () => {
+    const estimatePublic = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(estimatePublic).toMatch(/loadExistingQualifyingServiceKeys\(db, estimate\.customer_id, \{ strict: true \}\) \|\| \[\];\s+setupWaiverStale = /);
+    expect(estimatePublic).toMatch(/resolveCommercialPrepayTaxRate\(recurring, \{\s+prepayDiscountApplied: prepayResolved\.discount > 0,\s+baseRate: opts\.prepayBaseRate,\s+taxableOneTimeAmount: rodentSetupDueToday,\s+\}\)/);
+    expect(estimatePublic).toMatch(/resolveCommercialPrepayTaxRate\(recurringSvcList, \{ prepayDiscountApplied: resolved\.discount > 0, baseRate: prepayDisplayBaseRate, taxableOneTimeAmount: acknowledgedRodentSetup \}\)/);
+    expect(estimatePublic).toMatch(/invoiceIdResult = inv\.id;[\s\S]*?if \(acceptedRodentSetupAmount > 0\) \{[\s\S]*?await plans\.recordSetupFeeClaimForInvoice\(trx, \{\s+invoiceId: inv\.id,\s+anchorId: acceptRodentRoot \? acceptRodentRoot\.id : null,\s+amount: acceptedRodentSetupAmount,\s+\}\);/);
+  });
 
   test('the discount-rules missing-row insert carries EVERY validated field of the edit (codex #3591 r67 P1)', () => {
     const pricingConfig = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-pricing-config.js'), 'utf8');

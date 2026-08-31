@@ -63,13 +63,18 @@ function notMembershipCustomerSql(alias = 'c') {
 // false (treat as a non-member / new customer) on a missing customer or any
 // lookup error — the safe default is to charge the setup fee and offer annual
 // prepay, never to silently waive them for a non-member.
-async function isActivePlanCustomer(database, customerId) {
+// strict: a failed read THROWS instead of reading as "no plan" — the
+// verification callers (setup-waiver re-check, codex #3591 r68 P1) must tell
+// "not a member" apart from "unknown", or a transient outage reprices a
+// member's quote.
+async function isActivePlanCustomer(database, customerId, { strict = false } = {}) {
   if (!database || !customerId) return false;
   try {
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer || customer.active === false) return false;
     return isMembershipCustomerRow(customer);
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return false;
   }
 }
@@ -287,8 +292,8 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // #3359 r4: two sequential loads meant one could transiently fail while the
 // other succeeded, splitting tier and spend onto different identities).
 // Omitted (every other caller), the loader fetches its own.
-async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId } = {}) {
-  if (!(await isActivePlanCustomer(database, customerId))) return [];
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId, strict = false } = {}) {
+  if (!(await isActivePlanCustomer(database, customerId, { strict }))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('autoWaveguardTierEnroll')) {
@@ -307,9 +312,12 @@ async function loadExistingRecurringQualifyingRows(database, customerId, { catal
   const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
-  const catalogById = (catalogFieldsByRowId !== undefined
+  const catalogLoaded = catalogFieldsByRowId !== undefined
     ? catalogFieldsByRowId
-    : await loadCatalogFieldsByRowId(database, customerId)) || new Map();
+    : await loadCatalogFieldsByRowId(database, customerId);
+  // strict: an unreadable catalog is UNKNOWN evidence, never a degrade.
+  if (strict && catalogLoaded === null) throw new Error('qualifying-service catalog read failed');
+  const catalogById = catalogLoaded || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -380,8 +388,8 @@ function qualifyingKeysFromRows(rows = []) {
 // address, then the customer's primary street; a row that still can't be
 // located is EXCLUDED (counting an unlocatable plan toward another property's
 // tier would hand out an unearned discount).
-async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
-  const rows = await loadExistingRecurringQualifyingRows(database, customerId);
+async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null, strict = false } = {}) {
+  const rows = await loadExistingRecurringQualifyingRows(database, customerId, { strict });
   return qualifyingKeysFromRows(await filterRowsToStreet(database, rows, streetScope));
 }
 

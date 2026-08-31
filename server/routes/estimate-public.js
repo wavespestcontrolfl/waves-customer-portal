@@ -5272,9 +5272,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // the customer's effective rate resolved in handleEstimateView). Mirror
       // InvoiceService's rounding (tax dollars to cents, then add).
       if (!commercialManualAccept) return base;
+      // The setup joins the taxable base at the FULL effective rate, exactly
+      // as the converter blends it (codex #3591 r62/r68 P1) — a mixed
+      // taxable-bait + non-taxable-lawn prepay otherwise shows a total the
+      // exact-total guard rejects as stale.
       const taxRate = require('../services/estimate-converter').resolveCommercialPrepayTaxRate(recurring, {
         prepayDiscountApplied: prepayResolved.discount > 0,
         baseRate: opts.prepayBaseRate,
+        taxableOneTimeAmount: rodentSetupDueToday,
       });
       const tax = Math.round(base * taxRate * 100) / 100;
       return Math.round((base + tax) * 100) / 100;
@@ -8273,7 +8278,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     if (frozenSetupWaiver) {
       try {
         const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
-        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id) || [];
+        // STRICT (codex #3591 r68 P1): the default loader swallows a failed
+        // membership/catalog read as "no plan" → [] — indistinguishable from
+        // a genuinely lapsed waiver — which would reprice a member's quote
+        // with the $99 instead of taking the quote-required path below.
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true }) || [];
         setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
       } catch (probeErr) {
         // Validity UNKNOWN (codex #3591 r41 P1): neither keep the waiver
@@ -9660,13 +9669,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // acknowledged total must include it or the exact-total check
         // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
         // #3591 r16 P1). Same frozen resolver the converter bills from.
-        const base = Math.round((resolved.amount + converter.frozenRodentBaitSetupAmount(estData)) * 100) / 100;
+        const acknowledgedRodentSetup = converter.frozenRodentBaitSetupAmount(estData);
+        const base = Math.round((resolved.amount + acknowledgedRodentSetup) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
         // + PaymentIntent the converter creates (uses the same blended rate +
-        // post-discount allocation). Residential prepay is untaxed (rate 0).
+        // post-discount allocation, with the setup in the taxable base — codex
+        // #3591 r68 P1). Residential prepay is untaxed (rate 0).
         const taxRate = isCommercialAccept
-          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate })
+          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate, taxableOneTimeAmount: acknowledgedRodentSetup })
           : 0;
         // Mirror InvoiceService EXACTLY: tax dollars rounded to cents, then added
         // to the base — so the messaged amount equals inv.total to the cent.
@@ -11442,6 +11453,30 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             standardInvoiceMinted = true;
             standardInvoiceAttached = !!attachScheduledServiceId;
             invoiceIdResult = inv.id;
+            // Immutable ledger for the setup this invoice bills (codex #3591
+            // r68 P1) — the same setup_fee_claims record the prepay and
+            // completion mints write, so a later void/refund of a renamed
+            // or repriced invoice still restores the obligation onto the
+            // series (restoreRodentSetupObligationForReversedInvoice reads
+            // the claim first). Anchored to the rodent root this accept
+            // just scheduled; anchor-less when none exists yet.
+            if (acceptedRodentSetupAmount > 0) {
+              const plans = require('../services/secure-appointment-plans');
+              const acceptRoots = await trx('scheduled_services')
+                .where({ source_estimate_id: estimate.id, customer_id: customerId })
+                .whereNull('recurring_parent_id')
+                .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+                .select('id', 'service_type', 'service_id');
+              let acceptRodentRoot = null;
+              for (const root of acceptRoots || []) {
+                if ((await plans.authoritativeServiceKey(trx, root)) === 'rodent_bait') { acceptRodentRoot = root; break; }
+              }
+              await plans.recordSetupFeeClaimForInvoice(trx, {
+                invoiceId: inv.id,
+                anchorId: acceptRodentRoot ? acceptRodentRoot.id : null,
+                amount: acceptedRodentSetupAmount,
+              });
+            }
             // The customer-facing amount is the invoice's actual after-tax,
             // after-credit total — the same figure the /pay page collects.
             invoiceAmountResult = Number(inv.total) || 0;

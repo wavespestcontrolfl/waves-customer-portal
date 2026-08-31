@@ -58,6 +58,24 @@ describe('isActivePlanCustomer', () => {
   });
 });
 
+describe('strict mode — a failed membership read is UNKNOWN, never "no plan" (codex #3591 r68 P1)', () => {
+  const failingDb = (table) => ({
+    where: () => failingDb(table),
+    whereNotIn: () => failingDb(table),
+    columnInfo: async () => ({ is_recurring: {} }),
+    first: async () => { if (table === 'customers') throw new Error('db down'); return null; },
+    select: async () => [],
+  });
+  test('default swallows to false / []; strict propagates through every loader', async () => {
+    expect(await isActivePlanCustomer(failingDb, 'c1')).toBe(false);
+    expect(await loadExistingRecurringQualifyingRows(failingDb, 'c1')).toEqual([]);
+    expect(await loadExistingQualifyingServiceKeys(failingDb, 'c1')).toEqual([]);
+    await expect(isActivePlanCustomer(failingDb, 'c1', { strict: true })).rejects.toThrow('db down');
+    await expect(loadExistingRecurringQualifyingRows(failingDb, 'c1', { strict: true })).rejects.toThrow('db down');
+    await expect(loadExistingQualifyingServiceKeys(failingDb, 'c1', { strict: true })).rejects.toThrow('db down');
+  });
+});
+
 describe('loadExistingRecurringQualifyingRows plan-gate', () => {
   const pestRow = { id: 's1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-09-12' };
 

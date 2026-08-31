@@ -331,7 +331,31 @@ async function settledSetupClaimForInvoice(database, invoiceId) {
 async function settledSetupClaimForEstimate(database, estimateId) {
   if (!estimateId) return null;
   const term = await database('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('prepay_invoice_id');
-  return settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
+  const claim = await settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
+  if (!claim) return null;
+  // Only a LIVE/PAID invoice settles (codex #3591 r68 P1): a prepay voided
+  // or refunded before any series existed keeps its anchor-less claim for
+  // later recovery — that retained record is an OPEN obligation, not a
+  // settlement, so the booking must still stamp the disclosed setup.
+  const invoice = await database('invoices').where({ id: term.prepay_invoice_id }).first('status');
+  if (!invoice || TERMINAL_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
+  return claim;
+}
+
+// A series can still CONSUME its setup stamp when the root is live, or when
+// a terminal/completed/rescheduled root still has a child that can complete
+// (codex #3591 r67/r68 P1). Shared by every carried-setup probe so the
+// liveness rule cannot drift between them.
+const ROOT_NEEDS_LIVE_CHILD_STATUSES = ['cancelled', 'canceled', 'skipped', 'no_show', 'completed', 'rescheduled'];
+const CHILD_CAN_COMPLETE_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
+async function seriesCanStillConsume(database, root) {
+  if (!root?.id) return false;
+  if (!ROOT_NEEDS_LIVE_CHILD_STATUSES.includes(String(root.status || '').toLowerCase())) return true;
+  const liveChild = await database('scheduled_services')
+    .where({ recurring_parent_id: root.id })
+    .whereIn('status', CHILD_CAN_COMPLETE_STATUSES)
+    .first('id');
+  return !!liveChild;
 }
 
 // TRUE when another series booked from this estimate already carries the
@@ -352,17 +376,8 @@ async function estimateSetupCarriedElsewhere(database, estimateId, excludeRootId
     // A stamp counts only on a series that can still CONSUME it (codex
     // #3591 r67 P1): a cancelled root (no live children) can never bill
     // its stamp, so a replacement series booked from the same estimate
-    // must carry the disclosed setup itself. A completed/rescheduled root
-    // is still the series while a child can complete.
-    const status = String(root.status || '').toLowerCase();
-    if (['cancelled', 'canceled', 'skipped', 'no_show', 'completed', 'rescheduled'].includes(status)) {
-      const liveChild = await database('scheduled_services')
-        .where({ recurring_parent_id: root.id })
-        .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
-        .first('id');
-      if (!liveChild) continue;
-    }
-    return true;
+    // must carry the disclosed setup itself.
+    if (await seriesCanStillConsume(database, root)) return true;
   }
   if (!ids.length) return false;
   // An immutable collected claim on any root of the estimate counts
@@ -408,10 +423,13 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   // 'rescheduled' roots stay too (codex #3591 r44 P1): the legacy customer
   // reschedule marks the ROOT rescheduled while its future children remain —
   // the series still exists, so it must not read as brand-new coverage.
+  // No status filter here (codex #3591 r68 P1): a CANCELLED root whose later
+  // child is still live is still the series that carries/collected the
+  // setup — dropping it would make this coverage read as a brand-new
+  // program and add a second setup. Liveness is decided per root below.
   const roots = await database('scheduled_services')
     .where({ customer_id: customerId })
     .whereNull('recurring_parent_id')
-    .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
     .where(function recurringRoots() {
       this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
     })
@@ -432,13 +450,7 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
       ? (await authoritativeServiceKey(database, root)) === coverageKey
       : serviceMatchesCoverage(root, coverageServiceType);
     if (!matches) continue;
-    if (['completed', 'rescheduled'].includes(String(root.status || '').toLowerCase())) {
-      const liveChild = await database('scheduled_services')
-        .where({ recurring_parent_id: root.id })
-        .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
-        .first('id');
-      if (!liveChild) continue;
-    }
+    if (!(await seriesCanStillConsume(database, root))) continue;
     sawMatchingRoot = true;
     // An ESTIMATE-origin series made its setup decision at accept — never
     // re-derive a LIVE fee here (it would bill the accept's setup a second
