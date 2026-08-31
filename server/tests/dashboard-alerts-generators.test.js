@@ -351,6 +351,24 @@ describe('Action Inbox generators', () => {
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
   });
 
+  test('closeout_gaps_today: after a restart (empty carry) an active DB state row holds the alert through an outage (codex r6)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    primeDb({
+      scheduled_services: [{ id: 'svc-a' }],
+      dashboard_alert_state: { alert_id: 'closeout_gaps_today', current_count: 2, last_label: '2 completed visits today not closed out (3 open items)', last_seen_at: new Date().toISOString() },
+    });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
+    const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(item).toMatchObject({ count: 2, heldThroughOutage: true, members: ['svc-a'], label: expect.stringContaining('3 open items') });
+    // No active state row (alert genuinely resolved earlier) → an outage does not invent one.
+    __private.resetCloseoutCarry();
+    primeDb({ scheduled_services: [{ id: 'svc-a' }], dashboard_alert_state: undefined });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+  });
+
   test('closeout_gaps_today: absent when every completed visit is closed out or there are none', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     primeDb({ scheduled_services: [] });

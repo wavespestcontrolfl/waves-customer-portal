@@ -387,6 +387,7 @@ async function computeDashboardAlertsUncached() {
       const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
       const carry = closeoutCarryFor(today);
       const gapIds = [];
+      const unreadableIds = [];
       let issueCount = 0;
       for (const row of completedToday) {
         const status = statuses.get(row.id);
@@ -398,8 +399,33 @@ async function computeDashboardAlertsUncached() {
         } else if (unreadable && carry.has(row.id)) {
           // Outage: hold the last-known gap so the alert cannot clear and re-fire.
           gapIds.push(row.id); issueCount += carry.get(row.id);
-        } else if (!unreadable) {
+        } else if (unreadable) {
+          unreadableIds.push(row.id);
+        } else {
           carry.delete(row.id); // complete clean read → genuinely resolved
+        }
+      }
+      // The in-process carry is empty after a restart / on another replica.
+      // The DB-backed dashboard_alert_state row is the shared truth: the
+      // cron deletes it ONLY when the alert is genuinely absent, so an
+      // active row + unreadable visits = hold the alert as it last stood.
+      if (!gapIds.length && unreadableIds.length) {
+        const held = await db('dashboard_alert_state')
+          .where({ alert_id: 'closeout_gaps_today' })
+          .first('current_count', 'last_label', 'last_seen_at')
+          .catch(() => null);
+        const recent = held && held.last_seen_at && (Date.now() - new Date(held.last_seen_at).getTime()) < 24 * 60 * 60 * 1000;
+        if (recent) {
+          alerts.push({
+            id: 'closeout_gaps_today',
+            kind: 'action',
+            severity: 'warn',
+            count: Number(held.current_count || 1),
+            members: queueMembers(unreadableIds),
+            label: held.last_label || `${Number(held.current_count || 1)} completed visit(s) today not closed out — closeout lookup temporarily unavailable`,
+            href: '/admin/dispatch',
+            heldThroughOutage: true,
+          });
         }
       }
       if (gapIds.length) {
