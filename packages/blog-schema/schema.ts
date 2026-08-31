@@ -830,6 +830,10 @@ function isServiceCtaHref(href: string): boolean {
   try {
     const u = new URL(t);
     if (!WAVES_HUB_HOSTS.has(u.hostname.toLowerCase().replace(/\.$/, ''))) return false;
+    // An explicit non-default port (https://hub:444/quote/) is not the hub's
+    // service destination and may be unreachable. URL normalizes :443 away on
+    // https, so any remaining port is non-default.
+    if (u.port !== '') return false;
     return SERVICE_ROUTE_PATH_RE.test(`${u.pathname}${u.search}${u.hash}`);
   } catch { return false; }
 }
@@ -939,9 +943,12 @@ export function validateAffiliateUsage(
   // open={false}, which renders closed — are blanked (length-preserving),
   // on the structural view only.
   structural = blankBalancedElements(structural, (attrs) => {
+    // display:none in a CSS string OR a JSX style object ({display:'none'})
+    // hides regardless of the hidden attribute's value.
+    if (/display\s*['"]?\s*:\s*['"]?\s*none/i.test(attrs)) return true;
+    // hidden={false} disables only the hidden-attribute test.
     if (/(?:^|\s)hidden\s*=\s*\{\s*false\s*\}/i.test(attrs)) return false;
-    // display:none in a CSS string OR a JSX style object ({display:'none'}).
-    return /(?:^|\s)hidden(?=[\s>/=]|$)|display\s*['"]?\s*:\s*['"]?\s*none/i.test(attrs);
+    return /(?:^|\s)hidden(?=[\s>/=]|$)/i.test(attrs);
   }, unmasked);
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
