@@ -1871,6 +1871,15 @@ async function createAppointment(input) {
     }
     // Rung 6 — the same comms fence withCustomerCommsLock provided.
     await lockCustomerComms(trx, customer_id);
+    // Credit advisory lock BEFORE the customer row lock (pre-push r10 P1):
+    // offer creation (recordInspectionCreditOffer) takes the credit lock
+    // first and its offer INSERT then needs an FK key-share on this
+    // customer row — row-lock-first here was the AB-BA half of a deadlock.
+    // One consistent order: comms → credit advisory → customer row. The
+    // later projection re-acquires the same xact-scoped key, a no-op.
+    if (input._inspection_credit_amount !== undefined) {
+      await require('../inspection-credit').lockInspectionCreditCustomer(trx, customer_id);
+    }
     // Liveness re-asserted under the fence (GH r10 P1): the deleted_at
     // preflight above ran outside this transaction, so a merge/soft-delete
     // committing in between must abort the booking — never insert onto a
