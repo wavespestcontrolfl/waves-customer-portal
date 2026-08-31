@@ -3418,7 +3418,10 @@ function ExpandedProduct({
               No inventory movements yet.
             </div>
           ) : (
-            <div style={{ maxHeight: 220, overflow: "auto" }}>
+            // overflowX spelled explicitly (not the `overflow` shorthand) so
+            // the serialized style attribute contains "overflow-x: auto" and
+            // the index.css scroll-shadow affordance selector matches.
+            <div style={{ maxHeight: 220, overflowY: "auto", overflowX: "auto" }}>
               {" "}
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
@@ -4782,6 +4785,9 @@ function ProtocolsTab({
                 </button>{" "}
               </div>{" "}
             </div>{" "}
+            {/* overflow-x wrapper: phones scroll the wide table instead of
+                clipping it; index.css adds the scroll-shadow affordance. */}
+            <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
@@ -5045,6 +5051,7 @@ function ProtocolsTab({
                 })}
               </tbody>
             </table>
+            </div>
             {showAdd === svc.serviceType && (
               <div
                 style={{
@@ -5295,6 +5302,9 @@ function MarginsTab({ showToast }) {
                 ${svc.totalCost.toFixed(2)}/app
               </div>{" "}
             </div>{" "}
+            {/* overflow-x wrapper: phones scroll the wide table instead of
+                clipping it; index.css adds the scroll-shadow affordance. */}
+            <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
@@ -5362,6 +5372,7 @@ function MarginsTab({ showToast }) {
                 ))}
               </tbody>
             </table>{" "}
+            </div>
           </div>
         ))
       )}
@@ -5501,6 +5512,9 @@ function ScrapeTab({ showToast }) {
           No scrape jobs yet
         </div>
       ) : (
+        // overflow-x wrapper: phones scroll the wide table instead of
+        // clipping it; index.css adds the scroll-shadow affordance.
+        <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr>
@@ -5568,6 +5582,7 @@ function ScrapeTab({ showToast }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

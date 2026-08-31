@@ -1793,7 +1793,7 @@ export default function CustomersPageV2() {
                               type="button"
                               onClick={() => openCustomerProfile(c.id)}
                               aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
-                              className="text-14 font-medium text-blue-700 underline decoration-dotted underline-offset-2 truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+                              className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
                             >
                               {c.firstName} {c.lastName}
                             </button>

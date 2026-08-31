@@ -273,17 +273,24 @@ export default function DesignSystemFlagsPage() {
               </THead>{" "}
               <TBody>
                 {users.map((u) => (
-                  <TR key={u.id}>
+                  // h-11 pins the row pitch at >=44px: each Switch carries a
+                  // 44px coarse-pointer hit overlay (.u-touch-hit), and at the
+                  // default ~36px pitch adjacent rows' overlays overlap — a
+                  // boundary tap would flip a DIFFERENT user's flag. Row
+                  // height (not TD height/padding) so the guarantee doesn't
+                  // depend on box-sizing or padding overrides; align-middle
+                  // centers content in the taller row.
+                  <TR key={u.id} className="h-11">
                     {" "}
-                    <TD>{u.name}</TD>{" "}
-                    <TD>
+                    <TD className="align-middle">{u.name}</TD>{" "}
+                    <TD className="align-middle">
                       {" "}
                       <Badge>{u.role}</Badge>{" "}
                     </TD>
                     {flagKeys.map((k) => {
                       const on = !!(states[u.id] && states[u.id][k]);
                       return (
-                        <TD key={k} align="center">
+                        <TD key={k} align="center" className="align-middle">
                           {" "}
                           <Switch
                             checked={on}

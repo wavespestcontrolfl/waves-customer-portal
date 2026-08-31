@@ -382,7 +382,6 @@ function EmptyState() {
   return (
     <Card style={{ textAlign: "center", padding: 60 }}>
       {" "}
-      <div style={{ fontSize: 48, marginBottom: 16 }}></div>{" "}
       <div
         style={{
           fontSize: 18,
@@ -1916,7 +1915,6 @@ function SEODashboardTab() {
         {" "}
         <Card style={{ textAlign: "center", padding: 60 }}>
           {" "}
-          <div style={{ fontSize: 48, marginBottom: 16 }}></div>{" "}
           <div
             style={{
               fontSize: 18,

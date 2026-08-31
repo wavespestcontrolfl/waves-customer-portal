@@ -50,3 +50,25 @@
   font-size: 11px;
   font-weight: 500;
 }
+
+/* 44px effective touch target for the compact toggle primitives
+   (ui/Switch, ui/Checkbox, ui/Radio — 16px visual boxes). The visuals stay
+   identical everywhere; on coarse pointers only, a transparent ::before
+   overlay centered on the control extends the hit area to 44x44
+   (pseudo-elements hit-test as part of their originating element, so taps
+   on the overlay activate the control/label as normal). Requires
+   position: relative on the host — all three primitives already set it —
+   and ::before is free on all three (their check/thumb glyphs use ::after
+   or a child span). Desktop/fine pointers keep the compact hit box per the
+   touch-target contract. */
+@media (pointer: coarse) {
+  .u-touch-hit::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
