@@ -132,6 +132,11 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
     expect(src).toContain('promotedRetiredPestUnits');
     expect(src).toContain('...promotedRetiredPestUnits]');
+    // Zero-match combos (pest-owned reservation beside a kept bait+bond
+    // combo) promote alongside the reserved visit, gate-scoped.
+    expect(src).toContain('promotedComboUnits');
+    expect(src).toContain('...promotedComboUnits,');
+    expect(src.slice(src.indexOf('const promotedComboUnits'), src.indexOf('const promotedComboUnits') + 900)).toContain('.length === 0)');
     expect(src.match(/PEST_CADENCE_CATALOG_KEYS\[/g)).toHaveLength(2); // promotion + lock pre-pass
     expect(src).toContain('prePassRetiredPestPair');
   });

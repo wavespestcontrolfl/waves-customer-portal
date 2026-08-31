@@ -4638,6 +4638,25 @@ const EstimateConverter = {
         // billed program must schedule. The pattern gate reuses the
         // allowlist end-to-end, so a legacy line that would not seed does
         // not promote either (office scheduling keeps its semantics).
+        // Unmatched COMBOS promote alongside the reserved visit under
+        // GATE_SEPARATE_COMBO_VISITS (audit P0): with the pest+bait route
+        // retired, a PEST-owned reservation leaves the (kept) bait+bond
+        // combo with no reserved row to rewrite — pre-gate, the pest+bait
+        // combine consumed the bait and the reserved pest row was rewritten
+        // to the combined service, which covered it. Zero-match only: a
+        // both-halves-reserved combo is already covered by its two reserved
+        // rows (reservedRowComboRewrites' exactly-one-match contract), and
+        // a one-match combo rewrites the reserved row below as always.
+        const promotedComboUnits = process.env.GATE_SEPARATE_COMBO_VISITS !== 'true' ? [] : (combos || [])
+          .filter((combo) => reservedRows.filter((row) => {
+            const rowKey = recurringServiceKey({ name: row.service_type });
+            return rowKey === combo.route.primaryKey || rowKey === combo.route.companionKey;
+          }).length === 0)
+          .map((combo) => ({
+            service: combo.service,
+            catalogServiceKey: combo.route.catalogServiceKey,
+            noteKind: 'combined program',
+          }));
         // Pest promotes ONLY under GATE_SEPARATE_COMBO_VISITS and only in
         // the retired pest+bait pair shape (a standalone bait unit exists):
         // when the reservation is owned by the BAIT line, alreadyReserved
@@ -4740,7 +4759,7 @@ const EstimateConverter = {
             throw abort;
           }
         }
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits]) {
+        for (const unit of [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to
           // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
