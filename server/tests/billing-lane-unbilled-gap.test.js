@@ -163,3 +163,21 @@ describe('payer-billed visits', () => {
     expect(unbilledCompletionGap({ prediction: free })).toBeNull();
   });
 });
+
+describe('payer gaps never borrow the service customer wallet', () => {
+  test('a payer gap reports payerBilled and NO wallet verdict (Codex P1)', () => {
+    // The sheet turns noPaymentMethod:true into an offer to text THIS
+    // customer a card link — for an invoice a third party owns.
+    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true });
+    const gap = unbilledCompletionGap({ prediction: p, hasChargeableMethod: false });
+    expect(gap).toMatchObject({ reason: 'no_amount_on_file', payerBilled: true });
+    expect(gap.noPaymentMethod).toBeNull();
+  });
+
+  test('a self-pay gap still reports the empty wallet', () => {
+    const p = predictCompletionBilling(unbilledShape);
+    const gap = unbilledCompletionGap({ prediction: p, hasChargeableMethod: false });
+    expect(gap.noPaymentMethod).toBe(true);
+    expect(gap.payerBilled).toBeUndefined();
+  });
+});

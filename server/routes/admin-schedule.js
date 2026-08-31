@@ -5013,50 +5013,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let finalPrice = pricing.finalPrice;
     if (zeroCallbackPrice) finalPrice = 0;
-    // Billable-amount gate, evaluated on the FINAL numbers: buildAppointmentPricing
-    // has resolved the price (server pricing included, so a booking that sent no
-    // explicit price is judged on what will actually persist) and
-    // bookingBillingTermEffective has absorbed any annual-prepay downgrade. Both
-    // orderings were Codex findings on the first cut — checking earlier read raw
-    // request fields and both over- and under-fired.
-    {
-      // The floor EVERY generated visit is guaranteed to carry: primary net
-      // plus add-on lines guaranteed to be present on every generated date.
-      // Two kinds qualify — a line with NO cadence of its own
-      // (lineDueOnRecurringDate returns true immediately), and a line whose
-      // cadence and options MATCH the parent series, which therefore lands on
-      // exactly the dates the parent generates. Dropping the second kind
-      // rejected legitimate add-on-priced series with a $0 floor (Codex P1).
-      // Intermittent lines — seasonal, one_time, or a different cadence — stay
-      // excluded: they do not price the visits they are absent from.
-      const sameNumber = (a, b) => {
-        const x = a == null || a === '' ? null : Number(a);
-        const y = b == null || b === '' ? null : Number(b);
-        return x === y || (!Number.isFinite(x) && !Number.isFinite(y));
-      };
-      const matchesParentCadence = (line) => {
-        const pattern = line?.recurringPattern || line?.recurring_pattern || null;
-        if (pattern !== recurringPattern) return false;
-        if (pattern === 'one_time') return false;
-        return sameNumber(line?.recurringIntervalDays ?? line?.recurring_interval_days, recurringIntervalDays)
-          && sameNumber(line?.recurringNth ?? line?.recurring_nth, recurringNth)
-          && sameNumber(line?.recurringWeekday ?? line?.recurring_weekday, recurringWeekday);
-      };
-      const durableAddonLines = (pricing.addonLines || [])
-        .filter((line) => !(line?.recurringPattern || line?.recurring_pattern) || matchesParentCadence(line));
-      const recurringFloorPrice = zeroCallbackPrice
-        ? 0
-        : (calculateVisitFinancialsForAddons(pricing, durableAddonLines).price || 0);
-      const unbillable = recurringWithoutBillableAmount({
-        isRecurring,
-        recurringFloorPrice,
-        customer,
-        isCallback: resolvedIsCallback,
-        serviceType,
-      });
-      if (unbillable) return res.status(409).json(unbillable);
-    }
-
     const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
     const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
     const createdAppointments = [];
@@ -5160,6 +5116,40 @@ router.post('/', requireAdmin, async (req, res, next) => {
         logger.warn(`[schedule/create] ${droppedBoosters} booster visit(s) could not be placed — blackout/closed-day nudge exhausted`);
         bookingWarnings.push(`${droppedBoosters} booster visit${droppedBoosters === 1 ? '' : 's'} could not be placed — the date${droppedBoosters === 1 ? ' falls' : 's fall'} in an extended blackout/closed-day stretch. Adjust the days-off/blackout settings or add ${droppedBoosters === 1 ? 'it' : 'them'} manually.`);
       }
+    }
+
+    // Billable-amount gate, evaluated on the ACTUAL generated series. Every
+    // date this booking will write is known here (parent + children +
+    // boosters, the same list rung 1 locks below), so the floor is computed
+    // by running the REAL per-date pricing — filterAddonLinesForDate +
+    // calculateVisitFinancialsForAddons, exactly what the insert loop uses —
+    // over every one of them and taking the minimum.
+    //
+    // This replaced a hand-written "is this add-on durable?" predicate that
+    // was wrong in both directions across three Codex rounds: first it
+    // dropped every cadence-bearing add-on (false 409 on add-on-priced
+    // series), then it kept cadence-matched ones while ignoring skipWeekends
+    // / weekendShift, so a weekend-shifted child could silently lose the
+    // add-on that justified the booking and complete unbilled. Asking the
+    // pricing code what each date actually costs cannot drift from what the
+    // insert loop then writes.
+    {
+      const gateDates = [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates].filter(Boolean);
+      const floorForDate = (targetDate) => calculateVisitFinancialsForAddons(
+        pricing,
+        filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective),
+      ).price || 0;
+      const recurringFloorPrice = zeroCallbackPrice
+        ? 0
+        : gateDates.reduce((min, d) => Math.min(min, floorForDate(d)), Infinity);
+      const unbillable = recurringWithoutBillableAmount({
+        isRecurring,
+        recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
+        customer,
+        isCallback: resolvedIsCallback,
+        serviceType,
+      });
+      if (unbillable) return res.status(409).json(unbillable);
     }
 
     let waveguardPlanSync = null;

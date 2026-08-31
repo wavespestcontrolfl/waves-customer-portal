@@ -654,9 +654,16 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null }) {
   }
   return {
     reason: payerWithoutAmount ? 'no_amount_on_file' : prediction.reason,
+    // Whose wallet the visit is: a third-party payer owns the invoice, so the
+    // SERVICE customer's saved cards say nothing about it and must never be
+    // reported as "no card on file" — the sheet turns that into an offer to
+    // text THIS customer a card link for someone else's bill (Codex P1).
+    ...(payerWithoutAmount ? { payerBilled: true } : {}),
     // null = unknown (caller could not read the wallet); only `true` asserts
     // it, so an unreadable wallet never invents "no card on file".
-    noPaymentMethod: hasChargeableMethod == null ? null : hasChargeableMethod === false,
+    noPaymentMethod: payerWithoutAmount || hasChargeableMethod == null
+      ? null
+      : hasChargeableMethod === false,
   };
 }
 

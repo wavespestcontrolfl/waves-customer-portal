@@ -362,6 +362,21 @@ describe('detector adapters', () => {
     expect(out.count).toBe(0);
   });
 
+  test('unbilled_completed_visits: non-performed outcomes are not incidents (Codex P1)', async () => {
+    // Completion deliberately mints nothing for these — reporting them would
+    // manufacture a daily incident out of correct behavior. A null outcome is
+    // NOT an excuse (fail toward reporting).
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: 'inspection_only' },
+      { id: 'v2', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: 'customer_declined' },
+      { id: 'v3', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: 'incomplete' },
+      { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: null },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.ids).toEqual(['v4 [no_invoice_minted:invoice]']);
+  });
+
   test('unbilled_completed_visits: a VOID invoice is not proof of billing (Codex P1)', async () => {
     mockTables.scheduled_services = mockChain({ select: [
       { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
