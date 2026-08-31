@@ -17,7 +17,10 @@
  *   MONTHLY_LANE_SQL — the rate predicate narrows the lane population, it
  *   never defines it. billing-lane.js itself is exempt (it is the
  *   definition). Comments are ignored. Anything else must be in ALLOWLIST
- *   with a one-line reason, and a stale allowlist entry fails the test.
+ *   with a one-line reason — and each entry is keyed to its exact site
+ *   (file + predicate + a distinctive `context` string from the query
+ *   chain + an exact occurrence `count`), so a NEW shortcut in an
+ *   allowlisted file still fails, and a stale entry fails too.
  */
 
 const fs = require('fs');
@@ -31,6 +34,8 @@ const ALLOWLIST = [
   {
     file: 'services/billing-cron.js',
     match: ".where('monthly_rate', '>', 0)",
+    context: ".whereNull('service_paused_at')",
+    count: 1,
     // The dues cron deliberately SELECTS the wide rate-bearing population,
     // then runs every row through resolveBillingLane (GUARD 3b/3c) before
     // charging — the JS resolver is the lane filter, applied per row with
@@ -40,6 +45,8 @@ const ALLOWLIST = [
   {
     file: 'services/customer-offboarding.js',
     match: ".orWhere('monthly_rate', '>', 0)",
+    context: "qb.whereNotNull('waveguard_tier')",
+    count: 1,
     // Offboarding CLEAR: `tier IS NOT NULL OR rate > 0` widens the residue
     // sweep so a stale rate is nulled too — it selects rows to scrub, not
     // the monthly lane.
@@ -48,6 +55,8 @@ const ALLOWLIST = [
   {
     file: 'services/irrigation-weekly-email.js',
     match: ".orWhere('c.monthly_rate', '>', 0)",
+    context: "this.whereNotNull('c.waveguard_tier')",
+    count: 1,
     // Coarse `tier OR rate` SQL prefilter; the exact membership rule runs in
     // JS per row via the shared hasMembership / isAutoDerivedTierLabelRow
     // predicates (billing_mode is in the select).
@@ -55,11 +64,23 @@ const ALLOWLIST = [
   },
   {
     file: 'scripts/align-waveguard-portal-records.js',
-    match: ".orWhere('c.monthly_rate', '>', 0)",
+    match: ").orWhere('c.monthly_rate', '>', 0)",
+    context: ").orWhere('c.monthly_rate', '>', 0)",
+    count: 1,
     // Repair-script candidate prefilter (`recognized tier OR rate > 0`);
     // buildCustomerUpdates fail-closes per row via isMembershipCustomerRow,
     // so a sentinel-tier / per-visit row is never mutated.
     reason: 'OR-widened candidate prefilter; per-row fail-close via isMembershipCustomerRow',
+  },
+  {
+    file: 'scripts/align-waveguard-portal-records.js',
+    match: ".orWhere('c.monthly_rate', '>', 0)",
+    context: "waveguard_tier_source",
+    count: 1,
+    // Same repair script, notStillLabelOnly(): a positive rate keeps a
+    // converted auto-label row ELIGIBLE for repair (an OR arm widening the
+    // candidate set); membership itself is decided per row in JS.
+    reason: 'OR arm keeping converted label rows repair-eligible; not a lane selection',
   },
 ];
 
@@ -142,16 +163,20 @@ function findOffenders() {
       if (!KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line)) return;
       if (seen.has(idx)) return;
       seen.add(idx);
-      if (chainAround(lines, idx).includes(LANE_MARKER)) return;
-      offenders.push({ file: rel, line: idx + 1, snippet: line.trim() });
+      const chain = chainAround(lines, idx);
+      if (chain.includes(LANE_MARKER)) return;
+      offenders.push({ file: rel, line: idx + 1, snippet: line.trim(), chain });
     });
   }
   cachedOffenders = offenders;
   return offenders;
 }
 
+function entryMatches(a, o) {
+  return a.file === o.file && o.snippet.includes(a.match) && o.chain.includes(a.context);
+}
 function isAllowed(o) {
-  return ALLOWLIST.some((a) => a.file === o.file && o.snippet.includes(a.match));
+  return ALLOWLIST.some((a) => entryMatches(a, o));
 }
 
 describe('monthly-lane source guard (#3140)', () => {
@@ -181,14 +206,22 @@ describe('monthly-lane source guard (#3140)', () => {
     expect(violations).toEqual([]);
   });
 
-  test('every ALLOWLIST entry still matches a real raw predicate (no stale exemptions)', () => {
+  test('every ALLOWLIST entry matches EXACTLY its keyed site (no stale entries, no new shortcuts riding an exemption)', () => {
     const offenders = findOffenders();
     for (const entry of ALLOWLIST) {
       expect(typeof entry.reason).toBe('string');
       expect(entry.reason.length).toBeGreaterThan(10);
-      const hit = offenders.some((o) => o.file === entry.file && o.snippet.includes(entry.match));
-      if (!hit) {
-        throw new Error(`ALLOWLIST entry server/${entry.file} (${entry.match}) no longer matches a raw predicate — remove it.`);
+      const hits = offenders.filter((o) => entryMatches(entry, o));
+      if (hits.length === 0) {
+        throw new Error(`ALLOWLIST entry server/${entry.file} (${entry.match} near ${entry.context}) no longer matches a raw predicate — remove it.`);
+      }
+      if (hits.length !== entry.count) {
+        const where = hits.map((h) => `server/${h.file}:${h.line}`).join(', ');
+        throw new Error(
+          `ALLOWLIST entry server/${entry.file} (${entry.match} near ${entry.context}) matches ${hits.length} site(s) ` +
+          `(${where}) but is keyed to exactly ${entry.count} — a NEW raw monthly-lane predicate is riding this exemption. ` +
+          `Fix the new site with MONTHLY_LANE_SQL / resolveBillingLane, or add its own allowlist entry with its own reason.`,
+        );
       }
     }
   });

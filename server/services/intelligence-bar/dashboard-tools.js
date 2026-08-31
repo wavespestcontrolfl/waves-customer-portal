@@ -459,8 +459,14 @@ async function getMrrTrend(months) {
   // Real recorded MRR per month (point-in-time snapshots). A past month reads
   // its snapshot's actual MRR; the current (in-progress) month and any month
   // recorded before snapshots existed fall back to the live recompute below
-  // (which dates the right customers but at today's prices — the limitation
-  // snapshots replace going forward).
+  // (which dates the right customers but at today's prices AND today's
+  // billing lane — the customers row is current-state, so the fallback is a
+  // current-state approximation either way; snapshots are the point-in-time
+  // record that replaces it going forward). The lane predicate is applied to
+  // the fallback for BOTH cases deliberately: without it, per-visit / prepay
+  // / per-application rows that merely carry a monthly_rate inflate the
+  // recomputed months — the exact #3140 distortion — and current lane is no
+  // less historical than the current rate the same query already sums.
   const currentMonthStart = etMonthStart(now);
   const snapshotsByMonth = {};
   try {
@@ -486,6 +492,7 @@ async function getMrrTrend(months) {
       db({ c: 'customers' })
         .where('c.created_at', '<=', endIso)
         .where('c.monthly_rate', '>', 0)
+        // Monthly LANE, not merely rate-bearing (#3140) — see fallback note above.
         .whereRaw(MONTHLY_LANE_SQL)
         .where(function () {
           this.where('c.active', true).orWhereNotNull('c.churned_at');
