@@ -44,7 +44,7 @@ try {
   console.error(`✗ Upstream registry.json is unreadable/malformed: ${err.message}`);
   process.exit(1);
 }
-const { validateRegistry } = require(join(pkgDir, 'index.js'));
+const { validateRegistry, registryChecksum } = require(join(pkgDir, 'index.js'));
 const problems = validateRegistry(parsed);
 if (problems.length) {
   console.error(`✗ Upstream registry.json fails validation — sync aborted:`);
@@ -54,21 +54,31 @@ if (problems.length) {
   process.exit(1);
 }
 
+// The checksum is REQUIRED: verify-vendor.js (prebuild/prestart) refuses a
+// vendored registry whose recorded upstream checksum doesn't match, so a
+// sync without one would leave the build red. Astro records
+// sha256("\0registry.json\0" + bytes) — the same recipe verify-vendor uses.
 const copies = [
   { from: 'registry.json', to: 'registry.json' },
-  { from: 'checksum.txt', to: 'upstream-checksum.txt', optional: true },
+  { from: 'checksum.txt', to: 'upstream-checksum.txt' },
 ];
 
-for (const { from, to, optional } of copies) {
+for (const { from, to } of copies) {
   const src = join(srcDir, from);
   if (!existsSync(src)) {
-    if (optional) { console.warn(`~ upstream has no ${from} yet — skipped`); continue; }
     console.error(`✗ Missing upstream file: ${src}`);
     process.exit(1);
   }
   const dest = join(pkgDir, to);
   copyFileSync(src, dest);
   console.log(`✓ ${relative(adminRoot, dest)} ← ${src}`);
+}
+
+const recorded = readFileSync(join(pkgDir, 'upstream-checksum.txt'), 'utf8').trim();
+const actual = registryChecksum(readFileSync(join(pkgDir, 'registry.json')));
+if (recorded !== actual) {
+  console.error(`✗ Upstream checksum.txt (${recorded.slice(0, 12)}…) does not match sha256(registry.json) (${actual.slice(0, 12)}…) — regenerate it in the astro repo before syncing.`);
+  process.exit(1);
 }
 
 console.log('Done. Commit the vendored changes with the feature that needs them.');

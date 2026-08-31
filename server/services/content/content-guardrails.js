@@ -1637,12 +1637,33 @@ function affiliateRegistryModule() {
 // productId:null — the component cannot resolve, so it gates as
 // unregistered (and an expression carrying a URL is independently the
 // executable-expression P0 in externalLinkFinding).
+// Attribute walk is sequential and quote/brace-aware (sticky regex over
+// the tag's attribute text): each attribute's value is consumed whole, so
+// `note='product="x"'` is the note's VALUE and `data-product="x"` is an
+// attribute named data-product — only an attribute whose complete name is
+// exactly `product` with a quoted literal value resolves (Codex r2 P1).
+const JSX_ATTR_RE = /\s*([^\s=/>"'{}]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\{[^{}]*\})|([^\s"'{}]+)))?/y;
+function literalAttribute(attrs, name) {
+  const re = new RegExp(JSX_ATTR_RE.source, 'y');
+  const s = String(attrs || '');
+  re.lastIndex = 0;
+  let m;
+  while (re.lastIndex < s.length && (m = re.exec(s)) !== null) {
+    if (m[0].length === 0) break;
+    if (m[1] === name) {
+      if (m[2] !== undefined) return m[2];
+      if (m[3] !== undefined) return m[3];
+      return null; // expression, unquoted, or bare boolean — not a literal
+    }
+  }
+  return null;
+}
+
 function collectAffiliateLinkTags(text) {
   const tags = [];
   for (const tag of eachTag(String(text || ''))) {
     if (tag.isClose || tag.name !== 'affiliatelink') continue;
-    const m = /\bproduct\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(tag.attrs);
-    const productId = m ? (m[1] ?? m[2] ?? '').trim() : null;
+    const productId = (literalAttribute(tag.attrs, 'product') || '').trim();
     tags.push({ start: tag.start, productId: productId || null });
   }
   return tags;

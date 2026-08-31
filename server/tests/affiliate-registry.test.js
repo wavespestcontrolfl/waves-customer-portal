@@ -58,6 +58,18 @@ describe('validateProduct', () => {
       expect(registry.validateProduct(yellow({ [f]: undefined })).join(' ')).toMatch(new RegExp(f));
     }
   });
+  test('review/approval dates must be real calendar dates and not in the future (Codex r2 P1)', () => {
+    const now = { now: new Date() };
+    expect(registry.parseReviewDate('2099-02-31')).toBeNull();
+    expect(registry.parseReviewDate('2026-02-30')).toBeNull();
+    expect(registry.parseReviewDate('2026-08-30T25:00:00Z')).toBeNull();
+    expect(registry.parseReviewDate('2026-08-30')).toBeInstanceOf(Date);
+    expect(registry.validateProduct(green({ owner_approved_at: iso(-30) }), now).join(' ')).toMatch(/owner_approved_at/);
+    expect(registry.validateProduct(yellow({ label_reviewed_at: '2099-02-31' }), now).join(' ')).toMatch(/label_reviewed_at/);
+    expect(registry.validateProduct(yellow({ florida_registration_verified_at: iso(-1) }), now).join(' ')).toMatch(/florida_registration_verified_at/);
+    expect(registry.classifyProduct(yellow({ label_reviewed_at: '2099-02-31' }), now)).toBe('stale_label_review');
+    expect(registry.classifyProduct(green({ owner_approved_at: iso(-30) }), now)).toBe('inactive');
+  });
   test('non-https URLs are invalid', () => {
     expect(registry.validateProduct(green({ approved_affiliate_url: 'http://www.amazon.com/dp/B1?tag=t' })).length).toBeGreaterThan(0);
     expect(registry.validateProduct(green({ plain_url: 'javascript:alert(1)' })).join(' ')).toMatch(/plain_url/);
@@ -122,8 +134,13 @@ describe('productIndex / validateRegistry / loadRegistry', () => {
     }
     expect(registry.validateRegistry({ version: 1, products: [] })).toEqual([]);
   });
-  test('the vendored registry.json in this repo validates clean', () => {
+  test('the vendored registry.json in this repo validates clean AND matches its recorded upstream checksum', () => {
+    const { readFileSync } = require('node:fs');
+    const { join } = require('node:path');
     registry._resetCache();
     expect(registry.validateRegistry(registry.loadRegistry())).toEqual([]);
+    const pkgDir = join(__dirname, '..', '..', 'packages', 'affiliate-registry');
+    const recorded = readFileSync(join(pkgDir, 'upstream-checksum.txt'), 'utf8').trim();
+    expect(registry.registryChecksum(readFileSync(join(pkgDir, 'registry.json')))).toBe(recorded);
   });
 });

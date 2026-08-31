@@ -529,6 +529,18 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('attribute parsing is name-exact and quote-aware: data-product= and product= inside another value do not resolve (Codex r2 P1)', () => {
+    withAffiliateEnv(() => {
+      const { collectAffiliateLinkTags } = guardrails._internals;
+      expect(collectAffiliateLinkTags('<AffiliateLink data-product="rain-gauge" placement="x">y</AffiliateLink>')[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags(`<AffiliateLink note='product="rain-gauge"' placement="x">y</AffiliateLink>`)[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags('<AffiliateLink product>y</AffiliateLink>')[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags('<AffiliateLink product=rain-gauge>y</AffiliateLink>')[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags(`<AffiliateLink placement="x" product='rain-gauge'>y</AffiliateLink>`)[0].productId).toBe('rain-gauge');
+      expect(collectAffiliateLinkTags('<AffiliateLink title="a > b" product="rain-gauge" />')[0].productId).toBe('rain-gauge');
+    });
+  });
+
   test('a non-literal product prop cannot resolve — P0 UNREGISTERED', () => {
     withAffiliateEnv(() => {
       const r = guardrails.evaluate({

@@ -24,6 +24,7 @@
 'use strict';
 
 const { readFileSync, statSync } = require('node:fs');
+const { createHash } = require('node:crypto');
 const { join } = require('node:path');
 
 // ── frozen vocabulary (a change here is a policy change: new PR + tests) ──
@@ -83,12 +84,39 @@ function loadRegistry() {
   return registry;
 }
 
-function isIsoDate(v) {
-  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}:\d{2})?)?$/.test(v) && !Number.isNaN(new Date(v).getTime());
+// A review/approval date must be a REAL calendar date (round-trip
+// validated — "2099-02-31" is ISO-shaped but JS would normalise it to
+// March 3 and a yellow review would read as current forever) and must not
+// be in the future (a forward-dated approval or review is not a review that
+// happened). Bare dates are read as UTC calendar days; a date-only value
+// equal to today's UTC date is "today", not future.
+function parseReviewDate(v) {
+  if (typeof v !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2}))?$/.exec(v.trim());
+  if (!m) return null;
+  const [y, mo, d] = [m[1], m[2], m[3]].map(Number);
+  const calendar = new Date(Date.UTC(y, mo - 1, d));
+  if (calendar.getUTCFullYear() !== y || calendar.getUTCMonth() !== mo - 1 || calendar.getUTCDate() !== d) return null;
+  if (m[4] !== undefined && (Number(m[4]) > 23 || Number(m[5]) > 59 || Number(m[6] || 0) > 59)) return null;
+  const parsed = m[4] === undefined ? calendar : new Date(v.trim());
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isPastOrPresentDate(v, now) {
+  const d = parseReviewDate(v);
+  return !!d && d.getTime() <= now.getTime();
 }
 
 function daysOld(isoDate, now) {
-  return (now.getTime() - new Date(isoDate).getTime()) / 86400000;
+  return (now.getTime() - parseReviewDate(isoDate).getTime()) / 86400000;
+}
+
+/** sha256("\0registry.json\0" + bytes) — the vendor-drift recipe shared with the astro repo's checksum.txt. */
+function registryChecksum(bytes) {
+  const hash = createHash('sha256');
+  hash.update('\0registry.json\0');
+  hash.update(bytes);
+  return hash.digest('hex');
 }
 
 function parseHttpsUrl(raw) {
@@ -108,7 +136,7 @@ function parseHttpsUrl(raw) {
  * (the AMAZON_LINK_WITHOUT_ASSOCIATE_TAG rule lives here by design: raw
  * Amazon URLs in bodies are already DISALLOWED_EXTERNAL_LINK).
  */
-function validateProduct(row) {
+function validateProduct(row, { now = new Date() } = {}) {
   const errors = [];
   if (!row || typeof row !== 'object' || Array.isArray(row)) return ['row is not an object'];
   if (typeof row.product_id !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(row.product_id)) {
@@ -145,16 +173,16 @@ function validateProduct(row) {
       }
     }
   }
-  if (row.status === 'active' && !isIsoDate(row.owner_approved_at)) {
-    errors.push('an active product requires owner_approved_at (ISO date — the owner-merge approval record)');
+  if (row.status === 'active' && !isPastOrPresentDate(row.owner_approved_at, now)) {
+    errors.push('an active product requires owner_approved_at (a real, non-future ISO date — the owner-merge approval record)');
   }
   if (row.risk_class === 'yellow') {
     for (const f of YELLOW_REVIEW_FIELDS) {
       const v = row[f];
       const ok = f === 'epa_reg_number' ? (typeof v === 'string' && !!v.trim())
         : f === 'label_url' ? !!parseHttpsUrl(v)
-          : isIsoDate(v);
-      if (!ok) errors.push(`yellow-class product requires ${f} (per-product manual review, owner ruling 2026-08-31)`);
+          : isPastOrPresentDate(v, now);
+      if (!ok) errors.push(`yellow-class product requires ${f} (per-product manual review, owner ruling 2026-08-31; dates must be real and not in the future)`);
     }
   }
   return errors;
@@ -165,7 +193,7 @@ function validateProduct(row) {
  * product_ids (a duplicate poisons BOTH rows — fail closed, no
  * first-wins ambiguity). → [{ product_id, errors }]
  */
-function validateRegistry(registry = loadRegistry()) {
+function validateRegistry(registry = loadRegistry(), { now = new Date() } = {}) {
   // Top-level shape is validated EXPLICITLY — a registry without a products
   // array must be a reported problem (so the sync script refuses to vendor
   // it), never silently coerced to "no products, no errors".
@@ -186,7 +214,7 @@ function validateRegistry(registry = loadRegistry()) {
   }
   const results = [];
   for (const row of rows) {
-    const errors = validateProduct(row);
+    const errors = validateProduct(row, { now });
     if (typeof row?.product_id === 'string' && counts.get(row.product_id) > 1) {
       errors.push(`duplicate product_id "${row.product_id}"`);
     }
@@ -214,7 +242,7 @@ function validateRegistry(registry = loadRegistry()) {
 function classifyProduct(row, { now = new Date() } = {}) {
   if (!row || typeof row !== 'object') return 'inactive';
   if (row.risk_class === 'red' || row.status === 'prohibited') return 'prohibited';
-  const errors = validateProduct(row);
+  const errors = validateProduct(row, { now });
   const yellowFieldErrors = errors.filter((e) => e.startsWith('yellow-class product requires'));
   if (errors.length > yellowFieldErrors.length) return 'inactive';
   if (row.status !== 'active') return 'inactive';
@@ -285,5 +313,7 @@ module.exports = {
   classifyProduct,
   productIndex,
   registryUrls,
+  registryChecksum,
+  parseReviewDate,
   _resetCache,
 };
