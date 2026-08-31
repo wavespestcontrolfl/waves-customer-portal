@@ -112,6 +112,7 @@ function techSafeSort(sort) {
 const TECH_360_STRIPPED_KEYS = [
   'interactions', 'smsLog', 'payments', 'invoices', 'cards',
   'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
+  'annualPrepayEstimateSuggestion',
   'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
   'tags',
   // Sibling properties on the account: authorization is per-customer, so an
@@ -2956,6 +2957,20 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
+    // The COMPLETE consumed-estimate set for the prefill exclusion — the
+    // display list above is capped at 5, and an estimate linked to an older
+    // term must still never suggest again. A read failure poisons the set
+    // (null) so the suggestion is skipped entirely rather than built from an
+    // incomplete exclusion list.
+    const consumedEstimateIdsPromise = db.schema.hasTable('annual_prepay_terms')
+      .then((exists) => exists
+        ? db('annual_prepay_terms')
+          .where({ customer_id: c.id })
+          .whereNotNull('source_estimate_id')
+          .pluck('source_estimate_id')
+        : [])
+      .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
+
     const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
@@ -3229,6 +3244,28 @@ router.get('/:id', async (req, res, next) => {
         bankName: contract.bank_name,
       })),
       annualPrepayTerms: (annualPrepayTerms || []).map(mapAnnualPrepayTerm),
+      // Prefill hint for the "Record collected annual prepay" modal — which
+      // estimate this prepay most credibly comes from and the amount its own
+      // accept-as-prepay lane would invoice. Suggestion-only; never blocks
+      // the 360 payload.
+      annualPrepayEstimateSuggestion: await (async () => {
+        try {
+          // A null consumed set means the exclusion read failed — skip the
+          // suggestion rather than build it from an incomplete list.
+          const consumedEstimateIds = await consumedEstimateIdsPromise;
+          if (consumedEstimateIds === null) return null;
+          return await require('../services/annual-prepay-estimate-suggestion')
+            .buildAnnualPrepayEstimateSuggestion(estimates, {
+              // Estimates already consumed by ANY term priced a PRIOR year.
+              excludeEstimateIds: consumedEstimateIds,
+              resolveLineCadence: cadenceFromEstimateLine,
+              db,
+            });
+        } catch (e) {
+          logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
+          return null;
+        }
+      })(),
       prepaidPlans: (prepaidPlans || []).map((plan) => ({
         ...plan,
         paidAt: plan.paidAt instanceof Date ? plan.paidAt.toISOString() : plan.paidAt,
@@ -4851,6 +4888,13 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const reference = cleanOptionalText(req.body?.reference);
     const note = cleanOptionalText(req.body?.note);
+
+    // DELIBERATELY NO estimate provenance/claim here: closing an estimate is
+    // an ACCEPTANCE, and acceptance belongs to the canonical converter
+    // (conversion, deposits, group follow-ups, lead pipeline). The
+    // estimate-derived prefill is suggestion-only; linking the term to its
+    // estimate is a follow-up that extends the manual-acceptance mechanism
+    // rather than growing a parallel accept path on this recording route.
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     const invoiceNotes = [
       'Created from Customer 360 annual prepay.',
