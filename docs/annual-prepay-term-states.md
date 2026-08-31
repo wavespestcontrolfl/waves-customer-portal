@@ -55,7 +55,7 @@ replay-idempotent), never an error.
 | 9 | `payment_pending` / `active` / `renewal_pending` | `cancelled` **(a)** | Prepay invoice voided, refunded, or a `payments` refund lands (`syncTermForRefundedPayment`). Clears prepaid stamps, reverses WaveGuard extension credits, reopens covered visit invoices, resets billing mode. | `R` `syncTermForInvoicePayment` (`nextStatus === 'cancelled'`) | `renewal_decision IS NULL` |
 | 10 | `active` / `renewal_pending` | `payment_pending` | Dispute opened on the prepay invoice. Stamps `dispute_suspended_at`; coverage suspended (visits bill per-visit) until the dispute resolves. Dispute won → invoice back to paid → move 2 fires; the marker survives until the dues claw-back finishes, then `finishDisputeRecoveryForTerm` clears it. | `R` `suspendActiveTermsForDisputedInvoice` | `status IN ACTIVE_STATUSES` |
 | 11 | `cancelled` **(a)** | `active` | Lost-dispute revival: the dispute-cancelled term's invoice is re-paid in dunning. Restores extension credits. | `R` `syncTermForInvoicePayment` | `status = 'cancelled' AND renewal_decision IS NULL AND dispute_suspended_at IS NOT NULL` |
-| 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded`/`canceled` row — no such row is reachable: code never writes those names and the 20260614 migration normalized pre-existing ones.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
+| 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row, and move 9's `renewal_decision IS NULL` guard admits both legacy names — code never writes them, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
 | 13 | *any* | `cancelled` | Admin removes the annual-prepay flag from an invoice (`DELETE /:id/annual-prepay`). Stamps cleared, attached visits detached; billing mode is NOT reset. **Unguarded** — the only path that can move a decided term. Re-marking the invoice later re-derives the status via move 1 **only for an undecided term**; a decided term stays `cancelled` (`renewal_decision` survives the DELETE and move 1 preserves the status when it is set). | `AI` `DELETE /:id/annual-prepay` | none |
 
 Everything not in the table is not a move. In particular there is **no**
@@ -78,9 +78,15 @@ These constants in `R` decide what each stage *means* to the rest of billing:
 
 ## Known residue (not fixed here)
 
-- `canceled` and `refunded` sit in the CHECK but are dead names. Dropping them
-  is a migration (`DROP CONSTRAINT` + re-add) and needs a prod row scan first
-  (`SELECT status, count(*) … GROUP BY 1`) — separate PR, owner call.
+- `canceled` and `refunded` sit in the CHECK but are dead names for the CODE.
+  The 20260614 migration preserved any rows already carrying them (it only
+  normalized values outside its list), so legacy rows may still exist in prod;
+  an undecided legacy row would be admitted by moves 9 and 12. Step 1 is a
+  prod row scan (`SELECT status, count(*) FROM annual_prepay_terms GROUP BY 1`);
+  if zero, drop the two names from the CHECK (`DROP CONSTRAINT` + re-add); if
+  non-zero, normalize them (`canceled`→`cancelled`, `refunded`→`cancelled` with
+  `renewal_decision IS NULL` semantics) in the same migration — separate PR,
+  owner call.
 - Move 13 is the one unguarded transition, and after it a decided term is
   stranded `cancelled` with its decision intact. Whether the DELETE should
   refuse decided terms (or clear the decision) is an owner ruling; documented,
