@@ -625,9 +625,34 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // Scoped feasibility BEFORE the request row exists (fail closed).
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
   if (scopeError) throw scopeErrorToHttp(scopeError);
+  const subject = wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`;
+  // The still-open acceptance from a recent attempt (same customer, scope,
+  // actor) — reused by retries so the processor's repair pass can find the
+  // first attempt's rows, and honored by the eligibility gate below.
+  const findOpenAcceptance = async () => {
+    try {
+      return await db('service_requests')
+        .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new', subject })
+        .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
+        .orderBy('created_at', 'desc')
+        .first('*');
+    } catch (reuseErr) {
+      logger.warn(`[admin-cancellation] open-acceptance lookup failed for ${customerId}: ${reuseErr.message}`);
+      return null;
+    }
+  };
   if (!(await hasCancellableWork(customerId))) {
-    throw new CancelPlanError(400, 'nothing_to_cancel',
-      'There is no active plan, recurring service, or upcoming visit on this account to cancel.');
+    // A prior partial run may have already wound the account down and then
+    // lost a follow-up step (case write, refund task, confirmation) —
+    // nothing cancellable is left, but the retry must still reach the
+    // idempotent processor repair pass and the durable records. A recent
+    // open acceptance is that proof; without one this really is an account
+    // with nothing to cancel.
+    if (!(await findOpenAcceptance())) {
+      throw new CancelPlanError(400, 'nothing_to_cancel',
+        'There is no active plan, recurring service, or upcoming visit on this account to cancel.');
+    }
+    logger.info(`[admin-cancellation] no cancellable work for ${customerId} but an open acceptance exists — proceeding as a repair retry`);
   }
 
   const term = await resolveLiveTerm(customerId, wholeAccount);
@@ -799,19 +824,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // note-less cancel's recorded reason embeds the request id, and the
   // processor's repair pass finds the first attempt's cancelled rows by that
   // exact note — a fresh request would skip their failed side effects
-  // forever (and per-request dedupe keys would double-bell). Reuse the
-  // still-open acceptance for the same scope from the last 24h.
-  const subject = wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`;
-  let request = null;
-  try {
-    request = await db('service_requests')
-      .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new', subject })
-      .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
-      .orderBy('created_at', 'desc')
-      .first('*');
-  } catch (reuseErr) {
-    logger.warn(`[admin-cancellation] request-reuse lookup failed for ${customerId}: ${reuseErr.message}`);
-  }
+  // forever (and per-request dedupe keys would double-bell).
+  let request = await findOpenAcceptance();
   if (request) {
     logger.info(`[admin-cancellation] retry reuses accepted request ${request.id} for customer ${customerId} by ${actorLabel}`);
   } else {

@@ -443,6 +443,26 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockProcess.mock.calls[0][0].reason).toBe(mockProcess.mock.calls[1][0].reason);
   }));
 
+  test('a wound-down account with a lost follow-up step can still retry — the open acceptance beats nothing_to_cancel', () => withServer(async (baseUrl) => {
+    // First run: the wind-down lands, the case write fails.
+    mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
+    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(first.errors).toEqual(['case_write']);
+    expect(first.caseId).toBeNull();
+    // The account is now churned — no cancellable work left — but the open
+    // acceptance carries the retry through to the repair pass + case write.
+    hasCancellableWork.mockResolvedValue(false);
+    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(second.caseId).toBe('case-1');
+    expect(second.errors).toEqual([]);
+    // A genuinely empty account (no acceptance) still refuses.
+    mockState.service_requests = [];
+    const res = await post(baseUrl, '/cancel-plan');
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('nothing_to_cancel');
+  }));
+
   test('more visits pulled than the approved preview showed is an exception, never a clean "Done."', () => withServer(async (baseUrl) => {
     const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
     const base = await buildCancellationImpact();
