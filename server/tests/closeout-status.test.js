@@ -60,6 +60,10 @@ const {
   FACT_NAMES,
 } = require('../services/closeout-status');
 
+// Captured BEFORE any jest.resetModules() so it is the same instance the
+// service under test destructured at load.
+const followupMock = require('../services/typed-followup-obligation').typedFollowupObligationForCompletedSource;
+
 const NOW = new Date('2026-08-31T15:00:00Z');
 const SVC = 'svc-1';
 const REC = 'rec-1';
@@ -492,11 +496,18 @@ describe('closeout-status: comms + follow-up', () => {
   });
 
   test('recap claim: aged -> done; fresh (< 10 min) -> pending in-flight (codex r17)', () => {
+    // An aged claim ALONE is unverified (stamp precedes the send — GH r4); the
+    // explicit skipped_recap stamp remains real evidence.
     const aged = deriveCloseoutFacts(closedOutInputs({
       record: { ...closedOutInputs().record, structured_notes: {}, recap_sms_sent_at: '2026-08-30T18:10:00Z', field_flags: { recap: true } },
+      delivery: null,
     }));
-    expect(aged.facts.comms).toMatchObject({ state: 'done', reason: 'recap_sms_sent' });
+    expect(aged.facts.comms).toMatchObject({ state: 'unknown', reason: 'recap_claim_unverified' });
     expect(aged.facts.completion.recapLane).toBe(true);
+    const stamped = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, structured_notes: { completionSmsStatus: 'skipped_recap_sms_already_sent' } },
+    }));
+    expect(stamped.facts.comms).toMatchObject({ state: 'done', reason: 'recap_sms_sent' });
     const fresh = deriveCloseoutFacts(closedOutInputs({
       record: { ...closedOutInputs().record, structured_notes: {}, recap_sms_sent_at: new Date(NOW.getTime() - 60 * 1000).toISOString() },
       delivery: null,
@@ -510,6 +521,26 @@ describe('closeout-status: comms + follow-up', () => {
     const rec2 = { ...closedOutInputs().record, id: 'rec-old', report_view_token: 't'.repeat(32), report_generated_at: '2026-08-30T18:05:00Z' };
     const { facts } = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2] }));
     expect(facts.report).toMatchObject({ state: 'done', reason: 'report_published', hasToken: true });
+  });
+
+  test('GH r4: sibling invoice + billing outage → unknown; sibling posture never relabels the token record; non-performed invoice → contradiction; inactive visit beats failed attempt', () => {
+    const sib = { id: 'inv-sib', status: 'sent', total: 240, sent_at: '2026-08-30T10:00:00Z', payer_id: null };
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoice: { invoice: sib, liveBeside: null }, autopayActive: null })).facts.invoice)
+      .toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', invoiceId: 'inv-sib' });
+    const rec1 = { ...closedOutInputs().record, id: 'rec-new', report_view_token: null, report_generated_at: null };
+    const rec2 = { ...closedOutInputs().record, id: 'rec-old', structured_notes: { typedReportDelivery: 'internal_only' } };
+    const posture = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2], delivery: null }));
+    expect(posture.facts.report).toMatchObject({ state: 'done', audience: 'internal' });
+    expect(posture.facts.reportDelivery).toMatchObject({ state: 'not_required', reason: 'frozen_posture_internal_only' });
+    const nonPerf = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, structured_notes: { visitOutcome: 'inspection_only', completionSmsStatus: 'sent' } },
+    }));
+    expect(nonPerf.contradictions.map((c) => c.code)).toContain('invoice_on_non_performed_visit');
+    expect(summarizeCloseout(nonPerf.facts, nonPerf.contradictions).closedOut).toBe(false);
+    const inactive = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, status: 'cancelled' }, record: null, attempt: { state: 'failed', error: 'x' }, liveInvoice: null, delivery: null,
+    }));
+    expect(inactive.facts.completion).toMatchObject({ state: 'not_required', reason: 'visit_cancelled', attemptState: 'failed' });
   });
 
   test('license without a recorded expiry stays done (applicator-picker semantics) with expiryUnrecorded surfaced', () => {
@@ -733,7 +764,7 @@ describe('closeout-status: Agent D findings', () => {
       .toMatchObject({ state: 'unknown', reason: 'no_delivery_row_for_template', templateVersion: 'wdo_typed_v2' });
     const recap = { ...closedOutInputs().record, recap_sms_sent_at: '2026-08-30T18:10:00Z', structured_notes: {} };
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: recap })).facts.reportDelivery)
-      .toMatchObject({ state: 'done', reason: 'recap_sms_delivered' });
+      .toMatchObject({ state: 'unknown', reason: 'recap_claim_unverified' });
   });
 
   test('refunded sibling beside a PAID live invoice stays PARKED — refund.failed can restore the refunded row (codex P0)', () => {
@@ -854,6 +885,11 @@ function makeFakeKnex(tables) {
         for (const r of extra) if (!rows.includes(r)) rows.push(r);
         return chain;
       },
+      orWhereIn(col, values) {
+        const extra = (Array.isArray(source) ? source : []).filter((r) => values.includes(r[col]));
+        for (const r of extra) if (!rows.includes(r)) rows.push(r);
+        return chain;
+      },
       whereIn(col, values) { rows = rows.filter((r) => values.includes(r[col])); return chain; },
       whereNotIn(col, values) { rows = rows.filter((r) => !values.includes(r[col])); return chain; },
       whereNull(col) { rows = rows.filter((r) => r[col] == null); return chain; },
@@ -870,8 +906,14 @@ function makeFakeKnex(tables) {
     chain.where = (criteria) => {
       if (typeof criteria === 'function') {
         const collected = [];
-        criteria({ orWhere: (c) => { collected.push(c); }, where: (c) => { collected.push(c); } });
-        rows = rows.filter((r) => collected.some((c) => Object.entries(c).every(([k, v]) => r[k] === v)));
+        const inCollected = [];
+        criteria({
+          orWhere: (c) => { collected.push(c); },
+          where: (c) => { collected.push(c); },
+          orWhereIn: (col, values) => { inCollected.push([col, values]); },
+        });
+        rows = rows.filter((r) => collected.some((c) => Object.entries(c).every(([k, v]) => r[k] === v))
+          || inCollected.some(([col, values]) => values.includes(r[col])));
         return chain;
       }
       return origWhere(criteria);
@@ -968,6 +1010,18 @@ describe('closeout-status: loader against a fake knex', () => {
     await expect(fresh2.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex })).resolves.toBeNull();
     jest.dontMock('../services/service-completion-profiles');
     void actual;
+  });
+
+  test('follow-up resolves from the attempt-committed record; projects resolve via a secondary record link (GH r4)', async () => {
+    followupMock.mockClear();
+    const tables = healthyTables();
+    const rec2 = { ...recordRow, id: 'rec-old', created_at: '2026-08-30T17:00:00Z', report_view_token: null, report_generated_at: null };
+    tables.service_records = [recordRow, rec2];
+    tables.projects = [{ id: 'proj-2', scheduled_service_id: null, service_record_id: 'rec-old', status: 'closed', report_token: 'e'.repeat(32), delivery_status: 'sent', created_at: '2026-08-30T18:03:00Z' }];
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(followupMock).toHaveBeenCalledWith(expect.objectContaining({ recordId: REC }));
+    expect(result.visit.projectId).toBe('proj-2');
+    expect(result.facts.report).toMatchObject({ state: 'done', reason: 'project_report_published' });
   });
 
   test('a project linked through projects.scheduled_service_id drives report, delivery, and photos', async () => {

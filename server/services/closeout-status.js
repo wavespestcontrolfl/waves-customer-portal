@@ -300,7 +300,8 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   const projectProbe = await probe('projects', unavailable, () => knex('projects')
     .where((qb) => {
       qb.where({ scheduled_service_id: serviceId });
-      if (recordId) qb.orWhere({ service_record_id: recordId });
+      // Legacy record-only links can point at ANY of the visit's records.
+      if (recordIds.length) qb.orWhereIn('service_record_id', recordIds);
     })
     .orderBy('created_at', 'desc')
     .first());
@@ -344,7 +345,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
       ? customerOnAutopay(inputs.customer, { db: knex, now, failClosed: true })
       : null)),
     probe('typed follow-up obligation', unavailable, () => typedFollowupObligationForCompletedSource({
-      scheduledService: visit, knex, strict: true,
+      scheduledService: visit, knex, strict: true, recordId,
     })),
     probe('scheduled_services (follow-up child)', unavailable, () => knex('scheduled_services')
       .where({ followup_source_service_id: serviceId })
@@ -549,6 +550,10 @@ function deriveCloseoutFacts(inputs) {
         completionSource: record.completion_source || null, completedAt: isoOrNull(visit?.completed_at),
         attemptState, backfill: isBackfill, recapLane: fieldFlags.recap === true,
       });
+  } else if (visitInactive && !record) {
+    // Inactive visit with no record owes nothing — even past a terminal
+    // failed attempt (the replacement row owns the work after a reschedule).
+    completion = fact('not_required', `visit_${String(visit.status).toLowerCase()}`, { ruleSource: 'visit_flag', visitStatus: visit.status, attemptState });
   } else if (attemptState === 'running' || attemptState === 'resumable') {
     completion = fact('pending', `completion_${attemptState}`, { attemptState });
   } else if (attemptState === 'failed') {
@@ -606,7 +611,11 @@ function deriveCloseoutFacts(inputs) {
   // ---- 4. report (artifact exists / published) ---------------------------------
   let report;
   const tokenRecord = (inputs.records || []).find((r) => r.report_view_token || r.report_generated_at) || record;
-  const reportPublishedAt = isoOrNull(tokenRecord?.report_generated_at) || isoOrNull(notes.reportPublishedAt) || isoOrNull(notes.report_published_at);
+  // The artifact and its frozen posture must come from the SAME record — a
+  // sibling row's typedReportDelivery must not relabel another row's report.
+  const tokenNotes = tokenRecord === record ? notes : parseJsonObjectSafe(tokenRecord?.structured_notes);
+  const reportPosture = tokenNotes.typedReportDelivery ? String(tokenNotes.typedReportDelivery) : posture;
+  const reportPublishedAt = isoOrNull(tokenRecord?.report_generated_at) || isoOrNull(tokenNotes.reportPublishedAt) || isoOrNull(tokenNotes.report_published_at);
   const hasReportToken = Boolean(tokenRecord?.report_view_token);
   const reportRequiredByCatalog = requirements ? requirements.requiresServiceReport !== false : null;
   if (!completed) report = awaiting();
@@ -625,20 +634,20 @@ function deriveCloseoutFacts(inputs) {
     } else {
       report = fact('pending', 'project_completion_without_project_row', { completionSource: record?.completion_source || null });
     }
-  } else if (posture === 'disabled') report = fact('not_required', 'frozen_posture_disabled', { ruleSource: 'frozen_record', posture, audience: 'none' });
+  } else if (reportPosture === 'disabled') report = fact('not_required', 'frozen_posture_disabled', { ruleSource: 'frozen_record', posture: reportPosture, audience: 'none' });
   else if (reportRequiredByCatalog === false) {
     report = (hasReportToken || reportPublishedAt)
-      ? fact('done', 'published_despite_catalog_not_required', { publishedAt: reportPublishedAt, hasToken: hasReportToken, audience: posture === 'internal_only' ? 'internal' : 'customer', posture })
+      ? fact('done', 'published_despite_catalog_not_required', { publishedAt: reportPublishedAt, hasToken: hasReportToken, audience: reportPosture === 'internal_only' ? 'internal' : 'customer', posture })
       : fact('not_required', 'catalog_no_service_report', { ruleSource: 'catalog', requirementsSource: requirements.source, posture });
   } else if (hasReportToken || reportPublishedAt) {
     report = fact('done', 'report_published', {
-      publishedAt: reportPublishedAt, hasToken: hasReportToken, audience: posture === 'internal_only' ? 'internal' : 'customer', posture,
+      publishedAt: reportPublishedAt, hasToken: hasReportToken, audience: reportPosture === 'internal_only' ? 'internal' : 'customer', posture,
       formSubmitted: inputs.completedFormCount == null ? null : inputs.completedFormCount > 0,
     });
-  } else if (!requirements) report = fact('unknown', 'requirements_unavailable', { posture });
-  else if (inputs.completedFormCount > 0) report = fact('pending', 'form_submitted_not_published', { posture, formSubmitted: true });
+  } else if (!requirements) report = fact('unknown', 'requirements_unavailable', { posture: reportPosture });
+  else if (inputs.completedFormCount > 0) report = fact('pending', 'form_submitted_not_published', { posture: reportPosture, formSubmitted: true });
   else if (isBackfill) report = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', posture });
-  else report = fact('pending', 'no_report_artifact', { posture, formSubmitted: inputs.completedFormCount == null ? null : false });
+  else report = fact('pending', 'no_report_artifact', { posture: reportPosture, formSubmitted: inputs.completedFormCount == null ? null : false });
 
   // ---- 5. report delivery ---------------------------------------------------------
   let reportDelivery;
@@ -680,8 +689,8 @@ function deriveCloseoutFacts(inputs) {
     else if (ds === 'sending') reportDelivery = fact('pending', 'project_delivery_sending', evidence);
     else reportDelivery = fact('pending', 'project_report_not_sent', evidence);
   } else if (report.state === 'not_required') reportDelivery = fact('not_required', report.reason, { ruleSource: report.ruleSource || 'frozen_record', posture });
-  else if (posture === 'internal_only') reportDelivery = fact('not_required', 'frozen_posture_internal_only', { ruleSource: 'frozen_record', posture, audience: 'internal' });
-  else if (report.state !== 'done') reportDelivery = fact(report.state === 'unknown' ? 'unknown' : 'pending', 'report_not_published', { posture });
+  else if (reportPosture === 'internal_only') reportDelivery = fact('not_required', 'frozen_posture_internal_only', { ruleSource: 'frozen_record', posture: reportPosture, audience: 'internal' });
+  else if (report.state !== 'done') reportDelivery = fact(report.state === 'unknown' ? 'unknown' : 'pending', 'report_not_published', { posture: reportPosture });
   else if (delivery) {
     const status = String(delivery.status || '').toLowerCase();
     const evidence = {
@@ -697,21 +706,21 @@ function deriveCloseoutFacts(inputs) {
     } else if (DELIVERY_TERMINAL_SKIPPED.has(status)) reportDelivery = fact('not_required', `delivery_${status}`, { ruleSource: 'delivery_queue', ...evidence });
     else if (DELIVERY_IN_FLIGHT.has(status)) reportDelivery = fact('pending', `delivery_${status}`, evidence);
     else reportDelivery = fact('unknown', 'delivery_status_unrecognized', evidence);
-  } else if (inputs.deliveryLookupFailed) reportDelivery = fact('unknown', 'service_report_deliveries_lookup_failed', { posture });
-  else if (notesEmailStatus === 'disabled') reportDelivery = fact('not_required', 'report_email_kill_switch', { ruleSource: 'kill_switch', posture, notesStatus: notesEmailStatus });
-  else if (notesEmailStatus === 'sent') reportDelivery = fact('done', 'delivery_sent_per_record_notes', { posture, sentAt: isoOrNull(notes.serviceReportV1EmailSentAt) });
-  else if (notesEmailStatus === 'failed') reportDelivery = fact('failed', 'delivery_exhausted_per_record_notes', { posture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
+  } else if (inputs.deliveryLookupFailed) reportDelivery = fact('unknown', 'service_report_deliveries_lookup_failed', { posture: reportPosture });
+  else if (notesEmailStatus === 'disabled') reportDelivery = fact('not_required', 'report_email_kill_switch', { ruleSource: 'kill_switch', posture: reportPosture, notesStatus: notesEmailStatus });
+  else if (notesEmailStatus === 'sent') reportDelivery = fact('done', 'delivery_sent_per_record_notes', { posture: reportPosture, sentAt: isoOrNull(notes.serviceReportV1EmailSentAt) });
+  else if (notesEmailStatus === 'failed') reportDelivery = fact('failed', 'delivery_exhausted_per_record_notes', { posture: reportPosture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
   else if (notesEmailStatus === 'skipped') {
     const skip = classifyDeliverySkip(notes.serviceReportV1EmailError);
-    reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), posture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
+    reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), posture: reportPosture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
   }
-  else if (notesEmailStatus === 'queued' || notesEmailStatus === 'sending') reportDelivery = fact('pending', `delivery_${notesEmailStatus}`, { posture });
+  else if (notesEmailStatus === 'queued' || notesEmailStatus === 'sending') reportDelivery = fact('pending', `delivery_${notesEmailStatus}`, { posture: reportPosture });
   else if (isBackfill) reportDelivery = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', posture });
-  else if (recapSentAt && recapClaimSettled) reportDelivery = fact('done', 'recap_sms_delivered', { channel: 'sms', recapSentAt });
   else if (recapClaimFresh) reportDelivery = fact('pending', 'recap_sms_in_flight', { channel: 'sms', recapSentAt });
+  else if (recapSentAt && recapClaimSettled) reportDelivery = fact('unknown', 'recap_claim_unverified', { channel: 'sms', recapSentAt });
   else if (record?.report_template_version && record.report_template_version !== 'service_report_v1') {
-    reportDelivery = fact('unknown', 'no_delivery_row_for_template', { posture, templateVersion: record.report_template_version });
-  } else reportDelivery = fact('pending', 'not_enqueued', { posture });
+    reportDelivery = fact('unknown', 'no_delivery_row_for_template', { posture: reportPosture, templateVersion: record.report_template_version });
+  } else reportDelivery = fact('pending', 'not_enqueued', { posture: reportPosture });
 
   // ---- 6. invoice -----------------------------------------------------------------
   let invoice;
@@ -768,15 +777,30 @@ function deriveCloseoutFacts(inputs) {
     });
   } else if (!live && inputs.siblingInvoice?.invoice && splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).existing) {
     const sib = inputs.siblingInvoice.invoice;
-    invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(sib.status)) ? 'invoice_paid' : 'invoice_exists', {
-      invoiceId: sib.id, invoiceNumber: sib.invoice_number || null, status: sib.status || null,
-      total: sib.total != null ? Number(sib.total) : null, source: 'sibling_first_application', expectation: expectation?.kind || null,
-    });
+    if (billingInputsFailed.length) {
+      // Same outage guard as the own-visit live branch (GH r4).
+      invoice = fact('unknown', 'billing_inputs_unavailable', {
+        failed: billingInputsFailed, invoiceId: sib.id, invoiceNumber: sib.invoice_number || null, status: sib.status || null, source: 'sibling_first_application',
+      });
+    } else {
+      invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(sib.status)) ? 'invoice_paid' : 'invoice_exists', {
+        invoiceId: sib.id, invoiceNumber: sib.invoice_number || null, status: sib.status || null,
+        total: sib.total != null ? Number(sib.total) : null, source: 'sibling_first_application', expectation: expectation?.kind || null,
+      });
+      if (!visitPerformed) {
+        contradictions.push({ code: 'invoice_on_non_performed_visit', detail: `sibling invoice ${sib.id} exists but frozen visitOutcome is '${visitOutcome}' (nothing performed)` });
+      }
+    }
   } else if (live) {
     invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(live.status)) ? 'invoice_paid' : 'invoice_exists', {
       invoiceId: live.id, invoiceNumber: live.invoice_number || null, status: live.status || null,
       total: live.total != null ? Number(live.total) : null, payerBilled: Boolean(live.payer_id), expectation: expectation?.kind || null,
     });
+    if (!visitPerformed) {
+      // A bill exists for a visit whose frozen outcome says nothing was
+      // performed — a blocking exception, never quietly done (codex GH r4).
+      contradictions.push({ code: 'invoice_on_non_performed_visit', detail: `invoice ${live.id} exists but frozen visitOutcome is '${visitOutcome}' (nothing performed)` });
+    }
     if (expectation && ['covered_membership', 'covered_annual', 'no_charge'].includes(expectation.kind) && !isBackfill) {
       contradictions.push({
         code: 'invoice_on_covered_visit',
@@ -871,8 +895,11 @@ function deriveCloseoutFacts(inputs) {
   // dispatch-completion-deferred.js): sending | sent | deferred | failed |
   // blocked (opt-out / no consent) | skipped_recap_sms_already_sent.
   else if (smsStatus === 'sent') comms = fact('done', 'completion_sms_sent', { completionSmsStatus: smsStatus, deliveredAt: isoOrNull(notes.completionSmsDeferredDeliveredAt) || isoOrNull(notes.sentSmsAt) });
-  else if (smsStatus === 'skipped_recap_sms_already_sent' || (recapSentAt && recapClaimSettled)) comms = fact('done', 'recap_sms_sent', { recapSentAt, completionSmsStatus: smsStatus });
+  else if (smsStatus === 'skipped_recap_sms_already_sent') comms = fact('done', 'recap_sms_sent', { recapSentAt, completionSmsStatus: smsStatus });
   else if (recapClaimFresh) comms = fact('pending', 'recap_sms_in_flight', { recapSentAt });
+  // An aged claim alone is NOT delivery evidence: it is stamped before the
+  // provider call, and a crash between stamp and send leaves it set forever.
+  else if (recapSentAt && recapClaimSettled) comms = fact('unknown', 'recap_claim_unverified', { recapSentAt });
   else if (smsStatus === 'deferred') comms = fact('pending', 'deferred_send_window', { completionSmsStatus: smsStatus });
   else if (smsStatus === 'sending') comms = fact('pending', 'completion_sms_sending', { completionSmsStatus: smsStatus });
   else if (smsStatus === 'failed') comms = fact('failed', 'completion_sms_failed', { completionSmsStatus: smsStatus });

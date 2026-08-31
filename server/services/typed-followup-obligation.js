@@ -151,10 +151,12 @@ function typedFollowupVerdict({ scheduledService = {}, profile = {}, findingsTyp
 // `strict`: a status reader (closeout-status.js) must tell "lookup failed"
 // from "no obligation" — with strict the record/profile lookups propagate
 // instead of collapsing to null.
-async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db, strict = false } = {}) {
+async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db, strict = false, recordId = null } = {}) {
   if (!scheduledService?.id || scheduledService.status !== 'completed') return null;
+  // recordId: status readers pass the attempt's COMMITTED record so a newer
+  // recap/project sibling row cannot swap the frozen verdict.
   const recordQuery = knex('service_records')
-    .where({ scheduled_service_id: scheduledService.id })
+    .where({ scheduled_service_id: scheduledService.id, ...(recordId ? { id: recordId } : {}) })
     .orderBy('created_at', 'desc')
     .first();
   const record = strict ? await recordQuery : await recordQuery.catch(() => null);
