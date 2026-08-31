@@ -640,6 +640,28 @@ const SERVICE_CTA_LINK_RE =
 // Length-preserving blanker for balanced `{…}` MDX expressions, quote-aware
 // inside tags (an attribute value like title="a {b}" is not an expression)
 // and tolerant of nested braces. Unbalanced braces are left alone.
+// Non-rendered Markdown CODE, length-preserving: backtick AND tilde fences,
+// inline code, and CommonMark indented (4-space / tab) code lines — none of
+// it renders as prose, so none of it may satisfy a structural rule.
+function blankNonRenderedCode(src: string): string {
+  let out = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
+  out = out.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
+  // An indented code line follows a blank line (or another code line).
+  const lines = out.split('\n');
+  let prevBlankOrCode = true;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^(?: {4}|\t)/.test(line) && prevBlankOrCode) {
+      lines[i] = ' '.repeat(line.length);
+      prevBlankOrCode = true;
+    } else {
+      prevBlankOrCode = line.trim() === '' || /^(?: {4}|\t)/.test(line) === false && line.trim() === '';
+      prevBlankOrCode = line.trim() === '';
+    }
+  }
+  return lines.join('\n');
+}
+
 function blankMdxExpressions(src: string): string {
   const out = src.split('');
   const blankRange = (a: number, b: number) => { for (let k = a; k <= b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
@@ -692,6 +714,26 @@ function tagAttrsAt(src: string, start: number): string | null {
   return null;
 }
 
+// Sequential, quote-aware attribute read: the QUOTED LITERAL value of the
+// attribute whose complete name is exactly `name` — null when the
+// attribute is missing, expression-valued/unquoted, or DUPLICATED (JSX
+// keeps the last value while a reader sees the first, so a duplicate can
+// never validate).
+function literalAttr(attrs: string, name: string): string | null {
+  const re = /\s*([^\s=/>"'{}]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\{[^{}]*\})|([^\s"'{}]+)))?/gy;
+  let value: string | null = null;
+  let seen = 0;
+  let m: RegExpExecArray | null;
+  re.lastIndex = 0;
+  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
+    if (m[0].length === 0) break;
+    if (m[1] !== name) continue;
+    seen += 1;
+    value = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null;
+  }
+  return seen === 1 ? value : null;
+}
+
 // Every opening tag named `name` in `src` → [{ start, attrs }] (attrs null = unterminated).
 function tagsNamed(src: string, name: string): Array<{ start: number; attrs: string | null }> {
   const re = new RegExp(`<${name}\\b`, 'g');
@@ -715,7 +757,7 @@ function hasServiceCtaBefore(prefix: string): boolean {
   for (const { attrs } of tagsNamed(prefix, 'InlineCTA')) {
     if (attrs === null) continue; // unterminated — never counts
     if (!/\bctaHref\s*=/.test(attrs)) return true;
-    const href = /\bctaHref\s*=\s*["']([^"']*)["']/.exec(attrs)?.[1];
+    const href = literalAttr(attrs, 'ctaHref'); // duplicated/dynamic → null → not counted
     if (href && SERVICE_ROUTE_PATH_RE.test(href.trim())) return true;
   }
   return false;
@@ -735,8 +777,7 @@ export function validateAffiliateUsage(
 ): AffiliateUsageResult {
   const blockers: string[] = [];
   const warnings: string[] = [];
-  let cleaned = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
-  cleaned = cleaned.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
+  let cleaned = blankNonRenderedCode(body_mdx);
   cleaned = cleaned.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   // MDX expressions ({''}, {'[quote](/quote/)'}, {`## fake`}) render as
   // ordinary text, never as markup — blank every balanced brace expression
@@ -783,12 +824,12 @@ export function validateAffiliateUsage(
   // checks only work on quoted literals, and the resolver would receive a
   // value the gate never validated.
   const checked = new Set<string>();
-  const unmasked = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length)).replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length)).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   for (const { attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
-    const id = attrs === null ? undefined : /\bproduct\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
-    const placement = attrs === null ? undefined : /\bplacement\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
+    const id = attrs === null ? null : literalAttr(attrs, 'product');
+    const placement = attrs === null ? null : literalAttr(attrs, 'placement');
     if (!id || !placement) {
-      blockers.push('every <AffiliateLink> needs quoted literal product="…" and placement="…" props — expression-valued or missing props cannot be validated against the registry');
+      blockers.push('every <AffiliateLink> needs exactly one quoted literal product="…" and placement="…" prop — expression-valued, missing, or DUPLICATED props cannot be validated against the registry');
       continue;
     }
     const key = `${id}::${placement ?? ''}`;

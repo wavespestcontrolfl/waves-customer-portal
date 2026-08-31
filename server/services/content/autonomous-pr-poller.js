@@ -361,8 +361,22 @@ function affiliateBeltVerdict(run, head, prHeadSha = null) {
   let ids;
   try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
   const approved = new Set(ids(dp?.body || ''));
-  const extra = ids(content).filter((id) => !approved.has(id));
+  const headIds = ids(content);
+  const extra = headIds.filter((id) => !approved.has(id));
   if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
+  // Registry state is re-validated at MERGE time — the approval and the
+  // green preview may be days old, and a product paused, prohibited, or
+  // gone stale (yellow label review lapsed) since then must not land.
+  let registry;
+  try { registry = require('../../../packages/affiliate-registry'); } catch (_) { return { ok: false, reason: 'affiliate registry unavailable for the merge-time recheck' }; }
+  const index = registry.productIndex();
+  for (const id of headIds) {
+    const entry = index.get(id);
+    const state = entry ? entry.state : 'unregistered';
+    if (state !== 'active') {
+      return { ok: false, reason: `affiliate product "${id}" is no longer active at merge time (${state}) — re-verify or pause the registry row; auto-merge withheld` };
+    }
+  }
   return { ok: true };
 }
 

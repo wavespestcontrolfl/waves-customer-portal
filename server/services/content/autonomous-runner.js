@@ -3098,6 +3098,11 @@ class AutonomousRunner {
     }
 
     const published = !!patch.published_url;
+    // No-op refresh under approval: the reviewed body already matches the
+    // live page — same disposition as runNext's publish_no_changes (the
+    // review queue must not keep an approved no-op forever as
+    // publisher_no_live_url).
+    const noChanges = patch.publish_status === 'no_changes';
     // Bind the approval to the exact COMMIT the approved publish created
     // (PR #3508 r7 + r12 P1s): the poller's merge gate honors
     // trust_build_approved_at ONLY when the PR head still equals this SHA —
@@ -3127,7 +3132,9 @@ class AutonomousRunner {
     };
     const runUpdate = published
       ? { ...baseUpdate, outcome: 'completed_published', skip_reason: null, published_url: patch.published_url }
-      : { ...baseUpdate, outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', published_url: null };
+      : noChanges
+        ? { ...baseUpdate, outcome: 'completed_no_changes', skip_reason: 'publish_no_changes', published_url: null }
+        : { ...baseUpdate, outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', published_url: null };
     // Post is live / PR open. If persistence fails, fall back to a minimal
     // reconcilable state (never leave the row stuck in publishing_*).
     try {
@@ -3144,7 +3151,9 @@ class AutonomousRunner {
       };
       const fallback = published
         ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp }
-        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp };
+        : noChanges
+          ? { outcome: 'completed_no_changes', skip_reason: 'publish_no_changes', draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp }
+          : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp };
       await db('autonomous_runs').where('id', run.id).update(fallback)
         .catch((e2) => logger.error(`[autonomous-runner] named-competitor run fallback persist ALSO failed (run ${run.id}); manual reconcile needed: ${e2.message}`));
     }
@@ -3157,9 +3166,11 @@ class AutonomousRunner {
     // 'no_changes') → publisher_no_live_url (actionable in review, not pollable).
     const oppFinal = published
       ? { status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
-      : patch.astro_pr_url
-        ? { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() }
-        : { status: 'pending_review', skip_reason: 'publisher_no_live_url', updated_at: new Date() };
+      : noChanges
+        ? { status: 'done', skip_reason: 'no_changes', completed_at: new Date(), updated_at: new Date() }
+        : patch.astro_pr_url
+          ? { status: 'pending_review', skip_reason: 'astro_pr_pending_merge', updated_at: new Date() }
+          : { status: 'pending_review', skip_reason: 'publisher_no_live_url', updated_at: new Date() };
     try {
       await db('opportunity_queue').where({ id: opportunityId }).update(oppFinal);
     } catch (err) {

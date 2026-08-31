@@ -230,7 +230,25 @@ function runUpdates(updates) {
   });
 }
 
+// One temp registry for the whole suite: the belt's merge-time recheck needs
+// an ACTIVE rain-gauge row (the vendored registry is empty by design).
+const __affReg = (() => {
+  const { mkdtempSync, writeFileSync } = require('node:fs');
+  const os = require('node:os');
+  const pathmod = require('node:path');
+  const iso = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
+  const regPath = pathmod.join(mkdtempSync(pathmod.join(os.tmpdir(), 'affpoll-')), 'registry.json');
+  writeFileSync(regPath, JSON.stringify({ version: 1, products: [{
+    product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
+    approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
+    allowed_post_types: ['protocol'], allowed_placements: ['primary-rec', 'alt-rec'], owner_approved_at: iso(5),
+  }] }));
+  return regPath;
+})();
+
 beforeEach(() => {
+  process.env.AFFILIATE_REGISTRY_PATH = __affReg;
+  require('../../packages/affiliate-registry')._resetCache();
   // Refresh-path affiliate belt: default to a resolvable, affiliate-free
   // target file so existing refresh-merge tests keep merging; belt tests
   // override per case.
@@ -264,9 +282,22 @@ afterEach(() => {
 
 describe('affiliate belt (owner ruling 2026-08-31)', () => {
   const { affiliateBeltVerdict } = poller._internals;
+  const registryPkg = require('../../packages/affiliate-registry');
   let prevGate;
   beforeEach(() => { prevGate = process.env.GATE_AFFILIATE_LINKS; process.env.GATE_AFFILIATE_LINKS = 'true'; });
-  afterEach(() => { if (prevGate === undefined) delete process.env.GATE_AFFILIATE_LINKS; else process.env.GATE_AFFILIATE_LINKS = prevGate; });
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AFFILIATE_LINKS; else process.env.GATE_AFFILIATE_LINKS = prevGate;
+    process.env.AFFILIATE_REGISTRY_PATH = __affReg; registryPkg._resetCache();
+  });
+
+  test('registry state is re-validated at merge time: a product paused/stale since approval withholds', () => {
+    const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
+    delete process.env.AFFILIATE_REGISTRY_PATH; registryPkg._resetCache(); // empty vendored registry → unregistered
+    process.env.AFFILIATE_REGISTRY_PATH = '/nonexistent/registry.json'; registryPkg._resetCache();
+    expect(affiliateBeltVerdict(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/no longer active at merge time \(unregistered\)/) });
+  });
   test('the kill switch is re-checked at merge time: an approved affiliate head is withheld once GATE_AFFILIATE_LINKS is off', () => {
     const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
