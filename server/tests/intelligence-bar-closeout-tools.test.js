@@ -73,7 +73,8 @@ test('list_open_closeouts sweeps completed visits and returns only non-closed on
     }))
     .mockRejectedValueOnce(new Error('down'));
   const out = await executeCloseoutTool('list_open_closeouts', { date: '2026-08-31' });
-  expect(out).toMatchObject({ date: '2026-08-31', completedVisitsChecked: 3, closedOut: 1, statusUnavailable: 1 });
+  expect(out).toMatchObject({ date: '2026-08-31', completedVisitsChecked: 3, closedOut: 1, statusUnavailable: 1, truncated: false });
+  expect(out.unavailableVisits).toEqual([expect.objectContaining({ serviceId: 'svc-3', reason: 'status_load_failed' })]);
   expect(out.openCloseouts).toHaveLength(1);
   expect(out.openCloseouts[0]).toMatchObject({
     serviceId: 'svc-2', open: ['invoice'], unknown: ['photos'],
@@ -94,6 +95,16 @@ test('list_open_closeouts: absent date = today; malformed or impossible dates er
   expect((await executeCloseoutTool('list_open_closeouts', { date: '2026-8-31' })).error).toMatch(/Invalid date/);
   db.mockImplementation(() => { throw new Error('conn refused'); });
   expect((await executeCloseoutTool('list_open_closeouts', {})).error).toMatch(/unavailable/);
+});
+
+test('list_open_closeouts marks truncation when a day exceeds the cap (codex r2)', async () => {
+  const many = Array.from({ length: 51 }, (_, i) => ({ id: `svc-${i}`, service_type: 'Pest', customer_id: `c${i}`, window_start: '09:00' }));
+  db.mockImplementation(() => visitChain(many));
+  getCloseoutStatus.mockResolvedValue(status());
+  const out = await executeCloseoutTool('list_open_closeouts', { date: '2026-08-31' });
+  expect(out).toMatchObject({ completedVisitsChecked: 50, truncated: true });
+  expect(out.note).toMatch(/NOT an all-clear/);
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(50);
 });
 
 test('unknown tool name returns an error object', async () => {

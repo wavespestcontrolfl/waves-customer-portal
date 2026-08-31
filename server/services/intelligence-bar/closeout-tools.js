@@ -82,11 +82,15 @@ async function listOpenCloseouts(input) {
     visits = await db('scheduled_services')
       .where({ scheduled_date: date, status: 'completed' })
       .orderBy('window_start', 'asc')
-      .limit(DAY_SWEEP_VISIT_CAP)
+      .limit(DAY_SWEEP_VISIT_CAP + 1)
       .select('id', 'service_type', 'customer_id', 'window_start');
   } catch (err) {
     return { error: `scheduled_services lookup unavailable: ${err.message}`, date };
   }
+  // cap+1 tells a 50-visit day from a truncated one — a truncated sweep is
+  // never presented as an all-clear.
+  const truncated = visits.length > DAY_SWEEP_VISIT_CAP;
+  if (truncated) visits = visits.slice(0, DAY_SWEEP_VISIT_CAP);
   const results = [];
   for (let i = 0; i < visits.length; i += CLOSEOUT_CONCURRENCY) {
     const slice = visits.slice(i, i + CLOSEOUT_CONCURRENCY);
@@ -94,10 +98,17 @@ async function listOpenCloseouts(input) {
     slice.forEach((v, j) => results.push({ visit: v, status: loaded[j] }));
   }
   const open = [];
+  const unavailableVisits = [];
   let closedOut = 0;
-  let unavailableCount = 0;
   for (const { visit, status } of results) {
-    if (!status || !status.found) { unavailableCount += 1; continue; }
+    if (!status || !status.found) {
+      // Unverified, NOT a gap — but the operator must be able to name it.
+      unavailableVisits.push({
+        serviceId: visit.id, serviceType: visit.service_type || null, customerId: visit.customer_id || null, windowStart: visit.window_start || null,
+        reason: status?.lookupFailed ? 'lookup_failed' : (status ? 'not_found' : 'status_load_failed'),
+      });
+      continue;
+    }
     if (status.summary?.closedOut) { closedOut += 1; continue; }
     open.push({
       serviceId: visit.id,
@@ -118,8 +129,12 @@ async function listOpenCloseouts(input) {
     cap: DAY_SWEEP_VISIT_CAP,
     closedOut,
     openCloseouts: open,
-    statusUnavailable: unavailableCount,
-    note: 'unknown = a lookup outage, not a confirmed gap; contradictions block closedOut',
+    unavailableVisits,
+    statusUnavailable: unavailableVisits.length,
+    truncated,
+    note: truncated
+      ? `MORE than ${DAY_SWEEP_VISIT_CAP} completed visits on this date — only the first ${DAY_SWEEP_VISIT_CAP} by window were checked; this is NOT an all-clear for the rest`
+      : 'unknown = a lookup outage, not a confirmed gap; contradictions block closedOut',
   };
 }
 
