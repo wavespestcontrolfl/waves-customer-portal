@@ -1183,9 +1183,15 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       : null;
     // Monthly members never pay a per-application figure — this is the
     // arithmetic equivalent for comparison against a quote, and the panel
-    // labels its source so staff never reads it as a charged amount.
+    // labels its source so staff never reads it as a charged amount. Lane
+    // via the canonical resolver (#3140, Codex #3669 r7): an explicit
+    // per-visit / annual-prepay row retaining a legacy monthly_rate is not
+    // a monthly member, and its residue rate must not mint a derived
+    // per-application figure.
+    const { resolveBillingLane } = require('./billing-lane');
     const monthlyDerivedPerApplication = (singleUnitAccount
       && stampedPerApplication == null
+      && resolveBillingLane(customer).mode === 'monthly_membership'
       && Number(customer?.monthly_rate) > 0
       && visitsPerYear > 0)
       ? round2((Number(customer.monthly_rate) * 12) / visitsPerYear)
