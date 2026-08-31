@@ -20,6 +20,20 @@ const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./mes
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
+
+// Fallback parts for resolveCommittedVisitTime from a caller's appointment
+// time: the 'YYYY-MM-DDTHH:MM' strings every registration path builds, or
+// a Date (ET wall clock).
+function appointmentTimeParts(value) {
+  if (typeof value === 'string') {
+    return { date: value.slice(0, 10), windowStart: value.slice(11, 16) || null };
+  }
+  const dt = value instanceof Date ? value : new Date(value);
+  if (isNaN(dt.getTime())) return {};
+  const hhmm = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false })
+    .format(dt).replace(/^24/, '00');
+  return { date: etDateString(dt), windowStart: hhmm };
+}
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
@@ -2159,9 +2173,54 @@ const AppointmentReminders = {
    * registers row-less windowless visits at 08:00 ARMED) from resurrecting
    * the 8 AM promise. Confirmation keeps its normal source-based handling.
    */
+  // The COMMITTED scheduled_services row is the truth for a reminder's
+  // time. Callers registering a reminder for a visit they just inserted
+  // hold an in-memory copy whose window can differ from what landed
+  // (defaulted by the insert, inherited from a parent, or simply not on
+  // the object) — and the reminder sync trigger only fires on UPDATE, so
+  // a row born at the wrong time never self-corrects (four series visits
+  // drifted this way 08-30; #3625 repaired the data, this closes the
+  // path). Reads the row back and prefers it; the caller's values are
+  // the fallback only when the row is not visible yet or unreadable.
+  // Returns null with no date, else { appointmentTime, windowless }:
+  // a windowless row resolves to the canonical date+08:00 slot AND
+  // windowless=true — the caller must pass that as closeReminderWindows
+  // so the row registers as a non-delivering placeholder (see
+  // registerAppointment) instead of an armed 08:00 nobody chose.
+  async resolveCommittedVisitTime(scheduledServiceId, { date, windowStart } = {}, conn = db, { lock = false } = {}) {
+    let resolvedDate = date || null;
+    let resolvedStart = windowStart || null;
+    try {
+      let query = conn('scheduled_services').where({ id: scheduledServiceId });
+      // Share-lock the visit for the caller's transaction: a concurrent
+      // reschedule UPDATE then waits until the reminder exists, so its
+      // sync trigger finds a row to correct instead of nothing.
+      if (lock) query = query.forShare();
+      const row = await query.first('scheduled_date', 'window_start');
+      if (row) {
+        // The row is the whole truth once found: a NULL window means
+        // "windowless" (08:00 convention), not "keep the caller's stale
+        // window".
+        if (row.scheduled_date) {
+          resolvedDate = row.scheduled_date instanceof Date
+            ? row.scheduled_date.toISOString().slice(0, 10)
+            : String(row.scheduled_date).slice(0, 10);
+        }
+        resolvedStart = row.window_start ? String(row.window_start).slice(0, 5) : null;
+      }
+    } catch (err) {
+      logger.warn(`[appt-remind] could not read back visit ${scheduledServiceId} for its reminder time (${err.message}) — using the caller's values`);
+    }
+    if (!resolvedDate) return null;
+    return {
+      appointmentTime: `${resolvedDate}T${resolvedStart || '08:00'}`,
+      windowless: !resolvedStart,
+    };
+  },
+
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
-      const apptTime = parseETDateTime(appointmentTime);
+      let apptTime = parseETDateTime(appointmentTime);
       if (isNaN(apptTime.getTime())) {
         logger.error(`[appt-remind] Invalid appointment time: ${appointmentTime}`);
         return null;
@@ -2174,9 +2233,27 @@ const AppointmentReminders = {
       const sendConfirmation = typeof options.sendConfirmation === 'boolean'
         ? options.sendConfirmation
         : (source === 'booking_new' || source === 'admin_manual');
-      const closeReminderWindows = options.closeReminderWindows === true;
+      let closeReminderWindows = options.closeReminderWindows === true;
 
       const registration = await db.transaction(async (trx) => {
+        // options.fromCommittedRow: the caller registered a visit it just
+        // inserted and its in-memory copy of the window may not be what
+        // landed (see resolveCommittedVisitTime). Read the row HERE, inside
+        // this transaction and under a share lock — a separate read would
+        // leave a gap where a reschedule UPDATE runs its (UPDATE-only) sync
+        // trigger before the reminder exists and this insert then records
+        // the old time forever. The lock makes that UPDATE wait; when it
+        // proceeds the trigger finds this row and syncs it. The advisory
+        // slot lock below is keyed on the RESOLVED time.
+        if (options.fromCommittedRow) {
+          const resolved = await this.resolveCommittedVisitTime(
+            scheduledServiceId, appointmentTimeParts(appointmentTime), trx, { lock: true },
+          );
+          if (resolved) {
+            apptTime = parseETDateTime(resolved.appointmentTime);
+            closeReminderWindows = resolved.windowless;
+          }
+        }
         await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
           `appointment-reminder:${customerId}:${apptTime.toISOString()}`,
         ]);
