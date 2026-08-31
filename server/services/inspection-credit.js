@@ -490,7 +490,13 @@ async function recordInspectionCreditOffer({
   try {
     // onConflict().ignore() on the unique source visit — a completion
     // retry/replay re-runs this leg and must not create a second promise.
-    const [row] = await db('inspection_credit_offers')
+    // Customer-scoped credit lock (W0B): a card-approved credit-free
+    // booking projects "no open offer" under the SAME lock, so this insert
+    // either commits before that projection or waits until the booking
+    // (and its event) has committed — never lands in its blind spot.
+    const [row] = await db.transaction(async (trx) => {
+      await lockInspectionCreditCustomer(trx, customerId);
+      return trx('inspection_credit_offers')
       .insert({
         customer_id: customerId,
         source_scheduled_service_id: scheduledServiceId,
@@ -514,6 +520,7 @@ async function recordInspectionCreditOffer({
       .onConflict('source_scheduled_service_id')
       .ignore()
       .returning(['id', 'amount', 'expires_at']);
+    });
 
     if (!row) {
       // The offer already existed — report the EXISTING terms so the
@@ -1970,6 +1977,14 @@ async function inspectionCreditReportNote(service) {
 // expectedTotal equality check refuses and the pay-link fallback (which
 // auto-applies the real credit at delivery) takes over. Read-only; never
 // throws.
+// Transaction-scoped advisory lock serializing offer creation with any
+// in-transaction "is a credit open?" projection for one customer. Both
+// sides MUST take it: a lock only one writer holds protects nothing.
+async function lockInspectionCreditCustomer(trx, customerId) {
+  if (!trx || !customerId) return;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inspection_credit:${customerId}`]);
+}
+
 async function projectRedeemableOfferAmount(customerId, { now = new Date(), dbh = db } = {}) {
   if (!customerId) return 0;
   // THROWS on a query failure (Codex #3492 r10 P0) — a swallowed error
@@ -1993,6 +2008,7 @@ module.exports = {
   etDateOnlyToDate,
   etEndOfDayAfterDays,
   projectRedeemableOfferAmount,
+  lockInspectionCreditCustomer,
   markBookingForInspectionCredit,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,

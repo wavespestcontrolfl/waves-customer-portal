@@ -161,7 +161,7 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
 test('create_appointment: card bookings are credit-free by construction; reminders register for later (no text now)', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking — it is excluded from credit redemption/));
+  expect(labels).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking/));
   expect(labels).toContainEqual(expect.stringMatching(/reminder rows .*no confirmation text is sent now/));
   expect(c.notifies_customer).toBe(false);
 });

@@ -274,7 +274,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // claimed post-commit and by the hourly sweep — not pinnable), so a card
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
-    if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking — it is excluded from credit redemption (verified again at commit)');
+    if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
     push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card); no confirmation text is sent now');
   }
   if (toolName === 'bulk_update_customers') {

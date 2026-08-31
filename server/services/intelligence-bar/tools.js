@@ -1832,6 +1832,12 @@ async function createAppointment(input) {
     // inside the booking transaction — if an open credit appeared since the
     // card, abort before the marker/redemption can consume it undisclosed.
     if (input._inspection_credit_amount !== undefined) {
+      // Customer-scoped credit lock shared with offer creation: an offer
+      // being recorded concurrently either commits BEFORE this projection
+      // (and the mismatch aborts the booking) or waits until this booking
+      // has committed with its event (and is redeemed by the next booking,
+      // exactly as the card said). No READ COMMITTED blind spot remains.
+      await require('../inspection-credit').lockInspectionCreditCustomer(trx, customer_id);
       const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customer_id, { dbh: trx });
       const live = Number(projected?.amount ?? projected) || 0;
       if (live !== Number(input._inspection_credit_amount)) {
@@ -1840,19 +1846,17 @@ async function createAppointment(input) {
         throw err;
       }
     }
-    // The marker is what makes a booking eligible for credit redemption
-    // (immediate AND the hourly sweep). A card-approved credit-FREE booking
-    // is never marked: the READ COMMITTED projection above cannot see an
-    // offer committed concurrently, and an unmarked booking is the only
-    // thing that keeps "no credit is redeemed by this booking" true without
-    // a lock shared with offer creation.
-    if (input._inspection_credit_amount === undefined) {
-      await require('../inspection-credit').markBookingForInspectionCredit(trx, {
-        customerId: customer_id,
-        scheduledServiceId: created.id,
-        source: 'intelligence_bar',
-      });
-    }
+    // The booking event is a FACT the credit rails require ("this customer
+    // booked") — never skipped, even for a card-approved credit-free
+    // booking: an offer committed concurrently would otherwise lose its
+    // proof forever (silent permanent credit loss). The credit-free
+    // promise is enforced by the customer-scoped credit lock taken above,
+    // which offer creation shares.
+    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
+      customerId: customer_id,
+      scheduledServiceId: created.id,
+      source: 'intelligence_bar',
+    });
   });
   } catch (err) {
     if (err && err.previewChanged) {
