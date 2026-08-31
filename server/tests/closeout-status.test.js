@@ -21,6 +21,9 @@ jest.mock('../services/autopay-eligibility', () => ({
 jest.mock('../services/typed-followup-obligation', () => ({
   typedFollowupObligationForCompletedSource: jest.fn(async () => null),
 }));
+jest.mock('../services/estimate-first-application-invoice', () => ({
+  findFirstApplicationInvoiceForEstimateService: jest.fn(async () => ({ invoice: null, liveBeside: null })),
+}));
 jest.mock('../services/annual-prepay-renewals', () => ({
   annualPrepayCoversVisit: jest.fn(async () => true),
 }));
@@ -177,6 +180,12 @@ describe('closeout-status: completion fact', () => {
     expect(failed.facts.completion).toMatchObject({ state: 'failed', error: 'boom' });
   });
 
+  test('record exists but the attempt is still running/resumable → pending side effects, not closed (codex r12)', () => {
+    expect(deriveCloseoutFacts(closedOutInputs({ attempt: { state: 'resumable' } })).facts.completion)
+      .toMatchObject({ state: 'pending', reason: 'completion_side_effects_resumable', recordId: REC });
+    expect(deriveCloseoutFacts(closedOutInputs({ attempt: { state: 'running' } })).facts.completion.state).toBe('pending');
+  });
+
   test('record marked incomplete → pending', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ record: { ...closedOutInputs().record, status: 'incomplete' } }));
     expect(facts.completion).toMatchObject({ state: 'pending', reason: 'record_marked_incomplete' });
@@ -185,8 +194,9 @@ describe('closeout-status: completion fact', () => {
   test('completion-attempt lookup failure with no record → unknown, not a closeout gap (GH r1)', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: null, attemptLookupFailed: true }));
     expect(facts.completion).toMatchObject({ state: 'unknown', reason: 'completion_attempts_lookup_failed' });
-    const stillCompleted = deriveCloseoutFacts(closedOutInputs({ attempt: null, attemptLookupFailed: true }));
-    expect(stillCompleted.facts.completion.state).toBe('done');
+    // Even with a record, an unreadable attempt row means side effects are unknowable.
+    const withRecord = deriveCloseoutFacts(closedOutInputs({ attempt: null, attemptLookupFailed: true }));
+    expect(withRecord.facts.completion).toMatchObject({ state: 'unknown', recordId: REC });
   });
 
   test('service_records lookup failure → unknown, never pending', () => {
@@ -396,7 +406,7 @@ describe('closeout-status: invoice + invoice delivery', () => {
     const run = (o) => deriveCloseoutFacts(closedOutInputs({ liveInvoice: paid, ...o })).facts.invoiceDelivery;
     expect(run({ receiptJob: { id: 'rj', status: 'retry_scheduled', attempts: 2, next_attempt_at: '2026-08-31T16:00:00Z' } })).toMatchObject({ state: 'pending', reason: 'receipt_retry_scheduled' });
     expect(run({ receiptJob: { id: 'rj', status: 'failed', attempts: 5, last_error: 'to bob@example.com' } })).toMatchObject({ state: 'failed', reason: 'receipt_delivery_exhausted', lastError: 'to [email]' });
-    expect(run({ receiptJob: { id: 'rj', status: 'completed' } })).toMatchObject({ state: 'done', reason: 'paid_receipt_job_completed' });
+    expect(run({ receiptJob: { id: 'rj', status: 'completed', sms_result: { sent: true } } })).toMatchObject({ state: 'done', reason: 'paid_receipt_delivered' });
     expect(run({})).toMatchObject({ state: 'pending', reason: 'paid_receipt_not_sent' });
     expect(run({ receiptJobLookupFailed: true })).toMatchObject({ state: 'unknown' });
     expect(run({ liveInvoice: { ...paid, receipt_sent_at: '2026-08-30T18:10:00Z' } })).toMatchObject({ state: 'done', reason: 'paid_receipt_sent' });
@@ -417,6 +427,28 @@ describe('closeout-status: invoice + invoice delivery', () => {
   test('live invoice + failed billing input → invoice unknown but the row stays as evidence (GH r1)', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ autopayActive: null }));
     expect(facts.invoice).toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', failed: ['autopay'], invoiceId: 'inv-1' });
+  });
+
+  test('sibling first-application invoice (same estimate + date) counts as the visit invoice; a refunded sibling parks (codex r12)', () => {
+    const sib = { id: 'inv-sib', invoice_number: 'INV-S', status: 'sent', total: 240, sent_at: '2026-08-30T10:00:00Z', payer_id: null };
+    const done = deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoice: { invoice: sib, liveBeside: null } }));
+    expect(done.facts.invoice).toMatchObject({ state: 'done', reason: 'invoice_exists', invoiceId: 'inv-sib', source: 'sibling_first_application' });
+    expect(done.facts.invoiceDelivery).toMatchObject({ state: 'done', reason: 'invoice_delivered', source: 'sibling_first_application' });
+    const parked = deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoice: { invoice: { ...sib, status: 'refunded' }, liveBeside: { id: 'inv-live', status: 'sent' } } }));
+    expect(parked.facts.invoice).toMatchObject({ state: 'pending', reason: 'parked_manual_refunded_invoice', refundedInvoiceId: 'inv-sib', liveBesideInvoiceId: 'inv-live' });
+    // A canceled sibling is dropped from reuse — the lane expectation decides.
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoice: { invoice: { ...sib, status: 'canceled' }, liveBeside: null } })).facts.invoice.state).toBe('pending');
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoiceLookupFailed: true })).facts.invoice).toMatchObject({ state: 'unknown', failed: ['sibling_first_application'] });
+  });
+
+  test('receipt job completed is classified by channel legs (codex r12)', () => {
+    const paid = { id: 'inv-1', status: 'paid', total: 120, sent_at: null, sms_sent_at: null, receipt_sent_at: null, payer_id: null };
+    const run = (sms_result, email_result) => deriveCloseoutFacts(closedOutInputs({ liveInvoice: paid, receiptJob: { id: 'rj', status: 'completed', sms_result, email_result } })).facts.invoiceDelivery;
+    expect(run({ sent: true }, { ok: false, error: 'No receipt recipient email' })).toMatchObject({ state: 'done', reason: 'paid_receipt_delivered' });
+    expect(run({ sent: false, reason: 'no-phone' }, { ok: false, error: 'No receipt recipient email' })).toMatchObject({ state: 'failed', reason: 'receipt_no_recipient' });
+    expect(run({ sent: false, reason: 'receipt_texts_opted_out' }, { ok: false, error: 'receipt_opted_out' })).toMatchObject({ state: 'not_required', reason: 'receipt_opted_out', ruleSource: 'consent' });
+    expect(run({ sent: false, reason: 'channel_email_only' }, { ok: true })).toMatchObject({ state: 'done' });
+    expect(run(null, null)).toMatchObject({ state: 'unknown', reason: 'receipt_job_result_unclassified' });
   });
 
   test('prepaid (account-credit) invoice with no send timestamps is settled — nothing to deliver', () => {

@@ -64,6 +64,7 @@ const {
   completionNewestLiveInvoiceLookup,
   completionTerminalInvoiceLookup,
   reconcileLiveVsRefunded,
+  splitTerminalCompletionInvoice,
 } = require('./completion-invoice-candidate');
 const {
   resolveBillingLane,
@@ -135,6 +136,32 @@ function classifyDeliverySkip(reasonText) {
   if (t.includes('no service report recipient email') || t.includes('no email on file') || t.includes('recipient')) return { state: 'failed', reason: 'delivery_skipped_no_recipient' };
   if (t.includes('not a completed service report') || t.includes('unsupported service report') || t.includes('table unavailable')) return { state: 'unknown', reason: 'delivery_skipped_ineligible' };
   return { state: 'unknown', reason: 'delivery_skipped_unclassified' };
+}
+
+// receipt_delivery_jobs channel legs: sms_result { sent, reason } and
+// email_result { ok, error }. Policy skips are the customer's/owner's own
+// choice; no-phone / no-email are gaps; 'already-sent' means another path
+// delivered it.
+const RECEIPT_SMS_POLICY = new Set(['payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed']);
+const RECEIPT_EMAIL_POLICY = new Set(['receipt_opted_out', 'email_opted_out']);
+function classifyReceiptLegs(smsResult, emailResult) {
+  const sms = parseJsonObjectSafe(smsResult);
+  const email = parseJsonObjectSafe(emailResult);
+  const smsKind = !Object.keys(sms).length ? 'absent'
+    : sms.sent === true || sms.reason === 'already-sent' ? 'delivered'
+      : sms.reason === 'no-phone' ? 'gap'
+        : RECEIPT_SMS_POLICY.has(String(sms.reason || '')) ? 'policy' : 'other';
+  const emailKind = !Object.keys(email).length ? 'absent'
+    : email.ok === true ? 'delivered'
+      : email.error === 'No receipt recipient email' ? 'gap'
+        : RECEIPT_EMAIL_POLICY.has(String(email.error || '')) ? 'policy' : 'other';
+  const kinds = [smsKind, emailKind];
+  return {
+    delivered: kinds.includes('delivered'),
+    gap: kinds.includes('gap'),
+    policy: kinds.includes('policy') && !kinds.includes('other'),
+    detail: { sms: smsKind, email: emailKind },
+  };
 }
 
 function fact(state, reason, extra = {}) {
@@ -319,6 +346,17 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.liveInvoiceLookupFailed = Boolean(liveInvoiceProbe.error);
   inputs.terminalInvoice = terminalInvoiceProbe.value || null;
   inputs.terminalInvoiceLookupFailed = Boolean(terminalInvoiceProbe.error);
+  // Same fallback /complete uses when the visit carries no invoice of its
+  // own: the accepted estimate's first-application invoice may hang off a
+  // SIBLING visit (same estimate + date).
+  if (!inputs.liveInvoice && !inputs.terminalInvoice && !liveInvoiceProbe.error && !terminalInvoiceProbe.error && visit.source_estimate_id) {
+    const siblingProbe = await probe('invoices (sibling first-application)', unavailable, () => {
+      const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
+      return findFirstApplicationInvoiceForEstimateService(visit, knex);
+    });
+    inputs.siblingInvoice = siblingProbe.value || null;
+    inputs.siblingInvoiceLookupFailed = Boolean(siblingProbe.error);
+  }
   inputs.autopayActive = autopayProbe.error ? null : Boolean(autopayProbe.value);
   inputs.followup = followupProbe.error ? undefined : (followupProbe.value || null);
   inputs.followupChild = childProbe.value || null;
@@ -333,7 +371,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     const receiptProbe = await probe('receipt_delivery_jobs', unavailable, () => knex('receipt_delivery_jobs')
       .where({ invoice_id: liveInvoiceId })
       .orderBy('created_at', 'desc')
-      .first('id', 'status', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at'));
+      .first('id', 'status', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at', 'sms_result', 'email_result'));
     inputs.receiptJob = receiptProbe.value || null;
     inputs.receiptJobLookupFailed = Boolean(receiptProbe.error);
   }
@@ -440,8 +478,14 @@ function deriveCloseoutFacts(inputs) {
   const attemptState = inputs.attempt?.state || null;
   if (inputs.recordLookupFailed && !record) {
     completion = fact('unknown', 'service_records_lookup_failed', { visitStatus: visit?.status || null, attemptState });
-  } else if (inputs.attemptLookupFailed && !record) {
-    completion = fact('unknown', 'completion_attempts_lookup_failed', { visitStatus: visit?.status || null });
+  } else if (inputs.attemptLookupFailed) {
+    // A record is committed evidence, but whether its side effects finished
+    // lives in the attempt row — unreadable ⇒ unknown, even with a record.
+    completion = fact('unknown', 'completion_attempts_lookup_failed', { visitStatus: visit?.status || null, recordId: record?.id || null });
+  } else if (record && (attemptState === 'running' || attemptState === 'resumable')) {
+    // Post-commit attempt: the record exists but side effects are still
+    // pending/retryable (completion-attempts.js) — not closed out.
+    completion = fact('pending', `completion_side_effects_${attemptState}`, { recordId: record.id, attemptState, visitStatus: visit?.status || null });
   } else if (record && !visitCompleted) {
     contradictions.push({
       code: 'record_without_completed_visit',
@@ -647,6 +691,20 @@ function deriveCloseoutFacts(inputs) {
       failed: billingInputsFailed, invoiceId: live.id, invoiceNumber: live.invoice_number || null, status: live.status || null,
       total: live.total != null ? Number(live.total) : null,
     });
+  } else if (!live && inputs.siblingInvoiceLookupFailed) {
+    invoice = fact('unknown', 'invoice_lookup_failed', { failed: ['sibling_first_application'], expectation: expectation?.kind || null });
+  } else if (!live && inputs.siblingInvoice?.invoice && splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).terminal) {
+    const t = splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).terminal;
+    invoice = fact('pending', 'parked_manual_refunded_invoice', {
+      refundedInvoiceId: t.id, liveBesideInvoiceId: inputs.siblingInvoice.liveBeside?.id || null,
+      liveBesideStatus: inputs.siblingInvoice.liveBeside?.status || null, source: 'sibling_first_application', expectation: expectation?.kind || null,
+    });
+  } else if (!live && inputs.siblingInvoice?.invoice && splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).existing) {
+    const sib = inputs.siblingInvoice.invoice;
+    invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(sib.status)) ? 'invoice_paid' : 'invoice_exists', {
+      invoiceId: sib.id, invoiceNumber: sib.invoice_number || null, status: sib.status || null,
+      total: sib.total != null ? Number(sib.total) : null, source: 'sibling_first_application', expectation: expectation?.kind || null,
+    });
   } else if (live) {
     invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(live.status)) ? 'invoice_paid' : 'invoice_exists', {
       invoiceId: live.id, invoiceNumber: live.invoice_number || null, status: live.status || null,
@@ -702,11 +760,12 @@ function deriveCloseoutFacts(inputs) {
       ? fact('not_required', invoice.reason, { ruleSource: invoice.ruleSource || 'lane' })
       : fact(invoice.state === 'unknown' ? 'unknown' : 'pending', invoice.state === 'unknown' ? 'invoice_unknown' : 'no_invoice_yet');
   } else {
-    const status = String(live.status || '').toLowerCase();
-    const sentAt = isoOrNull(live.sent_at);
-    const smsSentAt = isoOrNull(live.sms_sent_at);
-    const receiptSentAt = isoOrNull(live.receipt_sent_at);
-    const evidence = { invoiceId: live.id, status, sentAt, smsSentAt, receiptSentAt };
+    const inv = live || inputs.siblingInvoice?.invoice;
+    const status = String(inv.status || '').toLowerCase();
+    const sentAt = isoOrNull(inv.sent_at);
+    const smsSentAt = isoOrNull(inv.sms_sent_at);
+    const receiptSentAt = isoOrNull(inv.receipt_sent_at);
+    const evidence = { invoiceId: inv.id, status, sentAt, smsSentAt, receiptSentAt, ...(live ? {} : { source: 'sibling_first_application' }) };
     if (status === 'prepaid') invoiceDelivery = fact('done', 'prepaid', evidence);
     else if (INVOICE_SETTLED_STATUSES.has(status)) {
       // Paid ≠ receipted: receipt_sent_at is stamped only on confirmed
@@ -715,12 +774,21 @@ function deriveCloseoutFacts(inputs) {
       const jobStatus = job ? String(job.status || '').toLowerCase() : null;
       if (receiptSentAt) invoiceDelivery = fact('done', 'paid_receipt_sent', evidence);
       else if (inputs.receiptJobLookupFailed) invoiceDelivery = fact('unknown', 'receipt_job_lookup_failed', evidence);
-      else if (jobStatus === 'completed') invoiceDelivery = fact('done', 'paid_receipt_job_completed', { ...evidence, receiptJobId: job.id });
+      else if (jobStatus === 'completed') {
+        // 'completed' also covers non-retryable skips — the channel results
+        // decide (receipt-delivery-queue.js expectedEmailSkip /
+        // actionableSmsFailure vocabulary).
+        const legs = classifyReceiptLegs(job.sms_result, job.email_result);
+        if (legs.delivered) invoiceDelivery = fact('done', 'paid_receipt_delivered', { ...evidence, receiptJobId: job.id, legs: legs.detail });
+        else if (legs.gap) invoiceDelivery = fact('failed', 'receipt_no_recipient', { ...evidence, receiptJobId: job.id, legs: legs.detail });
+        else if (legs.policy) invoiceDelivery = fact('not_required', 'receipt_opted_out', { ruleSource: 'consent', ...evidence, receiptJobId: job.id, legs: legs.detail });
+        else invoiceDelivery = fact('unknown', 'receipt_job_result_unclassified', { ...evidence, receiptJobId: job.id, legs: legs.detail });
+      }
       else if (jobStatus === 'failed') invoiceDelivery = fact('failed', 'receipt_delivery_exhausted', { ...evidence, receiptJobId: job.id, attempts: toNumber(job.attempts), lastError: scrubErrorText(job.last_error) });
       else if (jobStatus) invoiceDelivery = fact('pending', `receipt_${jobStatus}`, { ...evidence, receiptJobId: job.id, nextAttemptAt: isoOrNull(job.next_attempt_at) });
       else invoiceDelivery = fact('pending', 'paid_receipt_not_sent', evidence);
     }
-    else if (live.payer_id) invoiceDelivery = fact(sentAt ? 'done' : 'pending', sentAt ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);
+    else if (inv.payer_id) invoiceDelivery = fact(sentAt ? 'done' : 'pending', sentAt ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);
     else if (sentAt || smsSentAt || INVOICE_DELIVERED_STATUSES.has(status)) invoiceDelivery = fact('done', 'invoice_delivered', evidence);
     else if (smsStatus === 'deferred') invoiceDelivery = fact('pending', 'deferred_send_window', { ...evidence, completionSmsStatus: smsStatus });
     else if (smsStatus === 'failed') invoiceDelivery = fact('failed', 'completion_sms_failed', { ...evidence, completionSmsStatus: smsStatus });
