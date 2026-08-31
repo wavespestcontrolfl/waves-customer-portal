@@ -482,6 +482,37 @@ describe('autonomous versus lane (pest showdown)', () => {
     }
   });
 
+  test('every pair+city combination is walked before any card repeats, across short months', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // The sequence counts days that actually fire, not a fixed 8 slots/month:
+    // February has no 30th, so reserving a phantom slot skipped a sequence
+    // value and shortened the cycle — 2026-02-02 and 2026-05-02 both produced
+    // chinch-bug|Sarasota, 23 fires apart instead of 24 (Codex finding).
+    // Walk two full years of real fire days, ignoring the season gate so the
+    // underlying rotation is measured rather than the gated subset.
+    const cards = [];
+    for (let y = 2026; y <= 2027; y++) {
+      for (let m = 1; m <= 12; m++) {
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        for (const d of [2, 6, 10, 14, 18, 22, 26, 30].filter((x) => x <= lastDay)) {
+          const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const plan = Studio.selectAutonomousVersusPlan(etNoon(iso));
+          // Out-of-season slots return null but still consume a sequence step.
+          cards.push(plan ? `${plan.versusPair.key}|${plan.city}` : null);
+        }
+      }
+    }
+    const combos = Studio.PEST_VERSUS_PAIRS.length * 4; // 6 pairs x 4 cities
+    const lastSeen = new Map();
+    let minGap = Infinity;
+    cards.forEach((c, i) => {
+      if (c === null) return;
+      if (lastSeen.has(c)) minGap = Math.min(minGap, i - lastSeen.get(c));
+      lastSeen.set(c, i);
+    });
+    expect(minGap).toBe(combos); // 24 fires between identical cards, never 23
+  });
+
   test('cards stay unique across a season boundary (fixed modulus, no remapping)', () => {
     process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
     // Regression per Codex review: filtering the bank before the modulo

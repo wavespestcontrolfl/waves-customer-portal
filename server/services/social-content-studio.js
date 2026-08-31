@@ -202,6 +202,11 @@ const DEFAULT_COMPETITOR_PATTERNS = [
 const CHANNELS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 const AUTONOMOUS_SOURCE = 'autonomous_studio';
 
+// Origin for the versus lane's fire counter (see selectAutonomousVersusPlan).
+// Any fixed January works — it only sets the rotation's phase, so changing it
+// reshuffles which card lands on which date and must not be done casually.
+const VERSUS_SEQ_EPOCH_YEAR = 2020;
+
 const SEASONAL_AUTONOMOUS_TOPICS = {
   1: [
     { topic: 'winter pest pressure indoors', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
@@ -1211,14 +1216,20 @@ function selectAutonomousVersusPlan(now = new Date()) {
   const { year, month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
   if (day % 4 !== 2) return null;
 
-  // Both rotations advance from a +1-per-fire sequence number, never from the
+  // Both rotations advance from a +1-per-FIRE sequence number, never from the
   // raw day: the lane only fires when day % 4 === 2, so indexing by day pinned
   // the city to WAVES_LOCATIONS[2] (Sarasota) forever, and the day's stride of
   // 4 against a 6-pair bank (gcd 2) made only half the pairs reachable in a
-  // given month — the same card published up to 3x/month. Eight fixed slots
-  // per month keeps this pure arithmetic; short months skip a slot, which
-  // only nudges the cycle, never repeats it.
-  const seq = (year * 12 + month) * 8 + Math.floor((day - 2) / 4);
+  // given month — the same card published up to 3x/month.
+  //
+  // The count must be of days that actually fire, not a fixed 8 slots per
+  // month: fire days are 2/6/10/14/18/22/26/30, so every month has 8 except
+  // February (no 30th) with 7. Reserving a phantom February slot skipped a
+  // sequence value and broke the cycle — 2026-02-02 and 2026-05-02 both landed
+  // on chinch-bug|Sarasota, 23 fires apart instead of the full 24.
+  const monthsBefore = (year - VERSUS_SEQ_EPOCH_YEAR) * 12 + (month - 1);
+  const februariesBefore = (year - VERSUS_SEQ_EPOCH_YEAR) + (month > 2 ? 1 : 0);
+  const seq = monthsBefore * 8 - februariesBefore + Math.floor((day - 2) / 4);
 
   // Index the FULL bank with a fixed modulus and let an out-of-season slot
   // yield to the (already seasonal) campaign lane. Filtering the bank first
@@ -2239,18 +2250,6 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       }
     }
 
-    // Versus counterpart: the season was checked at selection, and the
-    // render/upload between there and here can cross ET midnight — a run
-    // selected in the last minutes of June must not post a swarmer card in
-    // July. Same re-check the approval path applies to a queued draft.
-    if (isVersusRun) {
-      const reason = versusPublishBlocker(plan);
-      if (reason) {
-        await updateAutonomousRun(run?.id, { status: 'failed', preview: finalPreview, skipReason: reason });
-        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
-      }
-    }
-
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
     // The link was probed when the preview was built; creative rendering and
     // uploads sit between that and here. Re-probe once more so the URL that
@@ -2260,6 +2259,20 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       : '';
     if (finalPreview.suggestedLink && !publishLink) {
       logger.warn(`[social-studio] link no longer live at publish time, publishing without it: ${finalPreview.suggestedLink}`);
+    }
+
+    // Versus counterpart of the liveness gate, and the LAST await before the
+    // post: the season was checked at selection, and render, uploads and the
+    // link probe (5s timeout) all sit between there and here — a run selected
+    // in the last minutes of June must not post a swarmer card in July. Placed
+    // after the probe deliberately, so no network call can widen the window
+    // again. Same re-check the approval path applies to a queued draft.
+    if (isVersusRun) {
+      const reason = versusPublishBlocker(plan);
+      if (reason) {
+        await updateAutonomousRun(run?.id, { status: 'failed', preview: finalPreview, skipReason: reason });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
     }
     // The snapshot gates above reject cheaply; the locks close their TOCTOU —
     // the reconcile cannot stamp the source row (review runs) and the stats
