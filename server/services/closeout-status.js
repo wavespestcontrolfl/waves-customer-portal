@@ -88,7 +88,9 @@ const COMPLETED_VISIT_STATUSES = new Set(['completed']);
 const INACTIVE_VISIT_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled']);
 // projects.delivery_status (migration 20260511000001): not_sent | sending |
 // sent | failed | legacy_sent. Project/WDO reports live on projects.report_token,
-// NOT service_records.report_view_token (project-completion.js nulls it).
+// NOT service_records.report_view_token (project-completion.js nulls it), and
+// the project links to the visit through projects.scheduled_service_id /
+// projects.service_record_id — scheduled_services carries no project_id.
 // Follow-up children in these statuses do not satisfy the obligation
 // (lockstep with FOLLOWUP_CHILD_INACTIVE_STATUSES in typed-followup-obligation).
 const FOLLOWUP_CHILD_INACTIVE_STATUSES = ['cancelled', 'skipped', 'no_show'];
@@ -172,7 +174,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   const customerId = visit.customer_id || null;
 
   const [
-    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe, projectProbe,
+    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe,
   ] = await Promise.all([
     probe('customers', unavailable, () => (customerId
       ? knex('customers').where({ id: customerId }).first(
@@ -204,9 +206,6 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     probe('service_visits members', unavailable, () => (visit.visit_id
       ? knex('scheduled_services').where({ visit_id: visit.visit_id }).select('id')
       : [])),
-    probe('projects', unavailable, () => (visit.project_id
-      ? knex('projects').where({ id: visit.project_id }).first()
-      : null)),
   ]);
 
   inputs.customer = customerProbe.value || null;
@@ -219,11 +218,21 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.packetMemberIds = Array.isArray(membersProbe.value)
     ? membersProbe.value.map((r) => r.id)
     : (membersProbe.error ? null : []);
-  inputs.project = projectProbe.value || null;
-  inputs.projectLookupFailed = Boolean(projectProbe.error);
-
   const record = inputs.record;
   const recordId = record?.id || null;
+
+  // Project/WDO link: projects.scheduled_service_id (or service_record_id) —
+  // never a column on the visit. Newest wins if a visit was ever re-linked.
+  const projectProbe = await probe('projects', unavailable, () => knex('projects')
+    .where((qb) => {
+      qb.where({ scheduled_service_id: serviceId });
+      if (recordId) qb.orWhere({ service_record_id: recordId });
+    })
+    .orderBy('created_at', 'desc')
+    .first());
+  inputs.project = projectProbe.value || null;
+  inputs.projectLookupFailed = Boolean(projectProbe.error);
+  const projectId = inputs.project?.id || null;
 
   const [
     activeAppsProbe, retractedAppsProbe, photosProbe, deliveryProbe, liveInvoiceProbe, terminalInvoiceProbe,
@@ -235,9 +244,14 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     probe('property_application_history (retracted)', unavailable, () => (recordId
       ? knex('property_application_history').where({ service_record_id: recordId }).whereNotNull('retracted_at').count('* as n').first()
       : { n: 0 })),
-    probe('service_photos', unavailable, () => (recordId
-      ? knex('service_photos').where({ service_record_id: recordId }).count('* as n').first()
-      : { n: 0 })),
+    probe(projectId ? 'project_photos' : 'service_photos', unavailable, () => {
+      // Project completions store their evidence on the project, not the
+      // service record (routes/admin-projects.js counts project_photos).
+      if (projectId) return knex('project_photos').where({ project_id: projectId }).count('* as n').first();
+      return recordId
+        ? knex('service_photos').where({ service_record_id: recordId }).count('* as n').first()
+        : { n: 0 };
+    }),
     probe('service_report_deliveries', unavailable, () => (recordId
       ? knex('service_report_deliveries').where({ service_record_id: recordId }).orderBy('created_at', 'desc').first()
       : null)),
@@ -263,6 +277,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.activeApplicationCount = activeAppsProbe.value ? toNumber(activeAppsProbe.value.n) : null;
   inputs.retractedApplicationCount = retractedAppsProbe.value ? toNumber(retractedAppsProbe.value.n) : null;
   inputs.photoCount = photosProbe.value ? toNumber(photosProbe.value.n) : null;
+  inputs.photoSource = projectId ? 'project_photos' : 'service_photos';
   inputs.delivery = deliveryProbe.value || null;
   inputs.deliveryLookupFailed = Boolean(deliveryProbe.error);
   inputs.liveInvoice = liveInvoiceProbe.value || null;
@@ -293,6 +308,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
       return AnnualPrepayRenewals.annualPrepayCoversVisit(visit, knex, { throwOnError: true });
     });
     annualCoverageValidated = coverageProbe.error ? null : coverageProbe.value;
+    inputs.annualCoverageLookupFailed = Boolean(coverageProbe.error);
   }
   inputs.annualCoverageValidated = annualCoverageValidated;
   let completionAutopayChargeEnabled = false;
@@ -362,8 +378,8 @@ function deriveCloseoutFacts(inputs) {
   const visitInactive = Boolean(visit && INACTIVE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()));
   const isBackfill = notes.backfill === true;
   const recordIncomplete = record?.status === 'incomplete';
-  const projectBacked = Boolean(visit?.project_id) || record?.completion_source === 'project_completion';
   const project = inputs.project || null;
+  const projectBacked = Boolean(project) || record?.completion_source === 'project_completion' || inputs.projectLookupFailed === true;
   const frozenPosture = notes.typedReportDelivery ? String(notes.typedReportDelivery) : null;
   const posture = frozenPosture || 'auto_send';
 
@@ -422,8 +438,9 @@ function deriveCloseoutFacts(inputs) {
   else if (!requirements.requiresApplicationLog) application = fact('not_required', 'catalog_no_application_log', { ruleSource: 'catalog', requirementsSource: requirements.source });
   else if (inputs.activeApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed');
   else if (inputs.activeApplicationCount > 0) application = fact('done', 'active_application_rows', { activeCount: inputs.activeApplicationCount, retractedCount: inputs.retractedApplicationCount ?? 0 });
-  else if (requirements.source === 'fallback_inference' && (inputs.retractedApplicationCount ?? 0) === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: requirements.source });
-  else if ((inputs.retractedApplicationCount ?? 0) > 0) application = fact('failed', 'all_application_rows_retracted', { activeCount: 0, retractedCount: inputs.retractedApplicationCount });
+  else if (requirements.source === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: requirements.source });
+  else if (inputs.retractedApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed', { activeCount: 0, detail: 'retracted-row lookup unavailable; cannot tell empty from all-retracted' });
+  else if (inputs.retractedApplicationCount > 0) application = fact('failed', 'all_application_rows_retracted', { activeCount: 0, retractedCount: inputs.retractedApplicationCount });
   else application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0 });
 
   // ---- 3. photos ---------------------------------------------------------------
@@ -433,8 +450,8 @@ function deriveCloseoutFacts(inputs) {
   else if (!requirements) photos = fact('unknown', 'requirements_unavailable');
   else if (!(requiredPhotos > 0)) photos = fact('not_required', 'catalog_zero_required_photos', { ruleSource: 'catalog', requirementsSource: requirements.source, actual: inputs.photoCount ?? null });
   else if (inputs.photoCount == null) photos = fact('unknown', 'service_photos_lookup_failed', { required: requiredPhotos });
-  else if (inputs.photoCount >= requiredPhotos) photos = fact('done', 'photo_count_met', { required: requiredPhotos, actual: inputs.photoCount });
-  else photos = fact('pending', 'photo_count_short', { required: requiredPhotos, actual: inputs.photoCount });
+  else if (inputs.photoCount >= requiredPhotos) photos = fact('done', 'photo_count_met', { required: requiredPhotos, actual: inputs.photoCount, source: inputs.photoSource || 'service_photos' });
+  else photos = fact('pending', 'photo_count_short', { required: requiredPhotos, actual: inputs.photoCount, source: inputs.photoSource || 'service_photos' });
 
   // ---- 4. report (artifact exists / published) ---------------------------------
   let report;
@@ -448,8 +465,8 @@ function deriveCloseoutFacts(inputs) {
         projectId: project.id, projectStatus: project.status || null, hasToken: true,
         audience: project.portal_visible === false ? 'token_only' : 'customer', source: 'projects.report_token',
       });
-    } else if (inputs.projectLookupFailed || (!project && visit?.project_id)) {
-      report = fact('unknown', 'projects_lookup_failed', { projectId: visit?.project_id || null });
+    } else if (inputs.projectLookupFailed) {
+      report = fact('unknown', 'projects_lookup_failed');
     } else if (project) {
       report = fact('pending', project.status === 'closed' ? 'project_closed_without_report' : 'project_report_not_published', {
         projectId: project.id, projectStatus: project.status || null, source: 'projects.report_token',
@@ -541,6 +558,10 @@ function deriveCloseoutFacts(inputs) {
     }
   } else if (inputs.liveInvoiceLookupFailed || inputs.terminalInvoiceLookupFailed) {
     invoice = fact('unknown', 'invoice_lookup_failed', { expectation: expectation?.kind || null });
+  } else if (inputs.annualCoverageLookupFailed === true) {
+    // predictCompletionBilling would fall back to the stamp when validation
+    // is null — a coverage-authority outage must not read as "covered".
+    invoice = fact('unknown', 'annual_coverage_lookup_failed', { prepaidMethod: visit?.prepaid_method || null });
   } else if (isBackfill) invoice = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', expectation: expectation?.kind || null });
   else if (!expectation) invoice = fact('unknown', 'billing_expectation_unavailable');
   else if (['no_charge', 'covered_membership', 'covered_annual', 'prepaid'].includes(expectation.kind)) {
@@ -692,7 +713,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
       serviceType: visit.service_type || null,
       isCallback: visit.is_callback === true,
       isRecurring: visit.is_recurring === true,
-      projectId: visit.project_id || null,
+      projectId: inputs.project?.id || null,
       visitGroupId: visit.visit_id || null,
     },
     record: record ? {

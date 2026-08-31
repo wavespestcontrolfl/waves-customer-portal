@@ -443,7 +443,7 @@ describe('closeout-status: grouped stops + summary', () => {
 describe('closeout-status: Agent D findings', () => {
   test('P0 project/WDO visit: report lives on projects.report_token, delivery on projects.delivery_status', () => {
     const projectVisit = closedOutInputs({
-      visit: { ...closedOutInputs().visit, project_id: 'proj-1', service_type: 'WDO Inspection' },
+      visit: { ...closedOutInputs().visit, service_type: 'WDO Inspection' },
       record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: {} },
       completedFormCount: 0, delivery: null,
       project: { id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'sent', last_delivery_at: '2026-08-30T19:00:00Z' },
@@ -456,7 +456,6 @@ describe('closeout-status: Agent D findings', () => {
 
   test('project report on payment hold → pending on_hold; failed delivery → failed; legacy_sent → done; no token → pending', () => {
     const base = closedOutInputs({
-      visit: { ...closedOutInputs().visit, project_id: 'proj-1' },
       record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: {} },
       delivery: null,
     });
@@ -468,6 +467,33 @@ describe('closeout-status: Agent D findings', () => {
     expect(deriveCloseoutFacts({ ...base, project: proj({ report_token: null }) }).facts.report)
       .toMatchObject({ state: 'pending', reason: 'project_closed_without_report' });
     expect(deriveCloseoutFacts({ ...base, project: null, projectLookupFailed: true }).facts.report.state).toBe('unknown');
+  });
+
+  test('project-backed photos are counted from project_photos (source surfaced); WDO 2-photo rule then passes', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      requirements: baseRequirements({ requiredPhotoCount: 2 }),
+      record: { ...closedOutInputs().record, completion_source: 'project_completion' },
+      project: { id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'sent' },
+      photoCount: 2, photoSource: 'project_photos',
+    }));
+    expect(facts.photos).toMatchObject({ state: 'done', source: 'project_photos', actual: 2 });
+  });
+
+  test('annual-coverage authority outage → invoice unknown, never "covered" via the stale stamp', () => {
+    const { facts, contradictions } = deriveCloseoutFacts(closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'annual_prepay', autopay_enabled: false },
+      lane: { mode: 'annual_prepay', source: 'explicit' },
+      visit: { ...closedOutInputs().visit, prepaid_method: 'annual_prepay_invoice', estimated_price: null },
+      annualCoverageValidated: null, annualCoverageLookupFailed: true, liveInvoice: null,
+    }));
+    expect(facts.invoice).toMatchObject({ state: 'unknown', reason: 'annual_coverage_lookup_failed' });
+    expect(summarizeCloseout(facts).closedOut).toBe(false);
+    expect(contradictions).toEqual([]);
+  });
+
+  test('active rows = 0 but the retracted-row lookup failed → unknown (cannot tell empty from all-retracted)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ activeApplicationCount: 0, retractedApplicationCount: null }));
+    expect(facts.application).toMatchObject({ state: 'unknown', reason: 'application_history_lookup_failed' });
   });
 
   test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {
@@ -632,6 +658,8 @@ describe('closeout-status: loader against a fake knex', () => {
     service_report_deliveries: [{ service_record_id: REC, channel: 'email', status: 'sent', attempts: 1, max_attempts: 5, sent_at: '2026-08-30T18:06:00Z' }],
     invoices: [{ id: 'inv-1', service_record_id: REC, scheduled_service_id: SVC, status: 'sent', total: 120, sent_at: '2026-08-30T18:06:00Z', created_at: '2026-08-30T18:02:00Z' }],
     payers: [],
+    projects: [],
+    project_photos: [],
   });
 
   beforeEach(() => {
@@ -661,6 +689,21 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.facts.photos).toMatchObject({ state: 'unknown', reason: 'service_photos_lookup_failed', required: 2 });
     expect(result.summary.unknown).toEqual(['photos']);
     expect(result.summary.open).toEqual([]);
+  });
+
+  test('a project linked through projects.scheduled_service_id drives report, delivery, and photos', async () => {
+    const tables = healthyTables();
+    tables.service_records = [{ ...recordRow, completion_source: 'project_completion', report_view_token: null, report_generated_at: null }];
+    tables.service_report_deliveries = [];
+    tables.projects = [{ id: 'proj-1', scheduled_service_id: SVC, service_record_id: null, status: 'closed', report_token: 'd'.repeat(32), delivery_status: 'sent', created_at: '2026-08-30T18:03:00Z' }];
+    tables.project_photos = [{ project_id: 'proj-1' }, { project_id: 'proj-1' }];
+    catalogRows[0].required_photo_count = 2;
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(result.unavailable).toEqual([]);
+    expect(result.visit.projectId).toBe('proj-1');
+    expect(result.facts.report).toMatchObject({ state: 'done', reason: 'project_report_published' });
+    expect(result.facts.reportDelivery).toMatchObject({ state: 'done', reason: 'project_delivery_sent' });
+    expect(result.facts.photos).toMatchObject({ state: 'done', actual: 2, source: 'project_photos' });
   });
 
   test('unknown service id → found:false, no facts fabricated', async () => {
