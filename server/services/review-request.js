@@ -1789,25 +1789,68 @@ const ReviewService = {
    * holding this id before either's post-send mark lands — the conditional
    * UPDATE lets exactly one through and the loser's send is rejected before
    * the provider call, so at most one ask ever texts the customer. A claim
-   * orphaned by a crash between the claim and the post-send mark becomes
-   * reclaimable after 10 minutes (the row is unscheduled, so a stuck claim
-   * can never auto-send — the only cost is the operator waiting to retry).
+   * orphaned by a crash between the claim and the post-send mark is
+   * RECONCILED against the outbound log after 10 minutes rather than
+   * blindly reclaimed: a delivered-but-unmarked ask (provider send
+   * succeeded, the delivered stamp failed) must become "sent", never a
+   * second text — only a stale claim with no trace of the link ever
+   * leaving is handed back (the row is unscheduled, so a stuck claim can
+   * never auto-send in the meantime).
    */
   async claimInlineForSend(requestId) {
     if (!requestId) return false;
-    const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
-    const updated = await db("review_requests")
-      .where({ id: requestId, triggered_by: "auto_inline" })
+    const claimed = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
       .whereNull("sms_sent_at")
-      .where((q) =>
-        q
-          .where({ status: "pending" })
-          .orWhere((qq) =>
-            qq.where({ status: "sending" }).where("updated_at", "<", staleBefore),
-          ),
-      )
       .update({ status: "sending", updated_at: new Date() });
-    return updated > 0;
+    if (claimed > 0) return true;
+
+    // Not pending — a stale abandoned claim is the only other claimable
+    // state, and only after reconciling it against the outbound log.
+    const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
+    const row = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("updated_at", "<", staleBefore)
+      .first("id", "token");
+    if (!row) return false;
+
+    // Any outbound sms_log row carrying this ask's link (long token or its
+    // short URL) is proof the ask reached the provider — excluding
+    // in-flight/reservation ('sending') and failure rows, which are not
+    // evidence of delivery.
+    let frags = [row.token];
+    try {
+      const { existingShortUrlFor } = require("./short-url");
+      const short = await existingShortUrlFor({
+        kind: "review",
+        entityType: "review_requests",
+        entityId: row.id,
+      });
+      if (short) frags.push(short);
+    } catch {
+      /* no short URL — the token fragment still reconciles */
+    }
+    frags = frags.filter(Boolean).map((f) => String(f).replace(/^https?:\/\//, ""));
+    for (const frag of frags) {
+      const evidence = await db("sms_log")
+        .where("direction", "outbound")
+        .whereNotIn("status", ["sending", "failed", "undelivered", "blocked", "canceled"])
+        .where("message_body", "like", `%${frag}%`)
+        .first("id");
+      if (evidence) {
+        // The ask went out — repair the missing stamp instead of reclaiming.
+        await this.markInlineDelivered(requestId);
+        return false;
+      }
+    }
+
+    const reclaimed = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("updated_at", "<", staleBefore)
+      .update({ status: "sending", updated_at: new Date() });
+    return reclaimed > 0;
   },
 
   async releaseInlineClaim(requestId) {

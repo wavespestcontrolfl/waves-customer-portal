@@ -52,7 +52,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
   b.join = jest.fn(() => b);
-  b.orderByRaw = jest.fn(() => b);
+  b.orderBy = jest.fn(() => b);
   b.offset = jest.fn(() => b);
   b.limit = jest.fn(async () => rows);
   b.first = jest.fn(async () => firstRow);

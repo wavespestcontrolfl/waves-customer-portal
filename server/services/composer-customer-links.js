@@ -185,7 +185,11 @@ async function buildLatestEstimateLink(customerIds) {
       .whereIn('customer_id', customerIds)
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
       .whereNull('archived_at')
-      .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
+      // NEWEST open estimate, by creation — viewing activity must not rank:
+      // an old estimate the customer opened yesterday would outrank the
+      // revised one created today, sending stale pricing. A newer estimate
+      // supersedes its siblings regardless of who has looked at what.
+      .orderBy('created_at', 'desc')
       .offset(offset)
       .limit(PAGE);
     estimate = rows.find((row) => isEstimateCustomerViewable(row)) || null;

@@ -572,14 +572,50 @@ describe('review request follow-up flow', () => {
     });
 
     expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
-    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline' });
+    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline', status: 'pending' });
     expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
 
-    // A colleague's send already holds the row — the conditional UPDATE
-    // matches nothing and the caller must reject its own send.
+    // A colleague's fresh (non-stale) claim already holds the row — the
+    // conditional UPDATE matches nothing, the stale lookup finds nothing,
+    // and the caller must reject its own send.
     updateQuery.update.mockResolvedValueOnce(0);
+    updateQuery.first.mockResolvedValueOnce(undefined);
     expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+  });
+
+  test('a stale claim with outbound-log evidence is repaired to sent, not reclaimed', async () => {
+    const rrQuery = chain();
+    const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+    rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
+    rrQuery.first.mockResolvedValueOnce({ id: 'rr-inline', token: 'tok-64chars' });
+    smsLogQuery.first.mockResolvedValueOnce({ id: 'sms-1' }); // the ask already left
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      if (table === 'sms_log') return smsLogQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+    // The missing delivered stamp is repaired from the log evidence.
+    expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+  });
+
+  test('a stale claim with no trace of a send is reclaimed', async () => {
+    const rrQuery = chain();
+    const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+    rrQuery.update
+      .mockResolvedValueOnce(0) // pending claim misses
+      .mockResolvedValueOnce(1); // stale reclaim wins
+    rrQuery.first.mockResolvedValueOnce({ id: 'rr-inline', token: 'tok-64chars' });
+    smsLogQuery.first.mockResolvedValue(undefined); // nothing ever left
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      if (table === 'sms_log') return smsLogQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
   });
 
   test('releaseInlineClaim hands a claimed row back to pending', async () => {

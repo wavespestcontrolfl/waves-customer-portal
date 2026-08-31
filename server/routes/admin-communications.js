@@ -517,7 +517,16 @@ router.post('/sms', async (req, res, next) => {
         const { isRealProviderSend } = require('../services/sms-auto-send');
         const ReviewService = require('../services/review-request');
         if (isRealProviderSend(result)) {
-          await ReviewService.markInlineDelivered(claimedReviewRequestId);
+          // Retried once: a lost stamp after a REAL send is the one state
+          // that can double-text the ask, so it gets a second attempt here
+          // and, failing that, the stale-claim reconcile in
+          // claimInlineForSend repairs it from the outbound log.
+          try {
+            await ReviewService.markInlineDelivered(claimedReviewRequestId);
+          } catch (firstErr) {
+            logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${claimedReviewRequestId}): ${firstErr.message}`);
+            await ReviewService.markInlineDelivered(claimedReviewRequestId);
+          }
         } else {
           await ReviewService.releaseInlineClaim(claimedReviewRequestId);
         }
