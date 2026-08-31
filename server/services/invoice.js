@@ -5038,7 +5038,7 @@ const InvoiceService = {
     // from its own reversal. The editable description only decides for
     // claim-less invoices (unsent accept drafts).
     let completionClaimToConsume = null;
-    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount");
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id");
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
@@ -5060,8 +5060,13 @@ const InvoiceService = {
       completionClaimToConsume = claimRecord.id;
     }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
-    let anchorId = null;
-    if (invoiceRow.scheduled_service_id) {
+    // The claim's anchored series is provenance (codex #3591 r69 P1): the
+    // standard/invoice-mode accept mints record the exact rodent root, so an
+    // unattached invoice (or one attached to a non-rodent first visit) on a
+    // customer with several rodent series restores onto THAT root instead of
+    // paging on the account-wide scan's ambiguity.
+    let anchorId = claimRecord?.scheduled_service_id || null;
+    if (!anchorId && invoiceRow.scheduled_service_id) {
       const own = await conn("scheduled_services")
         .where({ id: invoiceRow.scheduled_service_id })
         .first("id", "recurring_parent_id", "service_type", "service_id");
@@ -5487,15 +5492,17 @@ const InvoiceService = {
     let anchorId = claim.scheduled_service_id || null;
     if (!anchorId) {
       const { authoritativeServiceKey } = require("./secure-appointment-plans");
+      // Liveness per root through the shared consumable-series predicate
+      // (codex #3591 r69 P1): a CANCELLED root whose pending/confirmed child
+      // remains is still the series the refunded setup restores onto — a
+      // status filter here left the claim anchor-less and the child
+      // completed without the $99.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
       if (sourceEstimateId) {
-        // 'rescheduled' roots stay (codex #3591 r46 P1): the legacy customer
-        // reschedule marks the ROOT while live children remain — the
-        // billable-visit check below already treats it as live.
         const roots = await conn("scheduled_services")
           .where({ source_estimate_id: sourceEstimateId })
           .whereNull("recurring_parent_id")
-          .whereNotIn("status", ["cancelled", "canceled"])
-          .select("id", "service_type", "service_id");
+          .select("id", "service_type", "service_id", "status");
         // EXACTLY ONE rodent root or refuse (codex #3591 r61 P1): with two
         // live rodent roots linked to the same estimate, first-returned
         // ordering would re-stamp an arbitrary series and consume the
@@ -5504,6 +5511,7 @@ const InvoiceService = {
         // the claim anchor-less and pages for reconciliation.
         const estimateRodentRootIds = [];
         for (const root of roots || []) {
+          if (!(await seriesCanStillConsume(conn, root))) continue;
           if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) estimateRodentRootIds.push(root.id);
         }
         if (estimateRodentRootIds.length > 1) {
@@ -5520,14 +5528,14 @@ const InvoiceService = {
         const roots = await conn("scheduled_services")
           .where({ customer_id: customerId })
           .whereNull("recurring_parent_id")
-          .whereNotIn("status", ["cancelled", "canceled"])
-          .select("id", "service_type", "service_id", "source_estimate_id");
+          .select("id", "service_type", "service_id", "source_estimate_id", "status");
         // Same unique-anchor rule as the estimate path above (codex #3591
         // r61 P1): coverage matching two live direct rodent roots must not
         // restore onto whichever Postgres returned first.
         const coverageRodentRootIds = [];
         for (const root of roots || []) {
           if (root.source_estimate_id || !serviceMatchesCoverage(root, coverageServiceType)) continue;
+          if (!(await seriesCanStillConsume(conn, root))) continue;
           if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) coverageRodentRootIds.push(root.id);
         }
         if (coverageRodentRootIds.length > 1) {

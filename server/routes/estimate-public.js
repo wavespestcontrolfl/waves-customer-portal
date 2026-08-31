@@ -11027,6 +11027,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         invoiceModeResult = true;
         invoiceIdResult = inv.id;
+        // Same immutable setup ledger as the standard-accept mint (codex
+        // #3591 r69 P1): the invoice-mode draft bills the frozen rodent
+        // setup as its own line, so a later void/refund of a renamed or
+        // repriced invoice must still restore the obligation onto the
+        // accepted rodent root.
+        const invoiceModeRodentSetup = treatAsOneTime
+          ? 0
+          : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing);
+        if (invoiceModeRodentSetup > 0) {
+          const plans = require('../services/secure-appointment-plans');
+          const invoiceModeRoots = await trx('scheduled_services')
+            .where({ source_estimate_id: estimate.id, customer_id: customerId })
+            .whereNull('recurring_parent_id')
+            .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+            .select('id', 'service_type', 'service_id');
+          let invoiceModeRodentRoot = null;
+          for (const root of invoiceModeRoots || []) {
+            if ((await plans.authoritativeServiceKey(trx, root)) === 'rodent_bait') { invoiceModeRodentRoot = root; break; }
+          }
+          await plans.recordSetupFeeClaimForInvoice(trx, {
+            invoiceId: inv.id,
+            anchorId: invoiceModeRodentRoot ? invoiceModeRodentRoot.id : null,
+            amount: invoiceModeRodentSetup,
+          });
+        }
         // The customer-facing amount is the invoice's actual after-tax,
         // after-credit total — the same figure the /pay page collects.
         invoiceAmountResult = Number(inv.total) || 0;

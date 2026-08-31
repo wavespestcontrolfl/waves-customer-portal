@@ -132,8 +132,13 @@ describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P
   const { settledSetupClaimForInvoice, settledSetupClaimForEstimate, stampedSetupForVisit, anchorSetupFeeClaim } = plans;
   test('settledSetupClaimForInvoice / ForEstimate read the immutable ledger; the estimate path resolves through the winning term', async () => {
     const claimRow = { id: 'claim-1', scheduled_service_id: null, amount: '99.00' };
-    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow }), 'inv-prepay')).toEqual(claimRow);
-    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow }), null)).toBeNull();
+    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow, invoice: { status: 'draft' } }), 'inv-prepay')).toEqual(claimRow);
+    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow, invoice: { status: 'draft' } }), null)).toBeNull();
+    // The direct lookup enforces the live-invoice rule too (codex #3591 r69
+    // P1): a prepay voided between the accept commit and the stamp cleanup
+    // must not clear the booking stamp.
+    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow, invoice: { status: 'void' } }), 'inv-prepay')).toBeNull();
+    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow, invoice: null }), 'inv-prepay')).toBeNull();
     expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: { prepay_invoice_id: 'inv-prepay' }, invoice: { status: 'sent' } }), 'est-1')).toEqual(claimRow);
     // No term for the estimate (standard accept won the race) = no settlement.
     expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: null }), 'est-1')).toBeNull();
@@ -536,6 +541,17 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+
+  test('direct resolvers read the waiver STRICTLY; the reversal restores from the claim anchor; both anchor-less prepay restore searches use the consumable-series predicate (codex #3591 r69 P1)', () => {
+    const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    expect((plansSrc.match(/loadExistingQualifyingServiceKeys\(database, (row\.customer_id|customerId), \{ strict: true \}\)/g) || []).length).toBe(2);
+    expect(invoice).toMatch(/first\("id", "amount", "scheduled_service_id"\);[\s\S]*?let anchorId = claimRecord\?\.scheduled_service_id \|\| null;\s+if \(!anchorId && invoiceRow\.scheduled_service_id\) \{/);
+    const locked = invoice.slice(invoice.indexOf('async _restoreRetiredSetupFeeClaimLocked'), invoice.indexOf('const parent = await conn("scheduled_services")', invoice.indexOf('async _restoreRetiredSetupFeeClaimLocked')));
+    expect(locked).not.toMatch(/whereNotIn\("status", \["cancelled", "canceled"\]\)/);
+    expect((locked.match(/if \(!\(await seriesCanStillConsume\(conn, root\)\)\) continue;/g) || []).length).toBe(2);
+    const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(estimatePublicSrc).toMatch(/invoiceModeResult = true;\s+invoiceIdResult = inv\.id;[\s\S]*?if \(invoiceModeRodentSetup > 0\) \{[\s\S]*?await plans\.recordSetupFeeClaimForInvoice\(trx, \{\s+invoiceId: inv\.id,\s+anchorId: invoiceModeRodentRoot \? invoiceModeRodentRoot\.id : null,\s+amount: invoiceModeRodentSetup,\s+\}\);/);
+  });
 
   test('public accept: strict waiver re-check, setup in both commercial prepay tax blends, and a ledgered claim on the standard invoice (codex #3591 r68 P1)', () => {
     const estimatePublic = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');

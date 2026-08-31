@@ -285,8 +285,12 @@ async function directRodentSetupForRow(database, row) {
   // is never a WaveGuard member (owner ruling 2026-08-29), so its setup is
   // never waived by the account's other families.
   if (programKey === 'rodent_bait') {
+    // STRICT (codex #3591 r69 P1): the default loader reads a failed
+    // membership/catalog read as "no other family" and this resolver would
+    // disclose or stamp a $99 the customer's other plan waives — a throw
+    // reaches the callers' existing fail-closed handling instead.
     const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-    const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
+    const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id, { strict: true }) || [])
       .filter((key) => key !== 'rodent_bait');
     if (otherQualifiers.length > 0) return 0;
   }
@@ -321,7 +325,15 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount 
 // claim proves the fee was billed). Read-only.
 async function settledSetupClaimForInvoice(database, invoiceId) {
   if (!invoiceId) return null;
-  return (await database('setup_fee_claims').where({ invoice_id: invoiceId }).first('id', 'scheduled_service_id', 'amount')) || null;
+  const claim = await database('setup_fee_claims').where({ invoice_id: invoiceId }).first('id', 'scheduled_service_id', 'amount');
+  if (!claim) return null;
+  // Only a LIVE/PAID invoice settles (codex #3591 r68/r69 P1): a prepay
+  // voided or refunded — before its series existed, or between the accept
+  // commit and the post-acceptance stamp cleanup — keeps its claim as an
+  // OPEN obligation for recovery, never as a settlement that clears a stamp.
+  const invoice = await database('invoices').where({ id: invoiceId }).first('status');
+  if (!invoice || TERMINAL_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
+  return claim;
 }
 
 // Settlement evidence when the acceptance was WON BY ANOTHER SESSION (codex
@@ -331,15 +343,7 @@ async function settledSetupClaimForInvoice(database, invoiceId) {
 async function settledSetupClaimForEstimate(database, estimateId) {
   if (!estimateId) return null;
   const term = await database('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('prepay_invoice_id');
-  const claim = await settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
-  if (!claim) return null;
-  // Only a LIVE/PAID invoice settles (codex #3591 r68 P1): a prepay voided
-  // or refunded before any series existed keeps its anchor-less claim for
-  // later recovery — that retained record is an OPEN obligation, not a
-  // settlement, so the booking must still stamp the disclosed setup.
-  const invoice = await database('invoices').where({ id: term.prepay_invoice_id }).first('status');
-  if (!invoice || TERMINAL_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
-  return claim;
+  return settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
 }
 
 // A series can still CONSUME its setup stamp when the root is live, or when
@@ -489,7 +493,7 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   // from the term's coverage later.
   if (recurringServiceKey({ name: coverageServiceType }) !== 'rodent_bait') return null;
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, customerId) || [])
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, customerId, { strict: true }) || [])
     .filter((key) => key !== 'rodent_bait');
   if (otherQualifiers.length > 0) return null;
   return { anchorId: null, amount: cents(Math.max(0, Number(RODENT.baitSetupFee) || 0)) };
@@ -1226,6 +1230,7 @@ module.exports = {
   settledSetupClaimForInvoice,
   settledSetupClaimForEstimate,
   estimateSetupCarriedElsewhere,
+  seriesCanStillConsume,
   stampedSetupForVisit,
   anchorSetupFeeClaim,
   retireDirectSetupClaimForPrepay,
