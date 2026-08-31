@@ -1318,6 +1318,20 @@ async function updateRestockRequest(input) {
     const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
     const stockAfter = round4(stockBefore + received.amount);
 
+    // The card approved an EXACT stock delta (GH r11 P1): re-assert it
+    // here, under the request + product row locks — the entered quantity
+    // and unit were derived from unlocked reads, so a request or product
+    // edited after the confirm-time preview could otherwise add a
+    // different amount than the operator saw.
+    const approvedReceive = input._verified_receive;
+    if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
+      || String(inventoryUnit) !== String(approvedReceive.unit))) {
+      return {
+        error: 'The receive amount changed after the card was shown (request or product edited) — nothing was received. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+
     await trx('products_catalog').where('id', fresh.id).update({
       inventory_on_hand: stockAfter,
       inventory_unit: inventoryUnit,

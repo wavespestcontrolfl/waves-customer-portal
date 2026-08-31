@@ -1040,15 +1040,22 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // if any doesn't load (same rule as bulk_update_leads all_names) —
       // a wrong-id selection must be visible before Confirm, and the
       // contract carries a fingerprint of the full id list.
-      const ids = Array.isArray(params.customer_ids) ? params.customer_ids.map(String) : [];
+      // Lowercased at the boundary (GH r11 P2): PG returns uuid text in
+      // lowercase, so an uppercase id would resolve the row but then be
+      // classified missing by the case-sensitive lookup below — and the
+      // executor's skipped-set compare has the same trap. The pinned set,
+      // fingerprint, and stored params all carry the canonical form.
+      const ids = Array.isArray(params.customer_ids)
+        ? params.customer_ids.map((id) => String(id).trim().toLowerCase()) : [];
       if (!ids.length) {
         return { failed: true, modelResult: { error: 'customer_ids is empty — nothing to update.' } };
       }
       // Shape-validate before querying: a malformed id in whereIn on a uuid
       // column is a raw PG cast error (500), not a clean refusal.
-      if (ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+      if (ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id))) {
         return { failed: true, modelResult: { error: 'One or more customer_ids are not valid ids — nothing was proposed.' } };
       }
+      params.customer_ids = ids;
       const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
       const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
       const missing = ids.filter((id) => !nameById.has(id));
@@ -2567,6 +2574,21 @@ router.post('/confirm-action', async (req, res, next) => {
         // not the ones the card approved.
         if (Array.isArray(livePreview?.previous_names)) {
           execParams._verified_previous_names = livePreview.previous_names;
+          // Row COUNT rides too (GH r11 P2): a row added with the same
+          // displayed name after this preflight keeps the unique-name set
+          // identical while widening what the relabel touches.
+          if (livePreview.rows_matched !== undefined) {
+            execParams._verified_rows_matched = livePreview.rows_matched;
+          }
+        }
+        // update_restock_request receive: the verified preview's stock
+        // delta rides to the executor to re-assert under the
+        // request+product row locks (GH r11 P1) — the confirmed executor
+        // re-derives the receive amount from unlocked reads, so a request
+        // or product edited after this preflight could otherwise add a
+        // different amount than the card showed.
+        if (action.tool_name === 'update_restock_request' && livePreview?.adds !== undefined) {
+          execParams._verified_receive = { adds: livePreview.adds, unit: livePreview.unit };
         }
       }
       // Server-derived confirmation: the operator clicked Confirm. This is

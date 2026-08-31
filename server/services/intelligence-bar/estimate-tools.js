@@ -3456,6 +3456,17 @@ async function setEstimatePresentation(input, actionContext = {}) {
         preview_changed: true,
       };
     }
+    // Row COUNT binds too (GH r11 P2): a row ADDED with the same displayed
+    // name after the confirm-time preview keeps the unique-name set
+    // identical while widening what this relabel touches beyond the
+    // approved rows_matched.
+    const approvedRowCount = Number(input?._verified_rows_matched);
+    if (Number.isFinite(approvedRowCount) && lockedRows.length !== approvedRowCount) {
+      return {
+        error: 'The set of matching service rows on this estimate changed after the card was shown — nothing was relabeled. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
     for (const row of lockedRows) {
       // displayName ONLY — never label: legacy rows without a stable
       // service/key are CLASSIFIED by label (recurringServiceKey and

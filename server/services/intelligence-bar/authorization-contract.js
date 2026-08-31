@@ -81,7 +81,12 @@ const JOB_EFFECTS = {
   ],
   run_tax_advisor: [
     ['operational', 'Generates and stores a fresh AI tax-advisor report (15–30 s; paid model + search calls)'],
-    ['comms', 'Texts a summary to the admin phone — internal alert, not a customer message'],
+    // Conditional by the sender's own rules (GH r11 P2): tax-advisor.js
+    // texts only when the report carries a high-severity compliance alert
+    // or high-priority savings item, skips silently without ADMIN_PHONE,
+    // and swallows provider failures — a routine report sends nothing, so
+    // the card must not promise an unconditional SMS.
+    ['comms', 'MAY text a summary to the admin phone — only if the report finds a high-severity compliance alert or high-priority savings item (internal alert, not a customer message; best-effort send)'],
   ],
 };
 

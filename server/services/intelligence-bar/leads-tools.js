@@ -664,7 +664,14 @@ async function bulkUpdateLeads(input) {
     description: `Bulk update: ${current_status} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
     performed_by: 'Intelligence Bar',
   }));
-  await db('lead_activities').insert(activities).catch(err => logger.error(`[intelligence-bar:leads] Failed to log bulk activities: ${err.message}`));
+  // Best-effort, but never a silent Done (GH r11 P2): the contract
+  // discloses the per-lead activity-history append, so a failed insert
+  // after the committed status changes must surface as a card warning.
+  let activityWarning = null;
+  await db('lead_activities').insert(activities).catch((err) => {
+    logger.error(`[intelligence-bar:leads] Failed to log bulk activities: ${err.message}`);
+    activityWarning = `Statuses updated, but the ${ids.length} activity-history entries could not be written — the leads' histories are missing this bulk change.`;
+  });
 
   logger.info(`[intelligence-bar:leads] Bulk updated ${ids.length} leads: ${current_status} → ${new_status}`);
 
@@ -673,6 +680,7 @@ async function bulkUpdateLeads(input) {
     updated: ids.length,
     from_status: current_status,
     to_status: new_status,
+    ...(activityWarning ? { warning: activityWarning } : {}),
   };
 }
 
