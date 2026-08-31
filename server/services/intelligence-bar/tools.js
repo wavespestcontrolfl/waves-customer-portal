@@ -1851,6 +1851,20 @@ async function createAppointment(input) {
     throw err;
   }
 
+  // Card-confirmed bookings are approved credit-free (W0B): skip the
+  // immediate redemption entirely so this Confirm can never mint credit —
+  // an offer created after the card is applied by the hourly sweep, the
+  // documented ambient path, never by this click (codex r4 P1).
+  if (input._inspection_credit_amount !== undefined) {
+    return {
+      success: true,
+      appointment_id: appointment.id,
+      date: appointment.scheduled_date,
+      service_type: appointment.service_type,
+      ...(overlapAdvisory ? { overlap_advisory: overlapAdvisory } : {}),
+    };
+  }
+
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book
     // paths (Codex #3178 r26 P2): the marker alone leaves the credit
@@ -1919,6 +1933,19 @@ async function rescheduleAppointment(input) {
   const { appointment_id, new_date, new_time_window, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
+  // W0B pin (codex r4): assert the approved snapshot against THIS read —
+  // the same row the move's CAS is based on — so a visit that changed
+  // between the route preflight and here refuses instead of becoming the
+  // executor's new baseline.
+  if (appt && input._appointment_fingerprint) {
+    const { normalizeAppointmentPin, appointmentPinFingerprint } = require('./proposal-pins');
+    if (appointmentPinFingerprint(normalizeAppointmentPin(appt)) !== String(input._appointment_fingerprint)) {
+      return {
+        error: 'This visit changed after the card was shown — nothing was moved. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+  }
   if (!appt) return { error: 'Appointment not found' };
 
   // Terminal rows are one-way — a completed/cancelled visit must not quietly

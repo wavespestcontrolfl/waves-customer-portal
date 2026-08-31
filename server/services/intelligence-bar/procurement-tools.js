@@ -659,6 +659,18 @@ async function approvePrice(input) {
 
   const approval = await db('price_approvals').where('id', approval_id).first();
   if (!approval) return { error: 'Approval not found' };
+  // W0B pin (codex r4): the card's fingerprint is asserted on the SAME row
+  // this executor hands to applyPriceApproval — an edited/re-vendored
+  // approval refuses here instead of applying values the card never showed.
+  if (input._approval_fingerprint) {
+    const { priceApprovalFingerprint } = require('./proposal-pins');
+    if (priceApprovalFingerprint(approval) !== String(input._approval_fingerprint)) {
+      return {
+        error: 'This price approval changed after the card was shown — nothing was applied. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+  }
 
   if (action === 'approve') {
     // ONE atomic approval writer (codex r4-push P1): the shared

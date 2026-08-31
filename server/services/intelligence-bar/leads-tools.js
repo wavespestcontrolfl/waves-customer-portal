@@ -597,6 +597,9 @@ async function bulkUpdateLeads(input) {
       dry_run: true,
       matches: matching.length,
       matched_ids: matching.map(l => l.id),
+      // Complete identity list for the confirmation card (W0B): the exact-
+      // effects disclosure names EVERY pinned lead, not a sample.
+      all_names: matching.map(l => `${l.first_name || ''} ${l.last_name || ''}`.trim() || `lead ${l.id}`),
       preview: matching.slice(0, 10).map(l => ({
         name: `${l.first_name} ${l.last_name || ''}`.trim(),
         current_status: l.status,

@@ -1,0 +1,56 @@
+/**
+ * W0B proposal-time pins shared by the route (proposal + confirm preflight)
+ * and the executors (enforcement at the mutation's own read) — one
+ * fingerprint definition so the two boundaries can never drift apart.
+ *
+ * The route computes a fingerprint over the state the card displayed; the
+ * executor recomputes it from the row IT loaded (the same read its CAS/
+ * claim is based on) and refuses with preview_changed on mismatch — the
+ * approval is enforced at the final read, not only in a preflight query.
+ */
+
+const crypto = require('crypto');
+
+function sha(parts) {
+  return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+}
+
+// ── Appointment (reschedule) ────────────────────────────────────────────
+// Fields the reschedule effect depends on. customer_name is display-only
+// and deliberately NOT hashed (a display join must not perturb the pin).
+function normalizeAppointmentPin(row) {
+  const iso = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
+  return {
+    id: row.id,
+    status: row.status,
+    scheduled_date: row.scheduled_date instanceof Date
+      ? row.scheduled_date.toISOString().slice(0, 10)
+      : String(row.scheduled_date || ''),
+    time_window: row.time_window || null,
+    window_start: iso(row.window_start),
+    window_end: iso(row.window_end),
+    estimated_duration_minutes: row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
+    technician_id: row.technician_id || null,
+    service_type: row.service_type || null,
+  };
+}
+
+function appointmentPinFingerprint(pin) {
+  return sha([
+    String(pin.id), pin.status, pin.scheduled_date, pin.time_window, pin.window_start || null, pin.window_end || null,
+    pin.estimated_duration_minutes ?? null, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
+  ]);
+}
+
+// ── Price approval ──────────────────────────────────────────────────────
+// Every field the apply writes from: a re-priced, re-quantified or
+// re-vendored approval must be drift. Works on the raw row (executor) and
+// the route's pin object alike.
+function priceApprovalFingerprint(a) {
+  return sha([
+    String(a.id), a.status, String(a.product_id || ''), String(a.vendor_id || ''),
+    a.new_price == null ? null : Number(a.new_price), a.new_quantity || null,
+  ]);
+}
+
+module.exports = { normalizeAppointmentPin, appointmentPinFingerprint, priceApprovalFingerprint };

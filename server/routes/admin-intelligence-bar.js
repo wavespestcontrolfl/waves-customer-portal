@@ -531,29 +531,10 @@ async function loadAppointmentPin(appointmentId) {
     .where('ss.id', appointmentId)
     .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'c.first_name', 'c.last_name');
   if (!a) return null;
-  const iso = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
   return {
-    id: a.id,
-    status: a.status,
-    scheduled_date: a.scheduled_date instanceof Date ? a.scheduled_date.toISOString().slice(0, 10) : String(a.scheduled_date || ''),
-    // Both the legacy label and the canonical window instants — the
-    // reschedule executor writes window_start/window_end, so a window-only
-    // move must register as drift.
-    time_window: a.time_window || null,
-    window_start: iso(a.window_start),
-    window_end: iso(a.window_end),
-    estimated_duration_minutes: a.estimated_duration_minutes == null ? null : Number(a.estimated_duration_minutes),
-    technician_id: a.technician_id || null,
-    service_type: a.service_type || null,
+    ...normalizeAppointmentPin(a),
     customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim() || null,
   };
-}
-
-function appointmentPinFingerprint(pin) {
-  return crypto.createHash('sha256').update(JSON.stringify([
-    String(pin.id), pin.status, pin.scheduled_date, pin.time_window, pin.window_start || null, pin.window_end || null,
-    pin.estimated_duration_minutes ?? null, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
-  ])).digest('hex');
 }
 
 // Email reply pin covers WHO the reply goes to AND what it is a reply to —
@@ -589,6 +570,12 @@ async function resolveReviewRequestRecipient({ customer_id, customer_name }) {
   return null;
 }
 
+const {
+  normalizeAppointmentPin,
+  appointmentPinFingerprint,
+  priceApprovalFingerprint,
+} = require('../services/intelligence-bar/proposal-pins');
+
 async function loadPriceApprovalPin(approvalId) {
   const a = await db('price_approvals as pa')
     .leftJoin('products_catalog as p', 'p.id', 'pa.product_id')
@@ -608,12 +595,6 @@ async function loadPriceApprovalPin(approvalId) {
     new_price: a.new_price == null ? null : Number(a.new_price),
     new_quantity: a.new_quantity || null,
   };
-}
-
-function priceApprovalFingerprint(a) {
-  return crypto.createHash('sha256').update(JSON.stringify([
-    String(a.id), a.status, String(a.product_id || ''), String(a.vendor_id || ''), a.new_price, a.new_quantity,
-  ])).digest('hex');
 }
 
 function estimatePinFingerprint(est, flag) {
@@ -957,12 +938,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params.lead_ids = matchedIds;
       // Every pinned lead's name for the card's "Show more" (the count and
       // first ten alone can't distinguish two sets — codex P1 on #3648).
-      let allNames = [];
-      try {
-        const rows = await db('leads').whereIn('id', matchedIds).select('first_name', 'last_name');
-        allNames = rows.map((l) => `${l.first_name || ''} ${l.last_name || ''}`.trim()).filter(Boolean);
-      } catch (err) {
-        logger.warn(`[intelligence-bar] bulk lead name load failed: ${err.message}`);
+      // FAIL CLOSED (codex r4): the card's complete-target list is the
+      // disclosure — every pinned id must be named, or the proposal is
+      // refused rather than falling back to a sample.
+      const allNames = Array.isArray(dryRun.all_names) ? dryRun.all_names : [];
+      if (allNames.length !== matchedIds.length) {
+        return { failed: true, modelResult: { error: 'Could not load every matched lead for the confirmation card — narrow the criteria and retry.' } };
       }
       preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action, all_names: allNames };
     }
@@ -2373,9 +2354,10 @@ router.post('/confirm-action', async (req, res, next) => {
       // The route-level checks below are the cheap early refusal.
       const pinnedPhone = execParams._pinned_phone;
       const pinnedEmail = execParams._pinned_email;
+      // _appointment_fingerprint also stays: rescheduleAppointment asserts
+      // it against the row its own CAS is based on.
       const pinnedAppointment = execParams._appointment_fingerprint;
       delete execParams._pinned_email;
-      delete execParams._appointment_fingerprint;
       let drifted = false;
       if (pinnedPhone) {
         const r = action.tool_name === 'reply_via_sms'
@@ -2387,8 +2369,8 @@ router.post('/confirm-action', async (req, res, next) => {
         const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
         drifted = !email || emailPinFingerprint(email) !== String(pinnedEmail);
       }
+      // Kept in execParams: approvePrice re-verifies on ITS loaded row.
       const pinnedApproval = execParams._approval_fingerprint;
-      delete execParams._approval_fingerprint;
       if (!drifted && pinnedApproval) {
         const a = await loadPriceApprovalPin(String(execParams.approval_id || ''));
         drifted = !a || a.status !== 'pending' || priceApprovalFingerprint(a) !== pinnedApproval;
@@ -2400,6 +2382,18 @@ router.post('/confirm-action', async (req, res, next) => {
         const est = await resolveEstimateByIdentifier(String(execParams.estimate_identifier || ''));
         const flag = action.tool_name === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
         drifted = !est || estimatePinFingerprint(est, flag) !== pinnedEstimate;
+      }
+      if (!drifted && action.tool_name === 'bulk_update_leads' && Array.isArray(execParams.lead_ids)) {
+        // The card promised EVERY listed lead transitions. Re-run the match
+        // over the pinned ids; any lead that left current_status makes the
+        // set inexact — refuse instead of a silent partial update.
+        const recheck = await previewBulkLeadUpdate({
+          current_status: execParams.current_status,
+          lead_ids: execParams.lead_ids,
+          new_status: execParams.new_status,
+        });
+        const still = new Set((recheck?.matched_ids || []).map(String));
+        drifted = isToolFailure(recheck) || execParams.lead_ids.some((id) => !still.has(String(id)));
       }
       const pinnedCredit = execParams._inspection_credit_amount;
       if (!drifted && pinnedCredit !== undefined && execParams.customer_id) {

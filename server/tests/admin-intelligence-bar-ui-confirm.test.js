@@ -867,7 +867,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
   test('bulk_update_leads: dry-run runs at proposal, stored params carry dry_run:false + the pinned id set', async () => {
     mockPreviewBulkLeadUpdate.mockResolvedValue({
-      dry_run: true,
+      all_names: ['lead a', 'lead b', 'lead c'].slice(0, 3), dry_run: true,
       matches: 3,
       matched_ids: ['l1', 'l2', 'l3'],
       preview: [{ name: 'Testa A' }, { name: 'Testb B' }],
@@ -888,7 +888,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
   });
 
   test('bulk_update_leads with zero matches proposes nothing', async () => {
-    mockPreviewBulkLeadUpdate.mockResolvedValue({ dry_run: true, matches: 0, matched_ids: [], preview: [] });
+    mockPreviewBulkLeadUpdate.mockResolvedValue({ all_names: ['lead a', 'lead b', 'lead c'].slice(0, 3), dry_run: true, matches: 0, matched_ids: [], preview: [] });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_leads', input: { current_status: 'unresponsive', new_status: 'lost' } }],
       [{ type: 'text', text: 'Nothing to do.' }],
@@ -909,6 +909,8 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
         params: { current_status: 'unresponsive', new_status: 'lost', dry_run: false, lead_ids: ['l1', 'l2'] },
       },
     });
+    // W0B set recheck: every pinned lead must still match at Confirm.
+    mockPreviewBulkLeadUpdate.mockResolvedValue({ matched_ids: ['l1', 'l2'] });
     mockExecuteTool.mockResolvedValue({ success: true, updated: 2 });
 
     await withServer(async (baseUrl) => {
