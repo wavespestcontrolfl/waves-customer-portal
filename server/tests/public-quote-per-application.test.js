@@ -468,8 +468,25 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     const rodent = { qualifies: true, kind: 'rodent_bait_setup', amount: 99 };
     expect(resolveSetupFeeQuoteDecision(membership, { activeMember: true })).toEqual({ amount: 0, waived: 'existing_member', kind: 'waveguard_membership' });
     expect(resolveSetupFeeQuoteDecision(rodent, { activeMember: true })).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
-    expect(resolveSetupFeeQuoteDecision(rodent, { feeAlreadyQueued: true })).toEqual({ amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' });
+    // A queued claim elsewhere on the account waives the MEMBERSHIP fee, but
+    // the per-series rodent setup only when the claim was booked from THIS
+    // draft (codex #3591 r64 P1) — a second rodent program for another
+    // property never rides the first series' in-flight stamp.
+    expect(resolveSetupFeeQuoteDecision(membership, { feeAlreadyQueued: true })).toEqual({ amount: 0, waived: 'fee_already_queued', kind: 'waveguard_membership' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { feeAlreadyQueued: true })).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { feeAlreadyQueued: true, queuedForThisDraft: true })).toEqual({ amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' });
     expect(resolveSetupFeeQuoteDecision(rodent, {})).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+  });
+
+  test('the queued-claim probes carry draft provenance for the rodent kind (source contracts, codex #3591 r64 P1)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuote).toMatch(/\.first\('claim\.id', 'claim\.source_estimate_id'\);\s+feeAlreadyQueued = !!queued;/);
+    expect(publicQuote).toMatch(/queuedForThisDraft = !!queued && !!draftEstimateId && String\(queued\.source_estimate_id \|\| ''\) === String\(draftEstimateId\);/);
+    expect(publicQuote).toMatch(/decideSetupFeeQuote\(q, existingEst \? existingEst\.id : null\)/);
+    const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(booking).toMatch(/\.modify\(\(qb\) => \{ if \(rodentSetupQuote\) qb\.where\('claim\.source_estimate_id', freshPricingEst\.id\); \}\)/);
   });
 
   test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {

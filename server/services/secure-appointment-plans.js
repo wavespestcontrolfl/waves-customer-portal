@@ -315,6 +315,28 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount 
   return true;
 }
 
+// The ledger row an acceptance's invoice carries, or null — the immutable
+// evidence that the acceptance SETTLED the rodent setup (codex #3591 r64
+// P1: a standard verbal win skips the setup invoice entirely, so only a
+// claim proves the fee was billed). Read-only.
+async function settledSetupClaimForInvoice(database, invoiceId) {
+  if (!invoiceId) return null;
+  return (await database('setup_fee_claims').where({ invoice_id: invoiceId }).first('id', 'scheduled_service_id', 'amount')) || null;
+}
+
+// Anchor a claim the prepay mint ledgered before its series existed
+// (anchor-less, keyed to the invoice) onto the series that was booked for
+// it, so a later refund of that prepay restores the stamp there instead of
+// paging. Only fills an EMPTY anchor — never re-points a settled one.
+async function anchorSetupFeeClaim(database, { claimId, anchorId }) {
+  if (!claimId || !anchorId) return false;
+  const updated = await database('setup_fee_claims')
+    .where({ id: claimId })
+    .whereNull('scheduled_service_id')
+    .update({ scheduled_service_id: anchorId });
+  return Number(updated) === 1;
+}
+
 // Customer 360 Annual Prepay dialog (codex #3591 r37 P1): the general mint
 // names only a coverage service type — no anchor, no setup. Omission must
 // not read as a waiver: derive the obligation from the customer's LIVE direct
@@ -1106,6 +1128,8 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 
 module.exports = {
   recordSetupFeeClaimForInvoice,
+  settledSetupClaimForInvoice,
+  anchorSetupFeeClaim,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,

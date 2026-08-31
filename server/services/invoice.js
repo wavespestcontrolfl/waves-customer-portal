@@ -5339,12 +5339,22 @@ const InvoiceService = {
       .where({ id: invoiceId })
       .first("id", "customer_id", "scheduled_service_id", "line_items");
     if (!invoiceRow) return null;
+    // Durable claim FIRST (codex #3591 r64 P1), the same provenance rule the
+    // reversal applies: the claims-ledger row is immutable, while the line
+    // description/amount are staff-editable — a renamed or repriced
+    // completion invoice must still retire exactly the stamp its reversal
+    // restored, or the restored stamp / replacement invoice stays
+    // collectible as a second charge once the webhook re-flips this one to
+    // paid. The editable line decides only for claim-less invoices.
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount", "scheduled_service_id");
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
-    const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
-    if (!setupLine || !(amount > 0)) return null;
-    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
+    const lineAmount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    const claimAmount = claimRecord ? Math.round(Number(claimRecord.amount) * 100) / 100 : NaN;
+    const amount = Number.isFinite(claimAmount) && claimAmount > 0 ? claimAmount : lineAmount;
+    if (!(amount > 0)) return null;
+    if (!setupLine && !claimRecord) return null;
     if (claimRecord) {
       // Term-backed prepay claims are the term sync's revival's job; a
       // COMPLETION invoice's own claim rides its reinstatement here
@@ -5353,8 +5363,11 @@ const InvoiceService = {
       if (termBacked) return null;
     }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
-    let anchorId = null;
-    if (invoiceRow.scheduled_service_id) {
+    // The claim's own anchor is provenance too — the series the mint
+    // consumed the stamp from — so it outranks the invoice's (editable)
+    // visit link and the customer-wide root scan.
+    let anchorId = claimRecord?.scheduled_service_id || null;
+    if (!anchorId && invoiceRow.scheduled_service_id) {
       const own = await conn("scheduled_services")
         .where({ id: invoiceRow.scheduled_service_id })
         .first("id", "recurring_parent_id", "service_type", "service_id");

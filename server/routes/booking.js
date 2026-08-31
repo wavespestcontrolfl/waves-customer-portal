@@ -3000,9 +3000,14 @@ async function createSelfBooking(payload = {}) {
                 // can still complete and mint it. A fully-cancelled series
                 // otherwise waives every future plan forever (Codex #3489
                 // follow-up).
+                // The rodent setup is per-series and never self-waives
+                // (codex #3591 r64 P1): only a claim booked from THIS
+                // estimate counts — another property's in-flight rodent
+                // stamp must not strip this series' required setup.
                 const queuedElsewhere = await sp('scheduled_services as claim')
                   .where('claim.customer_id', custId)
                   .modify((qb) => { if (stampServiceRow?.id) qb.whereNot('claim.id', stampServiceRow.id); })
+                  .modify((qb) => { if (rodentSetupQuote) qb.where('claim.source_estimate_id', freshPricingEst.id); })
                   .whereNotNull('claim.pending_setup_fee')
                   .whereNot('claim.pending_setup_fee', 0)
                   .where(function consumable() {

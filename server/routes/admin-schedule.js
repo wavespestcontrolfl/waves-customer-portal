@@ -5449,9 +5449,32 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // or the secure-plan flow froze a different figure) while the
       // acceptance was billing its own setup invoice — that is the
       // double-charge case, so it is reported like a thrown retire.
-      const retireRodentSetupStampAfterAcceptance = async () => {
+      // Only an acceptance that actually SETTLED the setup retires the stamp
+      // (codex #3591 r64 P1): a standard verbal win converts with
+      // skipSetupInvoice (estimate-manual-acceptance) — no invoice carries
+      // the setup — so the stamp must stay for the first completion to
+      // collect. Settlement evidence is the immutable setup_fee_claims row
+      // the prepay mint ledgered against the acceptance's invoice, or the
+      // estimate's explicit rodent-setup waiver (the quote disclosed no
+      // setup, so a live stamp would charge one the customer never saw).
+      const rodentSetupSettledByAcceptance = async (acceptResult) => {
+        const { settledSetupClaimForInvoice } = require('../services/secure-appointment-plans');
+        const claim = await settledSetupClaimForInvoice(db, acceptResult?.conversion?.draftInvoiceId || null);
+        if (claim) return { claim };
+        let data = linkedEstimate?.estimate_data;
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+        const quote = data?.setupFeeQuote;
+        if (quote && quote.kind === 'rodent_bait_setup' && quote.waived && !(Number(quote.amount) > 0)) return { waived: quote.waived };
+        return null;
+      };
+      const retireRodentSetupStampAfterAcceptance = async (acceptResult) => {
         if (!(directRodentSetupStamp > 0)) return;
         try {
+          const settled = await rodentSetupSettledByAcceptance(acceptResult);
+          if (!settled) {
+            logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the estimate acceptance billed no setup — first completion collects it`);
+            return;
+          }
           const retired = await db('scheduled_services')
             .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
             .update({ pending_setup_fee: null, updated_at: new Date() });
@@ -5462,6 +5485,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
             return;
           }
           directRodentSetupStamp = 0;
+          // The prepay mint ledgered its claim before this series existed
+          // (anchor-less); anchor it now so a later refund of that prepay
+          // restores the stamp onto THIS series instead of paging.
+          if (settled.claim && !settled.claim.scheduled_service_id) {
+            const { anchorSetupFeeClaim } = require('../services/secure-appointment-plans');
+            await anchorSetupFeeClaim(db, { claimId: settled.claim.id, anchorId: svc.id });
+          }
         } catch (e) {
           logger.error(`[schedule] FIX: could not retire the rodent setup stamp on ${svc.id} after estimate acceptance — first completion would bill a setup the acceptance already covered: ${e.message}`);
           bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp could not be cleared — clear the pending setup fee on the new series to avoid double-billing.');
@@ -5509,7 +5539,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
         // Link the just-created rows now that the estimate is a recorded win.
         await linkCreatedRowsToEstimate();
-        await retireRodentSetupStampAfterAcceptance();
+        await retireRodentSetupStampAfterAcceptance(acceptResult);
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
         // An overlap that RACED in between the preflight check and the atomic
@@ -5533,7 +5563,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             downgradedAfterOverlapRace = true;
             if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
             await linkCreatedRowsToEstimate();
-            await retireRodentSetupStampAfterAcceptance();
+            await retireRodentSetupStampAfterAcceptance(retryResult);
             bookingWarnings.push('Appointment booked and the estimate was marked accepted as standard — an annual prepay term covering this date already exists (it landed during booking), so no new prepay invoice/term was created. Manage prepay from Customer 360.');
           } catch (retryErr) {
             logger.warn(`[schedule] standard-accept fallback after prepay overlap failed for estimate ${linkedEstimateId}: ${retryErr.message}`);

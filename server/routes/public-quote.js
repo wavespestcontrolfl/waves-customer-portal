@@ -144,11 +144,15 @@ function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, q
 // membership fee only. The rodent bait-station setup is waived by an OTHER
 // qualifying family — canonical evidence the engine already applied when it
 // emitted (or withheld) the line — so a rodent-only Bronze member still owes
-// it. An in-flight setup-fee claim anywhere on the account waives either
-// kind (one setup obligation per account at a time).
-function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false } = {}) {
+// it. An in-flight setup-fee claim anywhere on the account waives the
+// MEMBERSHIP fee (one account setup at a time); the rodent setup is
+// per-series and never self-waives (codex #3591 r64 P1: a second rodent
+// program for another property must not ride the first series' in-flight
+// stamp), so a queued claim waives it only when it belongs to THIS draft.
+function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false, queuedForThisDraft = false } = {}) {
   const memberWaives = activeMember && basis.kind === 'waveguard_membership';
-  return memberWaives || feeAlreadyQueued
+  const queuedWaives = feeAlreadyQueued && (basis.kind === 'waveguard_membership' || queuedForThisDraft);
+  return memberWaives || queuedWaives
     ? { amount: 0, waived: memberWaives ? 'existing_member' : 'fee_already_queued', kind: basis.kind }
     : { amount: basis.amount, kind: basis.kind };
 }
@@ -1641,11 +1645,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // the decision fails CLOSED in the customer's favor: a zero-waiver is
     // persisted, so nothing is disclosed and conversion charges nothing —
     // a bounded miss on a transient error, never a surprise $99.
-    const decideSetupFeeQuote = async (q) => {
+    const decideSetupFeeQuote = async (q, draftEstimateId = null) => {
       if (!setupFeeMixQualifies) return null;
       try {
         let activeMember = false;
         let feeAlreadyQueued = false;
+        let queuedForThisDraft = false;
         if (customerId) {
           const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
           const memberRow = await q('customers').where({ id: customerId }).first();
@@ -1698,8 +1703,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                     .whereIn('child.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
                 });
             })
-            .first('claim.id');
+            .first('claim.id', 'claim.source_estimate_id');
           feeAlreadyQueued = !!queued;
+          // Provenance for the per-series rodent setup: the claim counts
+          // against THIS quote only when its series was booked from this
+          // draft (source_estimate_id) — the post-booking /calculate refresh
+          // this decision serializes with — never from another series.
+          queuedForThisDraft = !!queued && !!draftEstimateId && String(queued.source_estimate_id || '') === String(draftEstimateId);
         }
         // Persist the WAIVER too, not just the fee: a waived draft carries
         // amount 0, and shouldIncludeWaveGuardSetupFeeForRecurring consumes
@@ -1711,7 +1721,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // booking.js stamps pending_setup_fee from `amount` when the
         // self-booked series activates, so the obligation travels with the
         // handoff instead of vanishing with the archived draft.
-        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued });
+        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued, queuedForThisDraft });
       } catch (memberErr) {
         // FAIL CLOSED toward the engine-priced line (codex #3591 r43 local
         // P0): a transient membership/claim lookup failure must never become
@@ -1877,7 +1887,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the stamp and revives the draft with a WAIVER, never a second
       // chargeable quote.
       const applySetupFeeQuote = async (q) => {
-        setupFeeQuote = await decideSetupFeeQuote(q);
+        setupFeeQuote = await decideSetupFeeQuote(q, existingEst ? existingEst.id : null);
         if (setupFeeQuote) estimateDataObj.setupFeeQuote = setupFeeQuote;
         else delete estimateDataObj.setupFeeQuote;
         // A ZERO rodent-setup decision (claim already queued on the account,

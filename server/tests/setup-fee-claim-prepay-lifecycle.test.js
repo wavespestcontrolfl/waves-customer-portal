@@ -433,13 +433,26 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(adminSchedule).toMatch(/directRodentSetupStamp = owedSetup;/);
     // …and BOTH acceptance-success paths (main accept and the overlap-race
     // standard downgrade) retire it, CAS'd on the exact stamped amount.
-    expect((adminSchedule.match(/await retireRodentSetupStampAfterAcceptance\(\);/g) || []).length).toBe(2);
+    expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(acceptResult\);/);
+    expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(retryResult\);/);
+    // …but only when the acceptance SETTLED the setup (codex #3591 r64 P1):
+    // a standard verbal win converts with skipSetupInvoice, so the stamp
+    // stays for the first completion; settlement evidence = the prepay
+    // mint's setup_fee_claims row on the acceptance invoice, or the
+    // estimate's explicit rodent-setup waiver. A settled anchor-less claim
+    // is anchored to the booked series.
+    // Ledger reads/writes go through the service (the route never touches
+    // setup_fee_claims itself — same rule the switch route's contract pins).
+    expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\)[\s\S]*?quote\.kind === 'rodent_bait_setup' && quote\.waived && !\(Number\(quote\.amount\) > 0\)/);
+    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(!settled\) \{[\s\S]*?return;\s+\}\s+const retired = await db\('scheduled_services'\)/);
+    expect(adminSchedule).toMatch(/if \(settled\.claim && !settled\.claim\.scheduled_service_id\) \{[\s\S]*?await anchorSetupFeeClaim\(db, \{ claimId: settled\.claim\.id, anchorId: svc\.id \}\);/);
+    expect(adminSchedule.includes("('setup_fee_claims')")).toBe(false);
     expect(adminSchedule).toMatch(/const retired = await db\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
     // A retire failure must warn about the double-bill hazard, never fail silently.
-    expect(adminSchedule).toMatch(/retireRodentSetupStampAfterAcceptance = async \(\) => \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
+    expect(adminSchedule).toMatch(/retireRodentSetupStampAfterAcceptance = async \(acceptResult\) => \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
     // A ZERO-row CAS is the consumed/refrozen-stamp race, not success (codex
     // #3591 r63 P1): it must warn and leave the local stamp un-cleared.
-    const retireBody = adminSchedule.slice(adminSchedule.indexOf('const retireRodentSetupStampAfterAcceptance = async'), adminSchedule.indexOf('await retireRodentSetupStampAfterAcceptance();'));
+    const retireBody = adminSchedule.slice(adminSchedule.indexOf('const retireRodentSetupStampAfterAcceptance = async'), adminSchedule.indexOf('await retireRodentSetupStampAfterAcceptance(acceptResult);'));
     expect(retireBody).toMatch(/if \(Number\(retired\) !== 1\) \{[\s\S]*?logger\.error\([\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed[\s\S]*?return;\s*\}\s*directRodentSetupStamp = 0;/);
   });
 
@@ -735,6 +748,20 @@ describe('retireRodentSetupObligationForReinstatedInvoice — a bounced refund r
     expect(withRebill.writes).toEqual([
       expect.objectContaining({ table: 'invoices', op: 'update', patch: expect.objectContaining({ status: 'void' }) }),
     ]);
+  });
+
+  test('a renamed/repriced completion invoice still retires from its immutable claim (amount + anchor), never the edited line (codex #3591 r64 P1)', async () => {
+    const edited = reinstConn({
+      invoiceRow: stdInvoice({ line_items: [{ description: 'Station install (edited)', unit_price: 50, amount: 50 }] }),
+      claimRow: { id: 'claim-c', amount: '99.00', scheduled_service_id: 'root-rb' },
+    });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(edited, 'inv-std')).toEqual({ retired: true, voidedRebills: 0 });
+    expect(edited.writes).toEqual([
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
+    ]);
+    // The edited line's $50 must not decide: with the claim at $99 and a $99 stamp the CAS matches; the line alone would have paged.
+    const lineOnly = reinstConn({ invoiceRow: stdInvoice({ line_items: [{ description: 'Bait Station Setup — one-time setup fee', unit_price: 50, amount: 50 }] }) });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(lineOnly, 'inv-std')).toEqual({ retired: false, voidedRebills: 0 });
   });
 
   test('a prepay invoice (claims-ledger row) and a no-setup-line invoice are no-ops', async () => {
