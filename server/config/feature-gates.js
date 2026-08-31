@@ -1867,8 +1867,10 @@ const gates = {
   // exact pre-thread ephemeral behavior returns and the /threads endpoints
   // 404. Read at CALL time via gateEnvValue in
   // services/intelligence-bar/threads.js (flip needs no redeploy); this
-  // entry is the status/log listing.
-  ibThreads: process.env.GATE_IB_THREADS === 'true',
+  // entry is the status/log listing — same parser as the request path so
+  // the listing can never disagree with what /query actually does.
+  // (gateEnvValue is a hoisted function declaration, safe to call here.)
+  ibThreads: gateEnvValue('GATE_IB_THREADS'),
 
 };
 
