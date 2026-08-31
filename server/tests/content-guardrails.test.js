@@ -805,6 +805,18 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('the FULL InlineCTA prop contract holds: unknown props and invalid tel block every draft (Codex #3646 r16)', () => {
+    const propCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_PROPS').length;
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA tel="not-a-phone" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+    expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA madeUpProp="x" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+    // Case-sensitive names: ctahref is NOT the ctaHref prop.
+    expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA ctahref="/quote/" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+    // The full valid prop set passes.
+    const ok = '<InlineCTA eyebrow="Local help" headline="Need a hand?" description="We can treat it." ctaLabel="Get a quote" ctaHref="/quote/" phone="(941) 599-3489" tel="tel:+19415993489" />';
+    expect(propCodes(guardrails.evaluate({ body: wrap(ok), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBe(0);
+  });
+
   test('InlineCTA ctaHref routes through the internal-route allowlist; destinations are exact (Codex #3646 r15)', () => {
     withAffiliateEnv(() => {
       // A root-relative ctaHref to a route this repo cannot prove exists is
@@ -837,7 +849,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
-      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY',
+      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }

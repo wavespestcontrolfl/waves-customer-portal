@@ -648,9 +648,15 @@ export const AFFILIATE_LINK_MAX_PER_POST = 3;
 function fencedCodeIntervals(raw: string): Array<[number, number]> {
   const intervals: Array<[number, number]> = [];
   let pos = 0; let openCh: string | null = null; let openLen = 0; let start = 0; let openDepth = 0; let openListIndent = 0;
-  // Ambient (unquoted) list tracking: a fence opened on a list CONTINUATION
-  // line ("- item" then "  ~~~") scopes to that item's content column too.
-  let ambientListIndent = 0; let ambientListDepth = 0; let prevBlank = true;
+  // Ambient list tracking as a STACK of containers ({content column, quote
+  // depth}): when an inner item dedents away, the PARENT's content column
+  // must survive (a fence at the outer item's column is still list content,
+  // never top-level — a scalar reset made an unclosed nested fence mask to
+  // EOF and hide real components: fail open).
+  const listStack: Array<{ col: number; depth: number }> = [];
+  const topCol = () => (listStack.length ? listStack[listStack.length - 1].col : 0);
+  const topDepth = () => (listStack.length ? listStack[listStack.length - 1].depth : 0);
+  let prevBlank = true;
   for (const line of raw.split('\n')) {
     const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
     const depth = (quotePrefix.match(/>/g) || []).length;
@@ -674,19 +680,25 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
     } else {
       const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
       const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
-      if (!blank && depth < ambientListDepth) { ambientListIndent = 0; ambientListDepth = 0; }
-      if (marker && markerIndent <= (depth === ambientListDepth ? ambientListIndent : 0) + 3) {
-        ambientListIndent = marker[0].length;
-        ambientListDepth = depth;
-      } else if (!blank && depth === ambientListDepth && indent < ambientListIndent && prevBlank) ambientListIndent = 0;
+      if (!blank && depth < topDepth()) { while (listStack.length && listStack[listStack.length - 1].depth > depth) listStack.pop(); }
+      if (marker && markerIndent <= (depth === topDepth() ? topCol() : 0) + 3) {
+        // A sibling/outer marker pops inner items whose content column it
+        // sits left of; a deeper marker nests.
+        while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > markerIndent) listStack.pop();
+        listStack.push({ col: marker[0].length, depth });
+      } else if (!blank && depth === topDepth() && indent < topCol() && prevBlank) {
+        // Dedent pops only the containers it leaves — parents whose content
+        // column the line still satisfies remain.
+        while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop();
+      }
       const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
       const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
         || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
       if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
-        if (!marker && depth === ambientListDepth && indent < ambientListIndent) ambientListIndent = 0;
+        if (!marker && depth === topDepth() && indent < topCol()) { while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop(); }
         openCh = opener[1][0]; openLen = opener[1].length; start = pos;
         openDepth = depth;
-        openListIndent = marker ? marker[0].length : (depth === ambientListDepth ? ambientListIndent : 0);
+        openListIndent = marker ? marker[0].length : (depth === topDepth() ? topCol() : 0);
       }
       prevBlank = blank;
     }
@@ -904,14 +916,21 @@ function blankBalancedElements(src: string, hidden: (attrs: string, name: string
 function tagAttrsAt(src: string, start: number): string | null {
   const m = /^<[A-Za-z][\w.]*/.exec(src.slice(start, start + 64));
   if (!m) return null;
-  let j = start + m[0].length; let q: string | null = null; let depth = 0;
+  let j = start + m[0].length; let q: string | null = null;
   for (; j < src.length; j += 1) {
     const c = src[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
     if (c === '"' || c === "'" || c === '`') { q = c; continue; }
-    if (c === '{') depth += 1;
-    else if (c === '}') depth -= 1;
-    else if (c === '>' && depth === 0) return src.slice(start + m[0].length, j);
+    if (c === '{') {
+      // An attr expression is lexed whole (regex/string/comment-aware): a
+      // `}` inside data-x={/[}]/} is regex text, not expression syntax —
+      // naive depth counting would go negative and drop the tag (leaving a
+      // hidden wrapper unblanked: fail open). Unbalanced → unterminated.
+      const e = closeOfExpressionAt(src, j);
+      if (e < 0) return null;
+      j = e; continue;
+    }
+    if (c === '>') return src.slice(start + m[0].length, j);
   }
   return null;
 }

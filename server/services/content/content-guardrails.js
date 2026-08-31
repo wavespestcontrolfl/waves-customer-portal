@@ -1939,6 +1939,27 @@ function hasServiceCtaLink(body) {
 // Code and comments never render; expressions CAN render a component, so
 // they stay visible (parity with the astro validator's unmasked view).
 const INLINE_CTA_ROOT_RELATIVE_RE = /^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-9._~\-/?#=&%+]*)?$/;
+// The COMPLETE vendored InlineCTA prop contract (packages/blog-schema
+// componentPropSchemas.InlineCTA): exactly these props (case-sensitive —
+// JSX), tel a phone-shaped literal. An unknown or invalid prop is rejected
+// by the astro publish gate after a full generation spend, so it blocks
+// here first (Codex #3646 r16 P1).
+const INLINE_CTA_PROP_NAMES = Object.freeze(new Set(['headline', 'description', 'ctaLabel', 'ctaHref', 'phone', 'tel', 'eyebrow']));
+const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?[\d\-().\s]{7,20}$/;
+// Every attribute name (with its quoted-literal value, null when
+// expression-valued/unquoted/duplicated) via the sequential walk.
+function eachJsxAttr(attrs) {
+  const re = new RegExp(JSX_ATTR_RE.source, 'y');
+  const s = String(attrs || '');
+  const out = [];
+  let m;
+  re.lastIndex = 0;
+  while (re.lastIndex < s.length && (m = re.exec(s)) !== null) {
+    if (m[0].length === 0) break;
+    out.push({ name: m[1], literal: m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null });
+  }
+  return out;
+}
 function inlineCtaHrefValid(v) {
   if (INLINE_CTA_ROOT_RELATIVE_RE.test(v) && !/(^|\/)\.\.(\/|$)/.test(v)) return true;
   if (!/^https:\/\//i.test(v)) return false;
@@ -1958,6 +1979,16 @@ function inlineCtaContractFinding(body) {
     if (strView[tag.start] === ' ' || attrView[tag.start] === ' ') continue;
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
+    }
+    // The FULL vendored prop contract, not just ctaHref: unknown props and
+    // an invalid literal tel are astro publish blockers (Codex #3646 r16).
+    for (const { name, literal } of eachJsxAttr(tag.attrs)) {
+      if (!INLINE_CTA_PROP_NAMES.has(name)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA> with unknown prop "${name}" — the component accepts only ${[...INLINE_CTA_PROP_NAMES].join(', ')}; the astro publish gate rejects unknown props.`);
+      }
+      if (name === 'tel' && literal !== null && !INLINE_CTA_TEL_RE.test(literal)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA tel="${literal}"> that is not a phone number (optionally tel:-prefixed) — the astro publish gate rejects it.`);
+      }
     }
     if (!/\bctaHref\s*=/.test(maskAttrRegions(tag.attrs))) continue; // no ctaHref: the component defaults to the quote page
     const href = literalAttribute(tag.attrs, 'ctaHref');
