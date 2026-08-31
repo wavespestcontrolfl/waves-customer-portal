@@ -4884,6 +4884,18 @@ function evidenceBaseScore(record) {
 
 function fieldEvidenceFromRecord(record, field) {
   if (!record || isMissingPropertyValue(record[field])) return null;
+  // unitCount is seeded to a truthy 1 on every shaped record — synthesizing
+  // evidence from the seed would promote "no signal" into an authoritative
+  // count after merging (countyAttestedSmallResidential could then suppress
+  // the conservative commercial verdict for a multifamily record whose true
+  // count is unknown — pre-push codex P1). Only an EXPLICIT evidence entry
+  // makes a unit count real.
+  // Shaped records carry ARRAY evidence; already-merged records carry the
+  // OBJECT shape — accept either so a re-merge keeps a real count.
+  if (field === 'unitCount') {
+    const uc = record._fieldEvidence?.unitCount;
+    if (!(Array.isArray(uc) ? uc[0] : uc)) return null;
+  }
   const existing = record._fieldEvidence?.[field]?.[0];
   const sourceType = existing?.sourceType || record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
   const sourceWeight = existing?.sourceQuality || record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown;

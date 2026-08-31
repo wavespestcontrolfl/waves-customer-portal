@@ -53,4 +53,21 @@ describe('shapeAsPropertyRecord unitCount', () => {
     expect(record.unitCount).toBe(1);
     expect(record._fieldEvidence?.unitCount).toBeUndefined();
   });
+
+  test('the truthy-1 seed never becomes evidence through a merge (codex P1)', () => {
+    // Two shaped records, neither with a real count: merging must not
+    // synthesize authoritative unitCount evidence from the seed —
+    // countyAttestedSmallResidential would read it as an attested 1 and
+    // suppress the conservative commercial verdict.
+    const a = _private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: null }, ADDRESS, 'gemini');
+    const b = _private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: null, source: 'https://example.org/other' }, ADDRESS, 'claude');
+    const merged = _private.mergePropertyRecords([a, b], ADDRESS);
+    expect(merged._fieldEvidence?.unitCount).toBeUndefined();
+    // A REAL parsed count still merges with its evidence intact.
+    const c = _private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: 48 }, ADDRESS, 'gemini');
+    const mergedReal = _private.mergePropertyRecords([c, b], ADDRESS);
+    expect(mergedReal.unitCount).toBe(48);
+    // Merged records carry the OBJECT evidence shape.
+    expect(mergedReal._fieldEvidence?.unitCount).toMatchObject({ value: 48 });
+  });
 });
