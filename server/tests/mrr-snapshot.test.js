@@ -130,11 +130,17 @@ describe('customerRateRows', () => {
     expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
 
-  test('payment-pending prepay ids are unioned into the per-customer population (#3669 r1)', async () => {
+  test('payment-pending prepay ids are NOT unioned into the longitudinal per-customer population (#3669 r2)', async () => {
+    // The pending-prepay set is an aggregate-only at-risk overlay. Unioning it
+    // here would put a pending customer into month M's per-customer snapshot;
+    // paying the prepay stamps billing_mode 'annual_prepay' and drops the id
+    // from month M+1, so the Net MRR bridge would report the successful
+    // collection as churned MRR (mrr-bridge prior-only branch).
     const capture = {};
     getPaymentPendingCustomerIds.mockResolvedValueOnce(new Set(['cust-pending-1']));
     await customerRateRows(makeFakeDb({ customerRows: [], capture }));
-    expect(capture.pendingUnion).toEqual(['c.id', ['cust-pending-1']]);
+    expect(capture.pendingUnion).toBeUndefined();
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
 });
 

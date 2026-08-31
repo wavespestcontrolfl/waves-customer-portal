@@ -5,9 +5,11 @@ const logger = require('./logger');
 // The payment-pending annual-prepay ids computeMrrBreakdown unions into its
 // population (those rows sit on billing_mode 'per_application' until the
 // prepay invoice is PAID, so the monthly-lane predicate alone would drop
-// them). The snapshot's tier / per-customer queries must union the SAME set
-// or the tiers stop reconciling to total_mrr (Codex #3669 r1 P1). Fail-soft
-// mirror of computeMrrBreakdown's own fetch.
+// them). The AGGREGATE by-tier query unions the SAME set or the tiers stop
+// reconciling to the same snapshot row's total_mrr (Codex #3669 r1 P1).
+// The LONGITUDINAL per-customer query (customerRateRows) deliberately does
+// NOT — see its comment (Codex #3669 r2 P2). Fail-soft mirror of
+// computeMrrBreakdown's own fetch.
 async function pendingPrepayIds(conn) {
   const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
   const set = await Promise.resolve()
@@ -34,14 +36,25 @@ async function tierBreakdown(conn) {
   }));
 }
 
-// Per-customer monthly_rate over the SAME population the aggregate snapshot uses
-// (active, not-deleted, monthly_rate > 0, internal/test excluded), so a month's
-// per-customer rows sum to that month's total_mrr. Feeds true point-in-time MRR
-// retention: "what each customer was paying in month X" instead of applying
-// today's rate retroactively. db is lazy-required so this module loads without knex.
+// Per-customer monthly_rate over the STABLE monthly-lane population (active,
+// not-deleted, monthly_rate > 0, monthly lane, internal/test excluded). Feeds
+// true point-in-time MRR retention: "what each customer was paying in month X"
+// instead of applying today's rate retroactively.
+//
+// The payment-pending prepay union is deliberately EXCLUDED here (Codex #3669
+// r2 P2): it is a transient collections overlay, and these rows are the
+// LONGITUDINAL per-customer snapshots the Net MRR bridge diffs month over
+// month. Unioning a pending customer in month M and then paying the prepay
+// (which stamps billing_mode 'annual_prepay' and removes the id from month
+// M+1's population) would make buildBridgeMonths classify a SUCCESSFUL prepay
+// collection as churned MRR (mrr-bridge.js prior-only branch). The pending set
+// stays aggregate-only: total_mrr / at_risk_mrr / by_tier carry it; the
+// per-customer rows therefore sum to the committed monthly-lane population,
+// not to total_mrr — by design. db is lazy-required so this module loads
+// without knex.
 async function customerRateRows(conn) {
   conn = conn || require('../models/db');
-  const rows = await mrrPopulationQuery(conn, await pendingPrepayIds(conn))
+  const rows = await mrrPopulationQuery(conn)
     .select('c.id as customer_id', 'c.monthly_rate as monthly_rate', 'c.waveguard_tier as waveguard_tier');
   return rows.map((r) => ({
     customer_id: r.customer_id,
@@ -59,8 +72,10 @@ async function customerRateRows(conn) {
  * Also DROPS this period's rows for customers who have since fallen out of the
  * population — deactivated, soft-deleted, or monthly_rate set to 0 mid-month.
  * The aggregate (mrr_snapshots.total_mrr) is recomputed from the live population
- * each refresh, so without this prune a dropped customer's stale row would linger
- * and the period's per-customer rows would stop summing to total_mrr. The cron
+ * each refresh, so without this prune a dropped customer's stale row would
+ * linger and the period's per-customer rows would stop reconciling to the
+ * aggregate (they sum to its monthly-lane portion — the transient pending-
+ * prepay overlay is aggregate-only, see customerRateRows). The cron
  * only ever refreshes the CURRENT month, so a closed month keeps its final
  * population. Returns how many rows were written and removed.
  *
@@ -85,8 +100,9 @@ async function recordCustomerMrrSnapshots(periodMonth, conn) {
     .insert(records)
     .onConflict(['period_month', 'customer_id'])
     .merge(); // refresh monthly_rate/waveguard_tier/captured_at for the in-progress month
-  // Prune rows for customers who left the population since an earlier refresh of
-  // this same month, so per-customer rows reconcile to mrr_snapshots.total_mrr.
+  // Prune rows for customers who left the population since an earlier refresh
+  // of this same month, so per-customer rows keep tracking the live lane
+  // population mrr_snapshots aggregates over.
   const keepIds = records.map((r) => r.customer_id);
   const removed = await conn('customer_mrr_snapshots')
     .where({ period_month: periodMonth })

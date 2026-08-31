@@ -43,6 +43,19 @@ const ALLOWLIST = [
     reason: 'wide select; lane enforced per row by resolveBillingLane (GUARD 3b/3c)',
   },
   {
+    file: 'routes/admin-pricing-strategy.js',
+    match: ".where('monthly_rate', '>', 0)",
+    context: ".whereIn('waveguard_tier', ['Bronze', 'Silver'])",
+    count: 2,
+    // Upsell/upgrade audiences (/dashboard topUpgradeOpportunities and
+    // /upsell-opportunities) select MEMBERS — the explicit Bronze/Silver tier
+    // filter is the membership criterion (sentinel tiers can't match). The
+    // monthly-dues lane would wrongly drop per-application / annual-prepay
+    // members from tier-upgrade candidacy (Codex #3669 r2); rate > 0 merely
+    // narrows to rate-bearing rows for ranking, it doesn't define the lane.
+    reason: 'membership (tier) audience for upsell candidacy, not a monthly-lane selection',
+  },
+  {
     file: 'services/customer-offboarding.js',
     match: ".orWhere('monthly_rate', '>', 0)",
     context: "qb.whereNotNull('waveguard_tier')",
