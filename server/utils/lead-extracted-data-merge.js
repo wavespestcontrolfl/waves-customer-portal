@@ -30,6 +30,18 @@
  */
 
 // A payload that omits these keeps the lead's value.
+// FILL-FORWARD: a stored value survives a payload that doesn't restate it.
+//
+// An explicit null CANNOT be treated as "clear this" here, and the extraction
+// schema is why: preferred_date_time is documented as "null if not confirmed"
+// and the model emits the key on EVERY extraction. So null means "this call
+// didn't state a time", never "the caller withdrew the one they gave" — the
+// two are indistinguishable in the payload. Honouring null as a clear would
+// wipe a stored appointment preference on every follow-up that didn't repeat
+// it, which is the exact degradation this module exists to prevent (the
+// incident's own thin follow-up carried preferred_date_time: null).
+// Clearing an obsolete preference needs a real withdrawal signal in the
+// extraction schema; it is not recoverable from the absence of a value.
 const FILL_FORWARD_KEYS = ['preferred_date_time'];
 // additional_properties is a COLLECTION, so latest-wins is data loss of the
 // same kind this module exists to stop: a later call that mentions one

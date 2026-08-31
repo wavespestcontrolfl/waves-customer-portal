@@ -431,6 +431,26 @@ describe('units are part of a property\'s identity', () => {
   });
 });
 
+describe('a null from a follow-up is silence, not a withdrawal', () => {
+  const RK = RECOMPUTED;
+
+  it('a follow-up that does not restate the time keeps the stored one', () => {
+    // The schema documents preferred_date_time as "null if not confirmed" and
+    // the model emits the key on EVERY extraction, so null cannot be told
+    // apart from "the caller withdrew it". Honouring it as a clear would wipe
+    // the appointment preference on every callback.
+    const afterCall1 = mergeLeadExtractedData({}, { preferred_date_time: '2026-09-02T14:00' }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, { ...THIN_FOLLOW_UP, preferred_date_time: null }, RK);
+    expect(afterCall2.preferred_date_time).toBe('2026-09-02T14:00');
+  });
+
+  it('a follow-up that states a NEW time replaces the old one', () => {
+    const afterCall1 = mergeLeadExtractedData({}, { preferred_date_time: '2026-09-02T14:00' }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, { preferred_date_time: '2026-09-03T09:00' }, RK);
+    expect(afterCall2.preferred_date_time).toBe('2026-09-03T09:00');
+  });
+});
+
 describe('concerns are compared whole, never as substrings', () => {
   const RK = RECOMPUTED;
 
