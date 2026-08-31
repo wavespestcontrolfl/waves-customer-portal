@@ -114,6 +114,8 @@ jest.mock('../models/db', () => {
       orWhere(a, op, val) { disjuncts.push(current); current = [asCond(a, op, val)]; return group; },
       whereNull(col) { current.push((r) => r[col] == null); return group; },
       whereNotNull(col) { current.push((r) => r[col] != null); return group; },
+      whereIn(col, vals) { current.push((r) => vals.includes(r[col])); return group; },
+      whereNotIn(col, vals) { current.push((r) => !vals.includes(r[col])); return group; },
       whereRaw(sql, bindings) {
         const distinct = String(sql).match(/\(?\s*([a-z_]+)\s+IS\s+DISTINCT\s+FROM\s+\?/i);
         if (!distinct) throw new Error(`fake db group: unsupported whereRaw ${sql}`);
@@ -764,7 +766,7 @@ describe('processCancellationRequest', () => {
     db.__tables.customer_interactions = [];
     mockNotifyAdmin.mockClear();
 
-    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT2', keepThrough: '2099-02-28' });
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT2', keepThrough: '2099-02-28', keepVisitIds: ['tv1'] });
 
     expect(result.churned).toBe(true);
     const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
@@ -857,7 +859,7 @@ describe('processCancellationRequest', () => {
         { id: 'after', customer_id: 'c1', status: 'pending', scheduled_date: '2099-03-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice' },
         { id: 'rebook', customer_id: 'c1', status: 'rescheduled', scheduled_date: PAST, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
       ];
-      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', keepThrough: '2099-02-28' });
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', keepThrough: '2099-02-28', keepVisitIds: ['in1', 'edge'] });
       const byId = Object.fromEntries(db.__tables.scheduled_services.map((r) => [r.id, r]));
       expect(byId.in1.status).toBe('confirmed');
       expect(byId.edge.status).toBe('pending');
@@ -880,11 +882,24 @@ describe('processCancellationRequest', () => {
         // visit must not stay on the calendar deliverable for free.
         { id: 'lawn', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-15', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
       ];
-      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r7', requestId: 'r7', keepThrough: '2099-02-28' });
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r7', requestId: 'r7', keepThrough: '2099-02-28', keepVisitIds: ['pest'] });
       const byId = Object.fromEntries(db.__tables.scheduled_services.map((r) => [r.id, r]));
       expect(byId.pest.status).toBe('confirmed');
       expect(byId.lawn.status).toBe('cancelled');
       expect(result).toEqual(expect.objectContaining({ ok: true, cancelledCount: 1, keptThrough: '2099-02-28' }));
+    });
+
+    test('keepThrough WITHOUT the covered-row set refuses before any write — a stamp or audit-linked term id is not coverage', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        // A refunded prior term RETAINS annual_prepay_term_id for audit with
+        // its stamps cleared — this row must never ride out a new window free.
+        { id: 'dead', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-10', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true, annual_prepay_term_id: 'term-DEAD' },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r8', requestId: 'r8', keepThrough: '2099-02-28' });
+      expect(result).toEqual(expect.objectContaining({ ok: false, churned: false, cancelledCount: 0, errors: ['keep_through_missing_coverage'] }));
+      expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
+      expect(db.__tables.customers[0].active).toBe(true);
     });
 
     test('a past keepThrough is ignored — the sweep never widens', async () => {

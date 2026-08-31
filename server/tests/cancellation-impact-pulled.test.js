@@ -80,7 +80,9 @@ test('keep-through boundary keeps COVERED dated visits on or before it out of th
     // Undated/rescheduled rows have no date to keep them — always pulled.
     { id: 'v5', family: 'pest_control', status: 'rescheduled', scheduled_date: '2001-01-01', track_state: null },
   ];
-  const impact = await buildCancellationImpact('cust-1', [], { after: '2099-02-15' });
+  // Coverage = the LIVE term's canonical covered-row set (keepVisitIds),
+  // not the row's stamp/term-id — a dead refunded term keeps its audit link.
+  const impact = await buildCancellationImpact('cust-1', [], { after: '2099-02-15', keepVisitIds: ['v1', 'v2', 'v3'] });
   expect(impact.visitsCancelled).toBe(3);
   expect(impact.nextVisitCancelled).toBe('2001-01-01');
   // Stable identities for the approved-facts fingerprint, sorted.

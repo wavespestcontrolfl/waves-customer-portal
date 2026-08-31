@@ -218,30 +218,65 @@ async function computePrepayRefund(term) {
   return { ...base, completedVisits, remainingVisits, amount, needsManualCalc: false };
 }
 
+// The LIVE term's canonical covered visit ids (coverageRowsForTerm — the
+// renewal module's own identity). A stamp/term-id classifier is NOT
+// coverage: a refunded prior term deliberately RETAINS
+// annual_prepay_term_id for audit while its stamps are cleared, so a
+// customer who later buys another term would have dead-term rows read as
+// covered. An unresolvable set REFUSES the end-of-coverage cancel — never
+// guess which visits are paid for (fail closed, before any write).
+async function liveCoveredKeepIds(term, customerId) {
+  let rows;
+  try {
+    const { coverageRowsForTerm } = require('./annual-prepay-renewals');
+    rows = await coverageRowsForTerm({ ...term, customer_id: customerId });
+  } catch (err) {
+    logger.error(`[admin-cancellation] covered-row set failed for term ${term.id}: ${err.message}`);
+    throw new CancelPlanError(409, 'coverage_rows_unavailable',
+      'Could not resolve which visits the prepay term covers. Nothing was cancelled — try again.');
+  }
+  return (Array.isArray(rows) ? rows : []).map((r) => r.id);
+}
+
 // A scoped cancel must never pull PREPAID visits: resolveLiveTerm only
 // guards whole-account cancels, so a scope that selects the covered family
 // would cancel already-paid visits while the term stays live — no decision,
-// no refund. The term cannot be mapped to a family safely, but the covered
-// ROWS can (stamp / term id — the canonical coverage identity): refuse when
-// any live-covered upcoming visit falls inside the scope (fail closed).
+// no refund. The term cannot be mapped to a family safely, but its covered
+// ROWS can (coverageRowsForTerm): refuse when any live term's upcoming
+// covered visit falls inside the scope (fail closed — a failed covered-row
+// read also refuses).
 async function scopedCoverageConflict(customerId, scope) {
-  const { coveredTermsAsOf, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
+  const { coveredTermsAsOf, coverageRowsForTerm } = require('./annual-prepay-renewals');
   const terms = await coveredTermsAsOf(db, etDateString())
     .where('t.customer_id', customerId)
-    .select('t.id');
+    .select('t.id', 't.term_start', 't.term_end', 't.coverage_service_type', 't.coverage_visit_count');
   if (!terms || !terms.length) return false;
   const { familyOfServiceRow } = require('./cancellation-processor');
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
-  const rows = await db('scheduled_services as s')
-    .leftJoin('services as sv', 's.service_id', 'sv.id')
-    .where('s.customer_id', customerId)
-    .whereIn('s.status', CANCELLABLE_STATUSES)
-    .where('s.scheduled_date', '>=', etDateString())
-    .where(function coveredIdentity() {
-      this.where('s.prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD).orWhereNotNull('s.annual_prepay_term_id');
-    })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
-  return (rows || []).some((r) => scope.includes(familyOfServiceRow(r)));
+  const today = etDateString();
+  for (const t of terms) {
+    let covered;
+    try {
+      covered = await coverageRowsForTerm({ ...t, customer_id: customerId });
+    } catch (err) {
+      logger.error(`[admin-cancellation] scoped coverage check failed for term ${t.id}: ${err.message}`);
+      return true; // unknown coverage = refuse the scoped cancel
+    }
+    const upcoming = (Array.isArray(covered) ? covered : []).filter((r) =>
+      CANCELLABLE_STATUSES.includes(String(r.status))
+      && (String(r.scheduled_date).slice(0, 10) >= today || r.status === 'rescheduled'));
+    if (!upcoming.length) continue;
+    // Catalog identity improves family classification when present.
+    const serviceIds = [...new Set(upcoming.map((r) => r.service_id).filter(Boolean))];
+    const services = serviceIds.length
+      ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'service_name')
+      : [];
+    const byId = new Map(services.map((s) => [s.id, s]));
+    if (upcoming.some((r) => scope.includes(familyOfServiceRow({ ...r, ...(byId.get(r.service_id) || {}) })))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Resolve scope against ownership. Returns { wholeAccount, scope, plan,
@@ -375,11 +410,13 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   const term = await resolveLiveTerm(customerId, wholeAccount);
   const prepayPlan = resolvePrepay(input, term, wholeAccount);
   // The preview's "visits pulled" must count what pressing the button pulls:
-  // an end-of-coverage cancel KEEPS dated visits through term_end (the
-  // processor's keepThrough floor), so the impact math gets the same boundary.
+  // an end-of-coverage cancel KEEPS the live term's covered visits through
+  // term_end (the processor's keepThrough floor + covered-id set), so the
+  // impact math gets the same boundary and the same set.
+  const keepVisitIds = prepayPlan.keepThrough ? await liveCoveredKeepIds(term, customerId) : null;
   const [eligible, impact] = await Promise.all([
     hasCancellableWork(customerId),
-    buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough }),
+    buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds }),
   ]);
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
@@ -482,6 +519,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
+  // The LIVE term's covered visit ids — resolved BEFORE any write; an
+  // unresolvable set refuses the commit (liveCoveredKeepIds throws 409).
+  const keepVisitIds = prepayPlan.keepThrough ? await liveCoveredKeepIds(term, customerId) : null;
 
   // Idempotency latch: an end-of-coverage cancel leaves the account with
   // cancellable work (the kept covered visits), so a retry or double-click
@@ -548,7 +588,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   const suppliedFingerprint = raw.previewFingerprint == null || raw.previewFingerprint === ''
     ? null : String(raw.previewFingerprint);
   if (suppliedFingerprint) {
-    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough });
+    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds });
     const liveFingerprint = cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, scope, wholeAccount });
     if (liveFingerprint !== suppliedFingerprint) {
       throw new CancelPlanError(409, 'preview_changed',
@@ -595,6 +635,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       families: wholeAccount ? [] : scope,
       actor: { type: actorType, userId: actorUserId },
       keepThrough: prepayPlan.keepThrough,
+      keepVisitIds,
       waiveLateFee: input.waiveLateFee,
     });
   } catch (err) {

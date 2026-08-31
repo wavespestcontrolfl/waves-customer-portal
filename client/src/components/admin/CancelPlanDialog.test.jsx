@@ -122,6 +122,28 @@ describe('CancelPlanDialog', () => {
     expect(screen.queryByRole('button', { name: /^Cancel the whole plan/ })).not.toBeInTheDocument();
   });
 
+  it('a processed run with follow-up errors is "Partially done", never "Done."', async () => {
+    stubFetch((path) => {
+      if (path.endsWith('/cancel-plan/preview')) return response(previewBody({}));
+      if (path.endsWith('/cancel-plan')) {
+        // The server intentionally leaves processed=true when a follow-up
+        // step (case write, prepay decision, refund task) failed — that run
+        // still needs the office.
+        return response({
+          success: true, requestId: 'req-e', processed: true, visitsPulled: 1, scope: [], remaining: [], tierBefore: 'Silver', tierAfter: null,
+          effectiveDate: '2026-08-31', lateFeeWaived: false, confirmationRequested: false, confirmationChannels: [], errors: ['refund_task_failed'],
+        });
+      }
+      return response({});
+    });
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn().mockResolvedValue(null)} />);
+    await screen.findByText('the whole plan');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel the whole plan' }));
+    await screen.findByText('Partially done — the office review alert has the details.');
+    expect(screen.queryByText('Done.')).not.toBeInTheDocument();
+    expect(screen.getByText(/Needs review: refund_task_failed/)).toBeInTheDocument();
+  });
+
   it('shows only the confirmation channels that can actually send', async () => {
     stubFetch((path) => {
       if (path.endsWith('/cancel-plan/preview')) {

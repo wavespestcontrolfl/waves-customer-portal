@@ -333,11 +333,14 @@ async function processCancellationRequest({
   //                while recurrence still stops. Date-exempt 'rescheduled'
   //                rebook intents are still pulled — an open rebook could
   //                land past the paid window.
+  //   keepVisitIds REQUIRED with keepThrough: the LIVE term's canonical
+  //                covered visit ids (coverageRowsForTerm) — only these
+  //                ride out the window; missing set = abort, fail closed.
   //   waiveLateFee scheduled-visit fee waived on every pulled visit — the
   //                card-hold rail releases instead of charging and the
   //                appointment-card rail closes 'waived'; recorded on the
   //                result and the timeline note.
-  actor = null, keepThrough = null, waiveLateFee = false,
+  actor = null, keepThrough = null, keepVisitIds = null, waiveLateFee = false,
 } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
@@ -354,11 +357,21 @@ async function processCancellationRequest({
   const sweepAfter = keepThrough && /^\d{4}-\d{2}-\d{2}$/.test(String(keepThrough)) && String(keepThrough) >= today
     ? String(keepThrough)
     : null;
-  // Coverage identity for the keep-through exemption (lazy: the renewals
-  // module is heavy and only a keep-through sweep needs the constant).
-  const keepThroughPrepaidMethod = sweepAfter
-    ? require('./annual-prepay-renewals').ANNUAL_PREPAY_PREPAID_METHOD
-    : null;
+  // keepVisitIds = the LIVE term's canonical covered rows (the caller reads
+  // them from coverageRowsForTerm). A stamp/term-id classifier is NOT the
+  // coverage identity: a refunded prior term deliberately RETAINS
+  // annual_prepay_term_id for audit while its stamps are cleared, so old
+  // dead-term rows would ride out a NEW term's window deliverable for free.
+  // A keep-through sweep with no covered-row set is unverifiable — abort
+  // before any mutation (fail closed) rather than guess in either direction.
+  if (sweepAfter && !Array.isArray(keepVisitIds)) {
+    logger.error(`[cancellation-processor] keepThrough for ${customerId} without keepVisitIds — refusing to sweep`);
+    return {
+      cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false,
+      errors: ['keep_through_missing_coverage'], keptThrough: sweepAfter, lateFeeWaived: false,
+    };
+  }
+  const keepIds = sweepAfter ? keepVisitIds.map(String) : null;
   const lateFeeWaived = waiveLateFee === true;
   // The waiver is REPORTED only after every applicable fee rail confirms
   // release: a lost race or ambiguous outcome ({released:false}, with or
@@ -644,19 +657,18 @@ async function processCancellationRequest({
         // rows keep their ORIGINAL — often past — date until SmartRebooker
         // actions them back onto the calendar, so an open rebook intent is
         // pulled regardless of date (else a churned customer could be rebooked).
-        // keepThrough (C3, end of paid coverage): ONLY rows the prepaid term
-        // covers (stamp or term id — the canonical coverage identity) ride
-        // out the paid window. A mixed account's uncovered rows (monthly
-        // lawn beside prepaid pest) are pulled NOW like any plain cancel:
-        // billing stops immediately, so uncovered work must never stay on
-        // the calendar deliverable for free.
+        // keepThrough (C3, end of paid coverage): ONLY the LIVE term's
+        // canonical covered rows (keepIds, from coverageRowsForTerm) ride
+        // out the paid window. Everything else — a mixed account's monthly
+        // services, or a DEAD refunded term's rows that keep their audit
+        // link — is pulled NOW like any plain cancel: billing stops
+        // immediately, so uncovered work must never stay on the calendar
+        // deliverable for free.
         if (sweepAfter) {
           this.where(function keptOrPastWindow() {
             this.where('scheduled_date', '>', sweepAfter)
               .orWhere(function uncoveredUpcoming() {
-                this.where('scheduled_date', '>=', today)
-                  .whereNull('annual_prepay_term_id')
-                  .whereRaw('(prepaid_method IS DISTINCT FROM ?)', [keepThroughPrepaidMethod]);
+                this.where('scheduled_date', '>=', today).whereNotIn('id', keepIds);
               });
           });
         } else {

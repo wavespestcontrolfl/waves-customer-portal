@@ -353,7 +353,11 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
         {result && (
           <div>
             <div className="mb-2 font-medium">
-              {result.processed ? "Done." : "Partially done — the office review alert has the details."}
+              {/* "Done" requires a clean run: the server leaves processed=true
+                  when a follow-up step (case write, prepay decision, refund
+                  task) failed and reports it in errors — that run still needs
+                  the office. */}
+              {result.processed && !(result.errors?.length) ? "Done." : "Partially done — the office review alert has the details."}
             </div>
             <div>
               <Fact label="Cancelled">{result.scope?.length ? result.scope.join(", ") : "whole account"}</Fact>

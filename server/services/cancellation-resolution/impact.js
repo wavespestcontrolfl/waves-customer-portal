@@ -20,7 +20,7 @@ const { familyLabel } = require('./templates');
 
 const labelOf = (key) => familyLabel(key) || String(key || '').replace(/_/g, ' ');
 
-async function buildCancellationImpact(customerId, requestedFamilies = [], { after = null } = {}) {
+async function buildCancellationImpact(customerId, requestedFamilies = [], { after = null, keepVisitIds = null } = {}) {
   const { planScopedWindDown, familyOfServiceRow } = require('../cancellation-processor');
   const { inferTierFromServiceCount } = require('../self-booking-plan-sync');
 
@@ -43,9 +43,11 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     })
     .select('s.*', 'sv.service_key', 'sv.service_name');
 
-  // Coverage identity for the keep-through exemption — must mirror the
-  // processor's sweep exactly (lazy: the renewals module is heavy).
-  const prepaidMethod = after ? require('../annual-prepay-renewals').ANNUAL_PREPAY_PREPAID_METHOD : null;
+  // Coverage identity for the keep-through exemption — the LIVE term's
+  // canonical covered rows (keepVisitIds, from coverageRowsForTerm), exactly
+  // like the processor's sweep. A stamp/term-id classifier is NOT coverage:
+  // a refunded prior term keeps its audit link with the stamps cleared.
+  const keepIds = after && Array.isArray(keepVisitIds) ? new Set(keepVisitIds.map(String)) : null;
   const perFamily = new Map();
   for (const row of rows) {
     const family = familyOfServiceRow(row);
@@ -57,11 +59,12 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     if (upcoming) {
       slot.upcoming += 1;
       if (!slot.nextVisitDate || d < slot.nextVisitDate) slot.nextVisitDate = d;
-      // Keep-through boundary (C3 end-of-coverage): only rows the prepaid
-      // term COVERS (stamp or term id — same identity as the processor's
-      // sweep) are KEPT through the boundary; a mixed account's uncovered
-      // rows are pulled now. An undated/rescheduled row has no date to keep.
-      const covered = (prepaidMethod != null && row.prepaid_method === prepaidMethod) || row.annual_prepay_term_id != null;
+      // Keep-through boundary (C3 end-of-coverage): only the LIVE term's
+      // covered rows (keepIds — same set the processor keeps) are KEPT
+      // through the boundary; a mixed account's uncovered rows and a dead
+      // refunded term's audit-linked rows are pulled now. An
+      // undated/rescheduled row has no date to keep.
+      const covered = !!keepIds && keepIds.has(String(row.id));
       const kept = after && covered && row.status !== 'rescheduled' && d <= String(after);
       // Live/done on the track layer: the processor's sweep excludes rows
       // whose track_state is complete / en_route / on_property (null-safe —

@@ -297,7 +297,9 @@ describe('POST /:id/cancel-plan/preview', () => {
     // The "visits pulled" preview counts only what the button pulls — the
     // impact math gets the processor's keep-through boundary.
     const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
-    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28' });
+    // The preview hands the impact math the LIVE term's canonical covered
+    // rows (coverageRowsForTerm) — the same set the processor will keep.
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28', keepVisitIds: ['s1', 's3'] });
     expect(body.effectiveOn).toBe('2027-02-28');
     expect(body.prepay).toEqual(expect.objectContaining({ termId: 'term-1', termEnd: '2027-02-28', disposition: 'end_at_term', refund: null }));
 
@@ -627,7 +629,10 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a scoped cancel that would pull COVERED visits is refused — 409 scoped_covers_prepaid, nothing written', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-01-05', prepaid_method: 'annual_prepay_invoice' },
+        // Inside the live term's window AND upcoming — coverageRowsForTerm
+        // (the canonical identity) reports it covered; a stamp alone no
+        // longer does.
+        { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2026-10-05', prepaid_method: 'annual_prepay_invoice' },
       ];
       mockPlan.mockResolvedValue({ ok: true, inScope: ['pest_control'], remaining: ['lawn_care'], tierBefore: 'Silver', tierAfter: 'Bronze' });
       const preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['pest_control'] })).json();
@@ -641,7 +646,8 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a scoped cancel OUTSIDE the covered family still runs (the covered rows are provably out of scope)', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-01-05', prepaid_method: 'annual_prepay_invoice' },
+        // Covered (in-window, upcoming) but out of the selected scope.
+        { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2026-10-05', prepaid_method: 'annual_prepay_invoice' },
       ];
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'] });
       const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] });
