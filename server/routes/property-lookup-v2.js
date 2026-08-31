@@ -2746,6 +2746,14 @@ function trustedUnitCount(rc) {
 // every consumer took max(correction, parcel aggregate)). Returns the
 // verified count, or null when the field's evidence is not tech-verified.
 function verifiedUnitCountOf(rc) {
+  // An AGGREGATED parcel keeps aggregate scope (codex P1 r6): the stacked
+  // association shape is whole-association by construction — its dimensions
+  // ARE the aggregate living area/lot — so a verified "1" (true for one
+  // unit's own record) must not reclassify it residential while the profile
+  // still carries association-wide sqft: that is the condo-aggregation
+  // failure this pipeline exists to prevent. Verified counts correct
+  // RECORD-scoped counts on non-aggregated records only.
+  if (rc?._parcel?.aggregated === true) return null;
   const entry = rc?._fieldEvidence?.unitCount;
   const ev = Array.isArray(entry) ? entry[0] : entry;
   if (String(ev?.sourceType || '').toLowerCase() !== 'verified') return null;

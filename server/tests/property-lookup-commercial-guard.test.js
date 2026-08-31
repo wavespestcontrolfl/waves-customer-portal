@@ -294,6 +294,17 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
     }), {})).toBe('COMMERCIAL');
   });
 
+  test('a verified 1 does NOT reclassify an AGGREGATED association parcel (codex P1 r6)', () => {
+    // The stacked-association shape is whole-association by construction —
+    // its dimensions are the aggregate living area/lot, so a unit-scoped
+    // verified "1" must not price one resident against association sqft.
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Manatee', residentialUnits: 36, aggregated: true },
+      _fieldEvidence: { unitCount: { value: 1, sourceType: 'verified', fieldVerify: false } },
+    }), {})).toBe('COMMERCIAL');
+  });
+
   test('a county Multifamily with NO unit data keeps the conservative COMMERCIAL vote', () => {
     expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
   });

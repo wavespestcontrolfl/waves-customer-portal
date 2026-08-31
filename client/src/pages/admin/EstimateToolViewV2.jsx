@@ -3303,6 +3303,13 @@ export default function EstimateToolViewV2({
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setUnitSaveState("saved");
+      // The current quote must not keep pricing off the OLD count's
+      // classification/dimensions (pre-push codex P1 r6) — re-run the
+      // lookup so the rebuilt profile (verified count folded in
+      // server-side) replaces the stale one. doLookup is a hoisted
+      // component-scope function; a refresh failure leaves the saved
+      // override intact and the operator can re-run Lookup manually.
+      try { await doLookup(); } catch { /* override saved; manual re-lookup */ }
     } catch {
       setUnitSaveState("error");
     }
