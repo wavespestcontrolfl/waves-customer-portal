@@ -328,6 +328,17 @@ function compactLineItem(item = {}) {
     price: item.priceAfterDiscount ?? item.price ?? null,
     total: item.totalAfterDiscount ?? item.total ?? null,
     perApp: item.perApp ?? null,
+    // Cadence + COGS inputs for the send-time pricing audit (codex
+    // pre-push P1, same contract as the quote-wizard mirror): without the
+    // numeric count a seasonal mosquito draft audits at the 12-visit
+    // default, and without program/addOns its station/dunk COGS is lost.
+    visitsPerYear: item.visitsPerYear ?? null,
+    visits: item.visits ?? null,
+    perVisit: item.perVisit ?? null,
+    appsPerYear: item.appsPerYear ?? null,
+    tier: item.tier ?? null,
+    program: item.program ?? item.selectedProgram ?? item.tier ?? null,
+    addOns: item.addOns ?? null,
     frequency: item.frequency ?? item.visitsPerYear ?? null,
     // Recurring foam carries an operator-chosen cadence + tier labor duration;
     // keep them so accept/render/booking present the sold cadence and reserve a

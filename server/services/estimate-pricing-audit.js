@@ -272,7 +272,12 @@ function quoteProvenanceFrom(estimate, data, result) {
   // shapes via the win/loss classifier, markerless engineInputs as
   // fallback for click-mints/v1) supplies the provenance flags.
   const lookupProfile = profileFromEstimateData(data) || data?.engineInputs || data?.inputs || {};
-  const profile = data?.engineInput ?? lookupProfile;
+  // Automated lead drafts persist their priced input only at the nested
+  // automation path — without it the property-provenance block froze all
+  // nulls for auto-sent estimates (codex pre-push P1).
+  const profile = data?.engineInput
+    ?? data?.automation?.draftEstimateAutomation?.engineInput
+    ?? lookupProfile;
   const recurring = result?.recurring || {};
   const bundle = data?.sendSnapshot?.pricingBundle || null;
   // Missing is null, never 0 — Number(null) is 0 and would fabricate a
