@@ -389,10 +389,11 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[admin-estimates] send pricing snapshot failed for estimate ${estimate.id}: ${err.message}`);
-    // The spread above carried the PRIOR send's bundle forward — a failed
-    // rebuild must not re-stamp stale customer-shown pricing under a new
-    // renderedAt (codex pre-push P1).
-    delete sendSnapshot.pricingBundle;
+    // The spread above carries the PRIOR send's bundle forward. Keep it:
+    // the public reader fast-paths sendSnapshot.pricingBundle, and
+    // dropping it here would flip a still-live customer link from the
+    // delivered quote to live pricing (GH codex P1). The AUDIT side never
+    // promotes a snapshot carrying pricingBundleError (send path checks).
     sendSnapshot.pricingBundleError = err.message;
   }
 

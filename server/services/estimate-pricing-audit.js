@@ -453,6 +453,11 @@ function normalizeRecurringLines(result) {
         ? Math.round((1 - priceNet / grossAnnual) * 1000) / 1000
         : 0,
       priceSource: 'saved_estimate.result.recurring.services',
+      // The mapper persists the visit count on every recurring row —
+      // promote it onto the line so visitsFor costs the sold cadence
+      // (bimonthly foam = 6) instead of the per-service default when no
+      // raw engine twin enriches the row (GH codex P1).
+      ...(structuredVisits(svc) ? { visitsPerYear: structuredVisits(svc) } : {}),
     };
     if (serviceKey === 'mosquito') {
       const mqMeta = result?.results?.mqMeta || {};

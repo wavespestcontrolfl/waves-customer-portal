@@ -617,6 +617,16 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.find((l) => /flea/i.test(l.label)).serviceKey).toBe('flea');
   });
 
+  test('mapped recurring rows cost their persisted visit count, not the per-service default', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-rec-visits', status: 'sent', monthly_total: '92.33', annual_total: '1108.00', onetime_total: null,
+      estimate_data: {
+        result: { recurring: { services: [{ name: 'Recurring Termite Foam Service', mo: 92.33, annual: 1108, visitsPerYear: 6 }] } },
+      },
+    });
+    expect(audit.lines.find((l) => /foam/i.test(l.label)).cogs.visitsPerYear).toBe(6);
+  });
+
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-xfer', status: 'sent', monthly_total: '400.00', annual_total: '4800.00', onetime_total: null,
