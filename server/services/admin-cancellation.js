@@ -117,7 +117,8 @@ async function resolveLiveTerm(customerId, wholeAccount) {
     .where('t.customer_id', customerId)
     .orderBy('t.term_end', 'desc')
     .select('t.id', 't.term_start', 't.term_end', 't.plan_label', 't.prepay_amount',
-      't.coverage_visit_count', 't.coverage_service_type', 't.status', 't.renewal_decision');
+      't.coverage_visit_count', 't.coverage_service_type', 't.status', 't.renewal_decision',
+      't.prepay_invoice_id');
   if (!terms || !terms.length) return null;
   if (terms.length > 1) {
     throw new CancelPlanError(409, 'multiple_prepay_terms',
@@ -136,6 +137,18 @@ async function resolveLiveTerm(customerId, wholeAccount) {
 }
 
 const dateOnly = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
+
+// coverageRowsForTerm returns [] BOTH for "no covered rows" and for a term
+// whose coverage identity is unreadable (coverage_service_type /
+// coverage_visit_count are nullable legacy columns) — the two must never be
+// conflated on this lane: an unresolvable identity read as a valid EMPTY
+// keep set pulls paid visits NOW while the confirmation says they ride out,
+// and a zero completed-visit count overstates the refund. Mirrors the
+// module's own guard (it bails to [] when any of these is missing).
+const termCoverageResolvable = (term) => !!(term
+  && String(term.coverage_service_type || '').trim()
+  && Number.parseInt(term.coverage_visit_count, 10) > 0
+  && term.term_start && term.term_end);
 
 // The facts the operator approves on the preview (visit count, refund
 // dollars, term, boundary, scope) — fingerprinted so the commit can refuse
@@ -203,6 +216,40 @@ async function computePrepayRefund(term) {
   };
   if (!(base.prepaidAmount > 0)) return { ...base, reason: 'prepay_amount_missing' };
   if (!base.includedVisits) return { ...base, reason: 'coverage_visit_count_missing' };
+  // Unreadable coverage identity ⇒ coverageRowsForTerm returns [] and the
+  // completed count reads zero — overstating remainingVisits. Manual, never
+  // an invented full refund.
+  if (!termCoverageResolvable(term)) return { ...base, reason: 'coverage_identity_missing' };
+  // Prior refund activity on the prepay payment: Stripe PARTIAL refunds
+  // leave the invoice 'paid' — the refund state lives on the payment rows
+  // (same signal move 9's reconciler reads). The C-6 formula assumes the
+  // full prepay_amount was collected and kept, so an earlier refund makes
+  // "prepaid ÷ included × remaining" over-promise (combined refunds could
+  // exceed what the customer paid). Allocating a partial refund is an
+  // operator judgment — record manual; a failed check is uncertain money,
+  // also manual (fail closed).
+  if (term.prepay_invoice_id) {
+    try {
+      const invoice = await db('invoices').where({ id: term.prepay_invoice_id })
+        .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
+      const refundActivity = invoice ? await db('payments')
+        .where(function linkedToInvoice() {
+          this.whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [invoice.id]);
+          if (invoice.stripe_payment_intent_id) this.orWhere('stripe_payment_intent_id', invoice.stripe_payment_intent_id);
+          if (invoice.stripe_charge_id) this.orWhere('stripe_charge_id', invoice.stripe_charge_id);
+        })
+        .where(function refundSignal() {
+          this.where('status', 'refunded')
+            .orWhereNotNull('refund_status')
+            .orWhere('refund_amount', '>', 0);
+        })
+        .first('id') : null;
+      if (refundActivity) return { ...base, reason: 'prior_refund_activity' };
+    } catch (err) {
+      logger.warn(`[admin-cancellation] prior-refund check failed for term ${term.id}: ${err.message}`);
+      return { ...base, reason: 'refund_activity_check_failed' };
+    }
+  }
   let completedRows = [];
   try {
     // Canonical coverage identity (coverageRowsForTerm — the mechanism the
@@ -236,6 +283,10 @@ async function computePrepayRefund(term) {
 // covered. An unresolvable set REFUSES the end-of-coverage cancel — never
 // guess which visits are paid for (fail closed, before any write).
 async function liveCoveredKeepIds(term, customerId) {
+  if (!termCoverageResolvable(term)) {
+    throw new CancelPlanError(409, 'prepay_coverage_unresolvable',
+      'The annual-prepay term does not carry a readable coverage identity (service type / visit count), so the visits it covers cannot be resolved. Repair the term from the invoice tools, or cancel effective now.');
+  }
   let rows;
   try {
     const { coverageRowsForTerm } = require('./annual-prepay-renewals');
@@ -265,6 +316,9 @@ async function scopedCoverageConflict(customerId, scope) {
   const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
   const today = etDateString();
   for (const t of terms) {
+    // A live term whose coverage identity cannot be read could cover ANY of
+    // the selected families — same fail-closed refusal as a failed read.
+    if (!termCoverageResolvable(t)) return true;
     let covered;
     try {
       covered = await coverageRowsForTerm({ ...t, customer_id: customerId });

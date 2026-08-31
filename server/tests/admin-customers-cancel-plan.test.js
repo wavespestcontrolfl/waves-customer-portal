@@ -133,6 +133,7 @@ function builderFor(table) {
         if (typeof a === 'function') current.push(buildGroupMatcher(a));
         else if (typeof a === 'object') Object.entries(a).forEach(([k, v]) => current.push((r) => r[col(k)] === v));
         else if (val === undefined) current.push((r) => r[col(a)] === op);
+        else if (op === '>') current.push((r) => Number(r[col(a)]) > val);
         else throw new Error(`fake db group: unsupported operator ${op}`);
         return group;
       },
@@ -144,6 +145,17 @@ function builderFor(table) {
       whereNull(c) { current.push((r) => r[col(c)] == null); return group; },
       whereNotNull(c) { current.push((r) => r[col(c)] != null); return group; },
       orWhereNotNull(c) { disjuncts.push(current); current = [(r) => r[col(c)] != null]; return group; },
+      // The prior-refund check links payments to the prepay invoice via
+      // metadata JSON (same predicate the renewals reconciler uses).
+      whereRaw(sql, bindings) {
+        if (!/metadata::jsonb\s*->>\s*'invoice_id'/.test(String(sql))) throw new Error(`fake db group: unsupported whereRaw ${sql}`);
+        const v = Array.isArray(bindings) ? bindings[0] : bindings;
+        current.push((r) => {
+          const m = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+          return m.invoice_id === v;
+        });
+        return group;
+      },
     };
     fn.call(group);
     disjuncts.push(current);
@@ -283,7 +295,7 @@ describe('POST /:id/cancel-plan/preview', () => {
   test('annual-prepay customer: end_of_coverage names term_end; now computes the C-6 refund from completed covered visits', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
       id: 'term-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
-      prepay_amount: '480.00', coverage_visit_count: 4, status: 'active',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active',
     }];
     mockState.scheduled_services = [
       { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
@@ -444,7 +456,7 @@ describe('POST /:id/cancel-plan', () => {
     beforeEach(() => {
       mockState.annual_prepay_terms = [{
         id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
-        prepay_amount: '480.00', coverage_visit_count: 4, status: 'active', renewal_decision: null,
+        prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
       }];
     });
 
@@ -741,6 +753,49 @@ describe('POST /:id/cancel-plan', () => {
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
     }));
 
+    test('a legacy term with no readable coverage identity refuses end_of_coverage (409) — an empty covered set is never trusted', () => withServer(async (baseUrl) => {
+      delete mockState.annual_prepay_terms[0].coverage_service_type;
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('prepay_coverage_unresolvable');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+      // The preview refuses the same way — the operator never sees a plan
+      // that silently pulls the paid visits.
+      const preview = await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'end_of_coverage' });
+      expect(preview.status).toBe(409);
+    }));
+
+    test('a legacy term with no readable coverage identity records the end-now refund as MANUAL — a zero completed count is never a full refund', () => withServer(async (baseUrl) => {
+      delete mockState.annual_prepay_terms[0].coverage_service_type;
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+      ];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.refund).toEqual(expect.objectContaining({ amount: null, needsManualCalc: true, reason: 'coverage_identity_missing' }));
+      const billing = NotificationService.notifyAdmin.mock.calls.find((c) => c[0] === 'billing');
+      expect(billing[2]).toContain('manual calculation');
+    }));
+
+    test('prior refund activity on the prepay payment records the refund as MANUAL — combined refunds must never exceed what was paid', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].prepay_invoice_id = 'inv-1';
+      mockState.invoices = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', stripe_charge_id: null }];
+      mockState.payments = [{ id: 'pay-1', status: 'succeeded', refund_status: 'partial', refund_amount: '100.00', metadata: { invoice_id: 'inv-1' } }];
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+      ];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.refund).toEqual(expect.objectContaining({ amount: null, needsManualCalc: true, reason: 'prior_refund_activity' }));
+
+      // No refund activity on the linked payment → the C-6 math stands.
+      mockState.payments = [{ id: 'pay-1', status: 'succeeded', refund_status: null, refund_amount: null, metadata: { invoice_id: 'inv-1' } }];
+      mockState.annual_prepay_terms[0].renewal_decision = null;
+      mockState.cancellation_cases = [];
+      mockRecordDecision.mockClear();
+      const clean = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(clean.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false }));
+    }));
+
     test('a scoped cancel that would pull COVERED visits is refused — 409 scoped_covers_prepaid, nothing written', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
         // Inside the live term's window AND upcoming — coverageRowsForTerm
@@ -836,7 +891,7 @@ describe('POST /:id/cancel-plan', () => {
   test('a failed processor run never touches the prepaid term or raises the refund task', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
       id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
-      prepay_amount: '480.00', coverage_visit_count: 4, status: 'active', renewal_decision: null,
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
     }];
     mockProcess.mockRejectedValueOnce(new Error('sweep down'));
     const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
