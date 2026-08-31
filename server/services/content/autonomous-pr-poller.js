@@ -329,7 +329,7 @@ async function headBlogFileContent(run, pr, gh) {
 // closed). The approval is BOUND to the reviewed draft: every affiliate
 // product id on the head must be one the approved draft_payload body
 // referenced, so a branch push after approval cannot add products.
-function affiliateBeltVerdict(run, head) {
+function affiliateBeltVerdict(run, head, prHeadSha = null) {
   if (head && typeof head === 'object' && head.notBlog) return { ok: true };
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
@@ -337,9 +337,18 @@ function affiliateBeltVerdict(run, head) {
   if (!run?.trust_build_approved_by) {
     return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
   }
+  const dp = parseJsonObject(run.draft_payload);
+  // The approval is bound to the exact COMMIT the approved publish created
+  // (draft_payload.trust_build_approved_head_sha, same binding the named-
+  // competitor merge gate uses): any later push needs a fresh sign-off.
+  // Absent SHA fails closed.
+  const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+  if (!approvedSha || !prHeadSha || approvedSha !== String(prHeadSha).toLowerCase()) {
+    return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — re-approve the current head` };
+  }
   let ids;
   try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
-  const approved = new Set(ids(parseJsonObject(run.draft_payload)?.body || ''));
+  const approved = new Set(ids(dp?.body || ''));
   const extra = ids(content).filter((id) => !approved.has(id));
   if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
   return { ok: true };
@@ -1469,7 +1478,7 @@ async function maybeAutoMerge(run, pr) {
         // 3.8a Affiliate belt — see recheckAffiliateApproval. Withheld (not
         //      parked): the fix is the owner's approval, which the next tick
         //      then honors.
-        const aff = affiliateBeltVerdict(run, topic.content);
+        const aff = affiliateBeltVerdict(run, topic.content, pr.head?.sha);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
           withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
@@ -1504,7 +1513,7 @@ async function maybeAutoMerge(run, pr) {
       // refresh that PRESERVES affiliate links also parks at affiliate_review
       // (every affiliate-bearing draft does during the pilot), so the same
       // approval stamp is required before auto-merge (Codex PR3 r3 P1).
-      const aff = affiliateBeltVerdict(run, await headBlogFileContent(run, pr, gh));
+      const aff = affiliateBeltVerdict(run, await headBlogFileContent(run, pr, gh), pr.head?.sha);
       if (!aff.ok) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
         return { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };

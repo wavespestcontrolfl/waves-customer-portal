@@ -7,7 +7,29 @@
 // does not match the recorded upstream-checksum.txt.
 
 import { z } from 'zod';
-import { AFFILIATE_PRODUCT_IDS, getAffiliateProduct, PROTECTED_POST_TYPES as AFFILIATE_PROTECTED_POST_TYPES } from '../affiliate-registry/index.ts';
+// The registry is read as JSON (not via ../affiliate-registry/index.ts): this
+// file is VENDORED into the admin portal, where the sibling package is the
+// CommonJS index.js and only registry.json is shared at the same relative
+// path — a .ts import would leave the vendored copy unloadable.
+import affiliateRegistryJson from '../affiliate-registry/registry.json' with { type: 'json' };
+
+type AffiliateRegistryRow = {
+  product_id?: string; status?: string; risk_class?: string;
+  allowed_post_types?: string[]; allowed_placements?: string[];
+};
+const AFFILIATE_ROWS: AffiliateRegistryRow[] = Array.isArray((affiliateRegistryJson as { products?: unknown }).products)
+  ? ((affiliateRegistryJson as { products: AffiliateRegistryRow[] }).products)
+  : [];
+const AFFILIATE_PRODUCT_IDS: ReadonlySet<string> = new Set(
+  AFFILIATE_ROWS.map((r) => r?.product_id).filter((id): id is string => typeof id === 'string'),
+);
+// A duplicated id never resolves (fail closed — mirrors the registry resolver).
+function getAffiliateProduct(id: string): AffiliateRegistryRow | null {
+  const rows = AFFILIATE_ROWS.filter((r) => r?.product_id === id);
+  return rows.length === 1 ? rows[0] : null;
+}
+// Mirrors PROTECTED_POST_TYPES in ../affiliate-registry/index.ts (pinned by test).
+const AFFILIATE_PROTECTED_POST_TYPES = ['location', 'cost', 'decision', 'comparison', 'case-study'] as const;
 import { SERVICE_AREAS } from './service-areas.ts';
 
 // ─────────────────────────────────────────────────────────────
@@ -327,9 +349,11 @@ export const componentPropSchemas = {
     headline: z.string().optional(),
     description: z.string().optional(),
     ctaLabel: z.string().optional(),
-    ctaHref: z.string().optional(),
+    // Rendered as an anchor href: root-relative path or https URL only —
+    // never an executable scheme (javascript:, data:, vbscript:).
+    ctaHref: z.string().regex(/^(?:\/(?!\/)[^\s]*|https:\/\/[^\s]+)$/, 'ctaHref must be a root-relative path or an https URL').optional(),
     phone: z.string().optional(),
-    tel: z.string().optional(),
+    tel: z.string().regex(/^(?:tel:)?\+?[\d\-().\s]{7,20}$/, 'tel must be a phone number (optionally tel:-prefixed)').optional(),
     eyebrow: z.string().optional(),
   }),
   BottomLineBox: z.object({
@@ -645,16 +669,29 @@ export function validateAffiliateUsage(
   const postType = frontmatter.post_type ?? '';
   if (!postType) blockers.push('affiliate posts must declare post_type (page-class eligibility cannot be verified)');
   else if ((AFFILIATE_PROTECTED_POST_TYPES as readonly string[]).includes(postType)) blockers.push(`post_type "${postType}" captures local service intent — affiliate links are never allowed on it`);
-  const idRe = /<AffiliateLink\b[^>]*\bproduct\s*=\s*["']([^"']+)["']/g;
-  let idm: RegExpExecArray | null;
+  // Each invocation's product/placement pair is checked against its row:
+  // post-type eligibility, and the row's placement allowlist (a placement
+  // the resolver would silently downgrade to a plain link is a publish
+  // blocker, not a surprise after the build).
+  const invRe = /<AffiliateLink\b([^>]*)>/g;
+  let inv: RegExpExecArray | null;
   const checked = new Set<string>();
-  while ((idm = idRe.exec(cleaned)) !== null) {
-    const id = idm[1];
-    if (checked.has(id)) continue;
-    checked.add(id);
+  while ((inv = invRe.exec(cleaned)) !== null) {
+    const attrs = inv[1];
+    const id = /\bproduct\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
+    const placement = /\bplacement\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
+    if (!id) continue;
+    const key = `${id}::${placement ?? ''}`;
+    if (checked.has(key)) continue;
+    checked.add(key);
     const row = getAffiliateProduct(id);
-    if (row && postType && row.status !== 'prohibited' && !(row.allowed_post_types ?? []).includes(postType)) {
+    if (!row) continue; // unknown ids are the prop schema's blocker
+    if (row.status === 'prohibited' || row.risk_class === 'red') { blockers.push(`affiliate product "${id}" is prohibited — remove the recommendation`); continue; }
+    if (postType && !(row.allowed_post_types ?? []).includes(postType)) {
       blockers.push(`affiliate product "${id}" is not eligible on a "${postType}" post (allowed: ${(row.allowed_post_types ?? []).join(', ') || 'none'})`);
+    }
+    if (row.allowed_placements?.length && placement && !row.allowed_placements.includes(placement)) {
+      blockers.push(`affiliate product "${id}" does not allow placement "${placement}" (allowed: ${row.allowed_placements.join(', ')})`);
     }
   }
   const domainsDeclared = (Array.isArray(frontmatter.domains) && frontmatter.domains.length > 0)

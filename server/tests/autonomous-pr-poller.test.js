@@ -266,13 +266,17 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
   });
   test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', () => {
     const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
-    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body }) };
-    expect(affiliateBeltVerdict({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body).ok).toBe(false);
-    expect(affiliateBeltVerdict(approved, body).ok).toBe(true);
-    expect(affiliateBeltVerdict(approved, { content: body }).ok).toBe(true);
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    expect(affiliateBeltVerdict({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body, 'headsha1').ok).toBe(false);
+    expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
+    expect(affiliateBeltVerdict(approved, { content: body }, 'HEADSHA1').ok).toBe(true);
+    // Bound to the exact approved head: a later push (or no SHA) fails closed.
+    expect(affiliateBeltVerdict(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/re-approve/) });
+    expect(affiliateBeltVerdict(approved, body, null).ok).toBe(false);
+    expect(affiliateBeltVerdict({ ...approved, draft_payload: JSON.stringify({ body }) }, body, 'headsha1').ok).toBe(false);
     // A product added on the branch AFTER approval is not approved.
     const extra = `${body}\n<AffiliateLink product="ant-bait" placement="alt-rec">y</AffiliateLink>`;
-    expect(affiliateBeltVerdict(approved, extra)).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
+    expect(affiliateBeltVerdict(approved, extra, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
   });
   test('non-blog refresh targets (no blog file path) are not subject to the belt', () => {
     expect(affiliateBeltVerdict({}, { notBlog: true }).ok).toBe(true);
@@ -1138,7 +1142,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     arm();
     const base = makeRun();
     const dp = JSON.parse(base.draft_payload);
-    setupDb({ pending: [makeRun({ trust_build_approved_by: 'adam', trust_build_approved_at: new Date(), draft_payload: JSON.stringify({ ...dp, body: affiliateFile.content }) })] });
+    setupDb({ pending: [makeRun({ trust_build_approved_by: 'adam', trust_build_approved_at: new Date(), draft_payload: JSON.stringify({ ...dp, body: affiliateFile.content, trust_build_approved_head_sha: 'headsha1' }) })] });
     res = await poller.pollPending();
     expect(gh.mergePr).toHaveBeenCalled();
   });
