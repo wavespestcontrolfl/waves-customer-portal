@@ -12884,49 +12884,64 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // just acknowledged. (Live read also picks up a payer-reroute
           // reversal, where gross is once again the true due.)
           let prepayFallbackAmount = annualPrepayQuotedAmount;
+          // Payer-billed invoice (pre-push Codex P1 r2): payer-billed prepay
+          // accepts are exempt from the card lane, so prepayAutoCharge can be
+          // null while the minted invoice carries payer_id — the invoice
+          // routes to the payer's AP and the homeowner must not be promised
+          // it. Read the live row; an unreadable row fails CLOSED (skip).
+          let payerBilledInvoice = false;
           try {
-            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied') : null;
-            if (dueRow) prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
-          } catch { /* keep the minted figure */ }
-          const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
-          const customerBody = await renderEditableSmsTemplate(
-            'estimate_accepted_annual_prepay',
-            {
-              first_name: firstName,
-              waveguard_tier: String(estimate.waveguard_tier).trim(),
-              amount_text: amountText,
-            },
-            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
-          );
-          if (!customerBody) {
-            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id') : null;
+            if (dueRow) {
+              prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
+              payerBilledInvoice = !!dueRow.payer_id;
+            }
+          } catch {
+            payerBilledInvoice = !!invoiceId; // routing unknown — do not text
+          }
+          if (payerBilledInvoice) {
+            logger.info(`[estimate-accept] prepay invoice for estimate ${estimate.id} is payer-billed; skipping homeowner acceptance SMS`);
           } else {
-            const sendResult = await sendCustomerMessage({
-              to: acceptSmsPhone,
-              body: customerBody,
-              channel: 'sms',
-              audience: customerId ? 'customer' : 'lead',
-              purpose: 'estimate_followup',
-              customerId: customerId || undefined,
-              estimateId: estimate.id,
-              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-              consentBasis: customerId ? undefined : {
-                status: 'transactional_allowed',
-                source: 'estimate_token_acceptance',
-                capturedAt: new Date().toISOString(),
+            const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
+            const customerBody = await renderEditableSmsTemplate(
+              'estimate_accepted_annual_prepay',
+              {
+                first_name: firstName,
+                waveguard_tier: String(estimate.waveguard_tier).trim(),
+                amount_text: amountText,
               },
-              entryPoint: 'estimate_accept_annual_prepay',
-              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
-            });
-            // No quiet-hours requeue: estimate_accept_annual_prepay is a
-            // customer-action entry point (owner ruling 2026-08-29) — the
-            // acceptance text answers the customer's own web acceptance
-            // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
-            // here.
-            if (sendResult.blocked || sendResult.sent === false) {
-              throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
+            );
+            if (!customerBody) {
+              logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
             } else {
-              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+              const sendResult = await sendCustomerMessage({
+                to: acceptSmsPhone,
+                body: customerBody,
+                channel: 'sms',
+                audience: customerId ? 'customer' : 'lead',
+                purpose: 'estimate_followup',
+                customerId: customerId || undefined,
+                estimateId: estimate.id,
+                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+                consentBasis: customerId ? undefined : {
+                  status: 'transactional_allowed',
+                  source: 'estimate_token_acceptance',
+                  capturedAt: new Date().toISOString(),
+                },
+                entryPoint: 'estimate_accept_annual_prepay',
+                metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
+              });
+              // No quiet-hours requeue: estimate_accept_annual_prepay is a
+              // customer-action entry point (owner ruling 2026-08-29) — the
+              // acceptance text answers the customer's own web acceptance
+              // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
+              // here.
+              if (sendResult.blocked || sendResult.sent === false) {
+                throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              } else {
+                logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+              }
             }
           }
         }
