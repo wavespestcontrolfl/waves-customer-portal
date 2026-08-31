@@ -49,6 +49,11 @@ describe('validateProduct', () => {
     // merchant is normalized (trim + lowercase) before the Amazon rules apply (Codex r4 P1)
     expect(registry.validateProduct(green({ merchant: ' Amazon ', approved_affiliate_url: 'https://amzn.to/x' })).join(' ')).toMatch(/amazon\.com directly/);
   });
+  test('Amazon policy keys off hostname / normalized merchant, not exact spelling; prohibited rows carry no URL (astro #503 parity)', () => {
+    expect(registry.validateProduct(green({ merchant: 'Amazon US', approved_affiliate_url: 'https://amzn.to/x' })).join(' ')).toMatch(/amazon\.com directly/);
+    expect(registry.validateProduct(green({ merchant: 'Some Store', approved_affiliate_url: 'https://www.amazon.com/dp/B1' })).join(' ')).toMatch(/tag=/);
+    expect(registry.validateProduct({ product_id: 'pro-x', status: 'prohibited', risk_class: 'red', merchant: 'x', plain_url: 'https://example.com/p' }).join(' ')).toMatch(/must not carry plain_url/);
+  });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {
       expect(registry.validateProduct(green({ allowed_post_types: ['protocol', pt] })).join(' ')).toMatch(/protected local-service/);
