@@ -2188,6 +2188,7 @@ export default function EstimateToolViewV2({
     leadServiceInterest: serviceInterest,
     homeSqFt: "",
     stories: "1",
+    unitCount: "",
     lotSqFt: "",
     propertyType: "Single Family",
     isCommercial: "NO",
@@ -2916,6 +2917,7 @@ export default function EstimateToolViewV2({
         ...(key === "address" ? { measuredTurfSf: "" } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
+        ...(key === "unitCount" ? { _unitCountEdited: true } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
@@ -3258,6 +3260,14 @@ export default function EstimateToolViewV2({
       enrichedProfile?.storiesSource === "default" && !form._storiesEdited;
     if (String(form.stories || "").trim() !== "" && !storiesIsUntouchedDefault)
       fields.stories = Number(form.stories);
+    // Unit count ships ONLY when the operator typed it — never a lookup
+    // value re-persisted as "tech verified" (same contract as stories). A
+    // verified count outranks even the county aggregate server-side, so
+    // this is the correction path for a false AI multi-unit result.
+    const unitCountNumber = Number(form.unitCount);
+    if (form._unitCountEdited && String(form.unitCount || "").trim() !== ""
+        && Number.isInteger(unitCountNumber) && unitCountNumber >= 1)
+      fields.unitCount = unitCountNumber;
     if (!form.address || !Object.keys(fields).length) return;
     setVerifySaveState("saving");
     try {
@@ -3271,7 +3281,7 @@ export default function EstimateToolViewV2({
     } catch {
       setVerifySaveState("error");
     }
-  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
+  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, form.unitCount, form._unitCountEdited, enrichedProfile]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
@@ -3678,6 +3688,7 @@ export default function EstimateToolViewV2({
           _footprintUnknownLookup: ep.footprintUnknown === true,
           _poolCageSizeEdited: false,
           _storiesEdited: false,
+          _unitCountEdited: false,
         };
         // With derivation suppressed nothing would refresh a previous
         // address's auto-derived footprint — clear it (manual entries keep
@@ -4834,6 +4845,7 @@ export default function EstimateToolViewV2({
       address: "",
       homeSqFt: "",
       stories: "1",
+      unitCount: "",
       lotSqFt: "",
       propertyType: "Single Family",
       isCommercial: "NO",
@@ -5641,6 +5653,7 @@ export default function EstimateToolViewV2({
                       homeSqFt: "",
                       lotSqFt: "",
                       stories: "1",
+                      unitCount: "",
                       propertyType: "Single Family",
                       isCommercial: "NO",
                       commercialSubtype: "",
@@ -6204,6 +6217,14 @@ export default function EstimateToolViewV2({
               </div>{" "}
               <FieldV2 label="Lot Sq Ft">
                 <InputV2 k="lotSqFt" type="number" placeholder="8000" />
+              </FieldV2>
+              <FieldV2 label="Units on parcel">
+                <InputV2 k="unitCount" type="number" min="1" max="2000" placeholder="1" />
+                <div className="mt-1 text-11 opacity-70">
+                  Whole-parcel total. Corrects a wrong lookup count (e.g. a
+                  single condo unit read as the whole building) when saved as
+                  verified.
+                </div>
               </FieldV2>
               {(form.svcTs || form.svcInjection) && (
                 <>

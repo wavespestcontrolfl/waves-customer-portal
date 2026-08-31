@@ -278,6 +278,22 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
     expect(detectCategory(rc, {})).toBe('COMMERCIAL');
   });
 
+  test('a tech-verified count outranks the stale parcel aggregate in BOTH directions (codex P1 r5)', () => {
+    // 48→1 correction: the county aggregate must not keep the property
+    // multi-unit/commercial after a person fixed it on site.
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Manatee', residentialUnits: 48 },
+      _fieldEvidence: { unitCount: { value: 1, sourceType: 'verified', fieldVerify: false } },
+    }), {})).toBe('RESIDENTIAL');
+    // And symmetrically: a verified 48 is not suppressed by a stale "2".
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 48,
+      _parcel: { county: 'Manatee', residentialUnits: 2 },
+      _fieldEvidence: { unitCount: { value: 48, sourceType: 'verified', fieldVerify: false } },
+    }), {})).toBe('COMMERCIAL');
+  });
+
   test('a county Multifamily with NO unit data keeps the conservative COMMERCIAL vote', () => {
     expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
   });
