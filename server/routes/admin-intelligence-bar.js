@@ -16,7 +16,10 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { TOOLS, executeTool } = require('../services/intelligence-bar/tools');
+const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
+const IbThreads = require('../services/intelligence-bar/threads');
+const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
+const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
@@ -174,6 +177,10 @@ const AGENT_ESTIMATE_TOOLS = [
 // /confirm-action; getToolsForContext additionally hides them from
 // non-admin tool lists.
 const ADMIN_ONLY_TOOL_NAMES = new Set([
+  // Recall searches the operator's own persisted IB threads — admin threads
+  // are the only ones that exist (techs stay ephemeral), so never offer or
+  // execute it for a technician token.
+  ...HISTORY_TOOL_NAMES,
   'create_customer',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
@@ -185,6 +192,7 @@ const PII_TOOL_NAMES = new Set([
   'create_customer',
   'update_property_access',
   'get_stop_details',
+  'get_recent_completions',
   'get_unanswered_threads',
   'get_conversation_thread',
   'search_messages',
@@ -213,6 +221,9 @@ const PII_TOOL_NAMES = new Set([
   // input can carry whatever the operator typed (a name, phone, address) —
   // taint so inputs/telemetry are redacted like the comms tools.
   'search_call_research',
+  // Recall returns verbatim past conversation turns (which may embed
+  // customer PII and carry taint markers) and its query is operator-typed.
+  'search_ib_history',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
@@ -406,23 +417,38 @@ function withCacheBreakpoint(messages) {
   return [...messages.slice(0, -1), { ...last, content }];
 }
 
-// UI-backed write confirmation (issue #1568). Dark until the Railway env
-// flips it on; read per-request so it can be toggled without a restart.
+// UI-backed write confirmation (issue #1568) is STRUCTURAL (owner rulings
+// 2026-08-30/31): NO environment value restores direct model-loop writes —
+// a config switch must never mean "turn off the safety layer". The
+// emergency control is IB_WRITES_DISABLED=true, which refuses every
+// Intelligence Bar write (proposals, /execute writes, /confirm-action
+// commits) while reads stay available; the fallback for a broken confirm
+// UI is the normal admin screen, never ungated AI execution. Read
+// per-request so it can be toggled without a restart. (GATE_IB_UI_CONFIRM
+// is retired and intentionally ignored.)
 function uiConfirmEnabled() {
-  return process.env.GATE_IB_UI_CONFIRM === 'true';
+  return true;
 }
+
+function ibWritesDisabled() {
+  return process.env.IB_WRITES_DISABLED === 'true';
+}
+const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
 
-function summarizeProposal(toolName, params) {
+function summarizeProposal(toolName, params, displayParams = params) {
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
   // changed (the confirmation card must show everything the commit will do).
+  // The flatten runs over the CURATED display params (same source as the
+  // card's param list), never the stored execution params — those carry
+  // pinned opaque ids and internal `_`-prefixed pins that must not surface.
   const flat = [];
-  for (const [k, v] of Object.entries(params || {})) {
-    if (v === undefined || v === null) continue;
+  for (const [k, v] of Object.entries(displayParams || {})) {
+    if (v === undefined || v === null || k.startsWith('_')) continue;
     if (typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
         if (v2 !== undefined && v2 !== null && typeof v2 !== 'object') flat.push(`${k}.${k2}: ${String(v2)}`);
@@ -483,6 +509,12 @@ function confirmationDisplayParams(toolName, params, preview) {
     // identity resolved at proposal time, not a raw partial name that
     // /confirm-action would re-resolve to somebody else.
     return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+  }
+  if (toolName === 'create_appointment' && preview?.pinned_technician) {
+    // Show the pinned tech by NAME (the id is opaque on a card) — the visit
+    // binds to exactly this technician at commit.
+    const { technician_id, technician_name, ...rest } = params;
+    return { ...rest, technician: preview.pinned_technician.name };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
@@ -604,6 +636,23 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
+    if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
+      // Pin the technician like send_sms pins the recipient: resolution
+      // happens NOW, so the card names the exact tech the visit binds to
+      // and /confirm-action can never re-resolve "Adam" to a different row
+      // than the operator approved. A model-supplied technician_id gets the
+      // SAME treatment — resolved to an active tech and canonicalized to a
+      // name, never approved as an opaque uuid. Ambiguity (or no active
+      // match) fails the proposal instead of silently mis-assigning.
+      const tech = params.technician_id
+        ? await resolveActiveTechnicianById(params.technician_id)
+        : await resolveTechnicianByName(params.technician_name);
+      if (!tech) return { failed: true, modelResult: { error: 'No active technician matches — nothing was proposed. Retry with a corrected name, a technician_id from an ambiguity result, or omit the technician.' } };
+      if (tech.error) return { failed: true, modelResult: tech };
+      params.technician_id = tech.id;
+      params.technician_name = tech.name;
+      preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
+    }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);
       if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
@@ -680,7 +729,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   const row = await PendingActions.createPendingAction({
     toolName: toolUse.name,
     params,
-    summary: summarizeProposal(toolUse.name, params),
+    summary: summarizeProposal(toolUse.name, params, confirmationDisplayParams(toolUse.name, params, preview)),
     requestedBy: getAdminActorId(req),
     context,
   });
@@ -701,6 +750,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // to find the dollars and review flags they are approving.
       params: confirmationDisplayParams(toolUse.name, params, preview),
       expiresAt: row.expires_at,
+      // Server-computed remaining ms — the client countdown anchors on
+      // receipt + this, never on comparing expiresAt to the device clock
+      // (codex P2 on #3633: a skewed clock staled the card at the wrong
+      // moment in both directions).
+      expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     },
   };
 }
@@ -1238,7 +1292,10 @@ function getToolsForContext(context, isAdmin = false) {
   // /execute both refuse them for technician tokens, so non-admin lists must
   // not offer them either. Appended LAST so each context's own tools stay a
   // stable prompt-cache prefix.
-  const infra = isAdmin ? INFRA_TOOLS : [];
+  // Recall rides with infra: context-independent, admin-only, appended last
+  // — and only while GATE_IB_THREADS is on (the tool refuses at execution
+  // time too, so a forced call fails closed with the rest of threads).
+  const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
   if (context === 'schedule' || context === 'dispatch') {
     return [...base, ...SCHEDULE_TOOLS, ...infra];
   }
@@ -1291,6 +1348,9 @@ function getToolsForContext(context, isAdmin = false) {
 function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (TECH_TOOL_NAMES.has(toolName)) {
     return executeTechTool(toolName, input, techContext || {});
+  }
+  if (HISTORY_TOOL_NAMES.has(toolName)) {
+    return executeHistoryTool(toolName, input, actionContext);
   }
   if (REVIEW_TOOL_NAMES.has(toolName)) {
     return executeReviewTool(toolName, input);
@@ -1618,6 +1678,11 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop. The confirmation id goes to the client only.
+          if (ibWritesDisabled()) {
+            result = { error: IB_WRITES_DISABLED_MESSAGE };
+            failed = true;
+            errorMessage = result.error;
+          } else {
           try {
             const proposed = await proposePendingWrite({
               toolUse,
@@ -1638,6 +1703,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
             failed = true;
             errorMessage = result.error;
           }
+          }
         } else if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
           failed = true;
@@ -1645,7 +1711,10 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           errorMessage = result.message;
         } else {
           try {
-            result = await executeToolByName(toolUse.name, toolUse.input, techContext);
+            // Recall is actor-bound: the owner id travels from the
+            // authenticated request, never from model-supplied input.
+            result = await executeToolByName(toolUse.name, toolUse.input, techContext,
+              HISTORY_TOOL_NAMES.has(toolUse.name) ? { actorId: getAdminActorId(req) } : {});
             if (isToolFailure(result)) {
               failed = true;
               errorMessage = result.error || result.message || 'tool returned error';
@@ -1723,6 +1792,86 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // Table may not exist yet — non-critical
     }
 
+    // The exact turn pair the client stores — also what a persisted thread
+    // keeps. Images are never persisted (their text marker is); taint
+    // markers ride along so a resumed thread stays redaction-aware.
+    const persistedUserTurn = appendTaintMarker(
+      appendTaintMarker(
+        images.length
+          ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+          : prompt,
+        imageTainted,
+        IMAGE_TAINT_MARKER,
+      ),
+      piiTainted,
+      PII_TAINT_MARKER,
+    );
+    const persistedAssistantTurn = appendTaintMarker(
+      appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
+      piiTainted,
+      PII_TAINT_MARKER,
+    );
+
+    // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
+    // admin actors only, never tech or the isolated agent_estimate rail.
+    // Best-effort — a thread write failure must never fail the answer. A
+    // thread_id the actor doesn't own appends nothing and returns no id, so
+    // the client quietly falls back to its ephemeral history.
+    let persistedThreadId = null;
+    let persistedThreadSeq = null;
+    const threadPersistenceActive = IbThreads.threadsEnabled() && req.techRole === 'admin'
+      && context !== 'tech' && context !== 'agent_estimate';
+    if (threadPersistenceActive) {
+      try {
+        // Pending-action cards (and their confirmation ids) are deliberately
+        // client-only and are NOT restored on resume — annotate the stored
+        // turn so a resumed model never believes a proposal is still awaiting
+        // confirmation and the operator knows to re-ask.
+        const threadAssistantTurn = pendingProposals.length
+          ? `${persistedAssistantTurn}\n[This reply proposed ${pendingProposals.length} pending action(s); those confirmation cards expired with the session and were not restored. If the action is still wanted, propose it again.]`
+          : persistedAssistantTurn;
+        // thread_seq is the client's view of the thread tail — a mismatch
+        // means a concurrent append (another tab) landed first, so this
+        // exchange would interleave without having seen it; the append is
+        // rejected and the client detaches instead.
+        // Malformed thread_id would raise a Postgres uuid cast error inside
+        // the transaction — treat it as no thread (fresh, seeded) instead.
+        const requestedThreadId = typeof req.body.thread_id === 'string' && UUID_RE.test(req.body.thread_id)
+          ? req.body.thread_id : null;
+        const appended = await IbThreads.appendExchange({
+          actorId: getAdminActorId(req),
+          threadId: requestedThreadId,
+          expectedSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+          context,
+          userText: persistedUserTurn,
+          assistantText: threadAssistantTurn,
+          // A NEW thread is seeded with the same trimmed, marker-tainted
+          // history the model sees, so a conversation that started ephemeral
+          // (gate flipped mid-chat, or a detach after a rejected append)
+          // survives refresh instead of persisting an amnesiac thread. The
+          // service validates roles/content and caps the seed.
+          seedTurns: requestedThreadId ? null : conversationHistory.slice(-8),
+        });
+        persistedThreadId = appended?.threadId || null;
+        persistedThreadSeq = appended?.lastSeq ?? null;
+        // Link this exchange's proposals to the thread so recall can join a
+        // conversation to its receipts (actor-bound inside the service).
+        if (persistedThreadId && Number.isInteger(persistedThreadSeq) && pendingProposals.length) {
+          await PendingActions.attachThread(
+            pendingProposals.map(p => p.id), persistedThreadId, persistedThreadSeq, getAdminActorId(req),
+          );
+        }
+      } catch (err) {
+        // Never log the full error: knex enriches it with the SQL bindings,
+        // which here are the complete user/assistant turn text (customer
+        // PII). Code + constraint name are enough to diagnose.
+        logger.error(
+          `[intelligence-bar] thread persistence failed (code=${err?.code || 'unknown'}`
+          + `${err?.constraint ? `, constraint=${err.constraint}` : ''})`,
+        );
+      }
+    }
+
     res.json({
       response: finalResponse,
       toolCalls,
@@ -1739,29 +1888,15 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // are stripped before the history reaches the model.
       conversationHistory: [
         ...conversationHistory.slice(-8),
-        {
-          role: 'user',
-          content: appendTaintMarker(
-            appendTaintMarker(
-              images.length
-                ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-                : prompt,
-              imageTainted,
-              IMAGE_TAINT_MARKER,
-            ),
-            piiTainted,
-            PII_TAINT_MARKER,
-          ),
-        },
-        {
-          role: 'assistant',
-          content: appendTaintMarker(
-            appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
-            piiTainted,
-            PII_TAINT_MARKER,
-          ),
-        },
+        { role: 'user', content: persistedUserTurn },
+        { role: 'assistant', content: persistedAssistantTurn },
       ],
+      ...(persistedThreadId ? { threadId: persistedThreadId, threadSeq: persistedThreadSeq } : {}),
+      // Explicit availability so the client tracks a RUNTIME gate change:
+      // false detaches its thread state (the kill switch's exact-ephemeral
+      // promise), true keeps thread mode even when this exchange's append
+      // failed best-effort.
+      threadsEnabled: threadPersistenceActive,
     });
 
   } catch (err) {
@@ -1811,6 +1946,9 @@ router.post('/execute', async (req, res, next) => {
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
+    if (ibWritesDisabled() && (UI_GATED_WRITE_TOOL_NAMES.has(action) || CONFIRMED_ACTION_TOOL_NAMES.has(action))) {
+      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    }
 
     let executionParams = params || {};
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
@@ -1829,6 +1967,9 @@ router.post('/execute', async (req, res, next) => {
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: confirmed === true,
+      // Request-derived actor for actor-bound reads (recall) — same source
+      // the /query loop uses, never the client params.
+      actorId: getAdminActorId(req),
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
@@ -1861,6 +2002,12 @@ router.post('/confirm-action', async (req, res, next) => {
   try {
     const id = String(req.body?.pending_action_id || '').trim();
     if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+
+    // Emergency write freeze covers commits too — a pending action proposed
+    // before the freeze must not slip through after it.
+    if (ibWritesDisabled()) {
+      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    }
 
     const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req));
     if (claim.error) {
@@ -2158,6 +2305,61 @@ router.get('/quick-actions', async (req, res, next) => {
   }
 });
 
+
+// ─── SERVER-PERSISTED THREADS (GATE_IB_THREADS) ─────────────────
+// Client-only endpoints, like /confirm-action — never model tools. Admin
+// actors only; every read is actor-bound inside the threads service.
+
+// Thread ids are uuid columns — validate shape at the request boundary so a
+// malformed id 404s instead of raising a Postgres cast error.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function threadsGuard(req, res) {
+  if (!IbThreads.threadsEnabled()) {
+    res.status(404).json({ error: 'Threads are not enabled' });
+    return false;
+  }
+  if (req.techRole !== 'admin') {
+    res.status(403).json({ error: 'Admin access required' });
+    return false;
+  }
+  return true;
+}
+
+router.get('/threads/latest', async (req, res, next) => {
+  try {
+    if (!threadsGuard(req, res)) return;
+    const thread = await IbThreads.latestThread(getAdminActorId(req));
+    res.json({ thread: thread || null });
+  } catch (err) {
+    logger.error('[intelligence-bar] threads/latest failed:', err);
+    next(err);
+  }
+});
+
+router.get('/threads', async (req, res, next) => {
+  try {
+    if (!threadsGuard(req, res)) return;
+    const threads = await IbThreads.listThreads(getAdminActorId(req), req.query.limit);
+    res.json({ threads });
+  } catch (err) {
+    logger.error('[intelligence-bar] threads list failed:', err);
+    next(err);
+  }
+});
+
+router.get('/threads/:id', async (req, res, next) => {
+  try {
+    if (!threadsGuard(req, res)) return;
+    if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Thread not found' });
+    const thread = await IbThreads.getThread(getAdminActorId(req), String(req.params.id));
+    if (!thread) return res.status(404).json({ error: 'Thread not found' });
+    res.json({ thread });
+  } catch (err) {
+    logger.error('[intelligence-bar] thread fetch failed:', err);
+    next(err);
+  }
+});
 
 module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's

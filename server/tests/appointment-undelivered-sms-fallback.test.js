@@ -65,7 +65,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain, custUpdateChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
       sms_log: [chain({ first: { created_at: '2026-06-19T13:00:00.000Z' } })],
       messaging_suppression: [chain({ first: null })],
     });
@@ -130,7 +130,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
     });
 
     await AppointmentReminders.handleUndeliveredSms({
@@ -155,7 +155,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
     });
 
     await AppointmentReminders.handleUndeliveredSms({
@@ -187,7 +187,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain, custUpdateChain, custNameChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
       notifications: [notifExistsChain],
       notification_prefs: [prefsChain],
       sms_log: [chain({ first: { created_at: '2026-06-21T13:00:00.000Z' } })],
@@ -217,7 +217,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
       sms_log: [chain({ first: { created_at: '2026-06-19T13:00:00.000Z' } })],
       // cleared AFTER the bounced send → the bounce is stale evidence
       messaging_suppression: [chain({ first: { active: false, cleared_at: '2026-06-20T13:00:00.000Z' } })],
@@ -246,7 +246,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
       // UNSTAMPED legacy writer logged 2s AFTER the clearance — raw compare
       // would call the bounce fresh; the 5s grace backdates it below cleared_at
       sms_log: [chain({ first: { created_at: '2026-06-20T13:00:02.000Z', metadata: null } })],
@@ -277,7 +277,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain, custUpdateChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
       // same 2s-after-clearance timing, but the row is stamped pre-handoff —
       // its created_at is trustworthy, so the send really postdates the START
       sms_log: [chain({ first: { created_at: '2026-06-20T13:00:02.000Z', metadata: { pre_handoff_stamp: true } } })],
@@ -309,7 +309,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain],
-      appointment_reminders: [reminderChain],
+      appointment_reminders: [reminderChain, chain({})], // + email-handoff move-hold recheck (no hold)
       sms_log: [brokenSmsLogChain],
     });
 

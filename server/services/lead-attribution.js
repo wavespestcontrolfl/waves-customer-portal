@@ -51,9 +51,40 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
   // Check if we already have a lead with this phone. Soft-deleted leads are
   // excluded — a new touch from that number should make a FRESH lead, not
   // silently update a row an operator removed from the pipeline.
-  const existingLead = normalizedFrom
+  let existingLead = normalizedFrom
     ? await db('leads').where('phone', normalizedFrom).whereNull('deleted_at').orderBy('created_at', 'desc').first()
     : null;
+
+  // Overlapping calls from one line are two PEOPLE, not one: reusing the
+  // lead here clobbered the first call's twilio_call_sid and both calls'
+  // extractions later collided on one row (estimator-engine audit
+  // 2026-08-30 #1). When the lead's linked call is a DIFFERENT sid that is
+  // still in flight (or started within the last 30 min and never reached a
+  // terminal status), this touch mints a fresh lead instead — the
+  // transcript-side name corroboration (findReusableCallLead) sorts out
+  // which extraction belongs where. A missing call_log row proves nothing
+  // and keeps today's reuse. SMS touches are unaffected.
+  let concurrentCallLeadId = null;
+  if (existingLead && type === 'call' && callSid
+      && existingLead.twilio_call_sid && existingLead.twilio_call_sid !== callSid) {
+    try {
+      const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
+      const otherCall = await db('call_log')
+        .where('twilio_call_sid', existingLead.twilio_call_sid)
+        .orderBy('created_at', 'desc')
+        .first('status', 'created_at');
+      const otherInFlight = !!otherCall
+        && !TERMINAL_CALL_STATUSES.includes(String(otherCall.status || '').toLowerCase())
+        && (Date.now() - new Date(otherCall.created_at).getTime()) < 30 * 60 * 1000;
+      if (otherInFlight) {
+        concurrentCallLeadId = existingLead.id;
+        existingLead = null;
+        logger.info(`[LeadAttribution] Concurrent call on shared phone — minting a fresh lead instead of reusing ${concurrentCallLeadId}`);
+      }
+    } catch (e) {
+      logger.warn(`[LeadAttribution] concurrent-call check failed (reusing lead as before): ${e.message}`);
+    }
+  }
 
   if (existingLead) {
     // Update existing lead with new touch
@@ -66,20 +97,41 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
     updates.follow_up_count = (parseInt(existingLead.follow_up_count) || 0) + 1;
     updates.updated_at = new Date();
 
+    // CONDITIONAL update for calls (GH codex P1): two concurrent calls can
+    // both read the same lead with the same terminal historical sid and
+    // both conclude reuse is safe — the write is therefore guarded on the
+    // sid still being what this invocation OBSERVED. A lost race (0 rows)
+    // means another call claimed the lead in the gap: fall through to a
+    // fresh mint exactly like the in-flight case above.
+    let raceLost = false;
     if (Object.keys(updates).length > 1) {
-      await db('leads').where('id', existingLead.id).update(updates);
+      if (type === 'call' && callSid) {
+        const guarded = db('leads').where('id', existingLead.id);
+        if (existingLead.twilio_call_sid) {
+          guarded.where((q) => q.where('twilio_call_sid', existingLead.twilio_call_sid).orWhere('twilio_call_sid', callSid));
+        } else {
+          guarded.where((q) => q.whereNull('twilio_call_sid').orWhere('twilio_call_sid', callSid));
+        }
+        raceLost = (await guarded.update(updates)) === 0;
+      } else {
+        await db('leads').where('id', existingLead.id).update(updates);
+      }
     }
 
-    await db('lead_activities').insert({
-      lead_id: existingLead.id,
-      activity_type: type === 'call' ? 'inbound_call' : 'inbound_sms',
-      description: `Follow-up ${type} via ${leadSource?.name || normalizedTo || 'unknown'}`,
-      performed_by: 'system',
-      metadata: JSON.stringify({ callSid, messageSid, callDuration }),
-    });
+    if (!raceLost) {
+      await db('lead_activities').insert({
+        lead_id: existingLead.id,
+        activity_type: type === 'call' ? 'inbound_call' : 'inbound_sms',
+        description: `Follow-up ${type} via ${leadSource?.name || normalizedTo || 'unknown'}`,
+        performed_by: 'system',
+        metadata: JSON.stringify({ callSid, messageSid, callDuration }),
+      });
 
-    logger.info(`[LeadAttribution] Updated existing lead ${existingLead.id}`);
-    return { type: 'existing_lead', leadId: existingLead.id, leadSourceId: leadSource?.id };
+      logger.info(`[LeadAttribution] Updated existing lead ${existingLead.id}`);
+      return { type: 'existing_lead', leadId: existingLead.id, leadSourceId: leadSource?.id };
+    }
+    concurrentCallLeadId = existingLead.id;
+    logger.info(`[LeadAttribution] Lost the sid race on lead ${existingLead.id} — minting a fresh lead for this caller`);
   }
 
   // Create new lead
@@ -100,9 +152,14 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
   await db('lead_activities').insert({
     lead_id: newLead.id,
     activity_type: 'created',
-    description: `New lead from ${leadType} via ${leadSource?.name || normalizedTo || 'unknown'}`,
+    description: concurrentCallLeadId
+      ? `New lead from ${leadType} via ${leadSource?.name || normalizedTo || 'unknown'} — same phone as lead ${concurrentCallLeadId} with a call in flight (possible second caller)`
+      : `New lead from ${leadType} via ${leadSource?.name || normalizedTo || 'unknown'}`,
     performed_by: 'system',
-    metadata: JSON.stringify({ callSid, messageSid, from: normalizedFrom, to: normalizedTo }),
+    metadata: JSON.stringify({
+      callSid, messageSid, from: normalizedFrom, to: normalizedTo,
+      ...(concurrentCallLeadId ? { sharedPhoneWithLeadId: concurrentCallLeadId } : {}),
+    }),
   });
 
   logger.info(`[LeadAttribution] New lead created: ${newLead.id} from ${leadSource?.name || 'unknown source'}`);

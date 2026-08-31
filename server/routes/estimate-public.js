@@ -11866,6 +11866,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
     let invoiceLinkDelivered = false;
+    // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
+    // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
+    // returns ok:false — delivery is in flight, not failed. Tracked apart
+    // from invoiceLinkDelivered so ONLY the acceptance-text gate below
+    // counts it; the prepay stamp resolution and the accept notification
+    // still require a CONFIRMED delivery.
+    let invoiceSmsQueued = false;
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
@@ -12477,6 +12484,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         try {
           const StripeService = require('../services/stripe');
           const prepayChargeResult = await chargeUnderJobFence(() => StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
+            // Customer-at-keyboard provenance (Codex #3598 r3 P1): the
+            // customer just accepted — the PI's lifecycle SMS and receipt
+            // answer their own action and send at any hour (owner ruling
+            // 2026-08-29). Only this site opts in; every other saved-method
+            // caller keeps the machine default.
+            customerInitiated: true,
             // EXACT-equality freeze to the acknowledged quote (pre-push
             // Codex P0 r2): the in-lock computeChargeAmount result must be
             // the same cents the customer confirmed — any drift (a credit
@@ -12861,12 +12874,38 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         purpose: 'estimate_accept_booking',
       });
     }
-    if (estimate.customer_phone && !billByInvoice && treatAsOneTime) {
+    // Accept-SMS recipient: the estimate's own phone; when the estimate has
+    // none but the linked customer row does — or, for a secondary-property
+    // row without one, the account primary (same person; #1995) — that
+    // number. Fail-open to "no phone", never a guess.
+    let acceptSmsPhone = String(estimate.customer_phone || '').trim();
+    if (!acceptSmsPhone && customerId) {
+      try {
+        const { withAccountPrimaryContact } = require('../services/customer-contact');
+        const contactRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'account_id', 'is_primary_profile');
+        const resolved = contactRow ? await withAccountPrimaryContact(contactRow) : null;
+        acceptSmsPhone = String(resolved?.phone || '').trim();
+      } catch (phoneErr) {
+        logger.warn(`[estimate-accept] accept SMS phone resolution failed for customer ${customerId}: ${phoneErr.message}`);
+      }
+    }
+    // Gated on the accept SHAPE, not on a phone (pre-push Codex P1): a
+    // phoneless one-time accept with an email on the account (or its
+    // primary) still owes the appointment confirmation — the SMS legs
+    // below no-op without a number and deliverConfirmationByChannel then
+    // reaches the email. A customer-less accept has no prefs/email row to
+    // resolve, so it still needs a phone to enter. (The annual-prepay
+    // acceptance text lives AFTER the invoice delivery below.)
+    if (!billByInvoice && treatAsOneTime && (acceptSmsPhone || customerId)) {
       try {
         if (treatAsOneTime) {
           const primarySvc = oneTimeBookingService || bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
           const confirmedServiceLabel = confirmationServiceLabel(oneTimeList, estimate, acceptedOneTimeServiceLabel || primarySvc.label);
-          if (bookingUrl) {
+          if (bookingUrl && !acceptSmsPhone) {
+            // Booking link rides SMS only; the onboarding email above
+            // carries the customer's next steps.
+            logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; skipping booking-link SMS`);
+          } else if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
               { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
@@ -12877,7 +12916,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               logger.warn(`[estimate-accept] estimate_accepted_onetime template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
             } else {
               const sendResult = await sendCustomerMessage({
-                to: estimate.customer_phone,
+                to: acceptSmsPhone,
                 body: customerBody,
                 channel: 'sms',
                 audience: customerId ? 'customer' : 'lead',
@@ -12893,83 +12932,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 entryPoint: 'estimate_accept_onetime_booking',
                 metadata: { original_message_type: 'estimate_accepted_onetime' },
               });
-              // Send-window hold: a web acceptance is not an SMS reply, so
-              // the text defers — the page and the acceptance email carry
-              // the moment; the booking-link SMS queues for 8:00 AM.
-              if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
-                try {
-                  const TWILIO_NUMBERS = require('../config/twilio-numbers');
-                  // Shared identity check: a linked estimate's captured
-                  // phone may legitimately differ from the account phone
-                  // (email-matched linkage), and the queued booking link is
-                  // a bearer token — refresh only when they matched.
-                  const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
-                  const recipientStamp = await recipientRefreshStamp({
-                    customerId,
-                    recipientPhone: estimate.customer_phone,
-                    label: 'estimate-accept',
-                  });
-                  const heldRow = {
-                    customer_id: customerId || null,
-                    direction: 'outbound',
-                    from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                    to_phone: estimate.customer_phone,
-                    message_body: customerBody,
-                    status: 'scheduled',
-                    scheduled_for: new Date(sendResult.nextAllowedAt),
-                    message_type: 'estimate_accepted_onetime',
-                    metadata: JSON.stringify({
-                      entry_point: 'estimate_accept_onetime_booking_deferred',
-                      estimate_id: estimate.id,
-                      original_block_code: sendResult.code,
-                      replay_purpose: 'estimate_followup',
-                      ...(customerId
-                        ? { ...recipientStamp, resolve_from_by_customer: true }
-                        : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
-                    }),
-                  };
-                  // The queued row is the ONLY delivery obligation this
-                  // text has (codex r25): the acceptance is already
-                  // committed, a retried /accept explicitly performs no
-                  // sends, and the onboarding email carries the portal URL
-                  // — not this booking URL. So the enqueue itself gets a
-                  // bounded retry, and exhaustion hands the obligation to
-                  // the office lane as a durable admin notification (the
-                  // repo's exception rail) instead of a log line nobody is
-                  // obligated to see.
-                  let queued = false;
-                  let lastEnqueueErr = null;
-                  for (let attempt = 1; attempt <= 3 && !queued; attempt += 1) {
-                    try {
-                      await db('sms_log').insert(heldRow);
-                      queued = true;
-                    } catch (enqueueErr) {
-                      lastEnqueueErr = enqueueErr;
-                      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 250));
-                    }
-                  }
-                  if (queued) {
-                    logger.info(`[estimate-accept] Booking SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
-                  } else {
-                    logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id} after 3 attempts: ${lastEnqueueErr?.message}`);
-                    await require('../services/notification-service').notifyAdmin(
-                      'comms',
-                      'Held booking-link SMS needs a manual send',
-                      'A one-time estimate acceptance after 8 PM could not queue its booking-link SMS for the morning window, and nothing else retries it — text the customer their booking link from the composer.',
-                      {
-                        link: `/admin/estimates/${estimate.id}`,
-                        metadata: {
-                          estimateId: estimate.id,
-                          reason: 'held_booking_sms_enqueue_failed',
-                          heldForWindowOpen: sendResult.nextAllowedAt,
-                        },
-                      },
-                    );
-                  }
-                } catch (queueErr) {
-                  logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
-                }
-              } else if (sendResult.blocked || sendResult.sent === false) {
+              // No quiet-hours requeue: estimate_accept_onetime_booking is
+              // a customer-action entry point (owner ruling 2026-08-29) —
+              // the booking-link text answers the customer's own web
+              // acceptance immediately, at any hour, so QUIET_HOURS_HOLD
+              // cannot surface here.
+              if (sendResult.blocked || sendResult.sent === false) {
                 throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
               } else {
                 logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
@@ -13043,40 +13011,62 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               customerId: customerId || undefined,
               scheduledServiceId: confirmedAppointmentRow?.id,
               serviceLabel: confirmedServiceLabel,
+              // No number at all: the text cannot deliver, ever — route the
+              // default-'sms' channel to the confirmation email fallback.
+              smsPermanentlyBlocked: !acceptSmsPhone,
               smsAttempt: async () => {
+                if (!acceptSmsPhone) {
+                  logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; confirmation goes by email`);
+                  return false;
+                }
                 const customerBody = await renderCustomerConfirmationBody();
                 if (!customerBody) {
                   logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
                   return false;
                 }
                 const sendResult = await sendCustomerMessage({
-                  to: estimate.customer_phone,
+                  to: acceptSmsPhone,
                   body: customerBody,
                   channel: 'sms',
                   audience: 'customer',
                   purpose: 'appointment_confirmation',
                   customerId: customerId || undefined,
                   appointmentId: confirmedAppointmentRow?.id,
+                  // ABA guard input (codex #3609 r45): the slot the body
+                  // quotes, derived the same way the canonical check derives
+                  // the live one. Omitted when the row carries no slot.
+                  ...(confirmedAppointmentRow?.scheduled_date ? (() => {
+                    const { parseETDateTime } = require('../utils/datetime-et');
+                    const d = confirmedAppointmentRow.scheduled_date instanceof Date
+                      ? confirmedAppointmentRow.scheduled_date.toISOString().slice(0, 10)
+                      : String(confirmedAppointmentRow.scheduled_date).slice(0, 10);
+                    const at = parseETDateTime(`${d}T${confirmedAppointmentRow.window_start ? String(confirmedAppointmentRow.window_start).slice(0, 5) : '08:00'}`);
+                    return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                  })() : {}),
                   estimateId: estimate.id,
                   identityTrustLevel: 'service_contact_authorized',
                   entryPoint: 'estimate_accept_onetime_confirmed',
                   metadata: { original_message_type: 'appointment_confirmation' },
                 });
-                // Send-window hold: hand the confirmation to the
-                // stranded-confirmation sweep instead of dropping it. This
-                // flow registered the reminder with sendConfirmation:false
-                // (it owns the confirmation itself), so nothing else would
-                // retry a held send — re-arming confirmation_sent puts the
-                // row in the 15-minute sweep, whose deliverConfirmation
-                // pre-check defers to the 8:00 AM window open and then
-                // sends the standard confirmation for this visit.
-                if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && confirmedAppointmentRow?.id) {
+                // No quiet-hours re-arm: estimate_accept_onetime_confirmed
+                // is a customer-action entry point (owner ruling
+                // 2026-08-29) — the appointment confirmation answers the
+                // customer's own web acceptance immediately, at any hour,
+                // so QUIET_HOURS_HOLD cannot surface here. A grouped-move
+                // MOVE_HOLD still can (the hold gate has no entry-point
+                // exemption; codex #3609 r31): this flow owns the
+                // confirmation (registered sendConfirmation:false), so
+                // re-arm for the stranded-confirmation sweep, which sends
+                // the post-move slot once the hold clears.
+                if (sendResult.code === 'MOVE_HOLD' && confirmedAppointmentRow?.id) {
                   try {
                     await db('appointment_reminders')
                       .where({ scheduled_service_id: confirmedAppointmentRow.id })
-                      .where({ cancelled: false })
+                      // never re-open a sibling-suppressed row (codex): the
+                      // slot owner carries the messaging.
+                      .where({ cancelled: false, suppressed_by_sibling: false })
                       .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
-                    logger.info(`[estimate-accept] Confirmation SMS held (send window) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
+                    logger.info(`[estimate-accept] Confirmation SMS held (grouped move) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
                   } catch (rearmErr) {
                     logger.error(`[estimate-accept] confirmation re-arm failed for ${confirmedAppointmentRow.id}: ${rearmErr.message}`);
                   }
@@ -13088,97 +13078,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (annualPrepaySelected && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)) {
-          // Auto-charged (or ACH-initiated) accepts skip this SMS (pre-push
-          // Codex P1): the template promises an invoice to pay, which
-          // contradicts a year already collected/collecting — the charge
-          // path's receipt is the customer's confirmation. Declined/skipped
-          // charges keep the invoice-coming copy, which is then accurate.
-          // Quote the invoice's live amount DUE (Codex r27 P2):
-          // annualPrepayQuotedAmount is invoice.total, but account credit
-          // applied in the accept trx sits in credit_applied — the pay
-          // link this SMS promises collects total - credit_applied, so the
-          // gross figure would contradict the lower amount the customer
-          // just acknowledged. (Live read also picks up a payer-reroute
-          // reversal, where gross is once again the true due.)
-          let prepayFallbackAmount = annualPrepayQuotedAmount;
-          try {
-            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied') : null;
-            if (dueRow) prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
-          } catch { /* keep the minted figure */ }
-          const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
-          const customerBody = await renderEditableSmsTemplate(
-            'estimate_accepted_annual_prepay',
-            {
-              first_name: firstName,
-              waveguard_tier: estimate.waveguard_tier || 'Bronze',
-              amount_text: amountText,
-            },
-            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
-          );
-          if (!customerBody) {
-            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
-          } else {
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: customerId ? 'customer' : 'lead',
-              purpose: 'estimate_followup',
-              customerId: customerId || undefined,
-              estimateId: estimate.id,
-              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-              consentBasis: customerId ? undefined : {
-                status: 'transactional_allowed',
-                source: 'estimate_token_acceptance',
-                capturedAt: new Date().toISOString(),
-              },
-              entryPoint: 'estimate_accept_annual_prepay',
-              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
-            });
-            // Send-window hold — same web-acceptance deferral as the
-            // one-time booking SMS above.
-            if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
-              try {
-                const TWILIO_NUMBERS = require('../config/twilio-numbers');
-                // Same bearer-link identity rule as the one-time accept
-                // enqueue above (shared helper, never a second inline copy).
-                const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
-                const recipientStamp = await recipientRefreshStamp({
-                  customerId,
-                  recipientPhone: estimate.customer_phone,
-                  label: 'estimate-accept',
-                });
-                await db('sms_log').insert({
-                  customer_id: customerId || null,
-                  direction: 'outbound',
-                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                  to_phone: estimate.customer_phone,
-                  message_body: customerBody,
-                  status: 'scheduled',
-                  scheduled_for: new Date(sendResult.nextAllowedAt),
-                  message_type: 'estimate_accepted_annual_prepay',
-                  metadata: JSON.stringify({
-                    entry_point: 'estimate_accept_annual_prepay_deferred',
-                    estimate_id: estimate.id,
-                    original_block_code: sendResult.code,
-                    replay_purpose: 'estimate_followup',
-                    ...(customerId
-                      ? { ...recipientStamp, resolve_from_by_customer: true }
-                      : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
-                  }),
-                });
-                logger.info(`[estimate-accept] Annual-prepay SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
-              } catch (queueErr) {
-                logger.error(`[estimate-accept] Held annual-prepay SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
-              }
-            } else if (sendResult.blocked || sendResult.sent === false) {
-              throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            } else {
-              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
-            }
-          }
         }
+        // Annual prepay: the acceptance text is sent AFTER the invoice
+        // delivery below (post-credit amount, delivery-confirmed).
         // Standard recurring accepts no longer send a separate acceptance SMS;
         // the onboarding handoff text was retired with the onboarding flow.
         // Customers continue through the invoice/pay-link path below.
@@ -13231,6 +13133,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           delivery = await runDelivery();
         }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
+        if (delivery?.sms?.scheduled === true) invoiceSmsQueued = true;
         if (delivery?.ok) {
           invoiceLinkDelivered = true;
         } else {
@@ -13244,6 +13147,105 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
       logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+    }
+
+    // Annual-prepay acceptance text (owner ruling 2026-08-31: revived — it
+    // had been unreachable since #1520, 2026-06-03). Runs AFTER the invoice
+    // delivery, keyed on it (pre-push Codex P1 r3): sendViaSMSAndEmail
+    // auto-applies account credit, so the amount is the FINAL due re-read
+    // from the row; a fully-covered invoice (nothing delivered, or due 0)
+    // or a payer-billed one (payer_id — payer-billed prepay skips the card
+    // lane, so prepayAutoCharge can be null) sends nothing: the homeowner
+    // must never be promised an invoice that is not coming to them. The
+    // auto-charged statuses never reach delivery, so they never reach here.
+    // No phone or no WaveGuard tier (the template names one; lawn/commercial
+    // prepay has none — never invent "Bronze") ⇒ no text. Kill switch:
+    // disable the estimate_accepted_annual_prepay admin SMS template.
+    // invoiceSmsQueued counts as delivery here (GH Codex P2 r5): the queued
+    // pay-link SMS goes out at 8 AM and the channel-neutral copy ("is on
+    // the way") stays truthful — without it the phone-only after-hours
+    // cohort would never receive this one-shot text.
+    if (annualPrepaySelected && invoiceId && (invoiceLinkDelivered || invoiceSmsQueued)) {
+      try {
+        // Live-account resolution (GH Codex P1 r5): estimate.customer_phone
+        // is an intake-time snapshot, while the invoice legs deliver to the
+        // CURRENT customers.phone — a billing-bearing text (tier + exact
+        // amount due) must resolve the same live contact (account-primary
+        // fallback for secondary-property rows, #1995) or not send at all.
+        // The tier likewise comes from the converted customer row: the
+        // accept transaction just wrote the converter-derived tier there,
+        // which also covers engine-generated drafts whose tier lives only
+        // in estimate_data (GH Codex P2 r5) — and the non-membership
+        // predicate keeps Commercial / One-Time / lawn-only NULL tiers out
+        // of a template that names a WaveGuard tier.
+        let prepaySmsPhone = '';
+        let prepayTier = '';
+        if (customerId) {
+          const { withAccountPrimaryContact } = require('../services/customer-contact');
+          const liveRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'account_id', 'is_primary_profile', 'waveguard_tier');
+          const liveContact = liveRow ? await withAccountPrimaryContact(liveRow) : null;
+          prepaySmsPhone = String(liveContact?.phone || '').trim();
+          prepayTier = String(liveRow?.waveguard_tier || '').trim();
+        } else {
+          // Customer-less accept: the estimate token is the only identity —
+          // its snapshot phone/tier are all there is (trust level below
+          // stays estimate_token_verified for this branch).
+          prepaySmsPhone = acceptSmsPhone;
+          prepayTier = String(estimate.waveguard_tier || '').trim();
+        }
+        const { membershipTierKey, NON_MEMBERSHIP_TIER_KEYS } = require('../services/membership-state');
+        const prepayTierKey = membershipTierKey(prepayTier);
+        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
+        const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
+        if (!prepaySmsPhone || !prepayTierKey || NON_MEMBERSHIP_TIER_KEYS.has(prepayTierKey)) {
+          logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!prepaySmsPhone ? 'no live phone' : 'no WaveGuard membership tier'}`);
+        } else if (!finalRow || finalRow.payer_id || !(Number(finalDue) > 0)) {
+          logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!finalRow ? 'invoice unreadable' : (finalRow.payer_id ? 'payer-billed' : 'nothing due after credit')}`);
+        } else {
+          const customerBody = await renderEditableSmsTemplate(
+            'estimate_accepted_annual_prepay',
+            {
+              first_name: firstName,
+              waveguard_tier: prepayTier,
+              amount_text: ` for ${fmtMoney(finalDue)}`,
+            },
+            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
+          );
+          if (!customerBody) {
+            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+          } else {
+            const sendResult = await sendCustomerMessage({
+              to: prepaySmsPhone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_annual_prepay',
+              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
+            });
+            // No quiet-hours requeue: estimate_accept_annual_prepay is a
+            // customer-action entry point (owner ruling 2026-08-29) — the
+            // acceptance text answers the customer's own web acceptance
+            // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
+            // here.
+            if (sendResult.blocked || sendResult.sent === false) {
+              logger.error(`[estimate-accept] Annual prepay acceptance SMS blocked for estimate ${estimate.id}: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            } else {
+              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            }
+          }
+        }
+      } catch (prepaySmsErr) {
+        logger.error(`[estimate-accept] Annual prepay acceptance SMS failed for estimate ${estimate.id}: ${prepaySmsErr.message}`);
+      }
     }
 
     // Late stamp resolution for UNCOLLECTED prepay outcomes (pre-push Codex
@@ -14805,7 +14807,18 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
-        .update({ status: 'declined', declined_at: trx.fn.now(), updated_at: trx.fn.now() });
+        .update({
+          status: 'declined',
+          declined_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+          // Normalized loss disposition (estimator audit 2026-08-29): this
+          // is the one CUSTOMER-authored decline path — no reason is
+          // collected, the classification IS the reason. COALESCE keeps any
+          // earlier staff stamp.
+          disposition: trx.raw("COALESCE(disposition, 'declined_by_customer')"),
+          disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
+          disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
+        });
       // Click-to-estimate mints only (GitHub #3391 round P1, mirrors the
       // acceptance path): the customer just REJECTED the very thing the
       // CTA request row asked staff to follow up on — leaving it open

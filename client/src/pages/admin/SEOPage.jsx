@@ -2928,6 +2928,11 @@ function BacklinkAgentPanel() {
   const [newTarget, setNewTarget] = useState("");
   const [processing, setProcessing] = useState(false);
   const [addResult, setAddResult] = useState(null);
+  // Registry intake (plan v2 §4, step 2): paste/CSV → seo_link_domains + intake items
+  const [intakeText, setIntakeText] = useState("");
+  const [intakeSeed, setIntakeSeed] = useState(false);
+  const [intakeBusy, setIntakeBusy] = useState(false);
+  const [intakeResult, setIntakeResult] = useState(null);
 
   const loadData = () => {
     Promise.all([
@@ -2965,6 +2970,24 @@ function BacklinkAgentPanel() {
     setAddResult(result);
     setUrlInput("");
     loadData();
+  };
+
+  const runIntake = async (dryRun) => {
+    if (!intakeText.trim()) return;
+    setIntakeBusy(true);
+    try {
+      const r = await adminPost("/admin/backlink-agent/opportunities/bulk", {
+        text: intakeText,
+        source: intakeSeed ? "owner_seed" : "list_import",
+        dryRun,
+      });
+      setIntakeResult(r);
+      if (!dryRun && !r?.error) setIntakeText("");
+    } catch (e) {
+      setIntakeResult({ error: e?.message || "Intake failed" });
+    } finally {
+      setIntakeBusy(false);
+    }
   };
 
   const handleProcess = async () => {
@@ -3244,6 +3267,124 @@ function BacklinkAgentPanel() {
             </div>
           )}
         </Card>
+        {/* Registry intake — paste box + CSV (plan v2 step 2) */}
+        <Card>
+          {" "}
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 500,
+              color: D.heading,
+              marginBottom: 4,
+            }}
+          >
+            Add opportunities to the registry
+          </div>{" "}
+          <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
+            Domains, URLs, free text, or a CSV with a Website column. Shortener
+            links and X posts are kept and resolved on the hourly sweep. Nothing
+            is contacted or paid.
+          </div>{" "}
+          <textarea
+            value={intakeText}
+            onChange={(e) => setIntakeText(e.target.value)}
+            placeholder={"academia.edu\nhttps://producthunt.com/…\nWebsite,Primary Action\n…"}
+            rows={5}
+            style={{
+              width: "100%",
+              padding: 10,
+              background: D.bg,
+              border: `1px solid ${D.border}`,
+              borderRadius: 8,
+              color: D.text,
+              fontSize: 13,
+              fontFamily: "Roboto, Arial, sans-serif",
+              resize: "vertical",
+              outline: "none",
+              boxSizing: "border-box",
+              marginBottom: 8,
+            }}
+          />{" "}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            {" "}
+            <label
+              style={{
+                fontSize: 12,
+                color: D.muted,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                minHeight: 44,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={intakeSeed}
+                onChange={(e) => setIntakeSeed(e.target.checked)}
+              />
+              Owner seed (investigate first)
+            </label>{" "}
+            <div style={{ display: "flex", gap: 8 }}>
+              {" "}
+              <button
+                onClick={() => runIntake(true)}
+                disabled={intakeBusy || !intakeText.trim()}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: 8,
+                  border: `1px solid ${D.border}`,
+                  background: "#fff",
+                  color: D.text,
+                  fontSize: 13,
+                  cursor: "pointer",
+                  opacity: intakeBusy || !intakeText.trim() ? 0.5 : 1,
+                }}
+              >
+                Preview
+              </button>{" "}
+              <button
+                onClick={() => runIntake(false)}
+                disabled={intakeBusy || !intakeText.trim()}
+                style={{
+                  padding: "8px 18px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: D.teal,
+                  color: "#fff",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  opacity: intakeBusy || !intakeText.trim() ? 0.5 : 1,
+                }}
+              >
+                {intakeBusy ? "Working…" : "Add to registry"}
+              </button>{" "}
+            </div>
+          </div>
+          {intakeResult && (
+            <div
+              style={{
+                marginTop: 8,
+                fontSize: 12,
+                color: intakeResult.error ? D.red : D.green,
+              }}
+            >
+              {intakeResult.error
+                ? intakeResult.error
+                : `${intakeResult.dryRun ? "Preview: " : ""}${intakeResult.inserted} new, ${intakeResult.existing} already known` +
+                  `${intakeResult.items?.pending ? `, ${intakeResult.items.pending} waiting to resolve` : ""}` +
+                  `${intakeResult.dropped?.length ? `, ${intakeResult.dropped.length} dropped` : ""}`}
+            </div>
+          )}
+        </Card>
         {/* Manual URL Input */}
         <Card>
           {" "}
@@ -3327,7 +3468,10 @@ function BacklinkAgentPanel() {
           >
             Queue ({queue.length})
           </div>{" "}
-          <div style={{ maxHeight: 400, overflowY: "auto" }}>
+          {/* overflowX spelled explicitly (overflow-y alone computes x to auto
+              but never serializes "overflow-x: auto", so the index.css
+              scroll-shadow affordance selector would miss this wrapper). */}
+          <div style={{ maxHeight: 400, overflowY: "auto", overflowX: "auto" }}>
             {queue.length === 0 ? (
               <div
                 style={{

@@ -390,7 +390,51 @@ Object.assign(api, {
   getPendingSatisfaction: async () => ({ pending: [] }),
   submitSatisfaction: async () => ({ success: true }),
   getRequests: async () => ({ requests: [], total: 0 }),
-  createRequest: async () => ({ success: true }),
+  createRequest: async (data) => (data?.category === 'cancellation'
+    ? { success: true, cancellation: { processed: true, visitsPulled: 2, confirmation: 'sms', confirmationChannels: ['sms', 'email'], effectiveDate: day(0), scope: data.families || 'account' } }
+    : { success: true }),
+  // Cancel-flow v2 (GATE_CANCEL_FLOW_V2) — demo impact for the Silver persona
+  // (pest + lawn). Throw { status: 404 } here to eyeball the H0 fallback.
+  cancelResolutionPreview: async (body = {}) => {
+    const all = [
+      { key: 'pest_control', label: 'Pest Control', monthlyRate: 49, perAppRate: 147, upcomingVisits: 1, nextVisitDate: day(5), prepay: null },
+      { key: 'lawn_care', label: 'Lawn Care', monthlyRate: 89, perAppRate: 129, upcomingVisits: 1, nextVisitDate: day(12), prepay: null },
+    ];
+    const cancelling = Array.isArray(body.families) && body.families.length ? body.families : all.map((f) => f.key);
+    const remaining = all.filter((f) => !cancelling.includes(f.key));
+    const impact = {
+      families: all,
+      tierBefore: 'Silver', tierAfter: remaining.length ? 'Bronze' : null,
+      tierDiscountBefore: 10, tierDiscountAfter: remaining.length ? 5 : 0,
+      accountMonthlyBefore: 138, accountMonthlyAfter: remaining.reduce((s, f) => s + f.monthlyRate, 0),
+      remaining: remaining.map((f) => ({ key: f.key, label: f.label, monthlyBefore: f.monthlyRate, monthlyAfter: Math.round(f.monthlyRate * 1.05 * 100) / 100 })),
+      visitsCancelled: all.filter((f) => cancelling.includes(f.key)).reduce((s, f) => s + f.upcomingVisits, 0),
+      nextVisitCancelled: day(5),
+      lateCancelFee: 0, openBalance: 0, payUrl: null, prepay: null,
+      autopayOn: true, termiteRental: false, effectiveDate: day(0), billingMode: 'per_application',
+    };
+    if (!body.reason) return { kind: 'none', reasonCode: null, scope: cancelling, impact };
+    if (body.reason === 'billing_issue') return { kind: 'hard_stop', reasonCode: body.reason, reviewType: 'billing', scope: cancelling, impact };
+    if (body.reason === 'away') {
+      return { kind: 'card', reasonCode: body.reason, scope: cancelling, impact, card: { templateId: 'away_hold', headline: 'Hold your plan while you are away', body: 'Pick the date you are back and we pause billing and visits until then. Nothing else changes.', action: { type: 'hold', holdMaxDays: 180, family: 'my plan' } } };
+    }
+    if (body.reason === 'price') {
+      return { kind: 'card', reasonCode: body.reason, scope: cancelling, impact, card: { templateId: 'price_offer', headline: 'One offer, no strings', body: 'Stay and take 15% off your next two charges for Lawn Care — nothing else changes, no term, and you can still cancel any time.', action: { type: 'retention_offer', percentOff: 15, charges: 2, capAmount: 75, family: 'Lawn Care' } } };
+    }
+    return { kind: 'none', reasonCode: body.reason, scope: cancelling, impact };
+  },
+  cancelResolutionAccept: async (body) => ({
+    ok: true,
+    receipt: {
+      reference: 'CR-DEMO-1042',
+      actionType: body.templateId === 'away_hold' ? 'hold' : 'retention_offer',
+      summary: body.templateId === 'away_hold'
+        ? `Your plan is on hold until ${body.params?.resumeDate || 'the date you picked'}.`
+        : '15% off your next two Lawn Care charges is applied.',
+      effects: ['No visits are scheduled while on hold.', 'AutoPay stays on; nothing is charged until service resumes.'],
+      confirmationChannels: ['sms', 'email'],
+    },
+  }),
   queryCustomerPricing: async () => ({}),
   getDocuments: async () => ({ documents: {}, total: 0 }),
   shareDocument: async () => ({ shareLink: '#' }),

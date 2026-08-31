@@ -30,7 +30,7 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
@@ -3811,7 +3811,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
       }
     } else if (toStatus === 'on_site') {
       try {
-        const result = await trackTransitions.markOnProperty(svc.id);
+        const result = await trackTransitions.markOnProperty(svc.id, {
+          // Audit provenance for the grouped fan-out (codex #3603 r3): the
+          // admin is the actor; the assigned tech stays the one named to
+          // the customer (actingTechId deliberately NOT set).
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
         await recordTrackTransitionResultFailure({
           jobId: svc.id,
           action: 'mark_on_property',
@@ -4528,9 +4534,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // pre-migration database (Codex round-9). Guarded once here; absent
     // columns leave svc.cust_billing_mode undefined = legacy behavior.
     let billingModeColumnsExist = false;
+    let customerTierSourceColumnExists = false;
+    // Probe FAILURE is not column ABSENCE: absent means a pre-provenance
+    // schema (every tier genuinely 'manual'); a failed probe means we don't
+    // know, and the tier snapshot must freeze NOTHING rather than 'manual'
+    // — or an auto-derived label could be frozen as a paid membership and
+    // print "$0.00 billed" forever (codex r13 P1).
+    let customerColumnsProbeFailed = false;
     try {
       billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
-    } catch { /* keep false — legacy select shape */ }
+      customerTierSourceColumnExists = await db.schema.hasColumn('customers', 'waveguard_tier_source');
+    } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -4545,6 +4559,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
+        ...(customerTierSourceColumnExists ? ['customers.waveguard_tier_source as cust_waveguard_tier_source'] : []),
         ...(billingModeColumnsExist
           ? ['customers.billing_mode as cust_billing_mode', 'customers.per_application_fee as cust_per_application_fee']
           : []),
@@ -7096,7 +7111,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           };
           if (serviceRecordCols.report_template_version && useServiceReportV1) recordInsert.report_template_version = 'service_report_v1';
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
-          if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
+          // Tier + provenance + callback identity frozen via the SHARED
+          // completion snapshot (completion-tier-snapshot.js) — the same
+          // builder the pest-recap path uses, so no completion path can
+          // create a record without them (codex #3617 r3/r4). The customer
+          // fields are RE-READ inside this transaction: the handler-entry
+          // read is minutes stale by insert time, and a concurrent
+          // membership edit would freeze the wrong provenance on a
+          // permanent report (codex r9 P1). Fallback = the entry read.
+          let snapshotCustomer = null;
+          try {
+            snapshotCustomer = await trx('customers').where({ id: svc.customer_id }).first(
+              'waveguard_tier',
+              'monthly_rate',
+              ...(customerTierSourceColumnExists ? ['waveguard_tier_source'] : []),
+              ...(billingModeColumnsExist ? ['billing_mode'] : []),
+            );
+          } catch { snapshotCustomer = null; }
+          Object.assign(recordInsert, completionTierSnapshotFields({
+            serviceRecordCols,
+            waveguardTier: snapshotCustomer ? snapshotCustomer.waveguard_tier : svc.cust_waveguard_tier,
+            waveguardTierSource: snapshotCustomer ? snapshotCustomer.waveguard_tier_source : svc.cust_waveguard_tier_source,
+            monthlyRate: snapshotCustomer ? snapshotCustomer.monthly_rate : svc.cust_monthly_rate,
+            billingMode: snapshotCustomer ? snapshotCustomer.billing_mode : svc.cust_billing_mode,
+            provenanceUnknown: customerColumnsProbeFailed,
+            // The LOCKED completion row's flag — svc was read before the
+            // FOR UPDATE and a concurrent update-details reclassify would
+            // freeze a stale callback identity forever (codex GH-r3 P2;
+            // same rule as the recap path).
+            isCallback: lockedSvcRow ? lockedSvcRow.is_callback === true : !!svc.is_callback,
+          }));
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,
@@ -7115,7 +7159,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (isBackfillCompletion) applyBackfillRecordTimingPolicy(recordTimingFields, effectiveTimeOnSite, svc);
           Object.assign(recordInsert, recordTimingFields);
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
-          if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
           if (serviceRecordCols.advisory && useServiceReportV1) {
             // Pass the completed-action scopes so an interior treatment keeps
@@ -11882,7 +11925,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             invoiceId: invoice.id,
             entryPoint: 'autopay_completion_decline',
             identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id },
+            // billing_mode_at_send: the owner autopay digest (#3607) classifies
+            // the text against the lane that authorized it.
+            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
           });
           paymentFailedNoticeSent = !!failResult.sent;
           // Send-window hold: the decline is deliberately independent of
@@ -11916,6 +11961,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   invoice_id: invoice.id,
                   pay_url: payUrl,
                   original_message_type: 'payment_failed',
+                  // Lane that authorized the decline notice — the replay
+                  // forwards it so the owner autopay digest (#3607)
+                  // classifies the morning send against it.
+                  billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode,
                   original_block_code: failResult.code,
                   replay_purpose: 'payment_failure',
                   refresh_customer_phone: true,
@@ -13137,6 +13186,7 @@ router.get('/products/catalog', async (req, res, next) => {
 // portal reaches these too. See services/pest-recap.js.
 // =========================================================================
 const PestRecap = require('../services/pest-recap');
+const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
 
 function recapActor(req) {
   return {
@@ -13633,7 +13683,12 @@ function parseRescheduleWindow(w) {
 }
 
 function normalizeHHMM(value) {
-  const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  // Accept HH:MM:SS too (series-move incident 2026-08-29/30, twice): the
+  // rebooker returns SIBLING occurrence windowStart as the raw pg time
+  // ('13:00:00'); rejecting it made rescheduleReminderTime fall back to
+  // 08:00 and every collective move re-armed sibling reminders five hours
+  // early.
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
   if (!m) return null;
   return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
 }
@@ -13710,7 +13765,7 @@ function rescheduleExpectPredicate(observed) {
 async function ensureObservedAnchor(serviceId, observed) {
   if (!observed || observed.read) return observed;
   const row = await db('scheduled_services').where({ id: serviceId })
-    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring');
+    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring', 'visit_id');
   if (row) Object.assign(observed, row, { read: true });
   return observed;
 }
@@ -13776,7 +13831,7 @@ function rescheduleReminderTime(date, window) {
 // paths) — callers that record completion (applySeriesMoveEffects) stamp
 // only on true/'stale'; single-visit callers keep their fire-and-forget
 // contract.
-async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
+async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null, preserveMoveHold = false } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
     const synced = await AppointmentReminders.handleReschedule(
@@ -13788,7 +13843,11 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // until our SMS settles + markRescheduleNoticeSent runs, so the 15-min
       // cron can't fire a duplicate reminder in the gap. A non-notifying move
       // leaves the 24h reminder pending so the cron still reminds the customer.
-      { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      { sendNotification: false,
+      // A partial/unverifiable unit move deliberately retains the cohort
+      // hold — this unconditional post-move sync must not release it
+      // (codex #3609 r37).
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
@@ -14233,9 +14292,15 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     // reminds the customer on the new slot.
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
-      await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
-      if (moved.smsSent === true) {
-        await markRescheduleReminderNotified(moved.id);
+      // A member carried by its visit's unit move (coveredByVisit) had its
+      // reminder synced by moveVisitAsUnit with its OWN landed window; the
+      // covered result carries no window, and re-syncing here would fall
+      // back to 08:00 (local codex audit). Board refresh only.
+      if (!moved.coveredByVisit) {
+        await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true, preserveMoveHold: moved.needsAttention?.code === 'VISIT_MOVE_INCOMPLETE' });
+        if (moved.smsSent === true) {
+          await markRescheduleReminderNotified(moved.id);
+        }
       }
       try {
         await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });
@@ -14950,11 +15015,41 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     if (collectiveMoveGateOn()) {
       // The observed anchor (read above, or by the resolution) answers the
       // recurrence + date questions — one read, one snapshot.
-      const job = observedForMove.is_recurring !== undefined
+      const job = observedForMove.is_recurring !== undefined && observedForMove.visit_id !== undefined
         ? observedForMove
-        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
+        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date', 'visit_id');
       const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
-      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+      // Grouped = at least two LIVE members (the unit mover's own rule —
+      // local audit r30): a visit_id whose other member is terminal is an
+      // ungrouped anchor and keeps the disclosure contract below. A member
+      // joining after this count re-enters the unit mover without a series
+      // policy and is refused there (VISIT_SERIES_MOVE_UNSUPPORTED); a
+      // detach is caught by the visit_id pinned in the CAS.
+      const groupedLive = job?.visit_id
+        ? (await require('../services/visit-groups').openMembers(db, job.visit_id)).length >= 2
+        : false;
+      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0] && groupedLive) {
+        // A GROUPED recurring anchor is never widened to its series from
+        // this surface (scope ruling, codex #3609 r3; local audit r26): the
+        // unit mover refuses the widening (VISIT_SERIES_MOVE_UNSUPPORTED)
+        // and points at "move this visit only" — this is that path. The
+        // whole stop moves as one visit, the series stays where it is, so
+        // no series acknowledgement is owed. "Reschedule series" (scope
+        // 'series') keeps its own refusal for grouped anchors.
+        rescheduleOptions.seriesPolicy = 'single';
+        // The grouped assumption itself is fenced (local gate r44): if the
+        // unit mover's locked plan finds the visit solo (a sibling went
+        // terminal since this count), the rebooker surfaces CHANGED instead
+        // of moving the occurrence single-row without the acknowledgement.
+        rescheduleOptions.expectGroupedVisit = true;
+        // The observed membership rides in the rebooker's CAS (codex r24 P1):
+        // an anchor detached from its visit between this read and the move
+        // would otherwise reach the rebooker ungrouped WITH seriesPolicy
+        // 'single' and move alone without the acknowledgement this route
+        // still requires for ungrouped anchors — it now misses the CAS
+        // (409, re-submit) instead.
+        rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: job.visit_id };
+      } else if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
@@ -14993,6 +15088,16 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         actorId: req.technicianId,
         reasonText,
       });
+      // Grouped siblings moved singly by moveVisitAsUnit are outside the
+      // series effects' broadcast scope — other boards need them too
+      // (codex #3609 r6).
+      for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
+        try {
+          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+        } catch (err) {
+          logger.error(`[dispatch] series reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
+        }
+      }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
         ...response,
@@ -15001,11 +15106,46 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         unassignedConflicts: effects.conflicts,
       });
     }
-    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
+    // A grouped stop that moved only PARTLY (owner ruling 2026-08-30): the
+    // customer is NOT texted — a "your visit moved" notice would be wrong
+    // for the sibling still at the old stop — and the response carries a
+    // hard needsAttention so the board surfaces it for repair, not a
+    // soft warning. Reminder sync runs with willNotify=false so the
+    // stranded sweep owns the (corrected) text once the stop is whole.
+    const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
+      || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
+    const willNotify = notifyCustomer !== false && !partialVisitMove;
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
+    }
+    // A grouped stop moved as a unit: every sibling that landed is a
+    // committed change other open boards must see too (codex #3609 r5).
+    for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
+      try {
+        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+      } catch (err) {
+        logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
+      }
+    }
+    if (partialVisitMove) {
+      const stuck = (result.visitMove.failed || []).map((f) => f.id);
+      logger.error(`[dispatch] grouped move of visit ${result.visitMove.visitId} for ${req.params.serviceId} is INCOMPLETE — ${stuck.length} member(s) still at the old stop (${stuck.join(', ')}); customer NOT notified`);
+      return res.json({
+        ...result,
+        notificationSent: false,
+        notificationError: 'grouped move incomplete — customer NOT notified',
+        needsAttention: {
+          code: 'VISIT_MOVE_INCOMPLETE',
+          // Shared builder (codex r44): a member that MOVED but could not
+          // be reassigned needs assignment guidance, never "still on the
+          // old day/time" — following that would move it AGAIN.
+          message: require('../services/visit-groups').incompleteMoveMessage(result.visitMove.failed || [], result.visitMove.parentRetargetFailed === true),
+          memberIds: stuck,
+        },
+      });
     }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary
@@ -15017,10 +15157,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       // admin-schedule lazily requires this module too; neither runs at load.
       const { sendRescheduleNoticeForVisit } = require('./admin-schedule');
       const win = parseRescheduleWindow(effectiveWindow);
+      // A grouped stop moved as a unit: the one notice quotes the STOP's
+      // landed arrival start (visitMove.visitStart — the earliest member),
+      // not the tapped member's requested start (codex #3609 r25 P1).
+      const noticeStart = result.visitMove?.visitStart || win.start;
       const notice = await sendRescheduleNoticeForVisit(
         req.params.serviceId,
         String(newDate).split('T')[0],
-        win.start,
+        noticeStart,
       );
       return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }
@@ -15273,6 +15417,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
       .first(
         's.id as job_id',
         's.customer_id',
+        's.visit_id',
         's.technician_id as tech_id',
         's.status',
         's.service_type',
@@ -15335,6 +15480,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
       notes: row.notes || null,
       internal_notes: row.internal_notes || null,
       updated_at: row.updated_at,
+      visit_id: row.visit_id || null,
     });
   } catch (err) {
     logger.error(`[dispatch/jobs/:id] hydration failed: ${err.message}`);
@@ -16114,6 +16260,12 @@ const recapVideoActor = (req) => req.technician?.name || req.technicianId || nul
 router.get('/:serviceId/recap-video', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
+    // Retired callback recap → the staff card reads exists:false and hides
+    // (codex P1 #3631) — no approve/send buttons over a video the public
+    // endpoints refuse to serve.
+    if (await recapPipeline.callbackRecapRetired(req.params.serviceId)) {
+      return res.json({ exists: false, status: 'retired' });
+    }
     const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap) return res.json({ exists: false, status: 'none' });
     return res.json({
@@ -16133,6 +16285,7 @@ router.post('/:serviceId/recap-video/generate', async (req, res, next) => {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap rendering is disabled' });
     if (!(await recapOwnerOk(req, res))) return undefined;
     const result = await recapPipeline.enqueueRecap(req.params.serviceId, { force: Boolean(req.body?.force) });
+    if (result.retired) return res.status(409).json({ error: 'Callback visits do not get a recap video while the re-service report is active.' });
     if (!result.ok) return res.status(503).json({ error: 'recap queue unavailable' });
     return res.json({ ok: true, status: result.recap?.status || 'pending' });
   } catch (err) { return next(err); }
@@ -16241,6 +16394,9 @@ module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
+// Test surface for the reminder-time normalization (series-move incident).
+module.exports.normalizeHHMM = normalizeHHMM;
+module.exports.rescheduleReminderTime = rescheduleReminderTime;
 module.exports._test = {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,

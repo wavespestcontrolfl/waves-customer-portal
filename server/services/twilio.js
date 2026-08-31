@@ -245,6 +245,45 @@ const TwilioService = {
   // =========================================================================
 
   /**
+   * Provider-side reconciliation: did an outbound message to `to` carrying
+   * `bodyFragment` (case-insensitive) reach Twilio after `sentAfter`? Used
+   * where the local sms_log cannot be trusted as proof of absence (a
+   * post-accept log insert failure is swallowed by sendSMS). Answers
+   * { found } when the provider could be consulted, { unavailable: true }
+   * when it could not (no creds, API error) — callers must treat that as
+   * "unknown", never as "not sent". A search that hits the page bound is
+   * also reported unavailable — a truncated result set is not proof of
+   * absence either.
+   */
+  async findOutboundMessageSince({ to, sentAfter, bodyFragment, limit = 1000 }) {
+    const twilioClient = getClient();
+    if (!twilioClient || !to) return { unavailable: true };
+    try {
+      // The SDK serializes dateSentAfter to whole seconds as a STRICT
+      // DateSent> filter, so an acceptance in the same second as the claim
+      // would be excluded — search from a minute earlier; the recipient +
+      // body-fragment checks below keep the match exact.
+      const from = sentAfter ? new Date(new Date(sentAfter).getTime() - 60 * 1000) : undefined;
+      const messages = await twilioClient.messages.list({
+        to,
+        dateSentAfter: from,
+        limit,
+      });
+      const frag = String(bodyFragment || "").toLowerCase();
+      const found = messages.some(
+        (m) => m.direction !== "inbound" && String(m.body || "").toLowerCase().includes(frag),
+      );
+      if (found) return { found: true };
+      if (messages.length >= limit) return { unavailable: true, truncated: true };
+      return { found: false };
+    } catch (err) {
+      // Twilio error text can echo the destination number — log the class/code only.
+      logger.warn(`[twilio] outbound message reconcile failed (code=${err?.code || err?.status || err?.name || "unknown"})`);
+      return { unavailable: true };
+    }
+  },
+
+  /**
    * Send a verification code via SMS for phone-based login
    */
   async sendVerificationCode(phone) {

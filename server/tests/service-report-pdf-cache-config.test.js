@@ -137,6 +137,35 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(result.key).toBe('reports/service-1/report-sig-current-tn0.pdf');
   });
 
+  test('queued renders carry the Termite V2 dashboard under the termite cache signature (same composer as the route)', async () => {
+    const original = process.env.TERMITE_REPORT_V2;
+    process.env.TERMITE_REPORT_V2 = 'true';
+    try {
+      const service = makeService({
+        service_line: 'termite',
+        service_type: 'Termite Bait Station Service',
+        service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: { stations_checked: 12, total_stations: 12, termite_activity: 'None observed', bait_consumption: 'None — bait intact' } } }),
+      });
+      mockBuildReportV1Data.mockImplementationOnce(async () => ({
+        serviceLine: 'termite',
+        typedReport: { type: 'termite_bait_station', visitSequence: 1, todaysResult: { nextStep: 'Recheck next quarter.' } },
+        // live-only field must never fossilize into the queued PDF
+        termiteNextMonitoringVisit: { scheduledDate: '2999-01-01', windowStart: '09:00', serviceType: 'Termite Bait Station Service' },
+      }));
+      const knex = makeKnex(service);
+      const result = await renderAndStoreServiceReportPdf('service-1', { token: 'token-1', knex });
+      const rendered = mockRenderServiceReportV1Pdf.mock.calls[0][0];
+      expect(rendered.termiteReportV2.status.label).toBe('No termite activity observed');
+      expect(rendered.termiteReportV2.nextStep).toBe('Recheck next quarter.');
+      expect(rendered.termiteReportV2.nextVisit).toBeNull();
+      expect(rendered).not.toHaveProperty('termiteNextMonitoringVisit');
+      expect(result.key).toContain('-termv2');
+    } finally {
+      if (original === undefined) delete process.env.TERMITE_REPORT_V2;
+      else process.env.TERMITE_REPORT_V2 = original;
+    }
+  });
+
   test('getOrRenderServiceReportPdf reuses the cache-check config when it has to render', async () => {
     const knex = makeKnex(makeService({ pdf_storage_key: 'reports/service-1/report-sig-old.pdf' }));
 

@@ -4,6 +4,7 @@
 
 const { getNewsletterType, isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
 const { validateVoice } = require('../config/voice-profiles');
+const { containsAffiliateMaterial } = require('./content/content-guardrails');
 
 // Phrases the flagship draft is NOT allowed to make up. The events_raw
 // table doesn't store admission, and the newsletter is an events guide
@@ -210,6 +211,22 @@ function validateNewsletterDraft(send, opts = {}) {
     scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), [], 'none');
     scanSegment(send.html_body, opts.lockedPrices || [], 'html');
     scanSegment(send.text_body, opts.lockedPrices || [], 'text');
+  }
+
+  // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31: the
+  // rendered blog page is the only approved channel — several affiliate
+  // programs, e.g. DoMyOwn/Awin, restrict or void email placements, and
+  // the newsletter has no review queue, so this must hard-block in code).
+  // Scanned on EVERY newsletter type, manual included — no legitimate send
+  // carries an affiliate/tracking URL.
+  for (const [segment, label] of [
+    [send.subject, 'subject'], [send.preview_text, 'preview text'],
+    [send.html_body, 'HTML body'], [send.text_body, 'plain-text body'],
+  ]) {
+    if (segment && containsAffiliateMaterial(segment)) {
+      errors.push(`AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: ${label} contains affiliate material (an <AffiliateLink>, a registered affiliate URL, or a tracking-network URL) — affiliate links publish on the blog only, never by email`);
+      break;
+    }
   }
 
   return { errors, warnings };

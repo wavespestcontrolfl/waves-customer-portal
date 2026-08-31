@@ -33,6 +33,12 @@ export const MOBILE_SETTINGS_SECTIONS = [
     adminOnly: true,
   },
   {
+    key: "link-library",
+    label: "Link Library",
+    to: "/admin/settings?tab=link-library",
+    adminOnly: true,
+  },
+  {
     key: "kpi-targets",
     label: "KPI Targets",
     to: "/admin/settings?tab=kpi-targets",

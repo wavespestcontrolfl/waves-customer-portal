@@ -19,7 +19,7 @@ const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibil
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
-const { applyAutoDispatchMove, revalidatePlacement } = require('./apply');
+const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr } = require('./dates');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
@@ -389,8 +389,21 @@ async function runAutoDispatch(opts = {}) {
     // applied earliest, where the pass-1 estimate has diverged least from live.
     if (config.mode !== 'dry_run' && plannedMoves.length) {
       plannedMoves.sort((a, b) => b.result.improvement - a.result.improvement);
+      // Stragglers of a PARTIAL grouped move (codex #3609 r31 P1): the
+      // failed member sits at its original placement and passes
+      // revalidatePlacement (which never compares visit_id), so its own
+      // pass-2 entry would re-evaluate it and move it independently after
+      // the detach seam dissolves the broken group — while the first
+      // result already declared the stop incomplete and staff-owned.
+      // Quarantine those ids for the rest of the run (rain-out's own
+      // pattern for unit-move stragglers).
+      const quarantinedIds = new Set();
       for (const pm of plannedMoves) {
         let fresh = null;
+        if (pm.service && quarantinedIds.has(String(pm.service.id))) {
+          await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'VISIT_MOVE_INCOMPLETE', reason_description: 'Straggler of a partial grouped move earlier this run — staff repair owns this stop', ...pm.result.audit });
+          continue;
+        }
         try {
           // Supersession check FIRST: re-read the scored row, because an operator
           // may have locked/excluded/cancelled or moved this visit during the run
@@ -453,14 +466,17 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
-          if (totals.changed >= config.maxChangesPerRun) {
+          // A grouped row moves its whole visit: reserve EVERY member row
+          // against the per-run cap before applying (codex #3609 r7).
+          const unitSize = await unitMoveSize(pm.service, fresh.best);
+          if (totals.changed + unitSize > config.maxChangesPerRun) {
             totals.recommended++; // cap-held but still a valid move — count it in the summary
-            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement})`, ...fresh.audit });
+            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${unitSize > 1 ? `, grouped visit of ${unitSize}` : ''})`, ...fresh.audit });
             continue;
           }
 
-          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, config);
-          totals.changed++;
+          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, { ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary });
+          totals.changed += result.movedCount || 1;
           await audit.logDecision(runId, {
             action: 'changed',
             service: pm.service,
@@ -476,6 +492,12 @@ async function runAutoDispatch(opts = {}) {
           });
         } catch (applyErr) {
           totals.failed++;
+          // A partial grouped move already changed rows — they count.
+          if (applyErr && applyErr.movedCount) totals.changed += applyErr.movedCount;
+          // Quarantine the stragglers (see above) for the rest of the run.
+          if (applyErr && Array.isArray(applyErr.failedMembers)) {
+            for (const id of applyErr.failedMembers) quarantinedIds.add(String(id));
+          }
           logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
           try {
             // Prefer the fresh (actually-attempted) placement in the failure row;

@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('./customer-contact');
+const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE, withAccountPrimaryContact } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -82,10 +82,12 @@ async function stampedPropertyLabel(scheduledServiceId) {
 
 async function loadCustomer(customerId) {
   if (!customerId) return null;
-  return db('customers')
+  const row = await db('customers')
     .where({ id: customerId })
     .select(
       'id',
+      'account_id',
+      'is_primary_profile',
       'first_name',
       'last_name',
       'company_name',
@@ -105,6 +107,10 @@ async function loadCustomer(customerId) {
       'service_contacts_consent_at',
     )
     .first();
+  // Secondary-property row with no email of its own: the account owner's
+  // address (#1995 A/D) — the row IS the owner, minted from their estimate.
+  // Only blank fields fill; a row-level email always wins.
+  return row ? withAccountPrimaryContact(row) : row;
 }
 
 // Resolve the email recipients for an appointment notice. Mirrors the SMS
@@ -190,7 +196,20 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
  *   { ok: false, blocked: true, reason }           — all recipients suppressed
  *   { ok: false, error }                           — threw
  */
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null }) {
+// Grouped unit-move hold (codex #3609 uncapped audit P1): a visit mid-move
+// stamps move_hold_until on its members' reminder rows, and an email
+// rendered for the OLD slot must not dispatch. The caller-level checks
+// (sendAppointmentNoticeEmail) run BEFORE this module's own awaits
+// (customer/recipients/property/template), so the hold is re-read here at
+// the actual provider handoff, per recipient. Fail closed — a held notice
+// defers (the callers leave their rows unmarked and retry), never lost.
+async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
+  // Delegates to THE shared guard (visit-groups.appointmentSendHeld) —
+  // one implementation with the SMS canonical path (codex r47).
+  return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs);
+}
+
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
@@ -232,6 +251,15 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     // exceed email_messages.idempotency_key (varchar 260) for long addresses.
     const recipientToken = crypto.createHash('sha256').update(recipient.email.toLowerCase()).digest('hex').slice(0, 16);
     const recipientKey = idempotencyKey ? `${idempotencyKey}:${recipientToken}` : undefined;
+    // Move-hold boundary re-check immediately before the provider call —
+    // the payload above was rendered from a slot a unit move may have just
+    // vacated. Held ⇒ stop the whole fan-out (the hold covers the visit,
+    // not one recipient) and defer.
+    if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) {
+      logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the provider handoff — grouped move in progress`);
+      await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
+      return { ok: false, held: true, reason: 'move_hold' };
+    }
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey,
@@ -243,7 +271,21 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         idempotencyKey: recipientKey,
         categories: builtCategories,
         suppressionGroupKey: TRANSACTIONAL_GROUP,
+        // Move-hold recheck at the library's own dispatch boundary (codex
+        // r41 uncapped): sendTemplate performs template/idempotency/
+        // suppression awaits before the provider call — a hold stamped in
+        // that gap must still abort. onQueued resolving false aborts
+        // PRE-dispatch; moveHoldLive fails closed internally, so a read
+        // error holds rather than sends.
+        ...(moveHoldServiceId ? { onQueued: async () => !(await moveHoldLive(moveHoldServiceId, renderedSlotMs)) } : {}),
       });
+      // An onQueued abort is a HELD outcome, not a delivery failure: stop
+      // the fan-out (the hold covers the visit) and let the caller defer.
+      if (moveHoldServiceId && result?.aborted) {
+        logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the dispatch boundary — grouped move in progress`);
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
+        return { ok: false, held: true, reason: 'move_hold' };
+      }
       outcomes.push(result);
       if (!result.deduped) {
         const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
@@ -314,6 +356,8 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
     categories: ['appointment_confirmation'],
     triggerEventId: `appointment.confirmation:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
+    moveHoldServiceId: scheduledServiceId || null,
+    renderedSlotMs: apptTime ? apptTime.getTime() : null,
   });
 }
 
@@ -390,6 +434,8 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     categories: [is72 ? 'appointment_reminder_72h' : 'appointment_reminder_24h'],
     triggerEventId: `${templateKey}:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
+    moveHoldServiceId: scheduledServiceId || null,
+    renderedSlotMs: apptTime ? apptTime.getTime() : null,
   });
 }
 

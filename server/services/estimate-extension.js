@@ -139,6 +139,14 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   if (estimate.archived_at) {
     throw validationError('Estimate is archived. Unarchive first.');
   }
+  // A never-delivered row has no customer link to extend (same reasoning as
+  // the crashed-send guard above), and reviving it to 'sent' would erase
+  // the expired_unsent classification that keeps internal drafts out of
+  // the loss rates (GH codex P2 — the V2 "Reopen + extend" action reaches
+  // here unconditionally).
+  if (estimate.status === 'expired' && !estimate.sent_at && !estimate.viewed_at) {
+    throw validationError('This estimate was never sent to the customer — send it instead of extending.');
+  }
 
   const newExpiry = computeExtensionExpiry(estimate, parsedDays);
 
@@ -152,6 +160,17 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   };
   const revivedStatus = extensionStatusUpdate(estimate);
   if (revivedStatus) updates.status = revivedStatus;
+  // A revived row is a LIVE courtship again — clear the expiry sweep's loss
+  // classification, or the next expiry/decline would COALESCE-preserve a
+  // stale expired_unviewed on a row the customer has since opened (codex
+  // pre-push P1). Only the sweep's own codes: nothing else can sit on an
+  // extendable row (declined isn't extendable; archived rows 400 above).
+  if (revivedStatus && ['expired_unviewed', 'expired_viewed'].includes(estimate.disposition)) {
+    updates.disposition = null;
+    updates.disposition_source = null;
+    updates.disposition_at = null;
+    updates.disposition_note = null;
+  }
 
   // Guarded write — the caller's row is a snapshot, so predicate on the
   // state this extension was computed FROM, not just the id. This stops a
@@ -208,7 +227,16 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           // after every expiry (codex #3244 r5). Admin extensions burning
           // it too is deliberate — admins can always extend again.
           extension_auto_granted_at: db.raw('COALESCE(extension_auto_granted_at, NOW())'),
-          status: db.raw("CASE WHEN status IN ('expired','send_failed') THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
+          // A NEVER-SENT sibling stays expired with its expired_unsent
+          // classification — reviving it would mint a phantom courtship
+          // (GH codex P2, same rule as the anchor's never-sent guard).
+          status: db.raw("CASE WHEN status IN ('expired','send_failed') AND COALESCE(disposition, '') <> 'expired_unsent' THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
+          // Mirror of the anchor row's revival clear (codex pre-push P1):
+          // a revived sibling sheds the sweep's expiry classification.
+          disposition: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition END"),
+          disposition_source: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_source END"),
+          disposition_at: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_at END"),
+          disposition_note: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_note END"),
           updated_at: db.fn.now(),
         });
     } catch (siblingErr) {
@@ -325,58 +353,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           if (smsResult?.sent && smsResult.providerMessageId === 'gate-blocked') {
             smsResult = { ...smsResult, sent: false, reason: 'sms_gate_off' };
           }
-          // Send-window hold: the lifetime auto-grant is burned by this
-          // call and nothing retries — queue the refreshed-link text on
-          // the scheduled rail so the promised SMS still arrives at
-          // 8:00 AM (the registry recheck suppresses it if the estimate
-          // goes terminal overnight).
-          if (!smsResult.sent
-            && smsResult.code === 'QUIET_HOURS_HOLD'
-            && smsResult.deferred
-            && smsResult.nextAllowedAt) {
-            try {
-              const TWILIO_NUMBERS = require('../config/twilio-numbers');
-              // A linked estimate may legitimately hold a phone that is NOT
-              // the account phone (email-matched linkage) — the shared
-              // identity check decides refresh vs freeze so the bearer
-              // estimate link can't be retargeted at replay.
-              const { recipientRefreshStamp } = require('./messaging/deferred-recipient-identity');
-              const recipientStamp = await recipientRefreshStamp({
-                customerId: estimate.customer_id,
-                recipientPhone: estimate.customer_phone,
-                label: 'estimate-extension',
-              });
-              await db('sms_log').insert({
-                customer_id: estimate.customer_id || null,
-                direction: 'outbound',
-                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                to_phone: estimate.customer_phone,
-                message_body: body,
-                status: 'scheduled',
-                scheduled_for: new Date(smsResult.nextAllowedAt),
-                message_type: 'estimate_extended',
-                metadata: JSON.stringify({
-                  entry_point: 'estimate_extension_deferred',
-                  estimate_id: estimate.id,
-                  original_block_code: smsResult.code,
-                  replay_purpose: 'estimate_followup',
-                  // The expiry this body NAMES (codex r26): an admin
-                  // re-extension before 08:00 moves expires_at again, and
-                  // the frozen "{new_expiry}" copy would contradict the
-                  // newer grant's own confirmation. The recheck suppresses
-                  // when the live expires_at no longer matches.
-                  granted_expires_at: newExpiry.toISOString(),
-                  ...(estimate.customer_id
-                    ? { ...recipientStamp, resolve_from_by_customer: true }
-                    : { consent_basis: { status: 'transactional_allowed', source: entryPoint } }),
-                }),
-              });
-              smsResult = { ...smsResult, scheduled: true };
-              logger.info(`[estimate-extension] Extension SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
-            } catch (queueErr) {
-              logger.error(`[estimate-extension] Held extension SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
-            }
-          }
+          // No quiet-hours branch: both extension entry points are exempt
+          // from the send window (admin = operator click, public =
+          // customer-action confirmation, owner ruling 2026-08-29), so
+          // QUIET_HOURS_HOLD cannot surface here.
         }
       }
     } catch (err) {

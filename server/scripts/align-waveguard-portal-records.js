@@ -98,10 +98,19 @@ function parseBooleanFlag(value) {
 // Default is dry-run: only a bare `--apply` or an explicit truthy value enables
 // writes, so `--apply=false`/`--apply=0` stays read-only.
 const APPLY = parseBooleanFlag(ARGS.apply);
-const LIMIT = ARGS.limit ? Math.max(1, Number.parseInt(ARGS.limit, 10) || 0) : null;
-const CUSTOMER_ID = ARGS['customer-id'] || null;
-const INCLUDE_INACTIVE = parseBooleanFlag(ARGS['include-inactive']);
-const ENROLL_NO_PLAN = parseBooleanFlag(ARGS['enroll-no-plan']);
+
+// Scan options. CLI flags populate them for `main()`; the daily lead-to-cash
+// invariants sweep calls `scanAlignment()` with an explicit object and no
+// `onRepair`, so the cron path has NO write capability at all.
+function optionsFromArgs(args = ARGS) {
+  return {
+    limit: args.limit ? Math.max(1, Number.parseInt(args.limit, 10) || 0) : null,
+    customerId: args['customer-id'] || null,
+    includeInactive: parseBooleanFlag(args['include-inactive']),
+    enrollNoPlan: parseBooleanFlag(args['enroll-no-plan']),
+  };
+}
+const CLI_OPTIONS = optionsFromArgs();
 
 function moneyNumber(value) {
   const num = Number(value || 0);
@@ -357,8 +366,8 @@ function buildNoPlanEnrollmentUpdates(customer, detectedKeys, columns) {
   return updates;
 }
 
-function applyCustomerFilters(query, customerColumns) {
-  if (!INCLUDE_INACTIVE && columnPresent(customerColumns, 'active')) query = query.where('c.active', true);
+function applyCustomerFilters(query, customerColumns, options = CLI_OPTIONS) {
+  if (!options.includeInactive && columnPresent(customerColumns, 'active')) query = query.where('c.active', true);
   if (columnPresent(customerColumns, 'deleted_at')) query = query.whereNull('c.deleted_at');
   return query;
 }
@@ -387,7 +396,7 @@ function customerSelect(query, customerColumns = {}) {
 // populated). This matches isMembershipCustomerRow so legacy-rate members still get
 // their missing tier/member_since fields backfilled. buildCustomerUpdates additionally
 // fail-closes via that same predicate, so a sentinel-tier row is never mutated.
-async function candidateCustomers(customerColumns) {
+async function candidateCustomers(customerColumns, options = CLI_OPTIONS) {
   let query = db('customers as c')
     .where(function enrolled() {
       this.whereRaw(
@@ -420,9 +429,9 @@ async function candidateCustomers(customerColumns) {
     });
   }
 
-  if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
-  query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
-  if (LIMIT) query = query.limit(LIMIT);
+  if (options.customerId) query = query.where('c.id', options.customerId);
+  query = customerSelect(applyCustomerFilters(query, customerColumns, options), customerColumns);
+  if (options.limit) query = query.limit(options.limit);
 
   return (await query).map((customer) => ({
     ...customer,
@@ -437,7 +446,7 @@ async function candidateCustomers(customerColumns) {
 // is a cheap pre-screen; the authoritative per-row gate stays
 // serviceRowCountsTowardWaveGuard + the upcoming-date check in
 // analyzeCustomer, mirroring how the alignment pass treats its rows.
-async function noPlanCandidateCustomers(customerColumns, today) {
+async function noPlanCandidateCustomers(customerColumns, today, options = CLI_OPTIONS) {
   let scheduledColumns = {};
   try {
     scheduledColumns = await db('scheduled_services').columnInfo();
@@ -486,9 +495,9 @@ async function noPlanCandidateCustomers(customerColumns, today) {
     // batch forever and starve valid later customers.
     .orderByRaw('random()');
 
-  if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
-  query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
-  if (LIMIT) query = query.limit(LIMIT);
+  if (options.customerId) query = query.where('c.id', options.customerId);
+  query = customerSelect(applyCustomerFilters(query, customerColumns, options), customerColumns);
+  if (options.limit) query = query.limit(options.limit);
 
   return (await query).map((customer) => ({
     ...customer,
@@ -666,11 +675,22 @@ function summarizeRepair(repair) {
   };
 }
 
-async function main() {
+/**
+ * Scan pass shared by the CLI and the daily lead-to-cash invariants sweep.
+ * READ-ONLY unless `onRepair` is supplied — the CLI passes
+ * `applyCustomerRepair` under `--apply`; the sweep passes nothing, so a
+ * cron-side drift report can never turn into a customer write. Per-customer
+ * ordering (analyze → repair → next customer) is preserved for the apply path.
+ *
+ * @param {{ limit?: number|null, customerId?: string|null, includeInactive?: boolean, enrollNoPlan?: boolean, onRepair?: (repair: object) => Promise<void> }} [options]
+ */
+async function scanAlignment(options = CLI_OPTIONS) {
+  const scanOptions = { ...optionsFromArgs({}), ...options };
+  const { onRepair } = scanOptions;
   const today = etDateString();
   const customerColumns = await db('customers').columnInfo();
-  const customers = await candidateCustomers(customerColumns);
-  if (ENROLL_NO_PLAN) customers.push(...await noPlanCandidateCustomers(customerColumns, today));
+  const customers = await candidateCustomers(customerColumns, scanOptions);
+  if (scanOptions.enrollNoPlan) customers.push(...await noPlanCandidateCustomers(customerColumns, today, scanOptions));
   const repairs = [];
   const noServiceEvidence = [];
   const tierMismatches = [];
@@ -682,23 +702,35 @@ async function main() {
     if (!Object.keys(repair.customerUpdates).length) continue;
 
     repairs.push(repair);
-    if (APPLY) await applyCustomerRepair(repair);
+    if (onRepair) await onRepair(repair);
   }
+
+  return {
+    checkedCustomers: customers.length,
+    repairs: repairs.map(summarizeRepair),
+    noPlanEnrollments: repairs.filter((repair) => repair.customer.candidate_reason === 'no_plan_upcoming_recurring').length,
+    noServiceEvidence,
+    tierMismatches,
+  };
+}
+
+async function main() {
+  const scan = await scanAlignment({ ...CLI_OPTIONS, onRepair: APPLY ? applyCustomerRepair : undefined });
 
   const summary = {
     ok: true,
     mode: APPLY ? 'apply' : 'dry-run',
-    checkedCustomers: customers.length,
-    customersNeedingRepair: repairs.length,
-    customerFieldUpdates: repairs.length,
-    noPlanEnrollments: repairs.filter((repair) => repair.customer.candidate_reason === 'no_plan_upcoming_recurring').length,
-    noServiceEvidenceCount: noServiceEvidence.length,
-    tierMismatchCount: tierMismatches.length,
-    limit: LIMIT,
-    customerId: CUSTOMER_ID,
-    includeInactive: INCLUDE_INACTIVE,
-    enrollNoPlan: ENROLL_NO_PLAN,
-    sample: repairs.slice(0, 20).map(summarizeRepair),
+    checkedCustomers: scan.checkedCustomers,
+    customersNeedingRepair: scan.repairs.length,
+    customerFieldUpdates: scan.repairs.length,
+    noPlanEnrollments: scan.noPlanEnrollments,
+    noServiceEvidenceCount: scan.noServiceEvidence.length,
+    tierMismatchCount: scan.tierMismatches.length,
+    limit: CLI_OPTIONS.limit,
+    customerId: CLI_OPTIONS.customerId,
+    includeInactive: CLI_OPTIONS.includeInactive,
+    enrollNoPlan: CLI_OPTIONS.enrollNoPlan,
+    sample: scan.repairs.slice(0, 20),
   };
 
   console.log(JSON.stringify(summary, null, 2));
@@ -720,9 +752,11 @@ module.exports = {
   detectServiceKeys,
   inferTierFromServiceCount,
   normalizeTierName,
+  optionsFromArgs,
   parseArgs,
   parseBooleanFlag,
   representativePlanKeys,
+  scanAlignment,
   serviceFamilyKey,
   uniqueServiceFamilies,
 };

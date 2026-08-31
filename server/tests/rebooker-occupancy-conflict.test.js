@@ -774,3 +774,97 @@ describe('seriesOccurrenceWindow — REBOOKER_NULL_END_OCCUPANCY=off outranks th
     expect(out).toEqual({ start: '10:00', end: '11:00' });
   });
 });
+
+describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
+  test('an ungrouped pre-read pins visit_id IS NULL in the CAS; an explicit single-row member move does not', async () => {
+    let { trxScheduled } = wireRescheduleMocks(service());
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin');
+    expect(trxScheduled.where).toHaveBeenCalledWith({ visit_id: null });
+    ({ trxScheduled } = wireRescheduleMocks(service()));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin', { visitPolicy: 'single' });
+    expect(trxScheduled.where).not.toHaveBeenCalledWith({ visit_id: null });
+    // a caller that fences membership itself keeps its own contract
+    ({ trxScheduled } = wireRescheduleMocks(service()));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin', { expect: { visit_id: 'v1' } });
+    expect(trxScheduled.where).not.toHaveBeenCalledWith({ visit_id: null });
+  });
+
+  test('a CAS miss that finds the row grouped surfaces VISIT_MEMBERSHIP_CHANGED; a plain miss keeps the generic 409', async () => {
+    let { trxScheduled } = wireRescheduleMocks(service());
+    trxScheduled.update.mockResolvedValue(0);
+    trxScheduled.first.mockImplementation(async () => (trxScheduled.update.mock.calls.length ? { visit_id: 'v9' } : undefined));
+    await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+    ({ trxScheduled } = wireRescheduleMocks(service()));
+    trxScheduled.update.mockResolvedValue(0);
+    trxScheduled.first.mockImplementation(async () => (trxScheduled.update.mock.calls.length ? { visit_id: null } : undefined));
+    const err = await SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin').catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 409 });
+    expect(err.code).toBeUndefined();
+  });
+
+  test('a one-member visit the mover declined re-takes the stop lock in the move trx; a sibling that joined meanwhile ⇒ VISIT_MEMBERSHIP_CHANGED (r14 P2)', async () => {
+    const vg = require('../services/visit-groups');
+    const lockSpy = jest.spyOn(vg, 'lockStopForRow').mockResolvedValue('p1:2026-09-01');
+    const membersSpy = jest.spyOn(vg, 'openMembers');
+    const unitSpy = jest.spyOn(vg, 'moveVisitAsUnit').mockResolvedValue(null);
+    const wire = (visitStatus, others) => {
+      const { trx, trxScheduled } = wireRescheduleMocks(service({ visit_id: 'v1' }));
+      const inner = trx.getMockImplementation();
+      trx.mockImplementation((table) => (table === 'service_visits' ? chain({ first: jest.fn().mockResolvedValue({ status: visitStatus }) }) : inner(table)));
+      membersSpy.mockResolvedValue(others);
+      return { trx, trxScheduled };
+    };
+    try {
+      // the visit gained a sibling ⇒ re-enter, and the row is NOT moved alone
+      let { trx, trxScheduled } = wire('open', [{ id: 'svc-1' }, { id: 'svc-2' }]);
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin'))
+        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+      expect(lockSpy).toHaveBeenCalledWith(trx, 'svc-1');
+      expect(membersSpy).toHaveBeenCalledWith(trx, 'v1');
+      expect(trxScheduled.update).not.toHaveBeenCalled();
+      // still alone ⇒ the single-row move commits under the stop lock
+      ({ trxScheduled } = wire('open', [{ id: 'svc-1' }]));
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).resolves.toMatchObject({ success: true });
+      expect(trxScheduled.update).toHaveBeenCalled();
+      // a visit that entered FINALIZATION after the plan is REFUSED (local
+      // codex gate P0): the detach seam ignores non-open visits, so moving
+      // the member would strand the parent and its issued artifacts.
+      ({ trxScheduled } = wire('closing', [{ id: 'svc-1' }, { id: 'svc-2' }]));
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
+      expect(trxScheduled.update).not.toHaveBeenCalled();
+      // the stop moved under us ⇒ same re-entry remedy
+      ({ trxScheduled } = wire('open', [{ id: 'svc-1' }]));
+      lockSpy.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'VISIT_STOP_MOVED' }));
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
+      expect(trxScheduled.update).not.toHaveBeenCalled();
+      // an explicit single-row member move (the unit mover's own calls) never re-checks
+      ({ trxScheduled } = wire('open', [{ id: 'svc-1' }, { id: 'svc-2' }]));
+      lockSpy.mockClear();
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin', { visitPolicy: 'single' })).resolves.toMatchObject({ success: true });
+      expect(lockSpy).not.toHaveBeenCalled();
+      expect(unitSpy).toHaveBeenCalledTimes(4);
+    } finally {
+      lockSpy.mockRestore(); membersSpy.mockRestore(); unitSpy.mockRestore();
+    }
+  });
+
+  test('reschedule() re-enters ONCE on VISIT_MEMBERSHIP_CHANGED so the fresh read routes through the unit mover', async () => {
+    const once = jest.spyOn(SmartRebooker, 'rescheduleOnce')
+      .mockRejectedValueOnce(Object.assign(new Error('grouped'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' }))
+      .mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v9' } });
+    try {
+      const out = await SmartRebooker.reschedule('svc-1', TARGET, null, 'rain', 'admin', { allowLive: false });
+      expect(out).toEqual({ success: true, visitMove: { visitId: 'v9' } });
+      expect(once).toHaveBeenCalledTimes(2);
+      expect(once.mock.calls[1][5]).toMatchObject({ allowLive: false, _membershipRetried: true });
+      // a second membership change is NOT retried again (no unbounded loop)
+      once.mockRejectedValueOnce(Object.assign(new Error('grouped'), { code: 'VISIT_MEMBERSHIP_CHANGED' }))
+        .mockRejectedValueOnce(Object.assign(new Error('grouped again'), { code: 'VISIT_MEMBERSHIP_CHANGED' }));
+      await expect(SmartRebooker.reschedule('svc-1', TARGET, null, 'rain', 'admin')).rejects.toThrow('grouped again');
+      expect(once).toHaveBeenCalledTimes(4);
+    } finally {
+      once.mockRestore();
+    }
+  });
+});

@@ -30,6 +30,13 @@ function backfilledCompletion(structuredNotes) {
 }
 
 async function sendRecap(scheduledServiceId, { knex = db } = {}) {
+  // A retired callback recap must never reach the customer's phone — the
+  // public endpoints hide/404 the video, so the SMS would link a dead
+  // player (codex P1 #3631). Checked before any claim is taken.
+  const { callbackRecapRetired } = require('./recap-pipeline');
+  if (await callbackRecapRetired(scheduledServiceId, knex)) {
+    return { ok: false, reason: 'callback_recap_retired' };
+  }
   const recap = await knex('service_recaps').where({ scheduled_service_id: scheduledServiceId }).first().catch(() => null);
   if (!recap) return { ok: false, reason: 'no_recap' };
   if (recap.status !== 'approved') return { ok: false, reason: `not_approved (${recap.status})` };

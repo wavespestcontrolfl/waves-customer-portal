@@ -1,4 +1,9 @@
 const DIRECTIONALS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
+// Spelled-out forms count as a post-directional for the street-suffix
+// lookahead ONLY ("100 Main Street North Apt 4" abbreviates the same as
+// "100 Main Street N Apt 4"); they are deliberately not in DIRECTIONALS,
+// which also drives token upper-casing ("north" must never become "NORTH").
+const POST_DIRECTIONAL_LOOKAHEAD = new Set([...DIRECTIONALS, 'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest']);
 const CITY_PREFIX_TOKENS = new Set(['st', 'lake', 'key', 'ridge']);
 const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
@@ -231,11 +236,21 @@ function normalizeStreetLine(value) {
     if (!alias) continue;
 
     const tail = tokens.slice(i + 1);
-    const suffixIsTerminal = tail.length === 0;
-    const suffixBeforeDirection = tail.length > 0 && tail.every((token) => DIRECTIONALS.has(token.replace(/[.,]/g, '').toLowerCase()));
-    const nextToken = tail[0]?.replace(/[.,]/g, '').toLowerCase() || '';
-    const suffixBeforeUnit = !!tail[0] && (tail[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
-    if (!suffixIsTerminal && !suffixBeforeDirection && !suffixBeforeUnit) continue;
+    // A suffix counts when it ends the street, or is followed by a post-directional run
+    // ("St N", "St NE") that itself ends the street or precedes a unit ("St N Apt 4 …").
+    // The directional run is skipped, not required to be the whole tail, so a whole-line
+    // address ("100 Main Street N Apt 4 Sarasota FL 34236") canonicalizes the same as its
+    // comma-separated street ("100 Main Street N"). "Street North Port" still does not
+    // qualify — "Port" is neither a directional nor a unit, so the suffix is left alone.
+    let afterDirectionals = 0;
+    while (afterDirectionals < tail.length && POST_DIRECTIONAL_LOOKAHEAD.has(tail[afterDirectionals].replace(/[.,]/g, '').toLowerCase())) {
+      afterDirectionals += 1;
+    }
+    const rest = tail.slice(afterDirectionals);
+    const nextToken = rest[0]?.replace(/[.,]/g, '').toLowerCase() || '';
+    const suffixIsTerminal = rest.length === 0;
+    const suffixBeforeUnit = !!rest[0] && (rest[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
+    if (!suffixIsTerminal && !suffixBeforeUnit) continue;
 
     tokens[i] = titleToken(alias);
     for (let j = i - 1; j >= 0; j -= 1) {
@@ -289,7 +304,9 @@ function normalizeZip(value) {
 }
 
 function normalizeUnitToken(token) {
-  return /^[A-Za-z]?\d+[A-Za-z]?$/.test(token) ? token.toUpperCase() : titleToken(token);
+  // Identifier-shaped tokens ("4B", "PH1", "TH12") are upper-cased as a unit;
+  // same letter budget as UNIT_VALUE so the two never disagree.
+  return /^[A-Za-z]{0,3}\d+[A-Za-z]?$/.test(token) ? token.toUpperCase() : titleToken(token);
 }
 
 // Second address line (unit / apt / suite). Kept separate from line1 so the
@@ -354,9 +371,27 @@ function unitLineValueKey(normalizedUnitLine) {
 // designator words ("4501 Space Coast Blvd") stay intact — and the remaining
 // street must still lead with a house number, so a line that is ONLY units
 // never splits down to a nonsense street.
+// A unit VALUE token: "4", "4B", "A", "#4", and hyphenated identifiers
+// ("200-A", "4-B", "A-12") — ordinary suite/apartment spellings. Only ever
+// tested AFTER a designator or hash, so a hyphenated street token never
+// qualifies on its own.
+// Up to three letters may lead the number ("PH1", "TH2", "A12") — penthouse /
+// townhouse-style identifiers are ordinary unit spellings.
+const UNIT_VALUE = /^#?[A-Za-z]{0,3}\d+[A-Za-z]?$|^[A-Za-z]$|^#?[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
 function splitStreetLineUnit(value) {
+  const { street, unit } = splitStreetLineUnitParts(value);
+  return { street, unit };
+}
+
+// splitStreetLineUnit plus the PLACE tail — every comma segment after the
+// street and its unit segments, joined back with ', ' ("100 Main St, Apt 4,
+// Sarasota, FL 34236" → tail "Sarasota, FL 34236"; '' when there is none).
+// Callers that rebuild a single-line address from the parsed street/unit
+// use it so a full-address line1 never loses its city/ZIP in the rebuild.
+function splitStreetLineUnitParts(value) {
   const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
   let line = segments[0] || '';
+  let consumed = 1;
   // Legacy values often carry the unit as its own comma segment — possibly
   // several ("123 Main St, Bldg 2, Apt 4, Sarasota") — pull consecutive
   // unit-leading segments back into the line so the peel below sees them
@@ -369,6 +404,7 @@ function splitStreetLineUnit(value) {
       && !isStateZipPair(firstTok, (segTokens[1] || '').replace(/[.,]/g, ''));
     if (!isUnitSegment) break;
     line = `${line} ${segments[i]}`;
+    consumed = i + 1;
   }
   let tokens = line.split(' ').filter(Boolean);
   const unitParts = [];
@@ -386,17 +422,32 @@ function splitStreetLineUnit(value) {
       }
       continue;
     }
+    // Separated hash — "100 Main St # 4" / "Apt # 4": the '#' is its own
+    // token, the value follows it. Same ownership rule as the attached form.
+    if (secondLast === '#' && tokens.length >= 3 && UNIT_VALUE.test(last)) {
+      const thirdLast = (tokens[tokens.length - 3] || '').replace(/[.,]/g, '').toLowerCase();
+      if (tokens.length >= 4 && UNIT_DESIGNATORS.has(thirdLast)) {
+        unitParts.unshift(`${tokens[tokens.length - 3]} # ${last}`);
+        tokens = tokens.slice(0, -3);
+      } else {
+        unitParts.unshift(`# ${last}`);
+        tokens = tokens.slice(0, -2);
+      }
+      continue;
+    }
     if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
         && !isStateZipPair(secondLast, last)
-        && /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$/.test(last)) {
+        && UNIT_VALUE.test(last)) {
       unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
       tokens = tokens.slice(0, -2);
       continue;
     }
     break;
   }
-  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) return { street: segments[0] || '', unit: '' };
-  return { street: tokens.join(' '), unit: unitParts.join(' ') };
+  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) {
+    return { street: segments[0] || '', unit: '', tail: segments.slice(1).join(', ') };
+  }
+  return { street: tokens.join(' '), unit: unitParts.join(' '), tail: segments.slice(consumed).join(', ') };
 }
 
 function splitStreetAndCity(value) {
@@ -481,8 +532,16 @@ function parseRawAddress(raw) {
     city = cleanString(cityTail.replace(/,/g, ''));
   } else {
     let remainder = withoutCountry;
-    zip = normalizeZip(remainder);
-    if (zip) remainder = cleanString(remainder.replace(zip, ''));
+    // Comma-free input has no segment boundaries, so only a TRAILING 5-digit
+    // token can be the ZIP — a leading one is the house number ("12345 Gulf
+    // Drive Bradenton"; SWFL house numbers share the 5-digit range with 34xxx
+    // ZIPs). Strip the matched trailing occurrence specifically so a house
+    // number that equals the ZIP is never removed from the street line.
+    const trailingZip = remainder.match(/(^|[\s,])(\d{5}(?:-\d{4})?)[.,;\s]*$/);
+    if (trailingZip) {
+      zip = trailingZip[2];
+      remainder = cleanString(remainder.slice(0, trailingZip.index));
+    }
     const stateMatch = findTrailingState(remainder);
     if (stateMatch.state) {
       state = stateMatch.state;
@@ -576,6 +635,8 @@ module.exports = {
   normalizeUnitLine,
   unitLineValueKey,
   splitStreetLineUnit,
+  splitStreetLineUnitParts,
+  splitStreetAndCity,
   titleCaseWords,
   normalizeState,
   parseRawAddress,
@@ -590,6 +651,9 @@ module.exports = {
   // street from city apply the same protection splitStreetAndCity does.
   CITY_PREFIX_TOKENS,
   UNIT_DESIGNATORS,
+  // A unit VALUE token per the shared peel grammar — shared so callers that
+  // recognize inline units elsewhere never accept a street word as a value.
+  UNIT_VALUE,
   // The canonical 'fl' disambiguation: 'fl' followed by a ZIP-shaped value
   // is the STATE marker ("FL 34236"), otherwise the FLOOR designator.
   // Shared so unit extraction elsewhere applies the identical rule.

@@ -150,6 +150,14 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         body: JSON.stringify({ method: 'check', sendReceipt: false }),
       });
       expect(res.status).toBe(200);
+      // Off-gateway settlement clears the pay-page PI stamp + stale processor
+      // tag so the tax export never synthesizes a Stripe gap row beside the
+      // manual ledger row (codex #3610 r3 P1).
+      expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'paid',
+        stripe_payment_intent_id: null,
+        processor: null,
+      }));
       // The completion rides the SAME trx as the status flip — a paid
       // invoice must never keep an 'active' plan that blocks edits.
       expect(trx).toHaveBeenCalledWith('payment_plans');

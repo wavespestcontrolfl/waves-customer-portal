@@ -1,4 +1,4 @@
-const cron = require('node-cron');
+const cron = require('../utils/scheduled-cron');
 const db = require('../models/db');
 // Boundary-rotation generation guard (codex #3233 r37/r38): captured at
 // process startup, NOT at query-build time — a marker stamped after this
@@ -609,7 +609,7 @@ function initScheduledJobs() {
       logger.error(`[sms-draft-canary] tick failed: ${err.message}`);
     }
   };
-  setTimeout(smsDraftCanaryTick, 60 * 1000);
+  cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
 
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
@@ -625,7 +625,7 @@ function initScheduledJobs() {
       logger.error(`[booking-funnel-canary] tick failed: ${err.message}`);
     }
   };
-  setTimeout(bookingFunnelCanaryTick, 90 * 1000);
+  cron.scheduleTimeout(bookingFunnelCanaryTick, 90 * 1000);
   cron.schedule('37 */6 * * *', bookingFunnelCanaryTick, { timezone: 'America/New_York' });
 
   // BOOT (+120s, then EVERY 6H at :49) — payment-method guard "firsts" watch
@@ -642,7 +642,7 @@ function initScheduledJobs() {
       logger.error(`[pm-guard-firsts] tick failed: ${err.message}`);
     }
   };
-  setTimeout(pmGuardFirstsTick, 120 * 1000);
+  cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
 
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
@@ -756,6 +756,22 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[knowledge-index] nightly sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 2:50AM — Link Library sitemap sync: keep the SMS composer's
+  // website links in step with www.wavespestcontrol.com (new pages appear,
+  // removed pages drop). Manual rows are untouched; Settings ▸ Link Library
+  // "Sync now" runs the same sync on demand.
+  // =========================================================================
+  cron.schedule('50 2 * * *', async () => {
+    if (!isEnabled('linkLibrarySync')) return;
+    try {
+      await runExclusive('link-library-sitemap-sync', () =>
+        require('./link-library').syncSitemapLinks());
+    } catch (err) {
+      logger.error(`[link-library] nightly sitemap sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1301,6 +1317,36 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Autopay texts that actually went out (kill: AUTOPAY_SMS_DIGEST_DISABLED=1)
+  // — 9:41am + 10:41am ET, after the 8:00 charge, 9:00 pre-charge, 9:17
+  // card-expiry and 10:07 retry jobs. Marker-based window, so the second
+  // tick is a no-op unless new texts landed. FIX: when any recipient is not
+  // a monthly member (the 2026-08-29 incident shape), FYI: otherwise.
+  for (const expr of ['30 41 9 * * *', '30 41 10 * * *']) {
+    cron.schedule(expr, async () => {
+      try {
+        const lockRes = await runExclusive('autopay-sms-digest', async () => {
+          const { runAutopaySmsDigest } = require('./autopay-sms-digest');
+          const result = await runAutopaySmsDigest();
+          logger.info(`[autopay-sms-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, mismatches: result.mismatches || 0 })}`);
+          if (result?.skipped === 'query_failed' || result?.error
+              || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+            throw new Error(`autopay SMS digest did not complete (${result.skipped || 'send_failed'})`);
+          }
+        });
+        if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+          const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+          const t0 = Date.now();
+          await recordJobStart('autopay-sms-digest').catch(() => {});
+          await recordJobEnd('autopay-sms-digest', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+          throw new Error(`autopay SMS digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+        }
+      } catch (err) {
+        logger.error(`Autopay SMS digest failed: ${err.message}`);
+      }
+    }, { timezone: 'America/New_York' });
+  }
+
   // Stripe webhook events the app failed to apply (ledger rows with error /
   // abandoned claims in the last 48h — the lookback deliberately exceeds
   // the daily interval + in-flight grace windows) plus Stripe-side delivery
@@ -1543,6 +1589,48 @@ function initScheduledJobs() {
       const r = await BacklinkMonitor.scan({ snapshot: true });
       if (r && r.snapshotOk === false) logger.error(`Backlink scan: snapshot NOT taken — ${r.snapshotError}`);
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY :40 — Link intake resolver sweep (§3.4d): pending references
+  // (shortener links, post URLs) → hosts via the SSRF-pinned resolver. Claims
+  // FOR UPDATE SKIP LOCKED, so overlapping ticks/instances are safe without a
+  // cron lock. No credits spent, no communications.
+  cron.schedule('40 * * * *', async () => {
+    try {
+      const r = await require('./seo/link-registry-intake').resolveIntakeItems(db, { limit: 50 });
+      if (r.claimed) logger.info(`[link-intake] resolver sweep: claimed ${r.claimed} resolved ${r.resolved} unresolved ${r.unresolved} dropped ${r.dropped} parked ${r.parked} errors ${r.errors.length}`);
+    } catch (err) { logger.error(`Link intake resolver sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
+  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
+  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
+  // are called directly — never the admin HTTP route. The feeders consume
+  // seo_backlinks, so they run INSIDE the scan's own lock ('backlink-scan'):
+  // a scan still paging at 4:10 keeps the lease and the feeders wait (10-min
+  // retries, up to an hour) rather than reading rows the scan is still
+  // transitioning; while they run, no scan can start.
+  cron.schedule('10 4 * * 0', async () => {
+    try {
+      await runExclusive('link-registry-sunday-feeders', async () => {
+        const feeders = async () => {
+          const b = await require('./seo/link-registry-baseline').importExistingBacklinks(db);
+          logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} reconciled ${b.placementsReconciled} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
+          const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
+          logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+          const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
+          logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}${e.skipped ? `SKIPPED (${e.skipped}) ` : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
+          return { ran: true };
+        };
+        for (let attempt = 1; attempt <= 6; attempt++) {
+          const r = await runExclusive('backlink-scan', feeders, { recordHealth: false });
+          if (!(r && r.skipped)) return;
+          logger.info(`[link-intake] Sunday feeders: backlink scan still holds its lock (${r.reason}) — retry ${attempt}/6 in 10 min`);
+          await new Promise((resolve) => setTimeout(resolve, 10 * 60e3));
+        }
+        logger.warn('[link-intake] Sunday feeders: backlink scan held its lock for an hour — skipped this week');
+      });
+    } catch (err) { logger.error(`Link registry Sunday feeders failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 4:30AM — Link prospect verifier (live/follow reconcile + crawl fallback)
@@ -2411,9 +2499,12 @@ function initScheduledJobs() {
     logger.info('Running: call extraction replay eval');
     try {
       await runExclusive('call-extraction-replay-eval', async () => {
-        const { runCallExtractionReplayEval } = require('./eval/call-extraction-replay');
+        const { runCallExtractionReplayEval, goldAccuracyLine } = require('./eval/call-extraction-replay');
         const result = await runCallExtractionReplayEval();
-        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0}`);
+        // goldAccuracyLine carries per-field misses + case ids: medium/low
+        // answer-key misses keep the run green, so this log line is where a
+        // quiet field regression stays visible week to week.
+        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} | ${goldAccuracyLine(result.goldAccuracy)}`);
       });
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
@@ -3403,6 +3494,12 @@ function initScheduledJobs() {
             // window must not reclassify it. Persisted at enqueue by the
             // inbound webhook's retry insert; automated rows never carry it.
             ...(claimMeta.conversational_context === true ? { conversationalContext: true } : {}),
+            // Customer-action provenance survives the retry rail the same
+            // way (Codex #3598 r5): a deposit receipt that hit a transient
+            // provider failure is still the answer to the customer's own
+            // payment. Persisted at enqueue by the customer-action
+            // requeue; automated rows never carry it.
+            ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
@@ -3421,6 +3518,15 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              // Enqueue provenance survives the replay (codex #3607 r4): the
+              // audit row is written under this worker's own entry point, so
+              // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
+              // and the lane stamped at enqueue ride along in metadata for
+              // the owner autopay digest to classify the send.
+              ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              ...(Object.prototype.hasOwnProperty.call(claimMeta, 'billing_mode_at_send')
+                ? { billing_mode_at_send: claimMeta.billing_mode_at_send ?? null }
+                : {}),
               // resolve_from_by_customer: customer-linked requeues (deferred
               // completion/prep/follow-up texts) stamped a placeholder
               // from_phone at enqueue only because the column is NOT NULL —
@@ -4175,14 +4281,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
+  // EVERY 30 MIN (:04/:34 — own minutes, off the :00/:30 pool pile-up) — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
   // ~1h first-touch SMS responsive. Suppression is enforced in
   // the service + the messaging validator. Ships LIVE; kill switch is
   // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('4,34 * * * *', async () => {
     try {
       await runExclusive('booking-abandon-recovery', async () => {
         const BookingAbandonRecovery = require('./booking-abandon-recovery');
@@ -4195,7 +4301,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Click-followup action queue (clicked-but-didn't-book)
+  // EVERY 30 MIN (:09/:39 — own minutes) — Click-followup action queue (clicked-but-didn't-book)
   //
   // Turns human short-link clicks on estimate/booking links (4h–72h old, not
   // converted, fully suppression-guarded) into PENDING message_drafts for
@@ -4203,7 +4309,7 @@ function initScheduledJobs() {
   // the owner's approval in /admin/drafts is the only send path. Gated by
   // GATE_CLICK_FOLLOWUP (off → shadow-logs candidate counts, writes nothing).
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('9,39 * * * *', async () => {
     try {
       await runExclusive('click-followup', async () => {
         const ClickFollowup = require('./click-followup');
@@ -4631,9 +4737,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Verify CSR follow-up tasks
+  // HOURLY (:33 — own minute, also clear of the daily 10:26 pre-visit card
+  // sweep; was :30, which shared the pool with ~25 other ticks and starved
+  // the Twilio voice webhooks on 2026-08-29) — Verify CSR follow-up tasks
   // =========================================================================
-  cron.schedule('30 * * * *', async () => {
+  cron.schedule('33 * * * *', async () => {
     logger.info('Running: follow-up task verification');
     try {
       // runExclusive: verifyFollowUps expires past-deadline tasks — a
@@ -5319,7 +5427,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Sync Google review content from Places API
+  // HOURLY (:56 — own minute, off the :00 pile-up) — Sync Google review content from Places API
   // GBP performance sync (above) handles impressions / views, NOT review
   // text. Without this hourly sync, the google_reviews table only ever
   // contained the aggregate `_stats` rows seeded by syncAllReviews on
@@ -5329,7 +5437,7 @@ function initScheduledJobs() {
   // re-pulls — this just makes "Sync Reviews" no longer the only way
   // for reviews to appear in the portal.
   // =========================================================================
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('56 * * * *', async () => {
     logger.info('Running: Google review content sync');
     try {
       const GoogleBusiness = require('./google-business');
@@ -5494,13 +5602,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
+  // EVERY 30 MIN (:14/:44 — own minutes) — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('14,44 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
     try {
       await runExclusive('review-sequences', async () => {
@@ -5920,6 +6028,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over
+  // existing detectors; emails contact@ only on a violation or an unrunnable
+  // check). 6:55 is deliberately AFTER the 6:00 estimate conversion guard and
+  // the 6:40 schedule-integrity watchdog: one of its checks asserts the guard
+  // converged. Minute unused elsewhere in this file (#3208 rule). Self-gated
+  // on GATE_LEAD_TO_CASH_SWEEP; cross-replica serialized here.
+  // =========================================================================
+  cron.schedule('55 6 * * *', async () => {
+    try {
+      await runExclusive('lead-to-cash-invariants', async () => {
+        const { runLeadToCashInvariantSweep } = require('./lead-to-cash-invariants');
+        const result = await runLeadToCashInvariantSweep();
+        logger.info(`[l2c-invariants] cron run: ${JSON.stringify({ sent: result?.sent || false, skipped: result?.skipped || null, violations: result?.violations ?? null, unavailable: result?.unavailable ?? null })}`);
+        // A sweep that found exceptions but could not deliver them must read
+        // as a FAILED run in job_health — rethrow so runExclusive records it.
+        if (result?.error || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`lead-to-cash invariants sweep did not complete (${result.error || result.skipped})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Lead-to-cash invariants sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40PM — Stale-visit sweep (past-dated open appointments)
   // =========================================================================
   // Runs after the 6PM missed-appointment check on purpose: that check only
@@ -5942,6 +6075,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:23AM — IB thread retention purge (GATE_IB_THREADS lane, owner
+  // default 365 days / IB_THREAD_RETENTION_DAYS). Hard-deletes idle
+  // ib_threads; turns ride the FK cascade. No-op while the gate is off —
+  // nothing writes threads then, and pre-existing rows still age out.
+  // =========================================================================
+  cron.schedule('23 4 * * *', async () => {
+    try {
+      await runExclusive('ib-thread-retention', async () => {
+        const { purgeExpiredThreads } = require('./intelligence-bar/threads');
+        await purgeExpiredThreads();
+      });
+    } catch (err) {
+      logger.error(`IB thread retention purge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
   // annual-prepay payment reminders/sweeps that ride the same run.
@@ -5958,6 +6108,28 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Renewal reminders failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // Plan-hold lifecycle (cancel-flow C2, ruling C-4): 7-day restart texts,
+  // then auto-resume — visits were already moved to the resume date when the
+  // hold started, so resume only restores the billing component and tier
+  // protection. No-op while the cancel-flow gate is off.
+  // =========================================================================
+  cron.schedule('18 10 * * *', async () => {
+    try {
+      const { cancelFlowV2Enabled } = require('./cancellation-resolution');
+      if (!cancelFlowV2Enabled()) return;
+      await runExclusive('plan-hold-lifecycle', async () => {
+        const { runPlanHoldLifecycle } = require('./cancellation-resolution/holds');
+        const result = await runPlanHoldLifecycle();
+        if (result.reminded || result.resumed || result.errors.length) {
+          logger.info(`Plan-hold lifecycle: ${result.reminded} reminded, ${result.resumed} resumed${result.errors.length ? ` (errors: ${result.errors.join(', ')})` : ''}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Plan-hold lifecycle failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

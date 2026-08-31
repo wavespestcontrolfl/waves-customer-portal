@@ -148,13 +148,18 @@ function typedFollowupVerdict({ scheduledService = {}, profile = {}, findingsTyp
  * typed verdict (untyped profile, no snapshot, type mismatch, not
  * completed) — callers treat null as "no obligation derivable".
  */
-async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db } = {}) {
+// `strict`: a status reader (closeout-status.js) must tell "lookup failed"
+// from "no obligation" — with strict the record/profile lookups propagate
+// instead of collapsing to null.
+async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db, strict = false, recordId = null } = {}) {
   if (!scheduledService?.id || scheduledService.status !== 'completed') return null;
-  const record = await knex('service_records')
-    .where({ scheduled_service_id: scheduledService.id })
+  // recordId: status readers pass the attempt's COMMITTED record so a newer
+  // recap/project sibling row cannot swap the frozen verdict.
+  const recordQuery = knex('service_records')
+    .where({ scheduled_service_id: scheduledService.id, ...(recordId ? { id: recordId } : {}) })
     .orderBy('created_at', 'desc')
-    .first()
-    .catch(() => null);
+    .first();
+  const record = strict ? await recordQuery : await recordQuery.catch(() => null);
   if (!record) return null;
 
   // The completion FROZE its final verdict into structured_notes (both
@@ -170,9 +175,17 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   // Pre-freeze records (completed before this shipped): re-derive from the
   // committed snapshot + live profile — the best available approximation.
   const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-  const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex).catch(() => null);
-  if (!profile) return null;
+  const profilePromise = resolveCompletionProfileForScheduledService(scheduledService, knex, { strict });
+  const profile = strict ? await profilePromise : await profilePromise.catch(() => null);
+  // strict callers get a DISTINGUISHABLE indeterminate result where the
+  // default path returns null for "could not reconstruct" — a status reader
+  // must not read that as "no obligation".
+  const indeterminate = (reason) => (strict ? { indeterminate: true, reason, serviceRecordId: record.id } : null);
+  if (!profile) return indeterminate('profile_unavailable');
   const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;
+  // A synthesized default (profile row removed/deactivated) meeting a typed
+  // snapshot cannot say whether a follow-up was promised.
+  if (profile.synthesized === true && snapshot) return indeterminate('profile_fallback_with_typed_snapshot');
   // A now-untyped alert-policy profile (bed_bug post-20260731400000) still
   // owes pre-freeze TYPED completions their obligation — the pointer was
   // cleared, not the record: derive through the snapshot's own type
@@ -181,7 +194,8 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   const findingsType = profile.findingsType
     || (profile.followupPolicy === 'alert' ? (snapshot?.type || null) : null);
   if (!findingsType) return null;
-  if (!snapshot || String(snapshot.type || '') !== String(findingsType)) return null;
+  if (!snapshot) return indeterminate('typed_snapshot_missing');
+  if (String(snapshot.type || '') !== String(findingsType)) return indeterminate('typed_snapshot_type_mismatch');
   const suggestion = typedFollowupVerdict({
     scheduledService,
     profile,

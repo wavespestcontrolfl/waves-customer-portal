@@ -14,6 +14,8 @@
  */
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
+  // Passthrough: these harnesses have no committed row to read back.
+  resolveCommittedVisitTime: jest.fn(async (id, { date, windowStart } = {}) => (date ? { appointmentTime: `${date}T${windowStart || '08:00'}`, windowless: !windowStart } : null)),
   alertRegistrationFailure: jest.fn().mockResolvedValue(undefined),
 }));
 
@@ -227,7 +229,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // Reminder registered so the 72h/24h cron sees the new visit.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       901, 5, expect.stringContaining('T08:00'), 'Quarterly Pest Control',
-      'recurring_auto_extend', { sendConfirmation: false },
+      'recurring_auto_extend', { sendConfirmation: false, closeReminderWindows: false, fromCommittedRow: true },
     );
     // Visit still live after registration → the re-check leaves the fresh
     // reminder armed.
@@ -788,7 +790,7 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledTimes(1);
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       900, 5, expect.stringContaining('T08:00'), 'Quarterly Pest Control',
-      'recurring_alert_action', { sendConfirmation: false },
+      'recurring_alert_action', { sendConfirmation: false, closeReminderWindows: false, fromCommittedRow: true },
     );
   });
 

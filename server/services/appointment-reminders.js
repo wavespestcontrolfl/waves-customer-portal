@@ -20,6 +20,20 @@ const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./mes
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
+
+// Fallback parts for resolveCommittedVisitTime from a caller's appointment
+// time: the 'YYYY-MM-DDTHH:MM' strings every registration path builds, or
+// a Date (ET wall clock).
+function appointmentTimeParts(value) {
+  if (typeof value === 'string') {
+    return { date: value.slice(0, 10), windowStart: value.slice(11, 16) || null };
+  }
+  const dt = value instanceof Date ? value : new Date(value);
+  if (isNaN(dt.getTime())) return {};
+  const hhmm = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false })
+    .format(dt).replace(/^24/, '00');
+  return { date: etDateString(dt), windowStart: hhmm };
+}
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
@@ -283,10 +297,60 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
   return !isWithinSendWindowET();
 }
 
+// Office-lane hand-off with a VERIFIED result (codex on-merge round):
+// notification-service catches persistence errors and resolves null, so a
+// bare call can log a successful hand-off while no notification exists —
+// silently losing the only durable record of the obligation. One retry,
+// then a loud error naming the lost manual action.
+async function handOffToOffice(title, message) {
+  // bell: true — lifecycle-critical manual-send obligations always ring
+  // (codex on-merge r2: GATE_ADMIN_BELL_POLICY would otherwise silence an
+  // unallowlisted 'comms' bell with a truthy suppressed sentinel and the
+  // only durable record of the obligation would be discarded). Success
+  // requires a PERSISTED id, never a sentinel.
+  const notify = () => require('./notification-service').notifyAdmin('comms', title, message, { bell: true });
+  try {
+    let res = await notify();
+    if (!res || !res.id) res = await notify();
+    if (!res || !res.id) {
+      logger.error(`[appt-remind] OFFICE HAND-OFF LOST (notification could not be persisted): ${title} — ${message}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.error(`[appt-remind] OFFICE HAND-OFF LOST (${err.message}): ${title} — ${message}`);
+    return false;
+  }
+}
+
+// The notice kinds a grouped unit move's durable send hold governs — the
+// same set deliverAppointmentNotice's entry check covers.
+const MOVE_HOLD_KINDS = new Set(['confirmation', '72h', '24h']);
+
+// Is the visit's reminder row under a grouped unit-move hold RIGHT NOW?
+// Read fresh at every provider handoff (codex #3609 r30 P1: the entry-point
+// check alone races the template/link/contact awaits — a mover stamping
+// mid-flight still let the in-flight send deliver the old time). FAIL
+// CLOSED: an unverifiable hold must not send; the unmarked notice retries.
+async function moveHoldActive(scheduledServiceId) {
+  if (!scheduledServiceId) return false;
+  try {
+    const row = await db('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('move_hold_until');
+    return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
+  } catch (err) {
+    logger.warn(`[appt-remind] move-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+    return true;
+  }
+}
+
 // Send the email version of an appointment notice. Returns the raw send result
 // ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
 // per-occurrence keys, so calling it as both a fallback and a primary send for
 // the same occurrence will not double-deliver. Best-effort — never throws.
+// A held: true result means a grouped unit move holds the visit — a
+// deferral, not a delivery failure: no fallback, no no-channel alert.
 async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
@@ -298,6 +362,14 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
     let resolvedRescheduleUrl = rescheduleUrl;
     if (!resolvedRescheduleUrl && scheduledServiceId && (kind === 'confirmation' || kind === '72h' || kind === '24h')) {
       resolvedRescheduleUrl = (await buildRescheduleLink(scheduledServiceId, { customerId })).url;
+    }
+    // Move-hold recheck at the EMAIL handoff (codex #3609 r30 P1): every
+    // email leg passes here — deliverAppointmentNotice's branches, the
+    // quiet-hours direct sends, the undelivered-SMS fallback — and the
+    // link mint above is exactly the await a mid-flight hold stamp races.
+    if (MOVE_HOLD_KINDS.has(kind) && scheduledServiceId && await moveHoldActive(scheduledServiceId)) {
+      logger.info(`[appt-remind] ${kind} email for ${scheduledServiceId} held at the provider handoff — grouped move in progress`);
+      return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
       return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
@@ -322,6 +394,9 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
     return true;
   }
+  // Grouped-move hold at the handoff: a deferral, not an unreachable
+  // customer — no alert; the caller's unmarked row retries after release.
+  if (res?.held) return false;
   if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
     // No usable channel: the SMS failed and email is either unavailable (no
     // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
@@ -357,9 +432,33 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
 async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null }) {
+  // LAST-moment unit-move hold check, at the one chokepoint every
+  // confirmation/72h/24h leg passes — inline creation confirmations
+  // included (codex #3609 r30 P1): a grouped move stamped after a caller's
+  // earlier recheck must still win. Read fresh, fail open on a read error
+  // (the hold is an availability guard, not a correctness gate — the
+  // sweep-side checks stay authoritative). Returning false leaves the
+  // caller's sent flags unmarked, so the send retries once the hold
+  // clears or expires.
+  // (The handoff-level rechecks — safeSend's pre-dispatch hold and
+  // sendAppointmentNoticeEmail's pre-send hold — are the authority for
+  // holds stamped DURING the awaits below; this entry check is the cheap
+  // early exit. moveHoldActive fails closed — codex r28 P1.)
+  if (scheduledServiceId && MOVE_HOLD_KINDS.has(kind) && await moveHoldActive(scheduledServiceId)) {
+    logger.info(`[appt-remind] ${kind} for ${scheduledServiceId} held — grouped move in progress (move_hold_until)`);
+    // Distinct hold code (codex r30 P1): a bare false reads as a
+    // completed-but-undelivered send to the callers, which mark their
+    // sent flags and suppress the message forever. MOVE_HOLD, like
+    // QUIET_HOURS_HOLD, means "leave the flags, retry later".
+    if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+    return false;
+  }
   const ch = apptChannel(channel);
   const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
-  const smsHeld = () => !!smsOutcome && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD';
+  // Both hold codes are deferrals with the same contract: no fallback
+  // that would deliver the notice anyway, no alert, row left unmarked.
+  const smsHeld = () => !!smsOutcome
+    && (smsOutcome.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome.blockedCode === 'MOVE_HOLD');
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -381,6 +480,12 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   if (ch === 'email') {
     const res = await sendAppointmentNoticeEmail(emailArgs);
     if (res?.ok) return true;
+    // Held at the handoff by a grouped move — defer the whole notice: no
+    // SMS fallback (it would carry the same stale time), no alert.
+    if (res?.held) {
+      if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+      return false;
+    }
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
     const smsOk = await runSms();
@@ -412,6 +517,25 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     }
     const emailRes = await sendAppointmentNoticeEmail(emailArgs);
     const emailOk = !!emailRes?.ok;
+    // Email leg held by a grouped move mid-flight and no SMS went out —
+    // a whole-notice deferral, not an unreachable customer.
+    if (!smsOk && emailRes?.held) {
+      if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+      return false;
+    }
+    // SMS delivered, THEN the email leg was held (codex r44 uncapped): the
+    // caller will close the row on this success, so the requested email
+    // would silently drop. Re-arming would duplicate the accepted SMS —
+    // hand the email leg durably to the office lane instead (the same
+    // exception rail every other partial hold uses).
+    if (smsOk && emailRes?.held) {
+      const handedOff = await handOffToOffice(
+        'Held appointment email needs a manual send',
+        `The ${kind} email leg of a 'both'-channel notice was held by an in-progress visit move after the text was already delivered — send it from the composer once the stop settles${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
+      );
+      if (handedOff) logger.info(`[appt-remind] ${kind} email leg held after a delivered SMS — handed to the office lane`);
+      return smsOk;
+    }
     // Neither channel reached the customer — raise the same human-follow-up
     // alert the SMS-only path uses.
     if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(emailRes) });
@@ -553,7 +677,15 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
   }
   if (!(await visitStillLive())) return false;
-  return deliverAppointmentNotice({
+  // Own outcome object so a MOVE_HOLD is visible here (uncapped codex
+  // audit P1): without it, the hold returned a bare false and the
+  // booking-time callers — who own the confirmation and registered it
+  // sendConfirmation:false — never retried; the only confirmation was
+  // permanently dropped. Held ⇒ re-arm the reminder row so the
+  // stranded-confirmation sweep delivers (through this same channel
+  // logic) once the move completes.
+  const holdOutcome = {};
+  const reached = await deliverAppointmentNotice({
     channel,
     kind: 'confirmation',
     customerId,
@@ -561,7 +693,37 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     apptTime: resolvedApptTime,
     serviceLabel,
     smsAttempt,
+    smsOutcome: holdOutcome,
   });
+  if (!reached && holdOutcome.blockedCode === 'MOVE_HOLD' && scheduledServiceId) {
+    try {
+      // NEVER re-open a sibling-suppressed row (codex on-merge round): it
+      // normally never delivers — re-arming it would send its own pristine-
+      // label confirmation beside the slot owner's. When nothing re-armed
+      // (suppressed or no row), the obligation goes to the office lane.
+      const rearmed = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId, cancelled: false, suppressed_by_sibling: false })
+        .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+      if (rearmed > 0) {
+        logger.info(`[appt-remind] confirmation for ${scheduledServiceId} held (grouped move) — re-armed for the stranded-confirmation sweep`);
+      } else {
+        await handOffToOffice(
+          'Held confirmation needs a manual send',
+          `A confirmation for service ${scheduledServiceId} was held by an in-progress visit move and its reminder row cannot be re-armed (sibling-suppressed or missing) — send it from the composer once the stop settles.`,
+        );
+      }
+    } catch (rearmErr) {
+      // A transient failure here would otherwise drop the ONLY retry path
+      // for a booking-owned confirmation (codex on-merge r2) — same
+      // durable hand-off as the zero-row branch.
+      logger.error(`[appt-remind] held confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+      await handOffToOffice(
+        'Held confirmation needs a manual send',
+        `A confirmation for service ${scheduledServiceId} was held by an in-progress visit move and its reminder row could not be re-armed (${rearmErr.message}) — send it from the composer once the stop settles.`,
+      );
+    }
+  }
+  return reached;
 }
 
 function lastTenDigits(value) {
@@ -1088,6 +1250,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return false;
   }
 
+  // (The grouped-move hold for appointment notices is enforced inside
+  // sendCustomerMessage itself — the canonical path every SMS leg passes,
+  // direct callers included — keyed on purpose + appointmentId. Its
+  // MOVE_HOLD block reaches callers via sendOutcome.blockedCode below.)
+
   let result;
   try {
     result = await sendCustomerMessage({
@@ -1111,6 +1278,9 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // handoff (twilio-sms.js forwards an allowlist), so the audit record is
     // the only queryable delivery evidence per visit (codex #3233 r2).
     ...(metaExtra.scheduled_service_id ? { appointmentId: String(metaExtra.scheduled_service_id) } : {}),
+    // ABA guard input (codex r39): the slot this body was rendered against,
+    // verified live at both canonical move-hold checkpoints.
+    ...(Number.isFinite(metaExtra.rendered_slot_ms) ? { renderedSlotMs: metaExtra.rendered_slot_ms } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran.
@@ -1150,12 +1320,12 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
       // notice permanently on a blip.
       || result.code === 'PRE_DISPATCH_CHECK_FAILED'
       || result.code === 'CONSENT_LOOKUP_FAILED';
-    // QUIET_HOURS_HOLD is STICKY across the contact fanout (like
-    // retryable/providerAccepted): a later opted-out contact's block must
-    // not erase the evidence that an eligible contact was held at the
+    // QUIET_HOURS_HOLD and MOVE_HOLD are STICKY across the contact fanout
+    // (like retryable/providerAccepted): a later opted-out contact's block
+    // must not erase the evidence that an eligible contact was held at the
     // boundary — the callers' defer-don't-close decision reads this code.
-    sendOutcome.blockedCode = sendOutcome.blockedCode === 'QUIET_HOURS_HOLD'
-      ? 'QUIET_HOURS_HOLD'
+    sendOutcome.blockedCode = (sendOutcome.blockedCode === 'QUIET_HOURS_HOLD' || sendOutcome.blockedCode === 'MOVE_HOLD')
+      ? sendOutcome.blockedCode
       : (result.code || null);
     // NON-sticky per-call evidence for safeSendAppointment's fan-out loop:
     // the sticky blockedCode above cannot say WHICH contact was held once
@@ -1216,6 +1386,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     ? sendOptions.sendOutcome
     : {};
   const heldContacts = [];
+  const moveHeldRoles = [];
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
@@ -1232,7 +1403,26 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
     }
+    // A move-hold block mid-fan-out (codex r30/r35): before anything was
+    // accepted the whole notice defers (sticky blockedCode, caller leaves
+    // its flags open and retries everything). AFTER an accepted contact,
+    // the caller will finalize 'sent' — so a held later contact would
+    // silently lose its copy: record it and hand the remainder to the
+    // office lane below (the quiet-hours partial rail can't carry it — a
+    // frozen queued body could announce the pre-move slot).
+    if (!sent && sharedOutcome.lastCode === 'MOVE_HOLD') {
+      if (!sentAny) break;
+      moveHeldRoles.push(contact.role || 'service');
+      continue;
+    }
     sentAny = sentAny || sent;
+  }
+  if (sentAny && moveHeldRoles.length) {
+    const handedOff = await handOffToOffice(
+      'Held appointment notice needs a manual send',
+      `A ${messageType} text to ${moveHeldRoles.length} appointment contact(s) (${moveHeldRoles.join(', ')}) was held by an in-progress visit move after another contact was already texted — send it from the composer once the stop settles.`,
+    );
+    if (handedOff) logger.info(`[appt-remind] ${messageType}: ${moveHeldRoles.length} move-held contact(s) handed to the office lane (partial fan-out)`);
   }
   // Partial fan-out across the 20:00 boundary (codex r20): one accepted
   // contact makes callers finalize 'sent', so a later held contact would
@@ -1486,8 +1676,29 @@ async function getReminderPrefs(customerId) {
 // was first read can still suppress the now-stale send.
 async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
   if (apptTime.getTime() <= Date.now()) {
+    // Deferred path (codex #3609 r22 P2): the time this sender read can have
+    // elapsed while a silent grouped move (keepPendingConfirmation) already
+    // put a NEW future time on the row. Marking by id alone would burn that
+    // confirmation with no text and nothing for the stranded sweep to
+    // repair — re-read, and skip WITHOUT marking when the time moved (the
+    // sweep resends the new time); the mark itself is fenced on the time.
+    let fence = {};
+    if (recheckBeforeSend) {
+      const fresh = await db('appointment_reminders').where({ id: record.id }).first('appointment_time', 'cancelled', 'confirmation_sent', 'move_hold_until');
+      if (!fresh || fresh.cancelled || fresh.confirmation_sent) return false;
+      // A grouped unit move holds this row (move_hold_until, codex #3609
+      // r29): skip WITHOUT marking — the sweep retries once the hold clears
+      // (full move) or expires (abandoned partial).
+      if (fresh.move_hold_until && new Date(fresh.move_hold_until).getTime() > Date.now()) return false;
+      const freshAt = fresh.appointment_time ? new Date(fresh.appointment_time).getTime() : null;
+      if (freshAt != null && freshAt !== apptTime.getTime()) {
+        logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — the appointment moved to a new time under the send; the sweep resends with the new time`);
+        return false;
+      }
+      if (fresh.appointment_time) fence = { appointment_time: fresh.appointment_time };
+    }
     await db('appointment_reminders')
-      .where({ id: record.id })
+      .where({ id: record.id, ...fence })
       .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
     logger.warn(
       `[appt-remind] Confirmation skipped for past appointment ${scheduledServiceId} ` +
@@ -1517,6 +1728,22 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         const fresh = await db('appointment_reminders').where({ id: record.id }).first();
         if (!fresh || fresh.cancelled || fresh.confirmation_sent) {
           logger.info(`[appt-remind] Confirmation superseded by cancel/reschedule for ${scheduledServiceId}`);
+          return false;
+        }
+        // Held by a grouped unit move (move_hold_until, codex #3609 r29):
+        // skip WITHOUT marking; the sweep re-delivers after the hold.
+        if (fresh.move_hold_until && new Date(fresh.move_hold_until).getTime() > Date.now()) {
+          logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — grouped move in progress`);
+          return false;
+        }
+        // A silent move that KEPT the confirmation pending (keepPendingConfirmation
+        // — a grouped sibling moved by moveVisitAsUnit) changed appointment_time
+        // underneath this in-flight send; the time this sender formatted is
+        // stale. Skip WITHOUT marking: the stranded-confirmation sweep re-reads
+        // the row and sends the new time (codex #3609 r8).
+        const freshAt = fresh.appointment_time ? new Date(fresh.appointment_time).getTime() : null;
+        if (freshAt != null && freshAt !== apptTime.getTime()) {
+          logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — appointment time changed under the send; the sweep resends with the new time`);
           return false;
         }
       }
@@ -1592,22 +1819,31 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
-        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }, { sendOutcome: smsOutcome }),
+        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome }),
       });
 
       // Boundary hold — same treatment as the pre-check above: return
       // WITHOUT marking, so the stranded-confirmation sweep re-calls this
       // function and the text goes out when the window opens at 8:00 AM.
-      if (!sent && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD') {
+      if (!sent && (smsOutcome.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome.blockedCode === 'MOVE_HOLD')) {
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held at the send-window boundary — deferred, row left unmarked`);
         return false;
       }
 
       // Mark sent whether or not delivery succeeded (landline / block) so
-      // reminders can proceed and we don't retry the confirmation.
-      await db('appointment_reminders')
-        .where({ id: record.id })
+      // reminders can proceed and we don't retry the confirmation — fenced
+      // on the appointment time this send formatted (local codex audit): a
+      // silent grouped-sibling move (keepPendingConfirmation) that changed
+      // appointment_time between the freshness re-read and the send must
+      // NOT be stamped as sent, or the corrected time is suppressed forever.
+      // A miss leaves the row pending and the stranded-confirmation sweep
+      // resends with the new time (one extra, correct text beats none).
+      const marked = await db('appointment_reminders')
+        .where({ id: record.id, appointment_time: apptTime })
         .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+      if (Number(marked) === 0) {
+        logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} went out for a time that changed under the send — row left pending so the sweep resends the new time`);
+      }
       if (sent) {
         logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
       }
@@ -1616,9 +1852,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
     return false;
   } catch (err) {
     logger.error(`[appt-remind] Confirmation SMS failed: ${err.message}`);
-    // Still mark confirmation_sent so reminders can proceed
+    // Still mark confirmation_sent so reminders can proceed — same
+    // appointment-time fence as the success path.
     await db('appointment_reminders')
-      .where({ id: record.id })
+      .where({ id: record.id, appointment_time: apptTime })
       .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
     return false;
   }
@@ -1936,9 +2173,54 @@ const AppointmentReminders = {
    * registers row-less windowless visits at 08:00 ARMED) from resurrecting
    * the 8 AM promise. Confirmation keeps its normal source-based handling.
    */
+  // The COMMITTED scheduled_services row is the truth for a reminder's
+  // time. Callers registering a reminder for a visit they just inserted
+  // hold an in-memory copy whose window can differ from what landed
+  // (defaulted by the insert, inherited from a parent, or simply not on
+  // the object) — and the reminder sync trigger only fires on UPDATE, so
+  // a row born at the wrong time never self-corrects (four series visits
+  // drifted this way 08-30; #3625 repaired the data, this closes the
+  // path). Reads the row back and prefers it; the caller's values are
+  // the fallback only when the row is not visible yet or unreadable.
+  // Returns null with no date, else { appointmentTime, windowless }:
+  // a windowless row resolves to the canonical date+08:00 slot AND
+  // windowless=true — the caller must pass that as closeReminderWindows
+  // so the row registers as a non-delivering placeholder (see
+  // registerAppointment) instead of an armed 08:00 nobody chose.
+  async resolveCommittedVisitTime(scheduledServiceId, { date, windowStart } = {}, conn = db, { lock = false } = {}) {
+    let resolvedDate = date || null;
+    let resolvedStart = windowStart || null;
+    try {
+      let query = conn('scheduled_services').where({ id: scheduledServiceId });
+      // Share-lock the visit for the caller's transaction: a concurrent
+      // reschedule UPDATE then waits until the reminder exists, so its
+      // sync trigger finds a row to correct instead of nothing.
+      if (lock) query = query.forShare();
+      const row = await query.first('scheduled_date', 'window_start');
+      if (row) {
+        // The row is the whole truth once found: a NULL window means
+        // "windowless" (08:00 convention), not "keep the caller's stale
+        // window".
+        if (row.scheduled_date) {
+          resolvedDate = row.scheduled_date instanceof Date
+            ? row.scheduled_date.toISOString().slice(0, 10)
+            : String(row.scheduled_date).slice(0, 10);
+        }
+        resolvedStart = row.window_start ? String(row.window_start).slice(0, 5) : null;
+      }
+    } catch (err) {
+      logger.warn(`[appt-remind] could not read back visit ${scheduledServiceId} for its reminder time (${err.message}) — using the caller's values`);
+    }
+    if (!resolvedDate) return null;
+    return {
+      appointmentTime: `${resolvedDate}T${resolvedStart || '08:00'}`,
+      windowless: !resolvedStart,
+    };
+  },
+
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
-      const apptTime = parseETDateTime(appointmentTime);
+      let apptTime = parseETDateTime(appointmentTime);
       if (isNaN(apptTime.getTime())) {
         logger.error(`[appt-remind] Invalid appointment time: ${appointmentTime}`);
         return null;
@@ -1951,9 +2233,27 @@ const AppointmentReminders = {
       const sendConfirmation = typeof options.sendConfirmation === 'boolean'
         ? options.sendConfirmation
         : (source === 'booking_new' || source === 'admin_manual');
-      const closeReminderWindows = options.closeReminderWindows === true;
+      let closeReminderWindows = options.closeReminderWindows === true;
 
       const registration = await db.transaction(async (trx) => {
+        // options.fromCommittedRow: the caller registered a visit it just
+        // inserted and its in-memory copy of the window may not be what
+        // landed (see resolveCommittedVisitTime). Read the row HERE, inside
+        // this transaction and under a share lock — a separate read would
+        // leave a gap where a reschedule UPDATE runs its (UPDATE-only) sync
+        // trigger before the reminder exists and this insert then records
+        // the old time forever. The lock makes that UPDATE wait; when it
+        // proceeds the trigger finds this row and syncs it. The advisory
+        // slot lock below is keyed on the RESOLVED time.
+        if (options.fromCommittedRow) {
+          const resolved = await this.resolveCommittedVisitTime(
+            scheduledServiceId, appointmentTimeParts(appointmentTime), trx, { lock: true },
+          );
+          if (resolved) {
+            apptTime = parseETDateTime(resolved.appointmentTime);
+            closeReminderWindows = resolved.windowless;
+          }
+        }
         await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
           `appointment-reminder:${customerId}:${apptTime.toISOString()}`,
         ]);
@@ -2204,7 +2504,26 @@ const AppointmentReminders = {
             // mid-sweep skips silently (the next sweep won't select it).
             const lockedVisit = await trx('scheduled_services')
               .where({ id: svc.id }).forUpdate()
-              .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at', 'status');
+              .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at', 'status', 'visit_id');
+            // A healed row for a member of a HELD grouped visit inherits the
+            // active unit-move hold (codex #3609 r28 P1): the mover claimed
+            // the rows that existed; a row born after the claim must not
+            // text a mid-move or partially-moved stop.
+            const inheritMoveHold = async (rec) => {
+              if (!rec || !lockedVisit.visit_id) return;
+              const heldSibling = await trx('appointment_reminders as ar')
+                .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+                .where('ss.visit_id', lockedVisit.visit_id)
+                .where('ar.move_hold_until', '>', new Date())
+                .first('ar.move_hold_until', 'ar.move_hold_token');
+              if (heldSibling) {
+                // The TOKEN travels with the stamp (codex r37): the release
+                // keys on it exclusively, so a healed row inheriting only
+                // the expiry would stay held for the full TTL after the
+                // move succeeds.
+                await trx('appointment_reminders').where({ id: rec.id }).update({ move_hold_until: heldSibling.move_hold_until, move_hold_token: heldSibling.move_hold_token || null });
+              }
+            };
             if (!lockedVisit || !lockedVisit.customer_id) return { skip: 'vanished' };
             if (SELF_HEAL_TERMINAL_STATUSES.has(String(lockedVisit.status || '').toLowerCase())) {
               return { skip: 'terminal' };
@@ -2235,6 +2554,7 @@ const AppointmentReminders = {
                 // Same booking-time preservation as the armed arm below.
                 createdAt: lockedVisit.created_at,
               });
+              await inheritMoveHold(record);
               return { record };
             }
             const record = await AppointmentReminders.registerVisitReminderInTx(trx, {
@@ -2248,6 +2568,7 @@ const AppointmentReminders = {
               // row stamped with the cron time would wrongly skip that reminder.
               createdAt: lockedVisit.created_at,
             });
+            await inheritMoveHold(record);
             return { record };
           });
           if (res && res.skip) continue;
@@ -2345,6 +2666,12 @@ const AppointmentReminders = {
         .where({ windows_preclosed: false })
         .where(function () {
           this.where({ reminder_72h_sent: false }).orWhere({ reminder_24h_sent: false });
+        })
+        // A grouped unit move holds its members' rows (move_hold_until,
+        // codex #3609 r29): quiet while held; an abandoned partial's hold
+        // expires on its own and the row re-enters this scan.
+        .where(function () {
+          this.whereNull('move_hold_until').orWhere('move_hold_until', '<', new Date());
         })
         .whereNotExists(function () {
           this.select(1)
@@ -2489,13 +2816,13 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }, { sendOutcome: smsOutcome72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
             });
 
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
-            if (!reached72 && smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD') {
+            if (!reached72 && (smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome72.blockedCode === 'MOVE_HOLD')) {
               logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred, row left unmarked`);
               continue;
             }
@@ -2644,7 +2971,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }, { sendOutcome: smsOutcome24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
               smsOutcome: smsOutcome24,
             });
 
@@ -2653,7 +2980,7 @@ const AppointmentReminders = {
             // owner's ruling (defer when the window reopens before the
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
-            if (!reached24 && smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD') {
+            if (!reached24 && (smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome24.blockedCode === 'MOVE_HOLD')) {
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);
               continue;
             }
@@ -2830,6 +3157,88 @@ const AppointmentReminders = {
   /**
    * Handle appointment reschedule — reset reminder flags and notify customer.
    */
+  /**
+   * THE verified cohort release for a retained unit-move hold (codex #3609
+   * on-merge r2 — one mechanism, shared by handleReschedule's post-sync
+   * finalizer AND the canonical assignment writer's post-commit repair
+   * path). Releases the WHOLE token cohort only when its live services
+   * form ONE quiet stop (one date, one technician, connected windows, no
+   * rescheduled member) and every referenced service_visits parent is
+   * OPEN and agrees with the children's date + earliest start. Best-effort
+   * — failure keeps the rows quiet until the TTL, the safe direction.
+   * Returns true when a release happened.
+   */
+  async releaseMoveHoldIfRepaired(scheduledServiceId) {
+    if (!scheduledServiceId) return false;
+    try {
+      // ATOMIC under the visit stop lock + row locks (codex on-merge r3):
+      // separate validation/update queries allowed drift between the
+      // verification and the release — the whole verdict and the token
+      // clear run in one transaction, serialized against movers.
+      return await db.transaction(async (t) => {
+        const vg = require('./visit-groups');
+        await vg.lockStopForRow(t, scheduledServiceId);
+        const record = await t('appointment_reminders')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .first('move_hold_until', 'move_hold_token');
+        if (!record || !record.move_hold_token || !record.move_hold_until) return false;
+        if (new Date(record.move_hold_until).getTime() <= Date.now()) return false;
+        const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
+        const hm = (v) => (v ? String(v).slice(0, 5) : null);
+        const cohort = await t('appointment_reminders as ar')
+          .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+          .where({ 'ar.move_hold_token': record.move_hold_token })
+          .forUpdate('ar')
+          .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
+        const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
+        const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
+        let oneStop = !pendingRebook && (liveRows.length < 2 || (
+          new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
+          && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
+          && require('./visit-groups').windowedMembersConnected(liveRows)
+        ));
+        // COMPLETE parent tuple (codex on-merge r3): status, date, start,
+        // END and TECHNICIAN — a failed retarget that only diverged on
+        // window_end or technician_id must keep the hold.
+        if (oneStop) {
+          const parentIds = [...new Set(liveRows.filter((r) => r.visit_id).map((r) => String(r.visit_id)))];
+          for (const vid of parentIds) {
+            const parent = await t('service_visits').where({ id: vid }).first('status', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+            const members = liveRows.filter((r) => String(r.visit_id || '') === vid);
+            const childDate = dayOf(members[0].scheduled_date);
+            const starts = members.map((r) => hm(r.window_start)).filter(Boolean).sort();
+            const ends = members.map((r) => hm(r.window_end)).filter(Boolean).sort();
+            const childTechs = [...new Set(members.map((r) => String(r.technician_id || '')))];
+            if (!parent || String(parent.status) !== 'open'
+              || dayOf(parent.scheduled_date) !== childDate
+              || (starts.length && hm(parent.window_start) !== starts[0])
+              || (ends.length ? hm(parent.window_end) !== ends[ends.length - 1] : parent.window_end !== null && hm(parent.window_end) !== null)
+              || (childTechs.length === 1 && String(parent.technician_id || '') !== childTechs[0])) {
+              oneStop = false;
+              break;
+            }
+          }
+        }
+        if (!oneStop) {
+          logger.info(`[appt-remind] retained move hold kept for ${scheduledServiceId} — its cohort does not yet form one repaired stop`);
+          return false;
+        }
+        const released = await t('appointment_reminders')
+          .where({ move_hold_token: record.move_hold_token })
+          .update({ move_hold_until: null, move_hold_token: null, updated_at: new Date() });
+        if (released > 0) {
+          logger.info(`[appt-remind] released the retained move hold on ${released} row(s) of ${scheduledServiceId}'s repaired cohort`);
+        }
+        return released > 0;
+      });
+    } catch (holdErr) {
+      // VISIT_STOP_MOVED / deadlocks / read failures: keep the hold — the
+      // next sync, an assignment repair, or the TTL finishes the job.
+      logger.warn(`[appt-remind] retained move-hold release skipped for ${scheduledServiceId}: ${holdErr.message}`);
+      return false;
+    }
+  },
+
   async handleReschedule(scheduledServiceId, newTime, options = {}) {
     try {
       const sendNotification = options.sendNotification !== false;
@@ -2962,7 +3371,13 @@ const AppointmentReminders = {
       // landing in that window must claim the slot. This suppresses the deferred
       // sendConfirmation (which skips confirmation_sent rows) so the customer
       // gets the reschedule notice below, not a stale-time confirmation after it.
-      if (!record.confirmation_sent) {
+      // options.keepPendingConfirmation: the caller sends NO replacement
+      // notice for this row (a grouped sibling moved silently by
+      // moveVisitAsUnit) — leave a still-pending creation confirmation
+      // pending so the deferred sendConfirmation delivers it, instead of
+      // superseding it here and re-arming afterwards (that re-arm raced a
+      // worker send in between — codex #3609 r7).
+      if (!record.confirmation_sent && options.keepPendingConfirmation !== true) {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
@@ -2972,6 +3387,28 @@ const AppointmentReminders = {
       if (options.expectSchedule && syncedRows === 0) {
         logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
         return { skippedStale: true };
+      }
+      // Repair-release for a retained unit-move hold (codex #3609 uncapped
+      // audit + r33/r34 P1s): a PARTIAL move retains move_hold_until on
+      // every planned member — the detached straggler AND the landed
+      // members (which can STAY GROUPED when 2+ remain) — and neither a
+      // later unit move (releases current members only) nor this sync
+      // cleared them, so a repaired stop stayed silent for the full 24h
+      // TTL. A successful reschedule of a held row IS the repair
+      // completing, so release the WHOLE cohort — landed still-grouped
+      // remainder included. Cohort identity = the exact stamp (every
+      // planned member was stamped with one jittered value — see
+      // MOVE_HOLD_TTL jitter in visit-groups — so a row re-stamped by a
+      // newer mover, or a different move's cohort, never matches) PLUS the
+      // customer (a visit stop is per-customer; belt against a stamp
+      // collision). NOT run for the unit mover's own in-flight sibling
+      // syncs (options.preserveMoveHold) — releasing mid-move would
+      // un-hold the very move the stamp protects. Best-effort after the
+      // committed sync — a failed release leaves rows quiet until the TTL,
+      // the safe direction, and the senders' own checks stay authoritative.
+      if (record.move_hold_until && record.move_hold_token && syncedRows > 0
+        && options.preserveMoveHold !== true) {
+        await AppointmentReminders.releaseMoveHoldIfRepaired(scheduledServiceId);
       }
 
       if (!sendNotification) {
@@ -3009,7 +3446,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }, { sendOutcome: rescheduleNoticeOutcome });
+          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: newApptTime.getTime() }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -3049,7 +3486,7 @@ const AppointmentReminders = {
         // own pre-check defers to 8:00 AM and then sends the standard
         // confirmation carrying the NEW time. Same guards as the 72h
         // re-arm so a newer reschedule's state is never clobbered.
-        if (!noticeSent && rescheduleNoticeOutcome.blockedCode === 'QUIET_HOURS_HOLD') {
+        if (!noticeSent && (rescheduleNoticeOutcome.blockedCode === 'QUIET_HOURS_HOLD' || rescheduleNoticeOutcome.blockedCode === 'MOVE_HOLD')) {
           await db('appointment_reminders')
             .where({
               id: record.id,
@@ -4428,6 +4865,7 @@ AppointmentReminders.reminder24hStillReachable = reminder24hStillReachable;
 // of texting customers.phone directly, so appointment_notify_primary and
 // service-contact routing always apply.
 AppointmentReminders.safeSendAppointment = safeSendAppointment;
+AppointmentReminders.handOffToOffice = handOffToOffice;
 // Sanitized customer-facing service label (strips admin suffixes; the
 // reminder row's stored value already folds in add-on lines) — shared so
 // the admin reschedule notice renders the same label as every reminder.
@@ -4460,5 +4898,8 @@ AppointmentReminders.renderAppointmentPageTemplate = renderAppointmentPageTempla
 // Exported for the other two confirmation senders (call-recording-processor,
 // estimate-public) so all three quote the arrival window identically.
 AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
+// Per-row customer-facing label (parent + add-ons) — the grouped appointment
+// page / calendar list members with it (codex #3609 r15/r16).
+AppointmentReminders.buildServiceLabel = buildServiceLabel;
 
 module.exports = AppointmentReminders;

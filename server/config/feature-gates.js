@@ -45,11 +45,13 @@
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
+ *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
+ *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
@@ -258,6 +260,18 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+
+  // Two-program combined visits retired (owner 2026-08-31, follow-through
+  // on the 08-28 combo ruling "I want to remove all of these"): with visit
+  // groups live, a sold pest + termite-bait pair (and lawn + tree & shrub)
+  // schedules as TWO standalone catalog visits the office can group at one
+  // stop, instead of one combined row. The termite bait + BOND routes are
+  // NOT two programs — the bond is a billing rider on the bait check (one
+  // visit is the product; whole-plan per-application pricing divides
+  // across it) — and keep combining. The converter reads the env at CALL
+  // time so a Railway flip takes effect on the next accept; this entry is
+  // the status-listing registration. Fail-closed ==='true'; kill: unset.
+  separateComboVisits: process.env.GATE_SEPARATE_COMBO_VISITS === 'true',
 
   // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
   // report offers the next service family the customer lacks (pest ↔ lawn,
@@ -595,6 +609,13 @@ const gates = {
   // opt-in pattern: no sends, no customer-visible effect (sole consumer is
   // the owner-activation-gated phone agent), ≤1 DEEP call/day.
   voiceProfileDistiller: process.env.GATE_VOICE_PROFILE_DISTILLER !== 'false',
+
+  // Link Library sitemap sync — DAILY pull of www.wavespestcontrol.com's
+  // sitemap into the composer's link_library rows (services/link-library.js).
+  // Read-only against the public site, no sends, no customer data. DEFAULT
+  // ON; kill switch GATE_LINK_LIBRARY_SYNC=false. The Settings "Sync now"
+  // button calls the same sync directly and is not gated here.
+  linkLibrarySync: process.env.GATE_LINK_LIBRARY_SYNC !== 'false',
 
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
@@ -1023,6 +1044,17 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Unrecorded-call alert: the "Twilio has no recording either" step of the
+  // existing 5-min missing-recording sweep (call-recording-processor
+  // .recoverMissingRecentRecordings). Rings an admin bell for any answered
+  // inbound call (>=60s, not voicemail/AI-relay) still without a recording
+  // 30 min after it ENDED — the blind spot the ingest watchdog can't see
+  // (the SID IS known; the audio never arrived). Born 2026-08-29: pool
+  // exhaustion → webhook 502 → Twilio's static voice-fallback bridged a
+  // 4:17 call with no <Dial record>, so no transcript/extraction/lead ever
+  // followed. Reads notifications; writes only admin bells.
+  // Off → the sweep recovers recordings exactly as before, no bells.
+  unrecordedCallWatchdog: process.env.GATE_UNRECORDED_CALL_WATCHDOG === 'true',
   // Booking-miss watchdog: a 30-min cron that rings an admin bell when a
   // call's V2 extraction says a concrete appointment slot was CONFIRMED but
   // no non-cancelled scheduled_services row exists for that customer on that
@@ -1047,6 +1079,16 @@ const gates = {
   // the ledger dual-writes advisorily (data accumulates pre-flip). Kill
   // switch = unset; owner flips after the ops backfill seeds components.
   planRateLedger: process.env.GATE_PLAN_RATE_LEDGER === 'true',
+  // Cancellation resolution engine + portal cancel v2 (PR E, owner GO
+  // 2026-08-30): the deterministic reason→template retention layer
+  // (server/services/cancellation-resolution/), the customer cancel-
+  // resolution preview endpoint, and the processor's churn tier/rate
+  // wind-down (clears waveguard_tier / monthly_rate / plan-rate components
+  // on full churn — the 08-30 audit's money-leak fix). OFF, every cancel
+  // path behaves byte-identically to H0 (#3614). Most call sites read the
+  // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
+  // unset. Owner flips with the C1 portal flow.
+  cancelFlowV2: process.env.GATE_CANCEL_FLOW_V2 === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;
@@ -1238,6 +1280,21 @@ const gates = {
   // policy flag, not a dev feature, so dev/test keep the review-park
   // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
   namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
+
+  // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
+  // When ON, content-guardrails resolves <AffiliateLink product="…"> tags
+  // against the vendored @waves/affiliate-registry (product rows the owner
+  // approved by merging their astro registry PR); when OFF — the default —
+  // the product index is empty, so EVERY AffiliateLink is a P0
+  // UNREGISTERED_AFFILIATE_LINK and the lane is fully dark. Raw affiliate
+  // URLs never pass regardless (DISALLOWED_EXTERNAL_LINK), and channel
+  // stripping (newsletter/social) runs regardless of this flag. OFF in
+  // EVERY environment unless set to EXACTLY 'true' (policy flag, same
+  // posture as GATE_NAMED_COMPETITOR_AUTOPUBLISH — '1'/'on' stay dark);
+  // content-guardrails reads process.env.GATE_AFFILIATE_LINKS === 'true' at
+  // CALL time (the reserviceReportCopy pattern) so flips and tests take
+  // effect immediately; kill switch = unset GATE_AFFILIATE_LINKS.
+  affiliateLinks: process.env.GATE_AFFILIATE_LINKS === 'true',
 
   // aeo_gap opportunity mining — feeds answer-engine (LLM) visibility gaps into
   // the content engine's opportunity_queue. Default OFF in prod: ships dormant
@@ -1665,6 +1722,14 @@ const gates = {
   // sitting in an open status (pending/confirmed/en_route/on_site).
   // Detection-only: never mutates the rows, no customer contact.
   staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
+  // Daily 6:55 ET lead-to-cash invariants sweep (services/lead-to-cash-
+  // invariants.js): a read-only registry over existing detectors (churned
+  // accounts with live plan state, WaveGuard field drift, recurring-schedule
+  // anomalies, stale open visits, converted-but-open estimates, completion-
+  // lane catalog coverage, failed closeout facts). Emails contact@ ONLY when
+  // a detector finds something or cannot run. Dark everywhere until flipped
+  // (it would email from every dev boot otherwise); kill = unset.
+  leadToCashInvariantSweep: process.env.GATE_LEAD_TO_CASH_SWEEP === 'true',
 
   // Customer rain chip — attaches a "chance of rain" percentage (NWS daily
   // outlook) to the customer portal's visit-tracker payload so the tracker
@@ -1826,6 +1891,39 @@ const gates = {
   // While dark: extraction still captures the new fields (capture-only);
   // nothing fills, parks, or renders. Kill switch: unset the var.
   callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
+
+  // "Traced spray map or nothing" across the whole pest line (owner
+  // 2026-08-31, generalizing the #3631 callback rule): with the gate on, a
+  // pest report with no technician trace renders NO generated schematic —
+  // web rings diagram, PDF drawn map, and /map.svg all suppress; the
+  // '-ton1' PDF key suffix re-renders cached pest documents once.
+  // Consumers re-read the env at call time via
+  // pestTraceOrNothingGateOn() (pest-report-v2.js → gateEnvValue), so a
+  // flip needs no redeploy. Kill switch: unset GATE_PEST_TRACE_OR_NOTHING.
+  pestTraceOrNothing: gateEnvValue('GATE_PEST_TRACE_OR_NOTHING'),
+
+  // Re-service (callback) report copy (2026-08-30): the customer report for
+  // a callback visit keys off `service_records.is_callback` instead of the
+  // editable display name, drops below the honest V2 status branches, splits
+  // lawn vs pest wording, and prints the "$0 — included with WaveGuard" line
+  // the tech completion panel already promises — on the web hero AND the PDF.
+  // OFF everywhere until Adam flips it (exact 'true'); reservice-report.js
+  // reads the env at call time so a flip needs no redeploy — cached PDFs
+  // re-render via the -rs1 key component. This entry is the status/log
+  // listing. Kill switch: unset the var (payload keeps `isCallback` as data).
+  reserviceReportCopy: process.env.GATE_RESERVICE_REPORT_COPY === 'true',
+
+  // Server-persisted Intelligence Bar threads (owner-ratified 2026-08-31):
+  // admin conversations survive refresh/route changes; the palette resumes
+  // the latest thread. OFF everywhere until Adam flips it (explicit opt-in —
+  // it persists operator conversations to the DB). Kill switch: unset — the
+  // exact pre-thread ephemeral behavior returns and the /threads endpoints
+  // 404. Read at CALL time via gateEnvValue in
+  // services/intelligence-bar/threads.js (flip needs no redeploy); this
+  // entry is the status/log listing — same parser as the request path so
+  // the listing can never disagree with what /query actually does.
+  // (gateEnvValue is a hoisted function declaration, safe to call here.)
+  ibThreads: gateEnvValue('GATE_IB_THREADS'),
 
 };
 

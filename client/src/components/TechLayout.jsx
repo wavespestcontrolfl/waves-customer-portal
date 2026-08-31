@@ -114,11 +114,20 @@ export default function TechLayout() {
     const title = document.querySelector('meta[name="apple-mobile-web-app-title"]');
     const prevManifest = link?.getAttribute('href');
     const prevTitle = title?.getAttribute('content');
+    const prevDocumentTitle = document.title;
     link?.setAttribute('href', '/manifest.tech.json');
     title?.setAttribute('content', 'Field Tools');
+    // Browser-tab title too — tech owns its complete identity. A tech who
+    // signed in via /admin/login arrives here after the admin bookmark
+    // hook's cleanup restored the CUSTOMER title, and this effect runs
+    // after that restore, so without this line the tab keeps "Waves
+    // Customer Portal". Matches the /tech SECTIONS title renderHTML
+    // (server/index.js) serves on a cold prod load.
+    document.title = 'Waves Tech';
     return () => {
       if (link && prevManifest) link.setAttribute('href', prevManifest);
       if (title && prevTitle) title.setAttribute('content', prevTitle);
+      document.title = prevDocumentTitle;
     };
   }, []);
 
@@ -132,7 +141,9 @@ export default function TechLayout() {
       <div
         role={authStatus === 'error' ? 'alert' : 'status'}
         style={{
-          minHeight: '100vh',
+          // 100dvh tracks the visible viewport on iOS Safari (100vh is the
+          // large viewport and leaves the bottom under the toolbar).
+          minHeight: '100dvh',
           background: DARK.bg,
           color: DARK.text,
           fontFamily: "'Nunito Sans', sans-serif",
@@ -154,7 +165,7 @@ export default function TechLayout() {
     return (
       <div
         style={{
-          minHeight: '100vh',
+          minHeight: '100dvh',
           background: DARK.bg,
           color: DARK.text,
           fontFamily: "'Nunito Sans', sans-serif",
@@ -218,7 +229,7 @@ export default function TechLayout() {
 
   return (
     <div style={{
-      minHeight: '100vh',
+      minHeight: '100dvh',
       background: DARK.bg,
       color: DARK.text,
       fontFamily: "'Nunito Sans', sans-serif",
@@ -256,8 +267,9 @@ export default function TechLayout() {
         <span style={{ fontSize: 13, color: DARK.muted }}>{techName}</span>
       </header>
 
-      {/* Main content area */}
-      <main style={{ flex: 1, padding: '16px', paddingBottom: 80, overflowY: 'auto' }}>
+      {/* Main content area. Bottom padding clears the fixed nav (8px pad +
+          44px links) plus the home-indicator safe area on notched iPhones. */}
+      <main style={{ flex: 1, padding: '16px', paddingBottom: 'calc(80px + env(safe-area-inset-bottom, 0px))', overflowY: 'auto' }}>
         <AddToHomeScreenHint />
         <Outlet />
       </main>
@@ -286,9 +298,13 @@ export default function TechLayout() {
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
+                justifyContent: 'center',
                 gap: 2,
                 textDecoration: 'none',
                 padding: '4px 12px',
+                // 44px effective touch target (field use = gloved thumbs).
+                minHeight: 44,
+                minWidth: 44,
                 borderRadius: 8,
                 color: active ? DARK.teal : DARK.muted,
                 transition: 'color 0.2s',
@@ -296,7 +312,7 @@ export default function TechLayout() {
             >
               <span style={{ fontSize: 22 }}>{item.icon}</span>
               <span style={{
-                fontSize: 10, fontWeight: active ? 700 : 500,
+                fontSize: 12, fontWeight: active ? 700 : 500,
                 fontFamily: "'Montserrat', sans-serif",
               }}>{item.label}</span>
             </Link>

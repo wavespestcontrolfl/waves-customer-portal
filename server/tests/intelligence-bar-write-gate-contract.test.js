@@ -62,7 +62,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -192,6 +192,8 @@ const READ_ONLY = [
   'search_field_intelligence',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
+  'get_recent_completions',
+  'search_ib_history',
   'find_schedule_gaps', 'get_day_summary', 'get_zone_density', 'find_available_slots',
   'cancel_and_reschedule_far_out',
   'get_kpi_snapshot', 'compare_periods', 'get_mrr_trend', 'get_revenue_breakdown',

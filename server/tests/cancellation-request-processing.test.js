@@ -55,6 +55,9 @@ jest.mock('../services/appointment-reminders', () => ({
 
 // Churn-reason classifier (Phase 7) — mocked so tests control the outcome;
 // the default resolves unclassified (the real module's fail-closed floor).
+const mockNotifyAdmin = jest.fn().mockResolvedValue({ id: 'notif-1' });
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
+
 jest.mock('../services/churn-classifier', () => ({
   classifyChurnReason: jest.fn().mockResolvedValue({ code: 'unclassified', source: 'none' }),
 }));
@@ -696,5 +699,91 @@ describe('processCancellationRequest', () => {
       expect(cust.churn_mrr).toBe(120); // original snapshot preserved
       expect(classifyChurnReason).not.toHaveBeenCalled();
     });
+  });
+  test('raises ONE deduped office task when the churned account has Waves-owned bait stations', async () => {
+    db.__tables.scheduled_services = [];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [
+      { id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true },
+      { id: 't2', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: false },   // retired — not counted
+      { id: 't3', customer_id: 'c1', program: 'termite', owned_by: 'customer', is_active: true }, // theirs — not ours to pull
+      { id: 't4', customer_id: 'other', program: 'termite', owned_by: 'waves', is_active: true },
+      { id: 't5', customer_id: 'c1', program: 'rodent', owned_by: 'waves', is_active: true },     // rodent hardware — not a bait rental
+    ];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT' });
+
+    expect(result.churned).toBe(true);
+    expect(result.errors).not.toContain('termite_retrieval_task');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(category).toBe('service');
+    expect(title).toMatch(/Termite stations to retrieve/);
+    expect(body).toMatch(/^1 Waves-owned bait station on this property/);
+    expect(body).toMatch(/No charge to the customer/);
+    expect(opts.dedupeKey).toBe('termite_station_retrieval:c1:reqT');
+    expect(opts.bell).toBe(true);
+    expect(opts.metadata).toEqual(expect.objectContaining({ kind: 'termite_station_retrieval', customerId: 'c1', stationCount: 1 }));
+  });
+
+  test('rental flag without pinned stations still raises the task; no rental → no task', async () => {
+    db.__tables.scheduled_services = [];
+    db.__tables.termite_stations = [];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: true }];
+    mockNotifyAdmin.mockClear();
+    await processCancellationRequest({ customerId: 'c1', requestId: 'reqF' });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/flagged as a bait-station rental/);
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.flaggedRental).toBe(true);
+
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    mockNotifyAdmin.mockClear();
+    await processCancellationRequest({ customerId: 'c1', requestId: 'reqN' });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('no retrieval task when the churn itself did not persist (account still live)', async () => {
+    db.__tables.scheduled_services = [];
+    db.__tables.termite_stations = [{ id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true }];
+    // No customer row → the churn block finds nothing to update → churned=false.
+    db.__tables.customers = [];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqL' });
+    expect(result.churned).toBe(false);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a retrieval alert that did not persist is an error, never a silent success', async () => {
+    db.__tables.scheduled_services = [];
+    db.__tables.termite_stations = [{ id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true }];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+    mockNotifyAdmin.mockResolvedValueOnce(null);
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqX' });
+    expect(result.churned).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain('termite_retrieval_task');
+
+    // A policy-suppressed sentinel is truthy but landed no row — same outcome.
+    mockNotifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'bell_policy' });
+    const suppressed = await processCancellationRequest({ customerId: 'c1', requestId: 'reqY' });
+    expect(suppressed.errors).toContain('termite_retrieval_task');
+
+    // Internal test-customer suppression (no reason) is the one silent skip.
+    mockNotifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    const internal = await processCancellationRequest({ customerId: 'c1', requestId: 'reqZ' });
+    expect(internal.errors).not.toContain('termite_retrieval_task');
   });
 });

@@ -4,6 +4,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
+const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -47,6 +49,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
@@ -1551,6 +1554,8 @@ function structuredCustomerConcern(structured = {}) {
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.termiteNextMonitoringVisit;
+  delete data.cockroachNextTreatmentVisit;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -3317,6 +3322,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           // Trim same-day sibling rows at this report's own score row so a
           // later visit completed the same day can't chart on this token.
           currentServiceRecordId: service.id || null,
+          // Customer-facing chart: callbacks are not trend data points
+          // while the re-service gate is on (#3623; scoring unaffected).
+          excludeCallbacks: reserviceReportCopyGateOn(),
         }).catch(() => [])
       : Promise.resolve([]),
     serviceCoverageConfigPromise,
@@ -3681,6 +3689,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
     serviceDate: service.service_date || null,
+    // Freezes the station denominator at the visit itself (codex P2 #3600
+    // r32) — same completion fields the visit-timing cells read.
+    // The public report query selects service_records.* without the
+    // scheduled-service completion columns, so use the already-resolved
+    // completionTime (record + scheduled row + timing evidence) first
+    // (codex P2 #3600 r34).
+    visitCompletedAt: completionTime || service.completed_at || service.actual_end_time || service.check_out_time || null,
     // Read off the FROZEN snapshot that actually OWNS the trapping program —
     // which may be a COMPANION, since typedTypes deliberately lets a
     // non-station primary carry a rodent_trapping companion and that
@@ -4381,6 +4396,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   let nextAppointment = null;
   let sameLineNextAppointment = null;
+  // Live-view only (stripLiveOnlyScheduleFields), termite line only.
+  let termiteNextMonitoringVisit = null;
+  // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
+  // the first upcoming ROACH-FAMILY appointment (the next treatment of the
+  // program) and how many roach-family visits are still ahead — the program
+  // position ("treatment 1 of 2") reads from these when the catalog does
+  // not fix the package size. Both consumed by attachCockroachReportV2.
+  let cockroachNextTreatmentVisit;
+  let cockroachUpcomingRoachVisits;
+  let cockroachProgramPosition;
+  let cockroachRenderedSignature;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4403,7 +4429,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .orderBy('scheduled_date', 'asc')
       .orderBy('window_start', 'asc')
       .limit(200)
-      .catch(() => []);
+      .catch(() => null); // null = the query FAILED (not "no visits") — consumers that need the distinction check Array.isArray
     // A rodent report's "next visit" spans the whole rodent program —
     // trapping, exclusion, sanitation, proofing — including service names
     // that carry no rodent token ("Exclusion Service" alone falls to the
@@ -4481,6 +4507,104 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     sameLineNextAppointment = toNextAppointment(nextApptRow);
     nextAppointment = sameLineNextAppointment
       || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
+
+    // Termite bait-station reports (typed identity): the "next monitoring visit" is the first
+    // upcoming BAIT-STATION appointment, selected here while the candidate
+    // rows are still in hand — the collapsed same-line pick above may be an
+    // earlier liquid/trench/inspection visit, which is termite work but not
+    // monitoring (codex P1 #3600 r3). Identity comes from the CANONICAL
+    // completion-profile resolver (service-completion-profiles.js — the
+    // same one the completion flow and the trace lane use), which already
+    // handles service_id links, service_key_snapshot, exact catalog names,
+    // and unique short names ("Bait Annual"); a typed profile decides in
+    // both directions, name tokens judge only rows with no typed profile
+    // (codex P1 #3600 r7). Scanned in date order, stopping at the first
+    // hit; best-effort — a resolver failure skips the row, never throws.
+    // Runs ONLY where the value can render: live view (pdf/static strip
+    // it), gate on, bait-station typed visit — each resolution is a few
+    // catalog reads, so gated-off and PDF builds must not pay for it
+    // (codex P2 #3600 r8).
+    // Keyed on the frozen typed identity, not the name-derived serviceLine:
+    // a "Bait Annual" short name detects as 'pest' while its snapshot is
+    // termite_bait_station (codex P1 #3600 r12) — same predicate as
+    // attachTermiteReportV2 and the PDF signature.
+    // Primary OR auto_send companion bait snapshot (combined visits) —
+    // the same resolver attachTermiteReportV2 and the PDF signature use.
+    if (
+      opts.mode === 'live'
+      && process.env.TERMITE_REPORT_V2 === 'true'
+      && termiteBaitSnapshotOf(service)
+    ) {
+      const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
+      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+      let baitRow = null;
+      // The WHOLE candidate window (a customer on weekly service can have
+      // dozens of non-bait rows ahead of the annual check — codex P2 #3600
+      // r9). Resolution is memoized per identity (service_id ·
+      // service_key_snapshot · label): repeated weekly rows resolve once,
+      // so the cost is one resolution per DISTINCT service, not per row.
+      const verdictByIdentity = new Map();
+      for (const row of rows) {
+        const identity = `${row?.service_id || ''}|${row?.service_key_snapshot || ''}|${String(row?.service_type || '').trim().toLowerCase()}`;
+        let isBait = verdictByIdentity.get(identity);
+        if (isBait === undefined) {
+          let profile = null;
+          let resolutionFailed = false;
+          // strict: a swallowed profile-table / identity-reload failure would
+          // surface as a default (typeless) profile and fall to the label
+          // (codex P2 #3600 r26) — make it throw, then skip the row.
+          try { profile = await resolveCompletionProfileForScheduledService(row, knex, { strict: true }); } catch { resolutionFailed = true; }
+          // A typed bait profile decides — except the installation profile,
+          // which freezes the same type but is not a monitoring check
+          // (codex P2 #3600 r19). A FAILED resolution is not an unlinked
+          // legacy row: fail closed, never fall to the label (codex P2 r23).
+          if (resolutionFailed) isBait = false;
+          else if (profile?.findingsType) {
+            // …and neither the installation profile nor the detection-only
+            // termite_monitoring program (codex P2 #3600 r19 / r21).
+            isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE
+              && isMonitoringServiceKey(profile.serviceKey);
+          } else if (profile?.projectType) isBait = false;
+          else isBait = isTermiteBaitServiceName(row?.service_type);
+          verdictByIdentity.set(identity, isBait);
+        }
+        if (isBait) { baitRow = row; break; }
+      }
+      termiteNextMonitoringVisit = toNextAppointment(baitRow);
+    }
+
+    // Cockroach treatment program (owner 2026-08-29: the first treatment
+    // ALWAYS references the next treatment date). Same identity discipline
+    // as the termite pick: the canonical completion-profile resolver decides
+    // roach-family rows (typed `cockroach` pointer, or a roach service key),
+    // name tokens judge only rows with no resolvable profile; a failed
+    // resolution skips the row. Runs only where the value can render
+    // (live view, gate on, cockroach typed primary).
+    // Cockroach treatment program (cockroach-report-v2.js resolveCockroachProgram
+    // — the ONE resolver shared with the PDF cache-key component): package
+    // position, same-program visits still ahead, and the next one. The
+    // DATE is live-only (stripped for pdf/static); the position and the
+    // upcoming COUNT ride every mode because the permanent record carries
+    // the program's completion state, keyed into the PDF cache. A failed
+    // resolution → position null → the dashboard makes no program claims.
+    if (process.env.COCKROACH_REPORT_V2 === 'true' && cockroachSnapshotOf(service)) {
+      // A FAILED upcoming query (null) is not an empty calendar (codex P1
+      // #3613): the resolver re-queries itself, and if that fails too the
+      // program falls closed (no claims) instead of reading "complete".
+      const program = await resolveCockroachProgram(service, knex, { upcomingRows: Array.isArray(upcomingRows) ? upcomingRows : null });
+      if (program && !program.failed) {
+        cockroachProgramPosition = program.treatmentNumber != null
+          ? { treatmentNumber: program.treatmentNumber, laterCompleted: program.laterCompleted || 0 }
+          : { treatmentNumber: null, reason: program.positionReason || 'no_lineage' };
+        cockroachUpcomingRoachVisits = program.upcoming;
+        if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(program.nextRow);
+      } else if (program && program.failed) {
+        cockroachProgramPosition = null;
+      }
+      // The signature of the program state THIS payload carries — the PDF
+      // store key reads it from the render, never from a second lookup.
+      cockroachRenderedSignature = cockroachProgramSignature(program);
+    }
   } catch { /* best-effort */ }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
@@ -4491,7 +4615,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // cached PDF goes stale across a renewal (same rule as nextAppointment).
   // Fail-soft like the portal endpoint: any error just omits the line.
   let termiteBonds = null;
-  if (serviceLine === 'termite' && opts.mode === 'live') {
+  // Termite line, OR any live report carrying a customer-visible bait-
+  // station snapshot (combined pest + termite visits keep serviceLine
+  // 'pest' while the companion dashboard renders the warranty card —
+  // codex P2 #3600 r14).
+  if (opts.mode === 'live' && (serviceLine === 'termite' || termiteBaitSnapshotOf(service))) {
     try {
       // Shared with /api/property/termite-bond so the hero cell and the
       // My Plan card it links to can never disagree (codex inline). EVERY
@@ -4792,6 +4920,100 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // The ONLY recommendation the fold may drop is the irrigation-hold
+  // instruction, and only when ONE CLAUSE of the reviewed narrative carries
+  // the same instruction at the same-or-longer duration. Three codex rounds
+  // (r5–r8 on #3631) showed general narrative-coverage matching cannot be
+  // made safe — cross-sentence token pooling, then cross-clause negation
+  // ("Apply irrigation for 48 hours, but do not mow" must never cover "Do
+  // not apply irrigation for 48 hrs") — so both sides are fingerprinted
+  // instead: an irrigation/water word AND a hold/negation word AND a
+  // parseable hours duration, co-occurring within a single clause. Every
+  // other recommendation keeps its card row unconditionally. Bias runs
+  // toward KEEPING: a duplicate line is noise, a dropped instruction is
+  // information loss.
+  // The hold verb must be grammatically TIED to the irrigation word — a
+  // hold/negation phrase followed by irrigation/watering within at most
+  // three intervening words ("do not apply irrigation", "hold off on any
+  // irrigation", "avoid watering", "wait 48 hours before watering") —
+  // never independently pooled tokens: "Irrigation caused no runoff for
+  // 48 hours" carries all three tokens but no hold instruction and must
+  // cover nothing (codex P1 r9).
+  // No bare "no" alternative (codex P1 r10): "No irrigation occurred for
+  // 72 hours before today's treatment" is a description, not a directive —
+  // only imperative hold verbs qualify, and a "no irrigation for 48 hours"
+  // phrasing simply keeps its card row (the keep-bias direction).
+  // NOUN forms only — irrigation/irrigating/watering, never bare
+  // "water <object>" (codex P1 r12): "Do not water the flower beds for 48
+  // hours" is a NARROWER hold than the lawn-wide irrigation instruction
+  // and must not fold it away.
+  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+((?:['’\w]+\s+){0,3}?)(?:irrigat\w+|watering)\b/i;
+  // Scope-narrowing belt (same finding): a clause that names a non-lawn
+  // target never covers the property-wide instruction, whatever its verbs.
+  const NARROWED_SCOPE_RE = /\b(?:beds?|flowers?|gardens?|shrubs?|plants?|trees?|pots?|planters?)\b/i;
+  // Double negation (codex P1 r13): "Do not SKIP irrigation" instructs the
+  // OPPOSITE of a hold — a second hold-family verb inside the gap flips the
+  // polarity, so the clause covers nothing.
+  const DOUBLE_NEGATION_GAP_RE = /\b(?:skip|avoid|withhold|miss|forget|stop|hold)\b/i;
+  // An irrigation-hold instruction's duration in hours, or null when the
+  // text is not one (no tied hold phrase, flipped polarity, or no duration).
+  const irrigationHoldHours = (text, { rejectNarrowedScope = false } = {}) => {
+    const s = String(text || '');
+    const phrase = IRRIGATION_HOLD_PHRASE_RE.exec(s);
+    if (!phrase) return null;
+    if (DOUBLE_NEGATION_GAP_RE.test(phrase[1] || '')) return null;
+    if (rejectNarrowedScope && NARROWED_SCOPE_RE.test(s)) return null;
+    const m = s.match(/(\d+(?:\.\d+)?)\s*h(?:ou)?rs?\b/i);
+    return m ? Number(m[1]) : null;
+  };
+  const recommendationCoveredByNarrative = (rec, narrative) => {
+    const recHours = irrigationHoldHours(rec);
+    if (recHours == null) return false;
+    return String(narrative || '')
+      .split(/[.!?]+/)
+      .some((sentence) => sentence
+        // "and"/"then" split too (codex P1 r11): "Do not water the flower
+        // beds and wait 72 hours before mowing" must not lend mowing's 72
+        // hours to a watering hold — the duration has to live in the same
+        // conjunct as the tied hold phrase.
+        .split(/[,;]|\bbut\b|\bhowever\b|\band\b|\bthen\b/i)
+        .some((clause) => {
+          const clauseHours = irrigationHoldHours(clause, { rejectNarrowedScope: true });
+          return clauseHours != null && clauseHours >= recHours;
+        }));
+  };
+
+  // Lawn callback reports fold the fragmented cards into the narrative
+  // (owner 2026-08-30, first-callback eyeball): the tech-reviewed AI report
+  // already tells the found/did/recommend story in prose — the "What we
+  // found & did" tiles, the "What we recommend" list, and the generic lawn
+  // program explainer restate it as noise on a complaint visit. Suppressed
+  // ONLY when that narrative actually composed (summarySource
+  // 'technician_report'): a callback whose completion produced no reviewed
+  // narrative keeps every card — removal must never lose the sole record.
+  // The Re-entry card independently carries the irrigation/re-entry timing,
+  // so dropping the recommendation list loses no safety guidance. Same kill
+  // switch as the rest of the lane (unset GATE_RESERVICE_REPORT_COPY).
+  const lawnCallbackNarrativeOwns = reserviceReportCopyGateOn()
+    && service.is_callback === true
+    && serviceLine === 'lawn'
+    && visitSummarySource === 'technician_report';
+
+  // Composed ahead of the payload so the traced-map decision below can read
+  // the outcome. A NON-PERFORMED callback (inspection_only /
+  // customer_declined) must not replay a spray/coverage trace beside copy
+  // saying no application was made (codex P1 r12): a trace captured before
+  // the tech selected that outcome would otherwise render as "where we
+  // sprayed" on web, hero, and PDF. 'incomplete' keeps its trace — partial
+  // treatment is still treatment (#3617 r11). The rs2 signature already
+  // carries the outcome key, so cached PDFs re-render once.
+  const reserviceReportBlock = await buildReserviceReport(
+    service,
+    { serviceLine, knex, visitOutcome: protocol.visitOutcome || null },
+  );
+  const callbackNonPerformed = Boolean(reserviceReportBlock)
+    && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -4817,7 +5039,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the card would otherwise show a placeholder identity.
     techVisitCard: process.env.GATE_REPORT_TECH_PHOTO === 'true'
       && !!(service.technician_name || service.technician_first_name),
+    // R4 REVERSED (owner 2026-08-31, "lets put the review request back
+    // in"): callback reports ask for a review again — a resolved complaint
+    // visit is a fine moment for the ask. The offer cards (cross-sell /
+    // referral) STAY suppressed on callbacks; only the review returns.
     reviewRequestEligible: !service.has_left_google_review,
+    // "Traced spray map or nothing" for the whole pest line (owner
+    // 2026-08-31, GATE_PEST_TRACE_OR_NOTHING, dark): with the gate on, the
+    // web schematic diagram, the PDF's drawn schematic, and the standalone
+    // map.svg all render nothing when no technician trace exists —
+    // recurring, one-time, and re-service pest visits alike.
+    pestTraceOrNothing: require('./pest-report-v2').pestTraceOrNothingGateOn()
+      && serviceLine === 'pest',
     hasLeftGoogleReview: !!service.has_left_google_review,
     // Canonical review office for the report CTA, resolved SERVER-side
     // (config/locations.js resolveReviewLocation: city → zip → geo → stored
@@ -4857,6 +5090,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // sentence links to the authenticated portal Schedule tab in the live
     // view. Boolean only; the standing token never rides the public report.
     reserviceEligible,
+    // Callback (re-service) identity, frozen on the record at completion —
+    // the authoritative flag billing/pressure/cross-sell already use. Plain
+    // data at every gate setting; the copy block below is what's gated.
+    isCallback: service.is_callback === true,
+    // Re-service hero/PDF copy (reservice-report.js) — null while
+    // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
+    // the client then keeps its legacy name-regex headline unchanged.
+    reserviceReport: reserviceReportBlock,
+    // True when the gated composer ran: a null reserviceReport on a callback
+    // is then a deliberate withholding (unsupported line), and the client
+    // must not fall back to the legacy name-regex copy.
+    reserviceGateOn: reserviceReportCopyGateOn(),
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
@@ -4906,7 +5151,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         visitSequence: typedSnapshot.visitSequence || 1,
         isProgressVisit: (typedSnapshot.visitSequence || 1) > 1,
         todaysResult: typedSnapshot.todaysResult || null,
-        findings: Array.isArray(typedSnapshot.findings) ? typedSnapshot.findings : [],
+        // Empty on lawn callbacks whose narrative owns the story — hides
+        // the "What we found & did" tiles on web AND PDF from one point.
+        findings: !lawnCallbackNarrativeOwns && Array.isArray(typedSnapshot.findings)
+          ? typedSnapshot.findings : [],
         nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
         photoSummary: typedSnapshot.photoSummary || null,
         schemaVersion: typedSnapshot.schemaVersion || null,
@@ -4927,7 +5175,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         label: 'Schematic view of inspected and treated zones. Service zones are approximate.',
       },
       satellite: satelliteMap,
-      traced: tracedTreatmentZone,
+      // Non-performed callbacks never replay a treatment trace (codex P1
+      // r12) — the copy says no application was made, and one payload
+      // decision covers the hero, the coverage card, and the PDF.
+      traced: callbackNonPerformed ? null : tracedTreatmentZone,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,
@@ -4956,6 +5207,35 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    termiteNextMonitoringVisit,
+    // Present (possibly null) ONLY when the live cockroach pick ran — the
+    // attach composer reads presence as "schedule resolved" (pdf/static
+    // never carry the keys, so the permanent record neither promises nor
+    // disclaims a date).
+    ...(cockroachNextTreatmentVisit !== undefined ? { cockroachNextTreatmentVisit } : {}),
+    ...(cockroachUpcomingRoachVisits !== undefined ? { cockroachUpcomingRoachVisits } : {}),
+    ...(cockroachProgramPosition !== undefined ? { cockroachProgramPosition } : {}),
+    ...(cockroachRenderedSignature !== undefined ? { cockroachReportV2RenderedSignature: cockroachRenderedSignature } : {}),
+    // Visit stage for a bait-station snapshot, from the completion profile
+    // (termite_installation_setup also freezes termite_bait_station):
+    // 'installation' keeps the typed record; 'monitoring' may render the
+    // dashboard. Consumed and removed by attachTermiteReportV2. Name tokens
+    // decide only when no profile resolved (fail toward the typed record).
+    // 'detection' = the seeded termite_monitoring program (in-ground
+    // monitoring stations, NO active bait) — its completion profile freezes
+    // the same typed type, but bait-deployed copy would misstate it
+    // (codex P1 #3600 r18); it keeps the typed record too.
+    // Identity order (codex P1 #3600 r19): the completion-FROZEN service key
+    // (service_data.completedServiceKey — a permanent report must not
+    // change stage when an admin repoints the schedule row or a legacy
+    // record loses its link), then the live profile, then name tokens.
+    // ONE stage resolver for the render path AND the PDF cache signature
+    // (recordStage): frozen completedServiceKey, else the applicable typed
+    // snapshot's own serviceKey, else the record's frozen service_type name
+    // for legacy records that froze neither. Never the live linked profile
+    // — a later reclassification must not change a permanent report token
+    // on one path and not the other (codex P2 #3600 r33 / P0 r21).
+    termiteBaitStage: termiteBaitSnapshotOf(service) ? recordStage(service) : null,
     termiteBonds,
     relatedDocuments,
     visitTimeline,
@@ -4968,12 +5248,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       ...parseJsonObject(service.weather_data),
     },
     findings,
-    recommendations,
+    // Folded ONLY where the narrative actually covers the instruction
+    // (codex P1 r5 on #3631): summarySource proves the notes parsed, not
+    // that every recommendation made it into the prose — one the narrative
+    // omits stays on the card rather than vanishing from web + PDF.
+    recommendations: lawnCallbackNarrativeOwns
+      ? recommendations.filter((rec) => !recommendationCoveredByNarrative(rec, visitSummary))
+      : recommendations,
     protocol,
     advisory,
     lawnAssessment,
     mowingHeight,
-    lawnProgramOverview,
+    lawnProgramOverview: lawnCallbackNarrativeOwns ? null : lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,
     // Drop the gauge/lawn-length photo from the gallery only when Lawn Report V2

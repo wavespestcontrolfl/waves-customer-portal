@@ -61,6 +61,13 @@ const VERIFIABLE_FIELDS = new Set([
   'roofType',
   'foundationType',
   'hasPool',
+  // Total units on the parcel (codex P1 r4 on the unitCount plumbing): the
+  // AI path now reports counts, so a wrong cached count must be correctable
+  // — a false multi-unit result otherwise forces unit-address public quotes
+  // into the site-confirmed path until the cache expires. A verified count
+  // carries parcel-scoped provenance (PARCEL_SCOPED_UNIT_COUNT_SOURCES), so
+  // it both votes and may suppress/exempt.
+  'unitCount',
 ]);
 
 // Evidence weight for tech-verified values — above live county (100): a
@@ -125,6 +132,12 @@ function sanitizeVerifiedValue(field, value) {
     // story count is exactly how an unknown-stories aggregate resolves —
     // dropping a tech's "6" here would pin footprintUnknown forever.
     case 'stories': return intInRange(value, 1, 50);
+    // Strict integer — a fractional or ranged entry is a typo, and this
+    // count drives commercial classification (same bound as the parsers).
+    case 'unitCount': {
+      const n = Number(value);
+      return Number.isInteger(n) && n >= 1 && n <= 2000 ? n : undefined;
+    }
     case 'yearBuilt': return intInRange(value, 1880, new Date().getFullYear() + 2);
     case 'hasPool': {
       if (typeof value === 'boolean') return value;

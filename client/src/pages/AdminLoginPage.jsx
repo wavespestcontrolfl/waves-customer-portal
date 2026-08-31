@@ -94,7 +94,7 @@ export default function AdminLoginPage() {
   };
 
   return (
-    <main style={{ minHeight: '100vh', background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT, padding: 20 }}>
+    <main className="admin-auth-page" style={{ background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT }}>
       <div style={{ maxWidth: 400, width: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 48, marginBottom: 12 }} />
@@ -124,7 +124,7 @@ export default function AdminLoginPage() {
 
           <button type="submit" disabled={loading} style={{
             ...BUTTON_BASE, width: '100%', padding: 16, marginTop: 16, fontSize: 15, fontFamily: ADMIN_FONT,
-            background: D.red, color: D.white, opacity: loading ? 0.7 : 1,
+            background: '#f4f4f5', color: '#18181B', opacity: loading ? 0.7 : 1,
           }}>{loading ? 'Signing in...' : 'Sign In'}</button>
 
           <Link to="/admin/forgot-password" style={{ display: 'block', marginTop: 16, minHeight: 44, lineHeight: '44px', textAlign: 'center', fontSize: 14, color: D.teal, textDecoration: 'none' }}>

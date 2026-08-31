@@ -267,10 +267,23 @@ time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
         scheduled_date: { type: 'string', description: 'YYYY-MM-DD' },
         service_type: { type: 'string' },
         technician_name: { type: 'string', description: 'Optional tech name' },
+        technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
+    },
+  },
+  {
+    name: 'get_recent_completions',
+    description: `The most recently completed visits, newest first — resolves "the customer we just finished" and "what did we complete today". Returns customer, service, technician, and completion time.
+Use for: "build the report for the customer we just finished", "who did we finish today?", "what was the last completed stop?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'integer', description: 'Max results (default 5, max 20)' },
+        days: { type: 'integer', description: 'Look back this many ET calendar days including today (default 2 = today + yesterday, max 30)' },
+      },
     },
   },
   {
@@ -333,6 +346,7 @@ async function executeTool(toolName, input) {
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'create_appointment': return await createAppointment(input);
+      case 'get_recent_completions': return await getRecentCompletions(input);
       case 'reschedule_appointment': return await rescheduleAppointment(input);
       case 'cancel_appointment': return await cancelAppointment(input);
       case 'draft_sms': return await draftSms(input);
@@ -1623,6 +1637,82 @@ function parseTimeWindowStart(timeWindow) {
 // non-positive span invisible to the overlap predicates and nonsense to the
 // elapsed guard.
 
+// Recency resolver for "the customer we just finished": completed visits,
+// newest first. The close-out moment is completion EVIDENCE only, in
+// preference order: the completed transition in job_status_history
+// (transitionJobStatus inserts it in the completion trx; the retired
+// legacy status-log table's evidence was migrated into it) →
+// ss.completed_at. Never ss.updated_at
+// (touched by unrelated edits — an old visit would outrank the actual
+// latest completion) and never completed_at first (the tracker can
+// backdate it to an older service DAY, see admin-dispatch
+// BACKFILL_RECORD_END_FIELDS). A completed row with NO completion evidence
+// at all is omitted rather than mis-ranked.
+const CLOSED_OUT_AT_SQL = `COALESCE(
+  (SELECT MAX(jsh.transitioned_at) FROM job_status_history jsh
+    WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
+  ss.completed_at)`;
+
+async function getRecentCompletions(input = {}) {
+  // Floor defensively even though the schema says integer — a fractional
+  // limit binds into Postgres's integer LIMIT and errors, and a fractional
+  // days would be reported unchanged in days_searched (codex P2 on #3633).
+  const limit = Math.min(Math.max(Math.floor(Number(input.limit)) || 5, 1), 20);
+  const days = Math.min(Math.max(Math.floor(Number(input.days)) || 2, 1), 30);
+  // ET calendar-day cutoff (not a rolling 24h window): "today" must mean the
+  // America/New_York service day, so days=1 never leaks yesterday-evening
+  // completions into a morning query. timestamptz AT TIME ZONE ET → ::date
+  // is the house pattern for ET day comparison.
+  const cutoffEtDay = etDateString(addETDays(new Date(), -(days - 1)));
+  const rows = await db('scheduled_services as ss')
+    .join('customers as c', 'c.id', 'ss.customer_id')
+    .leftJoin('technicians as t', 't.id', 'ss.technician_id')
+    .where('ss.status', 'completed')
+    .whereRaw(`${CLOSED_OUT_AT_SQL} IS NOT NULL`)
+    .whereRaw(`(${CLOSED_OUT_AT_SQL} AT TIME ZONE 'America/New_York')::date >= ?::date`, [cutoffEtDay])
+    .orderByRaw(`${CLOSED_OUT_AT_SQL} DESC`)
+    .limit(limit)
+    .select(
+      'ss.id', 'ss.customer_id', 'c.first_name', 'c.last_name',
+      'ss.service_type', 'ss.scheduled_date',
+      db.raw(`${CLOSED_OUT_AT_SQL} as closed_out_at`),
+      't.name as technician_name',
+    );
+  return {
+    completions: rows.map(r => ({
+      scheduled_service_id: r.id,
+      customer_id: r.customer_id,
+      customer: `${r.first_name} ${r.last_name || ''}`.trim(),
+      service_type: r.service_type,
+      scheduled_date: r.scheduled_date,
+      completed_at: r.closed_out_at,
+      technician: r.technician_name || null,
+    })),
+    total: rows.length,
+    days_searched: days,
+  };
+}
+
+// A technician name match must be UNIQUE among active technicians before an
+// appointment binds to it (mirrors comms-tools resolveCustomer). Returns a
+// row, null (no match), or { error, ambiguous, candidates }. The error
+// string is persisted in tool-health telemetry, so it carries no typed name;
+// the candidates array holds the detail and only reaches the operator.
+async function resolveTechnicianByName(name) {
+  const matches = await db('technicians')
+    .whereILike('name', `%${name}%`)
+    .where('active', true)
+    .limit(2);
+  if (matches.length > 1) {
+    return {
+      error: 'Multiple technicians match that name. Ask the operator which one, then retry with technician_id.',
+      ambiguous: true,
+      candidates: matches.map(t => ({ id: t.id, name: t.name })),
+    };
+  }
+  return matches[0] || null;
+}
+
 async function createAppointment(input) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -1658,11 +1748,26 @@ async function createAppointment(input) {
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
 
-  // Find technician if specified
+  // Resolve the technician BEFORE any write. The old `.first()` on an
+  // unordered ILIKE silently picked an arbitrary tech on multiple matches,
+  // and a no-match silently created the visit UNASSIGNED — both surprises
+  // the operator never approved. A pinned technician_id (set at proposal
+  // time so the confirmation card names the tech) resolves by immutable id.
   let technician_id = null;
-  if (technician_name) {
-    const tech = await db('technicians').whereILike('name', `%${technician_name}%`).first();
-    if (tech) technician_id = tech.id;
+  let resolvedTechnicianName = null;
+  if (input.technician_id) {
+    // Same active bar as name resolution — a model-provided id, or a tech
+    // deactivated during the confirmation window, must not take new visits.
+    const tech = await db('technicians').where('id', input.technician_id).where('active', true).first();
+    if (!tech) return { error: 'Technician not found or no longer active' };
+    technician_id = tech.id;
+    resolvedTechnicianName = tech.name;
+  } else if (technician_name) {
+    const tech = await resolveTechnicianByName(technician_name);
+    if (!tech) return { error: 'No technician matches that name — nothing was created. Retry with a corrected name, a technician_id, or omit the technician to leave the visit unassigned.' };
+    if (tech.error) return tech;
+    technician_id = tech.id;
+    resolvedTechnicianName = tech.name;
   }
 
   // A today target whose window already elapsed in ET is unreachable — the
@@ -1778,7 +1883,9 @@ async function createAppointment(input) {
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,
     service_type,
-    technician: technician_name || 'Unassigned',
+    // The RESOLVED tech's canonical name — never the raw input, which can be
+    // absent on an id-only retry or disagree with the id it rode in with.
+    technician: resolvedTechnicianName || 'Unassigned',
     // Advisory occupancy-overlap note (gated probe) — the booking stands.
     ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
   };
@@ -1931,6 +2038,12 @@ async function rescheduleAppointment(input) {
   let updatedRows = 0;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
+      // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
+      // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
+      // occupancy lock before any narrower lock, and the other IB date
+      // mover (schedule-tools) acquires occupancy and then waits on this
+      // same stop lock — taking them in the opposite order here could
+      // form an occupancy↔stop deadlock between two staff actions.
       if (probeWindowStart && probeWindowEnd) {
         const overlap = await probeSlotOverlap({
           trx,
@@ -1941,6 +2054,11 @@ async function rescheduleAppointment(input) {
         });
         if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
       }
+      // Grouped/frozen refusal under the stop lock (codex #3609 r29 P1):
+      // this tool writes the row directly — a grouped member moved alone
+      // would strand its siblings and parent at the old stop. Throws an
+      // operational 409 the executor surfaces as the tool error.
+      await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
       updatedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -1949,6 +2067,9 @@ async function rescheduleAppointment(input) {
             scheduled_date: observedDate,
             window_start: appt.window_start ?? null,
             window_end: appt.window_end ?? null,
+            // Observed membership is part of the CAS (codex r29): a row
+            // grouped since the read misses instead of moving alone.
+            visit_id: appt.visit_id ?? null,
             // Duration pin, only when this move's window math DEPENDED on the
             // column: on a row with a start and NO end, apptDuration is the
             // estimated_duration_minutes fallback, and it sets both the
@@ -2388,4 +2509,11 @@ async function searchFieldIntelligence(input) {
   };
 }
 
-module.exports = { TOOLS, executeTool };
+// Id-supplied path shares the same active bar as name resolution; used by
+// proposal-time pinning so a model-provided uuid still yields a NAMED tech
+// on the confirmation card.
+async function resolveActiveTechnicianById(id) {
+  return db('technicians').where('id', id).where('active', true).first();
+}
+
+module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById };

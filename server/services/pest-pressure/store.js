@@ -389,7 +389,7 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
     .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
 }
 
-async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null } = {}) {
+async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null, excludeCallbacks = false } = {}) {
   const q = knex('pest_pressure_scores as pps')
     .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
     .where('pps.customer_id', customerId)
@@ -410,6 +410,17 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
     // the window below `limit`.
     .limit(currentServiceRecordId ? limit + 8 : limit);
   if (serviceLine) q.where('pps.service_line', serviceLine);
+  // OPT-IN, customer-facing display only (owner-delegated ruling 2026-08-30,
+  // #3623): callback visits are not trend data points on the customer chart
+  // — the CURRENT report's own row always charts itself. Scoring callers
+  // (property-score and the pest-pressure pipeline) never pass this flag:
+  // callbacks deliberately count there (review-window.js).
+  if (excludeCallbacks) {
+    q.where(function notCallbackPoint() {
+      this.where('sr.is_callback', false).orWhereNull('sr.is_callback');
+      if (currentServiceRecordId) this.orWhere('pps.service_record_id', currentServiceRecordId);
+    });
+  }
   // Token-scoped callers (customer-facing report views) must pass
   // beforeOrOnServiceDate set to the report's own service_date so a
   // long-lived `/api/reports/:token` bearer can't reveal later visits
@@ -463,6 +474,15 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
         .orderBy('pps.id', 'desc')
         .limit(limit);
       if (serviceLine) earlierQuery.where('pps.service_line', serviceLine);
+      // Same opt-in exclusion as the main window: this fallback rebuilds the
+      // earlier-days list from scratch, so callback rows would reappear on
+      // the customer chart through this rare path (codex #3623 r3 P2). The
+      // current row is returned separately above and always charts itself.
+      if (excludeCallbacks) {
+        earlierQuery.where(function notCallbackPoint() {
+          this.where('sr.is_callback', false).orWhereNull('sr.is_callback');
+        });
+      }
       const earlierDays = await earlierQuery.select(
         'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
         'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',

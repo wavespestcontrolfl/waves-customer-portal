@@ -164,6 +164,9 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
+const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
+const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
+const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature, reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -484,6 +487,12 @@ async function buildServiceReportV1ResponseData(service, token, {
         // card, so what the customer told the tech never disappears into a
         // summary clause (John Kelleher audit 2026-07-29).
         customerConcern: data.customerConcern || null,
+        // Callback reports drop the schematic defense rows (owner
+        // 2026-08-30) — rides the re-service copy gate so one kill switch
+        // (unset GATE_RESERVICE_REPORT_COPY) restores the pre-lane render.
+        // isCallback rides the payload ungated (report-data), so the gate
+        // term here is what makes the suppression killable.
+        suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
@@ -538,6 +547,15 @@ async function buildServiceReportV1ResponseData(service, token, {
     } catch { /* best-effort — never block the report */ }
   }
 
+  // Termite Report V2 — station-protection dashboard for termite BAIT
+  // STATION visits (flag-gated). ONE composer shared with the queued PDF
+  // renderer (pdf-queue.js) — see attachTermiteReportV2.
+  attachTermiteReportV2(data, service);
+
+  // Cockroach Report V2 — treatment-program dashboard for cockroach typed
+  // primaries (flag-gated). Same ONE-composer contract as termite.
+  attachCockroachReportV2(data, service);
+
   // Product TARGETS are free text from the tech's picker, so a chip can carry
   // a compliance claim the permanent PDF would print verbatim (codex P1
   // #3176 r24). Sanitized at the SAME payload boundary as the re-entry copy —
@@ -574,7 +592,12 @@ async function buildServiceReportV1ResponseData(service, token, {
   // failure/suppression and the report renders exactly as today.
   let crossSell = null;
   let referral = null;
-  if (mode === 'live' && composeOffers) {
+  // Owner 2026-08-30 (extends the R4 review-ask ruling): a complaint-driven
+  // visit is the wrong moment for an upsell quote or a referral ask, just
+  // as it is for a Google ask — callback reports carry neither card while
+  // the re-service gate is on. Gate-dark keeps today's behavior.
+  const callbackSuppressesOffers = reserviceReportCopyGateOn() && data.isCallback === true;
+  if (mode === 'live' && composeOffers && !callbackSuppressesOffers) {
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('reportCrossSell')) {
       const { buildReportCrossSell } = require('../services/service-report/cross-sell');
@@ -1167,6 +1190,13 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
         // any drift between what the customer saw and what the server now
         // computes rejects, not just key/mode/price/option drift.
         const clickedPrint = String(metadata.fingerprint || '').trim();
+        // Callback reports no longer render offer cards (owner 2026-08-30):
+        // a card retained by a page opened before this deploy/gate flip must
+        // not act — same 409 the customer would get for any vanished offer
+        // (codex P2 r4 on #3631).
+        if (reserviceReportCopyGateOn() && joined?.is_callback === true) {
+          return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+        }
         const offerMismatch = !crossSell
           || !clickedPrint || clickedPrint !== crossSell.fingerprint
           || !clickedKey || clickedKey !== crossSell.serviceKey
@@ -1254,6 +1284,48 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // resolved the fresh row too. The work is booked; paging staff to
           // follow up on it is the exact noise the accept-path resolution
           // exists to prevent.
+          // Send-time pricing snapshot for click-mints (estimator audit
+          // M4): the mint stamps status='sent' inside its transaction but
+          // never wrote an audit snapshot. AFTER commit (the trx above is
+          // closed once outcome exists) and fail-soft — analytics never
+          // unwind a minted offer.
+          if (mintedEstimate?.estimateId) {
+            try {
+              const { saveEstimatePricingAuditSnapshot, getLatestEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              // A REUSED live mint gets a recovery snapshot only when none
+              // exists (pre-change mints, or a transient failure on the
+              // original attempt) — fresh mints always snapshot (GH codex
+              // P2). Both fail-soft.
+              const existing = mintedEstimate.reused
+                ? await getLatestEstimatePricingAuditSnapshot(mintedEstimate.estimateId)
+                : null;
+              if (!mintedEstimate.reused || !existing) {
+                const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
+                // acceptedReuse also lands here — acceptance rewrites
+                // result/totals, so a backfill from that row would mix
+                // post-acceptance lines with the original sendSnapshot.
+                // No snapshot beats an internally inconsistent one (GH
+                // codex P2).
+                if (mintedEstimate.reused && mintedRow
+                  && (mintedRow.status === 'accepted' || mintedRow.price_locked_at)) {
+                  throw Object.assign(new Error('skip: accepted reuse — no send-time state to backfill'), { skipBackfill: true });
+                }
+                // A recovery row for an OLD reused mint quotes the persisted
+                // send-time prices but costs them with TODAY's inventory —
+                // the distinct trigger keeps it from masquerading as a
+                // mint-time record (codex pre-push P1).
+                if (mintedRow) {
+                  await saveEstimatePricingAuditSnapshot(mintedRow, {
+                    trigger: mintedEstimate.reused ? 'cta_reuse_backfill' : 'cta_mint',
+                  });
+                }
+              }
+            } catch (auditErr) {
+              if (!auditErr.skipBackfill) {
+                logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
+              }
+            }
+          }
           if (!outcome.deduped && !mintedEstimate?.acceptedReuse) {
             // Bell AFTER the durable row exists; a bell failure leaves the
             // row actionable in the Customer 360 requests panel either way.
@@ -1312,14 +1384,25 @@ function cockroachRecapRetired(service) {
   } catch { return false; }
 }
 
+// One retirement verdict for every public recap surface (codex P1 r4 on the
+// no-schematic PR): callback recaps joined the cockroach family — the video
+// tells the routine-visit barrier/celebration story a complaint re-visit
+// must not carry, and an ALREADY-approved one must stop serving on
+// permanent links, not just stop being rebuilt. Rides the same kill switch
+// as the report-side suppression (unset GATE_RESERVICE_REPORT_COPY).
+function recapRetired(service) {
+  if (cockroachRecapRetired(service)) return true;
+  return reserviceReportCopyGateOn() && service.is_callback === true;
+}
+
 // GET /api/reports/:token/recap — customer-facing recap status. Only exposes a
 // recap the tech has APPROVED (ready-but-unapproved stays private).
 router.get('/:token/recap', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data', 'is_callback').first();
     if (!service || !service.scheduled_service_id) return res.status(404).json({ error: 'Not found' });
-    if (cockroachRecapRetired(service)) return res.json({ ready: false, durationMs: null });
+    if (recapRetired(service)) return res.json({ ready: false, durationMs: null });
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
@@ -1331,9 +1414,9 @@ router.get('/:token/recap', async (req, res, next) => {
 router.get('/:token/recap/video', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data', 'is_callback').first();
     if (!service || !service.scheduled_service_id) return res.status(404).end();
-    if (cockroachRecapRetired(service)) return res.status(404).end();
+    if (recapRetired(service)) return res.status(404).end();
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
@@ -1380,12 +1463,18 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
     }
     if (suppressedTypedReport(service)) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Callback reports no longer render the referral card (owner
+    // 2026-08-30) — a stale open page must not enroll a promoter through a
+    // button the report no longer shows (codex P2 r4 on #3631).
+    if (reserviceReportCopyGateOn() && service.is_callback === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
     if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
@@ -1611,6 +1700,11 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
           // leaks a later same-day sibling the moment a rating is submitted
           // (codex P2 #2824 r2).
           currentServiceRecordId: service.id || null,
+          // Same exclusion as buildReportV1Data: this response replaces the
+          // page's filtered history client-side, so without the flag the
+          // callback points reappear the moment a rating is submitted
+          // (codex #3623 r2 P1).
+          excludeCallbacks: reserviceReportCopyGateOn(),
         }).catch(() => [])
       : [];
 
@@ -1833,6 +1927,16 @@ router.get('/:token', async (req, res, next) => {
       // PEST_REPORT_V2 predates this key component — pest PDFs cached before
       // the pest V2 flip re-render once on next view.
       const pestV2Signature = pestReportV2PdfSignature(service);
+      // TERMITE_REPORT_V2 — same contract as the mosquito component: a gate
+      // flip must re-render cached termite bait-station PDFs.
+      const termiteV2Signature = termiteReportV2PdfSignature(service);
+      // COCKROACH_REPORT_V2 — same contract (cockroach-report-v2.js).
+      const cockroachV2Signature = await cockroachReportV2PdfSignature(service, db);
+      // GATE_RESERVICE_REPORT_COPY — callback copy + "$0 — included with
+      // WaveGuard" line (reservice-report.js); a flip or billing change
+      // must re-render the cached document.
+      const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
+      const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1850,7 +1954,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1868,6 +1972,8 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      let cockroachRenderedSignature = cockroachV2Signature;
+      let reserviceRenderedSignature = reserviceV2Signature;
       // The canonical snapshot the render is pinned to. Declared out here so
       // the storage block below keys the object by what was RENDERED, not by
       // the cache-lookup value; assigned inside the try so an unreadable
@@ -1891,6 +1997,8 @@ router.get('/:token', async (req, res, next) => {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
+          reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
           renderedData = data;
           const rendered = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
@@ -1965,11 +2073,15 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
+          // Same fence as pdf-queue: a callback inserted/reclassified
+          // mid-render must not store the old chart under the new key.
+          logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
         } else if (unreachablePhotos > 0) {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }
@@ -2045,6 +2157,16 @@ router.get('/:token/map.svg', async (req, res, next) => {
     }
 
     const data = await buildReportV1Data(service, req.params.token);
+    // Callback reports suppressed the generated schematic (owner
+    // 2026-08-30) — the standalone map endpoint must not keep serving what
+    // the live page and PDF no longer render (codex P2 r6). Same scoping
+    // as the PDF: only lines whose reservice block composed (rs2-keyed).
+    // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31) widens the verdict to
+    // the whole pest line ('-ton1'-keyed).
+    if ((reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport)
+      || data.pestTraceOrNothing === true) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
     res.type('image/svg+xml');
     return res.send(data.mapSvg || '');
   } catch (err) { next(err); }
@@ -2180,6 +2302,9 @@ router.get('/:token/data', async (req, res, next) => {
         // on permanent links either (codex P1 #3007 r11; the recap builder
         // stopped producing new ones in r10).
         && !require('../services/service-report/pest-report-v2').isCockroachTypedReportType(v1Data.typedReport?.type)
+        // Callback recaps are retired the same way (codex P1 r4) — don't
+        // advertise a player the /recap endpoints will now 404.
+        && !(reserviceReportCopyGateOn() && v1Data.isCallback === true)
       ) {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');

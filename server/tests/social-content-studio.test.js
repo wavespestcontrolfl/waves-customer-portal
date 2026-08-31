@@ -593,9 +593,153 @@ describe('autonomous review-milestone lane', () => {
     expect(plan.angle).toBe('review milestone');
     expect(plan.topic).toBe('300 Google reviews');
     expect(Object.keys(plan.preview.drafts).sort()).toEqual(['facebook', 'gbp']);
-    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/reviews/');
+    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/pest-control-reviews/');
     expect(plan.preview.sources[0].label).toContain('312 Google-reported reviews');
     const card = Studio.buildMilestoneCardInput(plan);
     expect(card).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.9 });
+  });
+});
+
+describe('studio link gate (live-only, topic-matched, probed)', () => {
+  const live = { title: 'Your Parrish Garage Door Seal Is Letting In More Roaches', slug: 'parrish-garage-door-seal-roach-entry', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/garage-door-seal-roaches-parrish-fl/' };
+  const legacy = { title: 'Legacy row', slug: 'parrish-garage-door-seal-roach-entry', astro_status: 'draft', astro_live_url: null };
+
+  test('liveUrlForRow never rebuilds a URL from slug — only the pages-poll live URL counts', () => {
+    // The 2026-08-29 regression: a status=published row with a planned-era
+    // slug and no astro_live_url produced /parrish-garage-door-seal-roach-entry/ → 404.
+    expect(Studio.liveUrlForRow(legacy)).toBeNull();
+    expect(Studio.liveUrlForRow(live)).toBe(live.astro_live_url);
+    expect(Studio.liveUrlForRow({ astro_live_url: 'javascript:alert(1)' })).toBeNull();
+  });
+
+  test('suggestedLink / suggestedLinkTitle read the chosen link page, and are empty without one', () => {
+    expect(Studio.suggestedLink({ content: [legacy], linkPage: null })).toBe('');
+    expect(Studio.suggestedLinkTitle({ content: [legacy], linkPage: null })).toBe('');
+    expect(Studio.suggestedLink({ content: [live], linkPage: live })).toBe(live.astro_live_url);
+    expect(Studio.suggestedLinkTitle({ content: [live], linkPage: live })).toBe(live.title);
+  });
+
+  test('firstLivePage skips dead pages, is bounded, and fails closed to no link', async () => {
+    const dead = { ...live, astro_live_url: 'https://www.wavespestcontrol.com/retired-post/' };
+    const probed = [];
+    const probe = async (url) => { probed.push(url); return url === live.astro_live_url; };
+    expect(await Studio.firstLivePage([legacy, dead, live], probe)).toBe(live);
+    expect(probed.sort()).toEqual([dead.astro_live_url, live.astro_live_url].sort()); // legacy row never probed (no live URL); probes run in parallel
+    // Rank order wins even when a later candidate answers first.
+    const slowLive = { ...live, astro_live_url: 'https://www.wavespestcontrol.com/slow-but-first/' };
+    const raced = async (url) => { if (url === slowLive.astro_live_url) await new Promise((r) => setTimeout(r, 20)); return true; };
+    expect(await Studio.firstLivePage([slowLive, live], raced)).toBe(slowLive);
+    // Four dead candidates: only the first three are probed, result is null.
+    const many = [1, 2, 3, 4].map((n) => ({ ...live, astro_live_url: `https://www.wavespestcontrol.com/dead-${n}/` }));
+    probed.length = 0;
+    expect(await Studio.firstLivePage(many, async (url) => { probed.push(url); return false; })).toBeNull();
+    expect(probed).toHaveLength(3);
+  });
+
+  test('linkIsLive probes only wavespestcontrol.com and treats any failure as dead', async () => {
+    const ok = async (url) => ({ ok: true, status: 200, url });
+    const notFound = async () => ({ ok: false, status: 404 });
+    const boom = async () => { throw new Error('ECONNRESET'); };
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', ok)).toBe(true);
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/parrish-garage-door-seal-roach-entry/', notFound)).toBe(false);
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', boom)).toBe(false);
+    expect(await Studio.linkIsLive('https://evil.example.com/', ok)).toBe(false); // never probed off-domain
+    expect(await Studio.linkIsLive('', ok)).toBe(false);
+  });
+
+  test('linkIsLive never follows redirects — a retired path that 301s elsewhere is dead', async () => {
+    const page = 'https://www.wavespestcontrol.com/pest-control/garage-door-seal-roaches-parrish-fl/';
+    const calls = [];
+    // With redirect:'manual' a 301 comes back as a non-ok response — the
+    // server never requests the Location target (homepage, another post, or
+    // an off-domain host).
+    const redirecting = async (url, opts) => { calls.push(opts.redirect); return { ok: false, status: 301, headers: new Map([['location', 'https://evil.example.com/']]) }; };
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/retired-post/', redirecting)).toBe(false);
+    expect(calls).toEqual(['manual']);
+    expect(await Studio.linkIsLive(page, async () => ({ ok: true, status: 200 }))).toBe(true);
+    // The response body is released (socket returned to the pool) once the status is read.
+    const cancel = jest.fn(async () => {});
+    expect(await Studio.linkIsLive(page, async () => ({ ok: true, status: 200, body: { cancel } }))).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('studio link relevance + legacy-card alert predicates', () => {
+  test('rowMatchesIntentKeywords matches pest names as word prefixes, not bare substrings', () => {
+    const kws = Studio.serviceIntentKeywords({ topic: 'ants and roaches after heavy rain', service: 'general pest' });
+    expect(kws).toEqual(expect.arrayContaining(['ant', 'ants', 'roach']));
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Your Parrish Garage Door Seal Is Letting In More Roaches' }, kws)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Ant-proofing a Sarasota kitchen' }, kws)).toBe(true);
+    // The wrong-topic regression: 'important', 'plant', 'giant' must not count as "ant".
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Important plant care for giant palms' }, kws)).toBe(false);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Antenna and antique shop pests' }, kws)).toBe(false);
+    // Derivational suffixes still count for stem keywords like 'fertil'.
+    const lawn = Studio.serviceIntentKeywords({ service: 'lawn care' });
+    expect(Studio.rowMatchesIntentKeywords({ title: 'October fertilization for Sarasota lawns' }, lawn)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'anything' }, [])).toBe(false);
+    // Plural only — derivational suffixes never turn marketing words into pests.
+    const rodent = Studio.serviceIntentKeywords({ service: 'rodent' });
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Rats in a Bradenton attic' }, rodent)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Top rated pest control, five star rating, best rates' }, rodent)).toBe(false);
+    expect(Studio.serviceIntentKeywords({ topic: 'top rated pest control in Parrish' })).not.toContain('rat');
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Mosquitoes after the storm' }, Studio.serviceIntentKeywords({ service: 'mosquito' }))).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Spring fertilizer schedule' }, lawn)).toBe(true);
+  });
+
+  test('serviceIntentKeywords is boundary-aware on the REQUESTED topic and covers unlisted-until-now pests', () => {
+    // False positive: 'important' / 'plant' must not activate the ant group.
+    expect(Studio.serviceIntentKeywords({ topic: 'important plant care update', service: 'general pest' })).toEqual([]);
+    // Previously-unlisted intents now resolve, so an exact live post can be linked.
+    expect(Studio.serviceIntentKeywords({ topic: 'black widow vs brown widow', service: 'general pest' })).toEqual(expect.arrayContaining(['spider']));
+    expect(Studio.serviceIntentKeywords({ topic: 'wasps nesting under eaves' })).toEqual(expect.arrayContaining(['wasp', 'hornet']));
+    expect(Studio.serviceIntentKeywords({ topic: 'palmetto bugs in the garage' })).toEqual(expect.arrayContaining(['roach']));
+    // End-to-end: the resolved keywords select the right row and reject the look-alike.
+    const kws = Studio.serviceIntentKeywords({ topic: 'summer roaches moving indoors', service: 'general pest' });
+    expect(Studio.rowMatchesIntentKeywords({ title: 'How to get rid of German cockroaches' }, kws)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Approaching hurricane season lawn prep' }, kws)).toBe(false);
+  });
+
+  test('captionContentRows never lets a city-only row feed the caption; probed link page leads', () => {
+    const roach = { id: 1, title: 'Roaches after Parrish rain' };
+    const roachOld = { id: 2, title: 'Garage door seal roach entry' };
+    const venice = { id: 3, title: 'Waves opens Venice office (termite)' };
+    const ranked = [
+      { row: roachOld, index: 0, relevant: true },
+      { row: roach, index: 1, relevant: true },
+      { row: venice, index: 2, relevant: false },
+    ];
+    // Probed page leads, other relevant rows follow, city-only row dropped.
+    expect(Studio.captionContentRows(ranked, roach)).toEqual([roach, roachOld]);
+    // No probe winner → relevant rows in rank order, still no city-only row.
+    expect(Studio.captionContentRows(ranked, null)).toEqual([roachOld, roach]);
+    // Only city-only rows → nothing to quote (content[0] must not be Venice/termite).
+    expect(Studio.captionContentRows([{ row: venice, index: 0, relevant: false }], null)).toEqual([]);
+  });
+
+  test('creativeStateSummary names the actual engine state, never a phantom provider failure', () => {
+    expect(Studio.creativeStateSummary({ enabled: false })).toMatch(/engine off/);
+    expect(Studio.creativeStateSummary({ enabled: true, eligible: false })).toMatch(/not eligible/);
+    expect(Studio.creativeStateSummary({ enabled: true, eligible: true, produced: true })).toMatch(/produced the Meta image/);
+    expect(Studio.creativeStateSummary({ enabled: true, eligible: true, produced: false })).toMatch(/returned no image/);
+  });
+
+  test('legacyCardShipped is true only for a successful platform result that retained a card URL', () => {
+    const card = 'https://cdn.example.com/social-media/parrish-card.jpg';
+    const gbpCard = 'https://cdn.example.com/social-media/parrish-card-gbp.jpg';
+    const cards = new Set([card, gbpCard]);
+    // Facebook posted the card photo.
+    expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], cards, card)).toBe(true);
+    // GBP image rejected → text-only retry succeeded WITHOUT imageUrl: no card shipped.
+    expect(Studio.legacyCardShipped([{ platform: 'gbp', success: true }], cards, card)).toBe(false);
+    // LinkedIn thumbnail upload missed → success without imageUrl: no card shipped.
+    expect(Studio.legacyCardShipped([{ platform: 'linkedin', success: true }], cards, card)).toBe(false);
+    // Instagram has no text fallback: success with the shared card = card shipped…
+    expect(Studio.legacyCardShipped([{ platform: 'instagram', success: true }], cards, card)).toBe(true);
+    // …but not when the shared image was a creative scene and only GBP had a card that failed.
+    expect(Studio.legacyCardShipped([{ platform: 'instagram', success: true }, { platform: 'gbp', success: false }], new Set([gbpCard]), 'https://cdn.example.com/scene.jpg')).toBe(false);
+    // Unrelated Meta success + GBP card success: true via the GBP imageUrl.
+    expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: 'https://cdn.example.com/scene.jpg' }, { platform: 'gbp', success: true, imageUrl: gbpCard }], new Set([gbpCard]), 'https://cdn.example.com/scene.jpg')).toBe(true);
+    // Nothing rendered → never alerts.
+    expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], new Set(), card)).toBe(false);
   });
 });

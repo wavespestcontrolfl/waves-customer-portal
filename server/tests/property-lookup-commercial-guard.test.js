@@ -225,6 +225,86 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
     }), {})).toBe('COMMERCIAL');
   });
 
+  test('a builder/permit-sourced small count cannot suppress the verdict on a hybrid merge (codex P1, unitCount plumbing)', () => {
+    // The AI prompt allows unitCount 1 for ONE apartment unit's own record.
+    // A builder or permit page is authoritative for TYPE but not
+    // parcel-scoped for COUNT — merged with whole-building county
+    // dimensions it must not read as a county-attested small parcel.
+    for (const sourceType of ['builder', 'permit']) {
+      expect(detectCategory(countyDuplexParcel({
+        _source: 'hybrid',
+        unitCount: 1,
+        _parcel: undefined,
+        _fieldEvidence: {
+          propertyType: { value: 'Multifamily', sourceType: 'county' },
+          unitCount: { value: 1, sourceType },
+        },
+      }), {})).toBe('COMMERCIAL');
+    }
+  });
+
+  test('a parcel-scoped small count (county / cadastral / verified evidence) still suppresses the verdict', () => {
+    for (const sourceType of ['county', 'cadastral', 'verified']) {
+      expect(detectCategory(countyDuplexParcel({
+        _source: 'hybrid',
+        unitCount: 2,
+        _parcel: undefined,
+        _fieldEvidence: {
+          propertyType: { value: 'Multifamily', sourceType: 'county' },
+          unitCount: { value: 2, sourceType },
+        },
+      }), {})).toBe('RESIDENTIAL');
+    }
+  });
+
+  test('a verify-flagged web count on a TRUSTED-type record cannot reclassify it COMMERCIAL (codex P1 r4)', () => {
+    // Type trust is not count trust: an authoritative county 'Single
+    // Family' returns the whole record from commercialSignalRecord, but a
+    // verify-first web count of 6 must not flip the >4-unit vote.
+    const rc = {
+      formattedAddress: '9 Example Ln, Testville, FL 00000',
+      propertyType: 'Single Family',
+      unitCount: 6,
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Single Family', sourceType: 'county' },
+        unitCount: { value: 6, sourceType: 'unknown', fieldVerify: true },
+      },
+    };
+    expect(detectCategory(rc, {})).toBe('RESIDENTIAL');
+    // An UNFLAGGED listing count keeps its vote — suppressing those would
+    // reopen the Gateway Ave hole in the other direction.
+    rc._fieldEvidence.unitCount = { value: 6, sourceType: 'web_listing', fieldVerify: false };
+    expect(detectCategory(rc, {})).toBe('COMMERCIAL');
+  });
+
+  test('a tech-verified count outranks the stale parcel aggregate in BOTH directions (codex P1 r5)', () => {
+    // 48→1 correction: the county aggregate must not keep the property
+    // multi-unit/commercial after a person fixed it on site.
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Manatee', residentialUnits: 48 },
+      _fieldEvidence: { unitCount: { value: 1, sourceType: 'verified', fieldVerify: false } },
+    }), {})).toBe('RESIDENTIAL');
+    // And symmetrically: a verified 48 is not suppressed by a stale "2".
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 48,
+      _parcel: { county: 'Manatee', residentialUnits: 2 },
+      _fieldEvidence: { unitCount: { value: 48, sourceType: 'verified', fieldVerify: false } },
+    }), {})).toBe('COMMERCIAL');
+  });
+
+  test('a verified 1 does NOT reclassify an AGGREGATED association parcel (codex P1 r6)', () => {
+    // The stacked-association shape is whole-association by construction —
+    // its dimensions are the aggregate living area/lot, so a unit-scoped
+    // verified "1" must not price one resident against association sqft.
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Manatee', residentialUnits: 36, aggregated: true },
+      _fieldEvidence: { unitCount: { value: 1, sourceType: 'verified', fieldVerify: false } },
+    }), {})).toBe('COMMERCIAL');
+  });
+
   test('a county Multifamily with NO unit data keeps the conservative COMMERCIAL vote', () => {
     expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
   });
@@ -447,10 +527,316 @@ describe('buildEnrichedProfile end-to-end', () => {
     expect(profile.fieldEvidence.propertyType.value).toBe('Multifamily');
   });
 
+  test('a verified count corrects the parcel signal the public-quote guard reads (codex P1 r7)', () => {
+    const base = {
+      formattedAddress: '30 Example Duplex Ct, Testville, FL 00000',
+      propertyType: 'Single Family',
+      squareFootage: 2200,
+      lotSize: 9000,
+      _source: 'county',
+      _parcel: { county: 'Sarasota', parcelId: 'X1', residentialUnits: 48 },
+    };
+    // Stale county 48, tech verified 1: the emitted parcel signal follows
+    // the correction, so a unit-suffixed quote is no longer forced into
+    // the site-confirmed path.
+    const corrected = buildEnrichedProfile({
+      ...base,
+      unitCount: 1,
+      _fieldEvidence: { unitCount: { value: 1, sourceType: 'verified', fieldVerify: false } },
+    }, {}, 27.26, -82.51);
+    expect(corrected.parcel.residentialUnits).toBe(1);
+    // unitOnMultiUnitParcelForcesSiteQuote (routes/public-quote.js, covered
+    // by its own suite) takes max(unitCount, parcel.residentialUnits) —
+    // assert the corrected signal keeps that max at 1 so the guard cannot
+    // fire, and the stale signal keeps 48 so it still does.
+    expect(Math.max(Number(corrected.unitCount) || 0, Number(corrected.parcel.residentialUnits) || 0)).toBe(1);
+    const stale = buildEnrichedProfile({ ...base, unitCount: 1 }, {}, 27.26, -82.51);
+    expect(stale.parcel.residentialUnits).toBe(48);
+  });
+
   test('county-backed commercial profile is unchanged', () => {
     const profile = buildEnrichedProfile(countyCommercialRecord(), {}, 27.26, -82.51);
     expect(profile.category).toBe('COMMERCIAL');
     expect(profile.isCommercial).toBe(true);
+  });
+});
+
+// Unit-type property carrying the association's parcel-scale lotSize —
+// lot-priced services (mosquito treatable area, rodent scoping) would quote
+// the whole development for one door (estimator-engine audit 2026-08-30 #3).
+describe('unit-type parcel-scale lot verify flag', () => {
+  const { buildFieldVerifyFlags } = routePrivate;
+
+  test('condo record WITH a lotSize → HIGH lotSize verify flag', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '1 Example Condo Way Unit 4, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      _source: 'county',
+    }, null, null);
+    const flag = flags.find((f) => f.field === 'lotSize');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/parcel/i);
+    expect(flag.reason).toMatch(/mosquito/i);
+  });
+
+  test('untrusted AI web-search "Multifamily" cannot fire the unit-lot flag', () => {
+    const flags = buildFieldVerifyFlags(untrustedAiRecord(), null, null);
+    const flag = flags.find((f) => f.field === 'lotSize' && /parcel, not one unit/i.test(f.reason || ''));
+    expect(flag).toBeUndefined();
+  });
+
+  test('technician-verified lot on a condo is the unit’s own area — no flag', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '6 Example Condo Way Unit 2, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 900,
+      _source: 'county',
+      _fieldEvidence: { lotSize: { value: 900, sourceType: 'verified' } },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('county-attested ≤4-unit condo parcel (duplex ruling) keeps its lot un-flagged', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '7 Example Duplex Ln, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 2400,
+      lotSize: 9000,
+      unitCount: 2,
+      _source: 'county',
+      _parcel: { residentialUnits: 2 },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('a condo unit folio attesting residentialUnits 1 STILL flags — that IS the target shape (codex P1 r3)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '10 Example Condo Way Unit 3, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 1,
+      _source: 'county',
+      _parcel: { residentialUnits: 1 },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
+  test('an "Office Condominium" land use behind a normalized Commercial type still flags (codex P1 r4)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '11 Example Office Park Unit B, Testville, FL 00000',
+      propertyType: 'Commercial',
+      squareFootage: 1800,
+      lotSize: 120000,
+      _source: 'county',
+      _parcel: { landUseDescription: 'Office Condominium' },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
+  test('a "Condominium Common Elements" land use is association property — no flag (codex P1 r6)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '13 Example Commons, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 0,
+      lotSize: 120000,
+      _source: 'county',
+      _parcel: { landUseDescription: 'Condominium Common Elements' },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('a "Condominium Common Area" land use behind a normalized type is an association parcel — no flag (codex P1 r5)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '12 Example Commons, Testville, FL 00000',
+      propertyType: 'Commercial',
+      squareFootage: 0,
+      lotSize: 120000,
+      _source: 'county',
+      _parcel: { landUseDescription: 'Condominium Common Area' },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('an UNFLAGGED web-sourced unit count cannot exempt the flag either (unitCount plumbing follow-up)', () => {
+    // trustedUnitCount passes an unflagged non-authoritative count through,
+    // so the exemption additionally requires authoritative provenance — a
+    // scraped "48 units" on a condo folio must not suppress the wrong-scope
+    // flag now that the AI path reports counts.
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '16 Example Condo Way Unit 7, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 48,
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Condominium', sourceType: 'county' },
+        unitCount: { value: 48, sourceType: 'web_listing' },
+      },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
+  test('a builder/permit-sourced development count cannot exempt the flag either (pre-push codex P1 r3)', () => {
+    // Builder and permit pages count the development, not this folio —
+    // only parcel-scoped provenance (county / cadastral / verified) may
+    // suppress the wrong-scope flag.
+    const base = {
+      formattedAddress: '18 Example Condo Way Unit 2, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 48,
+      _source: 'hybrid',
+    };
+    for (const sourceType of ['builder', 'permit']) {
+      const flags = buildFieldVerifyFlags({
+        ...base,
+        _fieldEvidence: {
+          propertyType: { value: 'Condominium', sourceType: 'county' },
+          unitCount: { value: 48, sourceType },
+        },
+      }, null, null);
+      expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+    }
+    for (const sourceType of ['county', 'cadastral', 'verified']) {
+      const flags = buildFieldVerifyFlags({
+        ...base,
+        _fieldEvidence: {
+          propertyType: { value: 'Condominium', sourceType: 'county' },
+          unitCount: { value: 48, sourceType },
+        },
+      }, null, null);
+      expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+    }
+  });
+
+  test('a verified 1 with a STALE parcel aggregate 48 keeps the wrong-scope warning (pre-push codex P0 r5)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '20 Example Condo Way Unit 3, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 1,
+      _source: 'hybrid',
+      _parcel: { residentialUnits: 48 },
+      _fieldEvidence: {
+        propertyType: { value: 'Condominium', sourceType: 'county' },
+        unitCount: { value: 1, sourceType: 'verified', fieldVerify: false },
+      },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
+  test('a web-sourced unit count on an authoritative-type hybrid cannot exempt the flag (codex P1 r8)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '15 Example Condo Way Unit 5, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 48,
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Condominium', sourceType: 'county' },
+        unitCount: { value: 48, sourceType: 'web_listing', fieldVerify: true },
+      },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
+  test('a "Multifamily Condominium" master parcel attesting 8 units is whole-property — no flag (codex P1 r7)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '14 Example Complex Dr, Testville, FL 00000',
+      propertyType: 'Multifamily Condominium',
+      squareFootage: 63096,
+      lotSize: 93940,
+      unitCount: 8,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('apartment/multifamily whole-building records never fire the condo unit-lot flag', () => {
+    for (const propertyType of ['Multifamily', 'Apartment Building', 'Condo Association']) {
+      const flags = buildFieldVerifyFlags({
+        formattedAddress: '9 Example Complex Dr, Testville, FL 00000',
+        propertyType,
+        squareFootage: 63096,
+        lotSize: 93940,
+        unitCount: 8,
+        _source: 'county',
+      }, null, null);
+      expect({ propertyType, flagged: !!flags.find((f) => f.field === 'lotSize') })
+        .toEqual({ propertyType, flagged: false });
+    }
+  });
+
+  test('a lot the merge already field-flagged gets ONE flag — the SCOPED condo flag wins (codex P0 r9)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '8 Example Condo Way, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      _source: 'county',
+      _fieldEvidence: { lotSize: { value: 93940, sourceType: 'county', fieldVerify: true } },
+    }, null, null);
+    const lotFlags = flags.filter((f) => f.field === 'lotSize');
+    expect(lotFlags).toHaveLength(1);
+    // The wrong-scope verdict must survive conflicting lot evidence — a
+    // generic flag reads as number-only downstream and keeps forwarding
+    // the shared-development turf.
+    expect(lotFlags[0].scope).toBe('unit_parcel');
+  });
+
+  test('aggregated multifamily association record → no unit-lot flag (whole-property workflow)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '5 Example Complex Dr, Testville, FL 00000',
+      propertyType: 'Multifamily',
+      squareFootage: 63096,
+      lotSize: 93940,
+      unitCount: 8,
+      _source: 'county',
+      _parcel: { aggregated: true },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('single-family with a lotSize → no lotSize flag', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '2 Example St, Testville, FL 00000',
+      propertyType: 'Single Family',
+      squareFootage: 1800,
+      lotSize: 9000,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('HOA common-area parcel with a lot keeps its parcel-scale basis (association is the customer)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '4 Example Commons, Testville, FL 00000',
+      propertyType: 'HOA Common Area',
+      squareFootage: 0,
+      lotSize: 93940,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('condo WITHOUT a lotSize keeps the quiet missing-lot behavior', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '3 Example Condo Way, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: null,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 });
 

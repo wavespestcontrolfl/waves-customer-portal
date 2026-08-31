@@ -1046,18 +1046,34 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   const sheetRef = useRef(null);
   const dragRef = useRef(null);
 
+  const viewportHeight = () => {
+    if (typeof window === "undefined") return 800;
+    return window.visualViewport?.height || window.innerHeight;
+  };
+
   const getHeight = (s) => {
-    const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+    const vh = viewportHeight();
     if (s === "peek") return 120;
     if (s === "half") return Math.round(vh * 0.5);
     return Math.round(vh * 0.9);
   };
 
   useEffect(() => {
-    if (!sheetRef.current) return;
-    sheetRef.current.style.transition =
-      "height 300ms cubic-bezier(0.34, 1.56, 0.64, 1)";
-    sheetRef.current.style.height = `${getHeight(snap)}px`;
+    if (!sheetRef.current) return undefined;
+    const apply = () => {
+      if (!sheetRef.current) return;
+      sheetRef.current.style.transition =
+        "height 300ms cubic-bezier(0.34, 1.56, 0.64, 1)";
+      sheetRef.current.style.height = `${getHeight(snap)}px`;
+    };
+    apply();
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", apply);
+    window.addEventListener("resize", apply);
+    return () => {
+      vv?.removeEventListener("resize", apply);
+      window.removeEventListener("resize", apply);
+    };
   }, [snap]);
 
   const onTouchStart = (e) => {
@@ -1070,7 +1086,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   const onTouchMove = (e) => {
     if (!dragRef.current || !sheetRef.current) return;
     const dy = dragRef.current.y - e.touches[0].clientY;
-    const vh = window.innerHeight;
+    const vh = viewportHeight();
     const newH = Math.max(120, Math.min(vh * 0.9, dragRef.current.h + dy));
     sheetRef.current.style.transition = "none";
     sheetRef.current.style.height = `${newH}px`;
@@ -1079,7 +1095,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   const onTouchEnd = () => {
     if (!dragRef.current || !sheetRef.current) return;
     const currentH = sheetRef.current.offsetHeight;
-    const vh = window.innerHeight;
+    const vh = viewportHeight();
     const targets = [
       ["peek", 120],
       ["half", Math.round(vh * 0.5)],
@@ -1097,7 +1113,8 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
       ref={sheetRef}
       className="fixed left-0 right-0 z-40 bg-white border-t border-hairline border-zinc-200 rounded-t-md shadow-lg flex flex-col md:hidden"
       style={{
-        bottom: "calc(56px + env(safe-area-inset-bottom))",
+        bottom:
+          "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",
         height: `${getHeight(snap)}px`,
       }}
     >
@@ -1136,7 +1153,7 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
           </div>{" "}
           <button
             onClick={() => setSnap(snap === "peek" ? "full" : "peek")}
-            className="text-11 u-label text-ink-secondary h-8 px-2 u-focus-ring"
+            className="text-12 u-label text-ink-secondary min-h-11 px-3 u-focus-ring"
           >
             {snap === "peek" ? "Expand" : "Collapse"}
           </button>{" "}

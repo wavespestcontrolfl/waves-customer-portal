@@ -136,3 +136,63 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     });
   });
 });
+
+test('a chained grouped stop keeps its calendar link past an early member\'s own window — expiry is the STOP\'s (local audit r35)', async () => {
+  const rows = [{ id: 'svc-g', scheduled_date: '2099-01-15', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', reschedule_token: 'tok-g', visit_id: 'visit-1' }];
+  const listChainRows = listChain(rows);
+  const countChain = { where: jest.fn(() => countChain), whereNotIn: jest.fn(() => countChain), count: jest.fn(() => countChain), first: jest.fn(async () => ({ n: 2 })) };
+  const membersChain = { where: jest.fn(() => membersChain), whereNotIn: jest.fn(() => membersChain), select: jest.fn(async () => [
+    { id: 'svc-g', status: 'confirmed', scheduled_date: '2099-01-15', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+    { id: 'svc-s', status: 'pending', scheduled_date: '2099-01-15', window_start: '10:00', window_end: '12:00', technician_id: 't1' },
+  ]) };
+  let calls = 0;
+  db.mockImplementation(() => { calls += 1; return calls === 1 ? listChainRows : calls === 2 ? countChain : membersChain; });
+  const prevGate = process.env.GATE_APPOINTMENT_PAGE;
+  process.env.GATE_APPOINTMENT_PAGE = 'true';
+  try {
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/schedule`)).json();
+      const g = body.upcoming[0];
+      expect(g.calendarUrl).toBe('/api/public/appointment/tok-g/calendar.ics');
+      // the STOP's expiry: latest member end (12:00 ET) beats the earliest start's 09:00+2h promise
+      expect(g.calendarExpiresAt).toMatch(/^2099-01-15T17:00:00/); // 12:00 ET = 17:00Z (EST)
+    });
+  } finally {
+    if (prevGate === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevGate;
+  }
+});
+
+test('a GROUPED upcoming visit carries no rescheduleUrl (the self-serve page would refuse it, codex #3609 r25 P2); an ungrouped row keeps its link', async () => {
+  const rows = [
+    { id: 'svc-g', scheduled_date: '2099-01-15', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', reschedule_token: 'tok-g', visit_id: 'visit-1' },
+    { id: 'svc-u', scheduled_date: '2099-01-16', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', reschedule_token: 'tok-u', visit_id: null },
+  ];
+  const listChainRows = listChain(rows);
+  const countChain = { where: jest.fn(() => countChain), whereNotIn: jest.fn(() => countChain), count: jest.fn(() => countChain), first: jest.fn(async () => ({ n: 2 })) };
+  // openMembers (groupedCalendarBlocked): members on SPLIT DATES (a partially
+  // committed unit move) ⇒ the ICS route would 404 ⇒ no calendar link either
+  const membersChain = { where: jest.fn(() => membersChain), whereNotIn: jest.fn(() => membersChain), select: jest.fn(async () => [
+    { id: 'svc-g', status: 'confirmed', scheduled_date: '2099-01-15', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+    { id: 'svc-s', status: 'pending', scheduled_date: '2099-01-16', window_start: '10:00', window_end: '11:00', technician_id: 't1' },
+  ]) };
+  let calls = 0;
+  db.mockImplementation(() => { calls += 1; return calls === 1 ? listChainRows : calls === 2 ? countChain : membersChain; });
+  const prevGate = process.env.GATE_APPOINTMENT_PAGE;
+  process.env.GATE_APPOINTMENT_PAGE = 'true';
+  try {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/schedule`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      const g = body.upcoming.find((v) => v.id === 'svc-g');
+      const u = body.upcoming.find((v) => v.id === 'svc-u');
+      expect(g.rescheduleUrl).toBe(null);
+      expect(g.calendarUrl).toBe(null);
+      expect(g.calendarExpiresAt).toBe(null);
+      expect(u.rescheduleUrl).toBe('/reschedule/tok-u');
+      expect(u.calendarUrl).toBe('/api/public/appointment/tok-u/calendar.ics');
+    });
+  } finally {
+    if (prevGate === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevGate;
+  }
+});

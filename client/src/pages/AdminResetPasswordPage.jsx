@@ -78,7 +78,7 @@ export default function AdminResetPasswordPage() {
   };
 
   return (
-    <main style={{ minHeight: '100vh', background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT, padding: 20 }}>
+    <main className="admin-auth-page" style={{ background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT }}>
       <div style={{ maxWidth: 440, width: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: 28 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 48, marginBottom: 12 }} />
@@ -97,7 +97,7 @@ export default function AdminResetPasswordPage() {
 
           {error && <div role="alert" style={{ marginTop: 14, padding: '10px 14px', borderRadius: 8, background: '#7f1d1d', color: '#fca5a5', fontSize: 14 }}>{error}</div>}
 
-          <button type="submit" disabled={loading || !token} style={{ width: '100%', minHeight: 48, marginTop: 18, border: 0, borderRadius: 10, background: D.red, color: D.white, fontSize: 15, fontWeight: 700, cursor: loading ? 'wait' : 'pointer', opacity: loading || !token ? 0.7 : 1 }}>
+          <button type="submit" disabled={loading || !token} style={{ width: '100%', minHeight: 48, marginTop: 18, border: 0, borderRadius: 10, background: '#f4f4f5', color: '#18181B', fontSize: 15, fontWeight: 700, cursor: loading ? 'wait' : 'pointer', opacity: loading || !token ? 0.7 : 1 }}>
             {loading ? 'Resetting password…' : 'Reset password'}
           </button>
 

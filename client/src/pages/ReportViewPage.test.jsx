@@ -1037,3 +1037,238 @@ describe('fungicide vocabulary covers the oomycete catalog prefills', () => {
     );
   });
 });
+
+describe('smartStatusSummary — re-service (callback) branch', () => {
+  const reservicePest = {
+    serviceLine: 'pest',
+    heading: 'we came back and took care of it!',
+    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+    completedFallback: 'Reported activity areas were re-treated today.',
+    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    includedWithWaveGuard: true,
+    billingLine: 'This re-service was included with your WaveGuard Gold membership — $0.00 billed.',
+  };
+
+  it('legacy (no reserviceReport block): the name regex still names the visit', () => {
+    const status = smartStatusSummary({ serviceType: 'Pest Control Re-Service', applications: [] }, 'static');
+    expect(status.heading).toBe('we came back and took care of it!');
+    expect(status.detail).not.toMatch(/\$0\.00/);
+  });
+
+  it('server block present: keys off is_callback, not the display name, and prints the $0 WaveGuard line', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Pest Control Service',
+      reserviceReport: reservicePest,
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('we came back and took care of it!');
+    expect(status.result).toMatch(/re-treated the affected areas/);
+    expect(status.completedLine).toBe('Reported activity areas were re-treated today.');
+    expect(status.detail).toContain('WaveGuard Gold membership — $0.00 billed');
+  });
+
+  it('lawn block carries the turf wording', () => {
+    const status = smartStatusSummary({
+      reserviceReport: {
+        ...reservicePest,
+        serviceLine: 'lawn',
+        result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.',
+        completedFallback: 'Reported problem areas were re-treated today.',
+        expectation: 'Lawn treatments take time to show — weeds and disease can take two to three weeks to respond after an application. Contact us if the problem areas are not improving after three weeks.',
+        includedWithWaveGuard: false,
+        billingLine: null,
+      },
+      applications: [],
+    }, 'static');
+    expect(status.result).toMatch(/^Lawn re-service completed/);
+    expect(status.detail).toMatch(/weeds and disease/);
+    expect(status.detail).not.toMatch(/\$0\.00/);
+  });
+
+  it('an honest needs-attention V2 snapshot outranks the re-service headline', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Lawn Care Re-Service',
+      reserviceReport: { ...reservicePest, serviceLine: 'lawn' },
+      reportV2: { snapshot: { status: 'needs_attention', peaceOfMind: 'We noted fungus in the back lawn — details below.' } },
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).toBe('We noted fungus in the back lawn — details below.');
+  });
+
+  it('every honest-status branch keeps the $0 WaveGuard line in its detail', () => {
+    const cases = [
+      { cockroachReportV2: { status: { label: 'Activity moderate after treatment 2 of 3.' } } },
+      { termiteReportV2: { status: { label: 'No termite activity at 12 stations.' } } },
+      { reportV2: { snapshot: { status: 'needs_attention', peaceOfMind: 'We noted fungus — details below.' } } },
+      { findings: [{ severity: 'high', title: 'Ant activity near front entry' }] },
+    ];
+    for (const extra of cases) {
+      const status = smartStatusSummary({ reserviceReport: reservicePest, applications: [], ...extra }, 'static');
+      expect(status.detail).toContain('$0.00 billed');
+    }
+  });
+
+  it('a cockroach V2 status headline outranks the re-service headline', () => {
+    const status = smartStatusSummary({
+      reserviceReport: reservicePest,
+      cockroachReportV2: { status: { label: 'German cockroach activity still moderate after treatment 2 of 3.' } },
+      applications: [],
+    }, 'static');
+    expect(status.result).toBe('German cockroach activity still moderate after treatment 2 of 3.');
+  });
+
+  it('a Pest V2 attention status outranks the re-service headline but keeps the $0 line', () => {
+    const status = smartStatusSummary({
+      reserviceReport: reservicePest,
+      pestReportV2: { status: { key: 'action', label: 'Action needed', tone: 'attention' } },
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).toBe('Action needed');
+    expect(status.detail).toContain('two weeks');
+    expect(status.detail).toContain('$0.00 billed');
+    const watching = smartStatusSummary({
+      reserviceReport: reservicePest,
+      pestReportV2: { status: { key: 'watching', label: 'We’re watching', tone: 'watch' } },
+      applications: [],
+    }, 'static');
+    expect(watching.heading).toBe('we came back and took care of it!');
+  });
+
+  it('high-priority findings still win over the re-service block', () => {
+    const status = smartStatusSummary({
+      reserviceReport: reservicePest,
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('we found activity that needs attention!');
+  });
+
+  it('a non-performed callback with pending re-entry targets never gets the "still drying" arm', () => {
+    const status = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'customer_declined' },
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      dynamicContext: {
+        reentry: { displayTimezone: 'America/New_York', targets: [{ label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' }] },
+      },
+      applications: [],
+    }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
+    expect(status.result).not.toMatch(/still drying/);
+    expect(status.detail).not.toMatch(/away from treated zones/);
+    expect(status.detail).toContain('No application was made on this visit');
+  });
+
+  it('an incomplete callback KEEPS the re-entry drying warning (partial application may be drying)', () => {
+    const status = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'incomplete', completedFallback: 'The visit was not completed.' },
+      dynamicContext: {
+        reentry: { displayTimezone: 'America/New_York', targets: [{ label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' }] },
+      },
+      applications: [],
+    }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
+    expect(status.result).toContain('still drying');
+    expect(status.detail).toContain('Keep pets and people away from treated zones');
+  });
+
+  it('an incomplete callback with a high-priority finding claims neither treatment nor "no application"', () => {
+    const status = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'incomplete', completedFallback: 'The visit was not completed.' },
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      applications: [],
+    }, 'static');
+    expect(status.detail).not.toMatch(/We treated/);
+    expect(status.detail).not.toMatch(/No application was made/);
+    expect(status.detail).toContain('could not be completed');
+  });
+
+  it('a non-performed callback never claims treatment, even in the high-priority branch', () => {
+    const status = smartStatusSummary({
+      reserviceReport: {
+        ...reservicePest,
+        outcome: 'inspection_only',
+        completedFallback: 'Reported activity areas were inspected today.',
+      },
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('we found activity that needs attention!');
+    expect(status.detail).not.toMatch(/We treated/);
+    expect(status.detail).toContain('No application was made on this visit');
+    expect(status.completedLine).toBe('Reported activity areas were inspected today.');
+  });
+
+  it('a non-performed callback outranks action-needed coverage, re-entry, and dashboard branches', () => {
+    const base = {
+      reserviceReport: {
+        ...reservicePest,
+        outcome: 'inspection_only',
+        heading: 'we came back to check on it!',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+        completedFallback: 'Reported activity areas were inspected today.',
+      },
+      applications: [],
+    };
+    const coverage = smartStatusSummary({
+      ...base,
+      serviceCoverage: { items: [{ areaName: 'Garage', status: 'inaccessible' }] },
+    }, 'static');
+    expect(coverage.result).toContain('No application was made on this visit');
+    const withDashboards = smartStatusSummary({
+      ...base,
+      cockroachReportV2: { status: { label: 'Treatment 2 of 3 complete.' } },
+      reportV2: { snapshot: { status: 'needs_attention', peaceOfMind: 'Fungus noted.' } },
+    }, 'static');
+    expect(withDashboards.heading).toBe('we came back to check on it!');
+    expect(withDashboards.result).toContain('No application was made on this visit');
+  });
+
+  it('a non-performed callback falls through the pressure-down branch to the outcome-honest copy', () => {
+    const status = smartStatusSummary({
+      reserviceReport: {
+        ...reservicePest,
+        outcome: 'inspection_only',
+        heading: 'we came back to check on it!',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+      },
+      dynamicContext: { pressureTrend: { direction: 'down', customerSummary: 'Activity has decreased.' } },
+      applications: [],
+    }, 'static');
+    expect(status.detail || '').not.toMatch(/maintained the protective treatment plan/);
+    expect(status.result).toContain('No application was made on this visit');
+    const treated = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'treated' },
+      dynamicContext: { pressureTrend: { direction: 'down', customerSummary: 'Activity has decreased.' } },
+      applications: [],
+    }, 'static');
+    expect(treated.heading).toBe('pest pressure is trending down!');
+  });
+
+  it('gate on + unsupported-line callback (block deliberately withheld): no legacy pest copy', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Mosquito Re-Service',
+      isCallback: true,
+      reserviceGateOn: true,
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).not.toMatch(/re-treated/);
+    // Gate dark (no marker): the legacy name regex still names the visit.
+    const dark = smartStatusSummary({
+      serviceType: 'Pest Control Re-Service',
+      isCallback: true,
+      applications: [],
+    }, 'static');
+    expect(dark.heading).toBe('we came back and took care of it!');
+  });
+
+  it('isCallback: false on the payload suppresses the legacy name regex', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Pest Control Re-Service',
+      isCallback: false,
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).toBe('Routine service completed. No high-priority issues were noted.');
+  });
+});

@@ -495,9 +495,12 @@ describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
     // Mirrors the acceptance pin: same source scoping, same linkage match,
     // resolved in the SAME decline transaction.
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
-    const declineIdx = src.indexOf("status: 'declined', declined_at");
+    // Anchor: the decline UPDATE now stamps the customer disposition in the
+    // same write (estimator audit 2026-08-29), so the one-line literal grew
+    // into a multi-line object — anchor on its unique disposition stamp.
+    const declineIdx = src.indexOf("COALESCE(disposition, 'declined_by_customer')");
     expect(declineIdx).toBeGreaterThan(0);
-    const block = src.slice(declineIdx, declineIdx + 1400);
+    const block = src.slice(declineIdx, declineIdx + 2000);
     expect(block).toMatch(/declinedCount && estimate\.source === 'service_report_cta'/);
     expect(block).toMatch(/whereNotIn\('status', OPEN_REQUEST_TERMINAL_STATUSES\)/);
     expect(block).toMatch(/pricing_revision->'mintedEstimate'->>'id' = \?/);
@@ -530,7 +533,11 @@ describe('offer composition is opt-in, and only the render path opts in (PR r15 
   });
 
   test('composition is gated on it, not on live mode alone', () => {
-    expect(src).toMatch(/if \(mode === 'live' && composeOffers\)/);
+    expect(src).toMatch(/if \(mode === 'live' && composeOffers && !callbackSuppressesOffers\)/);
+  });
+
+  test('callback reports suppress both offer cards under the re-service gate (owner 2026-08-30)', () => {
+    expect(src).toMatch(/callbackSuppressesOffers = reserviceReportCopyGateOn\(\) && data\.isCallback === true/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {

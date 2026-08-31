@@ -1,0 +1,185 @@
+/**
+ * Server-persisted Intelligence Bar conversations (owner-ratified 2026-08-31).
+ *
+ * Dark behind GATE_IB_THREADS (default OFF; kill = unset). Admin actors only —
+ * technician sessions keep the ephemeral client-held behavior. Every accessor
+ * is actor-bound: a thread is readable/appendable only by the admin actor who
+ * created it.
+ *
+ * What gets persisted is exactly what the client already round-trips: the
+ * marker-tainted user/assistant text pair per exchange. Images are never
+ * persisted (their text markers are). Persistence is best-effort from the
+ * query path — a thread write failure must never fail the operator's answer.
+ */
+
+const db = require('../../models/db');
+const logger = require('../logger');
+const { gateEnvValue } = require('../../config/feature-gates');
+
+// Retention (days) before a thread and its turns are hard-deleted. Owner
+// default 365; override via IB_THREAD_RETENTION_DAYS.
+const DEFAULT_RETENTION_DAYS = 365;
+
+// How many trailing turns hydrate the client on resume. The model window
+// stays the route's own trim (~8 turns) — this only bounds what the palette
+// re-displays.
+const RESUME_TURN_LIMIT = 40;
+
+// Cap on client-supplied seed turns persisted into a NEWLY created thread
+// (matches the route's model-window trim). Seeding keeps a thread coherent
+// when a conversation that started ephemeral — gate flipped mid-chat, or the
+// client detached after a rejected append — lands in a fresh thread.
+const SEED_TURN_LIMIT = 8;
+
+// Call-time read (a flip needs no redeploy); registered in
+// config/feature-gates.js (`ibThreads`) for the centralized status listing.
+function threadsEnabled() {
+  return gateEnvValue('GATE_IB_THREADS');
+}
+
+function retentionDays() {
+  const n = Math.floor(Number(process.env.IB_THREAD_RETENTION_DAYS));
+  return Number.isFinite(n) && n >= 30 ? n : DEFAULT_RETENTION_DAYS;
+}
+
+function deriveTitle(userText) {
+  const line = String(userText || '').split('\n')[0].trim();
+  return line.slice(0, 120) || 'Conversation';
+}
+
+/**
+ * Append one exchange to a thread, creating the thread when threadId is null.
+ * Returns { threadId, lastSeq } on success, null when the thread is missing,
+ * owned by a different actor, or when expectedSeq is absent or no longer
+ * matches the thread's tail — a concurrent append from another tab landed
+ * first, so this exchange was generated without seeing it (the caller then
+ * responds without a thread id and the client detaches rather than
+ * interleaving). A newly created thread is seeded with the caller's
+ * round-tripped history (validated, capped) so it stays coherent when the
+ * conversation started ephemeral.
+ */
+async function appendExchange({ actorId, threadId, expectedSeq, context, userText, assistantText, seedTurns }) {
+  if (!actorId || !userText || assistantText === undefined) return null;
+  return db.transaction(async (trx) => {
+    let thread;
+    if (threadId) {
+      thread = await trx('ib_threads')
+        .where({ id: threadId, admin_actor_id: actorId })
+        .forUpdate()
+        .first();
+      if (!thread) return null;
+    } else {
+      [thread] = await trx('ib_threads').insert({
+        admin_actor_id: actorId,
+        title: deriveTitle(userText),
+        context: context || null,
+      }).returning('*');
+      const seeds = (Array.isArray(seedTurns) ? seedTurns : [])
+        .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content)
+        .slice(-SEED_TURN_LIMIT);
+      if (seeds.length) {
+        await trx('ib_thread_turns').insert(
+          seeds.map((t, i) => ({ thread_id: thread.id, seq: i + 1, role: t.role, content: t.content })),
+        );
+      }
+    }
+
+    const [{ max }] = await trx('ib_thread_turns').where('thread_id', thread.id).max('seq');
+    const tail = max || 0;
+    // Existing threads REQUIRE a matching tail seq — a missing/corrupt
+    // thread_seq must not bypass the cross-tab interleaving guard.
+    if (threadId && (!Number.isInteger(expectedSeq) || expectedSeq !== tail)) return null;
+    const nextSeq = tail + 1;
+    await trx('ib_thread_turns').insert([
+      { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText) },
+      { thread_id: thread.id, seq: nextSeq + 1, role: 'assistant', content: String(assistantText) },
+    ]);
+    await trx('ib_threads').where('id', thread.id)
+      .update({ last_active_at: trx.fn.now(), updated_at: trx.fn.now() });
+    return { threadId: thread.id, lastSeq: nextSeq + 1 };
+  });
+}
+
+async function turnsAsHistory(threadId) {
+  const turns = await db('ib_thread_turns')
+    .where('thread_id', threadId)
+    .orderBy('seq', 'desc')
+    .limit(RESUME_TURN_LIMIT)
+    .select('seq', 'role', 'content');
+  return {
+    // The tail seq anchors the client's optimistic-concurrency check on the
+    // next append (two tabs resuming the same thread can't interleave).
+    lastSeq: turns.length ? turns[0].seq : 0,
+    history: turns.reverse().map(t => ({ role: t.role, content: t.content })),
+  };
+}
+
+/** The actor's most recently active thread, hydrated for the palette. */
+async function latestThread(actorId) {
+  if (!actorId) return null;
+  const thread = await db('ib_threads')
+    .where('admin_actor_id', actorId)
+    .orderBy('last_active_at', 'desc')
+    .first();
+  if (!thread) return null;
+  const { lastSeq, history } = await turnsAsHistory(thread.id);
+  return {
+    id: thread.id,
+    title: thread.title,
+    context: thread.context,
+    last_active_at: thread.last_active_at,
+    lastSeq,
+    conversationHistory: history,
+  };
+}
+
+/** One thread by id, actor-bound. */
+async function getThread(actorId, threadId) {
+  if (!actorId || !threadId) return null;
+  const thread = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .first();
+  if (!thread) return null;
+  const { lastSeq, history } = await turnsAsHistory(thread.id);
+  return {
+    id: thread.id,
+    title: thread.title,
+    context: thread.context,
+    last_active_at: thread.last_active_at,
+    lastSeq,
+    conversationHistory: history,
+  };
+}
+
+/** Recent threads for the picker (no turns). */
+async function listThreads(actorId, limit = 20) {
+  if (!actorId) return [];
+  return db('ib_threads')
+    .where('admin_actor_id', actorId)
+    .orderBy('last_active_at', 'desc')
+    .limit(Math.min(Math.max(Math.floor(Number(limit)) || 20, 1), 50))
+    .select('id', 'title', 'context', 'last_active_at', 'created_at');
+}
+
+/** Hard-delete threads idle past retention; turns ride the FK cascade. */
+async function purgeExpiredThreads() {
+  const days = retentionDays();
+  const deleted = await db('ib_threads')
+    .whereRaw("last_active_at < NOW() - (? || ' days')::interval", [days])
+    .del();
+  if (deleted > 0) {
+    logger.info(`[ib-threads] retention purge removed ${deleted} thread(s) idle > ${days}d`);
+  }
+  return { deleted, retention_days: days };
+}
+
+module.exports = {
+  threadsEnabled,
+  appendExchange,
+  latestThread,
+  getThread,
+  listThreads,
+  purgeExpiredThreads,
+  deriveTitle,
+  RESUME_TURN_LIMIT,
+};

@@ -28,6 +28,8 @@
  */
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
+  // Passthrough: these harnesses have no committed row to read back.
+  resolveCommittedVisitTime: jest.fn(async (id, { date, windowStart } = {}) => (date ? { appointmentTime: `${date}T${windowStart || '08:00'}`, windowless: !windowStart } : null)),
   alertRegistrationFailure: jest.fn().mockResolvedValue(undefined),
 }));
 

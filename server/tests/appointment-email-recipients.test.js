@@ -8,7 +8,7 @@ const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
 const AppointmentEmail = require('../services/appointment-email');
 
-function mockDb({ customer = null, prefs = null }) {
+function mockDb({ customer = null, prefs = null, slot = { scheduled_date: '2026-06-22', window_start: '10:00' } }) {
   db.mockImplementation((table) => {
     if (table === 'customers') {
       return { where: () => ({ select: () => ({ first: async () => customer }) }) };
@@ -18,6 +18,15 @@ function mockDb({ customer = null, prefs = null }) {
     }
     if (table === 'customer_interactions') {
       return { insert: async () => [1] };
+    }
+    if (table === 'appointment_reminders') {
+      // pre-provider move-hold recheck — no hold
+      return { where: () => ({ first: async () => null }) };
+    }
+    if (table === 'scheduled_services') {
+      // ABA live-slot verification (codex r39) — the live row matches the
+      // rendered slot the tests pass (2026-06-22T14:00Z = 10:00 ET).
+      return { where: () => ({ first: async () => slot }) };
     }
     throw new Error(`unexpected db table ${table}`);
   });
@@ -79,6 +88,7 @@ describe('appointment email recipient resolution (fan-out to appointment contact
         service_contact_name: 'Joseph Haught', service_contact_phone: null, service_contact_email: 'buyer@example.com',
       },
       prefs: { appointment_notify_primary: true },
+      slot: { scheduled_date: '2026-07-09', window_start: '12:00' }, // 16:00Z = 12:00 ET
     });
 
     const res = await AppointmentEmail.sendAppointmentConfirmationEmail({

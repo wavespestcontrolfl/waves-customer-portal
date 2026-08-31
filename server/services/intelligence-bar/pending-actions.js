@@ -99,6 +99,23 @@ async function recordResult(id, result) {
   }
 }
 
+/**
+ * Stamp the persisted thread AND the exact exchange (its assistant turn
+ * seq) onto the proposals that exchange produced, so recall
+ * (search_ib_history) attributes receipts to the matched exchange — never
+ * thread-wide. Actor-bound: only rows the same actor requested are touched.
+ * Best-effort from the /query path — a failure here never fails the answer.
+ */
+async function attachThread(ids, threadId, turnSeq, requestedBy) {
+  if (!threadId || !Number.isInteger(turnSeq) || !requestedBy
+    || !Array.isArray(ids) || ids.length === 0) return 0;
+  return db('ib_pending_actions')
+    .whereIn('id', ids)
+    .where('requested_by', String(requestedBy))
+    .whereNull('thread_id')
+    .update({ thread_id: threadId, thread_turn_seq: turnSeq, updated_at: db.fn.now() });
+}
+
 module.exports = {
   TTL_MINUTES,
   paramsHash,
@@ -107,4 +124,5 @@ module.exports = {
   claimForConfirm,
   cancelPendingAction,
   recordResult,
+  attachThread,
 };

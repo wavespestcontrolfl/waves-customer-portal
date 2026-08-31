@@ -49,6 +49,13 @@ const ARGS = Object.fromEntries(
       console.log(`Checked ${result.checked} call(s)`);
       console.log(`Replay errors: ${result.replayErrors}`);
       console.log(`Fixture expectations: ${result.fixtureExpectations.passed || 0}/${result.fixtureExpectations.checked || 0} passed, ${result.fixtureExpectations.failed || 0} failed`);
+      const gold = result.goldAccuracy || {};
+      const pct = gold.accuracy === null || gold.accuracy === undefined ? 'n/a' : `${(gold.accuracy * 100).toFixed(1)}%`;
+      console.log(`Answer-key accuracy: ${pct} (${gold.correct || 0}/${gold.labeled || 0} fields${gold.unscored ? `, ${gold.unscored} unscored` : ''})`);
+      for (const [field, row] of Object.entries(gold.byField || {})) {
+        const rowPct = row.accuracy === null ? 'n/a' : `${(row.accuracy * 100).toFixed(0)}%`;
+        console.log(`  ${field.padEnd(26)} ${String(row.correct).padStart(2)}/${String(row.labeled).padEnd(2)} ${rowPct.padStart(4)} ${row.severity}${row.missCaseIds?.length ? `  misses: ${row.missCaseIds.join(', ')}` : ''}`);
+      }
       if (result.attempts.length > 1) console.log(`Attempts: ${result.attempts.map((a) => a.status).join(' -> ')}`);
       console.log('');
     }

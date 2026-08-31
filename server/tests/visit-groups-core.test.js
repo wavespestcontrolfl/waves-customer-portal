@@ -78,6 +78,7 @@ describe('canJoin', () => {
     ['family', { group_family: 'lawn_tree_shrub' }],
     ['technician', { technician_id: 't2' }],
     ['window', { window_start: '14:00', window_end: '16:00' }],
+    ['office_review', { status: 'pending', source_action: 'ai_call_outbound_review', customer_confirmed: false }],
   ])('%s mismatch refuses', (reason, patch) => {
     const visit = { ...baseVisit, technician_id: 't1' };
     const row = { ...baseRow, technician_id: 't1', ...patch };
@@ -179,5 +180,50 @@ describe('windowedMembersConnected (codex #3590 r8/r12: one transitive chain = o
   test('point windows (no end) chain by start', () => {
     expect(windowedMembersConnected([w('09:00', null), w('09:00', '10:00')])).toBe(true);
     expect(windowedMembersConnected([w('09:00', null), w('09:30', '10:00')])).toBe(false);
+  });
+});
+
+describe('siblingEligibleFor (live fan-out, doc §3)', () => {
+  const { siblingEligibleFor } = require('../services/visit-groups')._test;
+  test('en_route accepts the pre-en-route statuses only; a rescheduled placeholder never follows a sibling', () => {
+    expect(siblingEligibleFor('en_route', 'pending')).toBe(true);
+    expect(siblingEligibleFor('en_route', 'confirmed')).toBe(true);
+    expect(siblingEligibleFor('en_route', 'rescheduled')).toBe(false);
+    expect(siblingEligibleFor('en_route', 'on_site')).toBe(false);
+    expect(siblingEligibleFor('en_route', 'completed')).toBe(false);
+  });
+  test('on_site also accepts en_route; terminal never', () => {
+    expect(siblingEligibleFor('on_site', 'en_route')).toBe(true);
+    expect(siblingEligibleFor('on_site', 'pending')).toBe(true);
+    expect(siblingEligibleFor('on_site', 'cancelled')).toBe(false);
+    expect(siblingEligibleFor('completed', 'pending')).toBe(false);
+  });
+});
+
+describe('visitSummariesForRows (schedule payload)', () => {
+  const { visitSummariesForRows } = require('../services/visit-groups')._test;
+  test('attaches one shared summary per visit; ungrouped rows untouched', () => {
+    const rows = [
+      { id: 'a', visitId: 'v1', status: 'completed', estimatedDuration: 30, serviceType: 'Pest' },
+      { id: 'b', visitId: null, status: 'pending', estimatedDuration: 45 },
+      { id: 'c', visitId: 'v1', status: 'pending', estimatedDuration: 25, serviceType: 'Rodent' },
+    ];
+    const map = visitSummariesForRows(rows);
+    expect(map.size).toBe(1);
+    expect(rows[1].visit).toBeUndefined();
+    expect(rows[0].visit).toBe(rows[2].visit);
+    expect(rows[0].visit).toMatchObject({
+      id: 'v1', serviceCount: 2, memberIds: ['a', 'c'], primaryId: 'c',
+      estimatedDuration: 55, serviceTypes: ['Pest', 'Rodent'], liveCount: 1,
+    });
+  });
+  test('primary falls back to the first member when every member is terminal', () => {
+    const rows = [
+      { id: 'a', visitId: 'v1', status: 'completed' },
+      { id: 'c', visitId: 'v1', status: 'skipped' },
+    ];
+    visitSummariesForRows(rows);
+    expect(rows[0].visit.primaryId).toBe('a');
+    expect(rows[0].visit.liveCount).toBe(0);
   });
 });

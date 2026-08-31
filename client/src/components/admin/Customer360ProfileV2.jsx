@@ -3532,6 +3532,8 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                       <option value="cash">Cash</option>
                       <option value="check">Check</option>
                       <option value="zelle">Zelle</option>
+                      <option value="venmo">Venmo</option>
+                      <option value="paypal">PayPal</option>
                       <option value="other">Other</option>
                     </select>
                   </label>
@@ -3644,13 +3646,68 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
   );
 }
 
-function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
+// Does the server's estimate-derived prefill apply to what the operator is
+// recording? Three checks, all required, all fail-closed:
+// 1. Label: EXACT identity of the CADENCE-NEUTRAL service — cadence words
+//    and service/plan/program filler drop out, so an estimate line named
+//    plain "Pest Control" matches the modal's "Quarterly Pest Control"
+//    default — but "Commercial Pest Control" never matches "Pest Control".
+//    Never substring-match a money prefill. Cadence safety does NOT ride the
+//    label: it is enforced by checks 2-3 against the estimate's own
+//    coverageCadence/coverageVisitCount, so a monthly quote still never
+//    lands on a quarterly schedule.
+// 2. Cadence: the modal's coverage cadence must equal the estimate's own.
+// 3. Visit count: ditto — the quoted annual is only valid for the quoted
+//    schedule.
+function annualPrepaySuggestionLabelKey(value) {
+  return normalizeAnnualPrepayLabelKey(value)
+    .replace(/service|plan|program/g, "")
+    .trim();
+}
+
+export function estimateSuggestionMatchesService(suggestion, serviceType, coverageCadence, visitCount) {
+  if (!suggestion || suggestion.blocked || !(Number(suggestion.amount) > 0)) return false;
+  if (!suggestion.coverageCadence
+    || String(suggestion.coverageCadence) !== String(coverageCadence || "")) return false;
+  if (Number.parseInt(visitCount, 10) !== Number(suggestion.coverageVisitCount)) return false;
+  const suggestionKey = annualPrepaySuggestionLabelKey(suggestion.serviceLabel);
+  const serviceKey = annualPrepaySuggestionLabelKey(serviceType);
+  return !!suggestionKey && !!serviceKey && suggestionKey === serviceKey;
+}
+
+export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
-  const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
-  const defaultCoverageCadence = inferAnnualPrepayInitialCadence(activeTerm, prepaidPlans);
+  // For a brand-new customer (no options, no term, no prepaid plans) the
+  // eligible estimate is the ONLY signal of what plan is being recorded —
+  // without this, service/cadence fall to the Quarterly Pest Control
+  // defaults and a valid lawn/tree-shrub suggestion could never prefill.
+  const inferredServiceBase = inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
+  // inferAnnualPrepayServiceBase never returns "" — its terminal fallback is
+  // the literal "Pest Control", which is a GUESS, not a signal, when the
+  // customer carries no serviceTypes either. Only then may the estimate
+  // seed the defaults.
+  const inferredBaseIsGuess = inferredServiceBase === "Pest Control"
+    && !String(customer?.serviceTypes || "").trim();
+  // deriveAnnualPrepayServiceOptions also pads an empty list with a
+  // "Pest Control" fallback option — that lone guess is not a signal either.
+  const optionsAreFallbackOnly = serviceOptions.length === 1 && serviceOptions[0]?.source === "fallback";
+  const seedFromSuggestion = estimateSuggestion
+    && !estimateSuggestion.blocked
+    && Number(estimateSuggestion.amount) > 0
+    && (serviceOptions.length === 0 || optionsAreFallbackOnly)
+    && !activeTerm
+    && (prepaidPlans || []).length === 0
+    && inferredBaseIsGuess;
+  const defaultServiceBase = (!optionsAreFallbackOnly && serviceOptions[0]?.value)
+    || (seedFromSuggestion ? estimateSuggestion.serviceLabel : inferredServiceBase);
+  const defaultCoverageCadence = seedFromSuggestion && estimateSuggestion.coverageCadence
+    ? estimateSuggestion.coverageCadence
+    : inferAnnualPrepayInitialCadence(activeTerm, prepaidPlans);
   const defaultServiceType = formatAnnualPrepayServiceLabel(defaultServiceBase, defaultCoverageCadence) || "Quarterly Pest Control";
-  const defaultVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[defaultCoverageCadence] || "4";
+  const defaultVisitCount = seedFromSuggestion && Number(estimateSuggestion.coverageVisitCount) > 0
+    ? String(estimateSuggestion.coverageVisitCount)
+    : (ANNUAL_PREPAY_CADENCE_VISITS[defaultCoverageCadence] || "4");
   const suggestedAmount = inferAnnualPrepaySuggestedAmount(
     { ...customer, prepaidPlans, annualPrepayTerms },
     defaultServiceType,
@@ -3658,7 +3715,20 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     activeTerm,
     prepaidPlans,
   );
-  const [amount, setAmount] = useState(suggestedAmount ? suggestedAmount.toFixed(2) : "");
+  // Estimate-derived prefill is the LAST fallback: recorded terms, prepaid
+  // plans, and the profile rate all speak to money actually agreed with this
+  // customer and win over a quote.
+  const estimateFallbackAmount = !suggestedAmount
+    && estimateSuggestionMatchesService(estimateSuggestion, defaultServiceType, defaultCoverageCadence, defaultVisitCount)
+    ? Number(estimateSuggestion.amount)
+    : 0;
+  const [amount, setAmount] = useState(
+    suggestedAmount
+      ? suggestedAmount.toFixed(2)
+      : estimateFallbackAmount > 0
+        ? estimateFallbackAmount.toFixed(2)
+        : "",
+  );
   const [serviceType, setServiceType] = useState(defaultServiceType);
   const [coverageCadence, setCoverageCadence] = useState(defaultCoverageCadence);
   const [visitCount, setVisitCount] = useState(defaultVisitCount);
@@ -3672,6 +3742,10 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
   const [amountTouched, setAmountTouched] = useState(false);
   const cadenceTouchedRef = useRef(false);
   const visitCountTouchedRef = useRef(false);
+  // True while the (untouched) amount value came from the estimate prefill —
+  // a service change away from the estimate's service must CLEAR it, never
+  // let the old service's quoted year get recorded against the new one.
+  const amountFromEstimateRef = useRef(estimateFallbackAmount > 0);
 
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ").trim() || "Customer";
   const count = Number.parseInt(visitCount, 10);
@@ -3693,7 +3767,7 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     if (value) setTermEnd(addMonthsInput(value, 12));
   };
 
-  const updateSuggestedAmount = (nextServiceType, nextCoverageCadence) => {
+  const updateSuggestedAmount = (nextServiceType, nextCoverageCadence, nextVisitCount) => {
     if (amountTouched) return;
     const nextSuggested = inferAnnualPrepaySuggestedAmount(
       { ...customer, prepaidPlans, annualPrepayTerms },
@@ -3702,20 +3776,39 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
       activeTerm,
       prepaidPlans,
     );
-    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+    if (nextSuggested > 0) {
+      amountFromEstimateRef.current = false;
+      setAmount(nextSuggested.toFixed(2));
+    } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType, nextCoverageCadence, nextVisitCount)) {
+      amountFromEstimateRef.current = true;
+      setAmount(Number(estimateSuggestion.amount).toFixed(2));
+    } else if (amountFromEstimateRef.current) {
+      // The standing amount was the estimate's quoted year for a DIFFERENT
+      // service or schedule — clear rather than silently record it here.
+      amountFromEstimateRef.current = false;
+      setAmount("");
+    }
   };
 
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
     const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
-    if (inferredCadence && !cadenceTouchedRef.current) {
+    // A label-inferred cadence only takes effect when the operator hasn't
+    // chosen one manually — and the prefill must evaluate against the cadence
+    // that will actually be SUBMITTED, never the ignored inference (a
+    // quarterly quote must not restore onto a manually-selected monthly
+    // schedule just because the label says "Quarterly").
+    const cadenceApplies = !!inferredCadence && !cadenceTouchedRef.current;
+    let nextVisitCount = visitCount;
+    if (cadenceApplies) {
       setCoverageCadence(inferredCadence);
       const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
       if (inferredVisitCount && !visitCountTouchedRef.current) {
         setVisitCount(inferredVisitCount);
+        nextVisitCount = inferredVisitCount;
       }
     }
-    updateSuggestedAmount(value, inferredCadence || coverageCadence);
+    updateSuggestedAmount(value, cadenceApplies ? inferredCadence : coverageCadence, nextVisitCount);
   };
 
   const handleServiceOptionChange = (value) => {
@@ -3727,16 +3820,21 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     cadenceTouchedRef.current = true;
     setCoverageCadence(value);
     const nextVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[value];
+    const effectiveVisitCount = nextVisitCount && !visitCountTouchedRef.current ? nextVisitCount : visitCount;
     if (nextVisitCount && !visitCountTouchedRef.current) setVisitCount(nextVisitCount);
-    updateSuggestedAmount(serviceType, value);
+    updateSuggestedAmount(serviceType, value, effectiveVisitCount);
   };
 
   const handleVisitCountChange = (value) => {
     visitCountTouchedRef.current = true;
     setVisitCount(value);
+    // An estimate-derived amount is only valid for the estimate's own visit
+    // count — re-evaluate so a mismatched count clears the prefill.
+    updateSuggestedAmount(serviceType, coverageCadence, value);
   };
 
   const handleAmountChange = (value) => {
+    amountFromEstimateRef.current = false;
     setAmountTouched(true);
     setAmount(value);
   };
@@ -3798,6 +3896,8 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     ["cash", "Cash"],
     ["check", "Check"],
     ["zelle", "Zelle"],
+    ["venmo", "Venmo"],
+    ["paypal", "PayPal"],
     ["other", "Other"],
   ];
 
@@ -3906,6 +4006,21 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
             {perVisit > 0 && (
               <div className="text-11 text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
+              </div>
+            )}
+            {estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount) && (
+              <div className="text-11 text-ink-secondary mt-1">
+                From estimate #{estimateSuggestion.shortRef} — quoted prepay
+                year {fmtCurrency(Number(estimateSuggestion.amount))}
+                {Number(estimateSuggestion.discount) > 0
+                  ? ` (includes ${fmtCurrency(Number(estimateSuggestion.discount))} prepay discount)`
+                  : ""}
+              </div>
+            )}
+            {estimateSuggestion?.blocked && (
+              <div className="text-11 text-ink-secondary mt-1">
+                Estimate #{estimateSuggestion.shortRef}: {estimateSuggestion.blockReason} —
+                enter the amount collected.
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
@@ -5885,11 +6000,12 @@ export default function Customer360ProfileV2({
               back / menu / Text pills on top, large name, three-stat row */}
           <div className="c360-header-mobile px-4 pb-3">
             {" "}
-            {/* Spacer reserving the fixed top action bar's height (incl. the
-                iPhone safe-area inset) so the name/stats start below it. */}
+            {/* Spacer reserving the fixed top action bar's height (8px top
+                pad + 44px controls + 8px bottom pad = 60px, plus the iPhone
+                safe-area inset) so the name/stats start below it. */}
             <div
               aria-hidden="true"
-              style={{ height: "calc(52px + env(safe-area-inset-top, 0px))" }}
+              style={{ height: "calc(60px + env(safe-area-inset-top, 0px))" }}
             />
             <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-1">
               {c.firstName} {c.lastName}
@@ -7692,10 +7808,14 @@ export default function Customer360ProfileV2({
             )}
           </div>{" "}
         </div>
-        {/* Mobile spacer for sticky action bar */}
+        {/* Mobile spacer for sticky action bar — tracks the same keyboard
+            inset as the bar itself so content still scrolls clear of it. */}
         <div
           className="c360-mobile-footer-spacer"
-          style={{ height: "calc(56px + env(safe-area-inset-bottom, 0px))" }}
+          style={{
+            height:
+              "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",
+          }}
           aria-hidden="true"
         />{" "}
       </div>
@@ -7713,9 +7833,12 @@ export default function Customer360ProfileV2({
           portrait). stopPropagation so taps on the bar (esp. the ⋯ menu)
           don't bubble to the overlay's close handler. */}
       <div
-        className="c360-mobile-actionbar fixed top-0 left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
+        className="c360-mobile-actionbar fixed left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
         onClick={(e) => e.stopPropagation()}
         style={{
+          // Track the Safari-bookmark visual viewport (keyboard / URL bar)
+          // like the AdminLayoutV2 header; 0px until the shell sets the var.
+          top: "var(--vv-offset-top, 0px)",
           paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
         }}
       >
@@ -7723,7 +7846,7 @@ export default function Customer360ProfileV2({
         <button
           onClick={onClose}
           aria-label="Back"
-          className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+          className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
         >
           {" "}
           <ChevronLeft size={18} strokeWidth={1.75} />{" "}
@@ -7732,7 +7855,7 @@ export default function Customer360ProfileV2({
           {c.phone && (
             <a
               href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Text
             </a>
@@ -7742,7 +7865,7 @@ export default function Customer360ProfileV2({
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
               styledButton
-              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Call
             </CallBridgeLink>
@@ -7750,7 +7873,7 @@ export default function Customer360ProfileV2({
           {isAdmin && (
             <button
               onClick={openEditModal}
-              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
             >
               Edit
             </button>
@@ -7761,7 +7884,7 @@ export default function Customer360ProfileV2({
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="More"
               aria-expanded={menuOpen}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
             >
               {" "}
               <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
@@ -7843,6 +7966,7 @@ export default function Customer360ProfileV2({
           activeTerm={displayedAnnualPrepayTerm}
           prepaidPlans={data.prepaidPlans || []}
           annualPrepayTerms={data.annualPrepayTerms || []}
+          estimateSuggestion={data.annualPrepayEstimateSuggestion || null}
           onClose={() => setAnnualPrepayOpen(false)}
           onSaved={handleAnnualPrepaySaved}
         />

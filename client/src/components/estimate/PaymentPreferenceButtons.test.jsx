@@ -31,9 +31,9 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /pay the 12-month plan in full/i }));
+    fireEvent.click(screen.getByRole('button', { name: /prepay 12 months/i }));
 
-    expect(screen.getByText('12-month invoice opens after confirmation.')).toBeInTheDocument();
+    expect(screen.getByText('12-month invoice opens after you approve.')).toBeInTheDocument();
     expect(onSelect).toHaveBeenCalledWith('prepay_annual');
   });
 
@@ -54,7 +54,7 @@ describe('PaymentPreferenceButtons', () => {
     );
 
     expect(screen.getByText('Save your card at checkout; the 12-month total is charged when you confirm.')).toBeInTheDocument();
-    expect(screen.queryByText('12-month invoice opens after confirmation.')).not.toBeInTheDocument();
+    expect(screen.queryByText('12-month invoice opens after you approve.')).not.toBeInTheDocument();
   });
 
   // Codex #3492 r10: auto-satisfy accepts (saved card / Auto Pay already
@@ -74,7 +74,7 @@ describe('PaymentPreferenceButtons', () => {
 
     expect(screen.getByText('Your saved payment method on file is charged the 12-month total when you confirm.')).toBeInTheDocument();
     expect(screen.queryByText(/Save your card at checkout/)).not.toBeInTheDocument();
-    expect(screen.queryByText('12-month invoice opens after confirmation.')).not.toBeInTheDocument();
+    expect(screen.queryByText('12-month invoice opens after you approve.')).not.toBeInTheDocument();
   });
 
   it('in-lane prepay with a waivable setup fee appends the charge-at-confirm line', () => {
@@ -90,7 +90,7 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    expect(screen.getByText(/setup is included at no charge\. Save your card at checkout; the 12-month total is charged when you confirm\./)).toBeInTheDocument();
+    expect(screen.getByText(/setup fee waived\. Save your card at checkout; the 12-month total is charged when you confirm\./)).toBeInTheDocument();
   });
 
   it('shows setup plus first visit invoice total for pay per application', () => {
@@ -110,7 +110,7 @@ describe('PaymentPreferenceButtons', () => {
 
     expect(onSelect).toHaveBeenCalledWith('pay_at_visit');
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
-    expect(screen.getByText('First service visit')).toBeInTheDocument();
+    expect(screen.getByText('Per application')).toBeInTheDocument();
     expect(screen.getByText('Invoice total')).toBeInTheDocument();
     expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
     expect(screen.getByText('$125.00')).toBeInTheDocument();
@@ -130,7 +130,7 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
     expect(screen.getByText('Bait Station Setup')).toBeInTheDocument();
-    expect(screen.getByText('First service visit')).toBeInTheDocument();
+    expect(screen.getByText('Per application')).toBeInTheDocument();
     expect(screen.getByText('Invoice total')).toBeInTheDocument();
     expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
     expect(screen.getByText('$89.00')).toBeInTheDocument();
@@ -139,7 +139,7 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.queryByText('WaveGuard Membership Setup')).not.toBeInTheDocument();
   });
 
-  it('prefers discounted treatment rows for the first service visit amount', () => {
+  it('prefers discounted treatment rows for the per-application amount', () => {
     render(
       <PaymentPreferenceButtons
         onSelect={vi.fn()}
@@ -158,7 +158,7 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    expect(screen.getByText('First service visit')).toBeInTheDocument();
+    expect(screen.getByText('Per application')).toBeInTheDocument();
     expect(screen.getByText('$125.00')).toBeInTheDocument();
     expect(screen.queryByText('$600.00')).not.toBeInTheDocument();
     expect(screen.queryByText('$244.00')).not.toBeInTheDocument();
@@ -184,9 +184,11 @@ describe('PaymentPreferenceButtons', () => {
     );
 
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
-    expect(screen.queryByText('First service visit')).not.toBeInTheDocument();
+    expect(screen.queryByText('Per application')).not.toBeInTheDocument();
     expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
-    expect(screen.getByText('Choose pay per application with a setup invoice after confirmation, or annual prepay to approve the 12-month plan up front with setup included.')).toBeInTheDocument();
+    // Both breakdown boxes render, so the combined fineprint is gone
+    // (owner 2026-08-30) — the boxes carry the when-money-moves copy.
+    expect(screen.queryByText(/Choose pay per application/)).not.toBeInTheDocument();
     expect(screen.queryByText('$72.00')).not.toBeInTheDocument();
     expect(screen.queryByText('$144.00')).not.toBeInTheDocument();
   });
@@ -240,9 +242,9 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    // No exact "First service visit $X" / invoice rows — they'd contradict the
+    // No exact "Per application $X" / invoice rows — they'd contradict the
     // "$X–$Y, confirmed on site" range, and the accept creates no invoice.
-    expect(screen.queryByText('First service visit')).not.toBeInTheDocument();
+    expect(screen.queryByText('Per application')).not.toBeInTheDocument();
     expect(screen.queryByText('Invoice total')).not.toBeInTheDocument();
     expect(screen.queryByText(/after confirmation, we open the invoice/i)).not.toBeInTheDocument();
     expect(screen.getAllByText(/confirm your exact price on/i).length).toBeGreaterThan(0);
@@ -291,7 +293,7 @@ describe('PaymentPreferenceButtons', () => {
     });
   });
 
-  it('uses "an" with the bare invoice fallback label (never "a invoice")', () => {
+  it('renders no combined fineprint when prepay is offered', () => {
     render(
       <PaymentPreferenceButtons
         onSelect={vi.fn()}
@@ -302,9 +304,9 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    // No setup fee and no first-visit amount → the fallback label is bare
-    // 'invoice', which takes 'an'.
-    expect(screen.getByText(/with an invoice after confirmation/)).toBeInTheDocument();
+    // With prepay offered the combined fineprint never renders (owner
+    // 2026-08-30) — the a/an article helper it needed is gone with it.
+    expect(screen.queryByText(/invoice after confirmation/)).not.toBeInTheDocument();
     expect(screen.queryByText(/\ba invoice\b/)).not.toBeInTheDocument();
   });
 

@@ -18,7 +18,7 @@ const smsMigration = require('../models/migrations/20260702000011_reschedule_lin
 const emailMigration = require('../models/migrations/20260702000012_reschedule_link_email_templates');
 
 const {
-  eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
+  eligibility, eligibilityAsync, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
   seriesScopeMismatch,
@@ -480,5 +480,47 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
       }),
     }));
     await expect(buildRescheduleLink('svc-1')).resolves.toEqual({ url: null, line: '' });
+  });
+});
+
+describe('grouped visits are refused before slot selection (codex #3609 r4)', () => {
+  const NOW = new Date('2026-07-01T12:00:00Z');
+  function wireCount(n, { frozenVisit = null } = {}) {
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNot: () => api, whereNotIn: () => api, whereIn: () => api, count: () => api,
+        select: async () => [],
+        // scheduled_services ⇒ the live-member count; service_visits ⇒ the
+        // frozen-verdict read (null = no such visit ⇒ not frozen)
+        first: async () => (table === 'scheduled_services' ? { n: String(n) } : table === 'service_visits' ? frozenVisit : null),
+      };
+      return api;
+    });
+  }
+  test('two or more live services at the stop → not reschedulable, reason grouped', async () => {
+    wireCount(2);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'grouped' });
+  });
+  test('a single-member visit or an ungrouped row keeps the sync verdict (no query when ungrouped)', async () => {
+    wireCount(1);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: true });
+    mockDb.mockClear();
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: null }, NOW)).toEqual({ ok: true });
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+  test('one live member on a FROZEN visit (issued link) → reason grouped: self-service is not advertised only to be refused at commit (codex #3609 r26 P2)', async () => {
+    wireCount(1, { frozenVisit: { id: 'v1', status: 'open', summary_token_issued_at: '2026-08-28T12:00:00Z' } });
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'grouped' });
+  });
+
+  test('an unreadable membership lookup fails CLOSED (not_available), never as ungrouped (local codex audit)', async () => {
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => { throw new Error('db down'); } };
+    mockDb.mockImplementation(() => api);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'not_available' });
+  });
+  test('terminal verdicts win without a membership query', async () => {
+    mockDb.mockClear();
+    expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });
+    expect(mockDb).not.toHaveBeenCalled();
   });
 });

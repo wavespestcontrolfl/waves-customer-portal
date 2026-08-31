@@ -14,7 +14,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
   })),
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
-jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),

@@ -342,6 +342,302 @@ describe('outbound-link gate (DISALLOWED_EXTERNAL_LINK)', () => {
   });
 });
 
+describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/component model)', () => {
+  const { mkdtempSync, writeFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const os = require('node:os');
+  const registry = require('../../packages/affiliate-registry');
+
+  const iso = (daysAgo) => new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
+  const PRODUCTS = [
+    { product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
+      approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
+      plain_url: 'https://www.amazon.com/dp/B000TEST01',
+      allowed_post_types: ['protocol', 'seasonal'], owner_approved_at: iso(10) },
+    { product_id: 'ant-bait', status: 'active', risk_class: 'yellow', merchant: 'solutions',
+      approved_affiliate_url: 'https://www.solutionsstores.com/test-bait?aff=waves',
+      allowed_post_types: ['protocol'], owner_approved_at: iso(10),
+      epa_reg_number: '12345-67', label_url: 'https://www.solutionsstores.com/label.pdf',
+      florida_registration_verified_at: iso(10), label_reviewed_at: iso(10) },
+    { product_id: 'stale-dunks', status: 'active', risk_class: 'yellow', merchant: 'solutions',
+      approved_affiliate_url: 'https://www.solutionsstores.com/test-dunks?aff=waves',
+      allowed_post_types: ['protocol'], owner_approved_at: iso(400),
+      epa_reg_number: '765-43', label_url: 'https://www.solutionsstores.com/dunks-label.pdf',
+      florida_registration_verified_at: iso(400), label_reviewed_at: iso(400) },
+    { product_id: 'pro-termiticide', status: 'prohibited', risk_class: 'red', merchant: 'solutions' },
+    { product_id: 'old-trap', status: 'paused', risk_class: 'green', merchant: 'amazon',
+      approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST02?tag=wavespest-20',
+      allowed_post_types: ['protocol'], owner_approved_at: iso(90) },
+    { product_id: 'bad-amazon', status: 'active', risk_class: 'green', merchant: 'amazon',
+      approved_affiliate_url: 'https://amzn.to/short',
+      allowed_post_types: ['protocol'], owner_approved_at: iso(10) },
+  ];
+
+  let registryPath;
+  beforeAll(() => {
+    registryPath = join(mkdtempSync(join(os.tmpdir(), 'affreg-')), 'registry.json');
+    writeFileSync(registryPath, JSON.stringify({ version: 1, products: PRODUCTS }));
+  });
+
+  // gate: 'true' (default) or '' — an empty value is the OFF/dark posture
+  // (deleting vs '' is equivalent to gateEnvValue). NOTE: an explicit
+  // `gate: undefined` would re-trigger the destructuring default, so OFF
+  // tests pass '' — never undefined.
+  const withAffiliateEnv = (fn, { gate = 'true', path } = {}) => {
+    const prev = { gate: process.env.GATE_AFFILIATE_LINKS, path: process.env.AFFILIATE_REGISTRY_PATH };
+    process.env.GATE_AFFILIATE_LINKS = gate;
+    process.env.AFFILIATE_REGISTRY_PATH = path || registryPath;
+    registry._resetCache();
+    try { return fn(); } finally {
+      if (prev.gate === undefined) delete process.env.GATE_AFFILIATE_LINKS;
+      else process.env.GATE_AFFILIATE_LINKS = prev.gate;
+      if (prev.path === undefined) delete process.env.AFFILIATE_REGISTRY_PATH;
+      else process.env.AFFILIATE_REGISTRY_PATH = prev.path;
+      registry._resetCache();
+    }
+  };
+
+  const link = (product) => `<AffiliateLink product="${product}" placement="primary-rec">the product</AffiliateLink>`;
+  const goodBody = (product = 'rain-gauge') => `How much water your sprinklers put out is measurable.\n\n## Measuring output\n\nStart with a [free quote](/quote/) if the lawn already shows stress. For DIY measurement, ${link(product)} works well.`;
+  const fm = (over = {}) => ({ disclosure: { type: 'affiliate' }, post_type: 'protocol', ...over });
+  const affiliateCodes = (r) => r.findings.filter((f) => /AFFILIATE|PESTICIDE_LINK|SERVICE_CTA_MISSING/.test(f.code)).map((f) => `${f.severity}:${f.code}`);
+
+  test('dark by default: gate unset ⇒ every AffiliateLink is P0 UNREGISTERED (and the component is still uncataloged)', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toEqual(['P0:UNREGISTERED_AFFILIATE_LINK']);
+      // PR-1 posture: AffiliateLink is deliberately NOT in SAFE_MDX_COMPONENTS
+      // yet — the astro renderer doesn't exist. Doubly dark.
+      expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+    }, { gate: '' });
+  });
+
+  test('the kill switch is EXACT: GATE_AFFILIATE_LINKS=1 / on stay dark (Codex r4 P1)', () => {
+    for (const v of ['1', 'on', 'TRUE', 'yes']) {
+      withAffiliateEnv(() => {
+        const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
+        expect(affiliateCodes(r)).toEqual(['P0:UNREGISTERED_AFFILIATE_LINK']);
+      }, { gate: v });
+    }
+  });
+
+  test('gate on + active product + disclosure + eligible post_type + service CTA ⇒ no affiliate findings', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toEqual([]);
+    });
+  });
+
+  test('raw tracking URLs stay DISALLOWED_EXTERNAL_LINK — the component is the ONLY path (no bypass)', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({
+        body: 'Buy [it](https://www.amazon.com/dp/B000TEST01?tag=wavespest-20) today.',
+        frontmatter: fm(),
+      }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    });
+  });
+
+  test('citation allowances never bypass the raw-URL ban: a tagged retailer URL as a required source or on an allowed domain is still P0 (Codex r3 P1)', () => {
+    withAffiliateEnv(() => {
+      const url = 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20';
+      const asSource = guardrails.evaluate({ body: `See [it](${url}).`, frontmatter: fm() }, { targetIsBlog: true, requiredSourceUrls: [url] });
+      expect(asSource.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+      const prev = process.env.CONTENT_ALLOWED_LINK_DOMAINS;
+      process.env.CONTENT_ALLOWED_LINK_DOMAINS = 'amazon.com';
+      try {
+        const onDomain = guardrails.evaluate({ body: `See [it](${url}).`, frontmatter: fm() }, { targetIsBlog: true });
+        expect(onDomain.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+        // …while an untagged, non-registry page on that domain keeps the allowance.
+        const plain = guardrails.evaluate({ body: 'See [it](https://www.amazon.com/gp/help/customer/display.html).', frontmatter: fm() }, { targetIsBlog: true });
+        expect(plain.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+      } finally {
+        if (prev === undefined) delete process.env.CONTENT_ALLOWED_LINK_DOMAINS;
+        else process.env.CONTENT_ALLOWED_LINK_DOMAINS = prev;
+      }
+    });
+  });
+
+  test('non-blog targets never resolve products — UNREGISTERED on a service page', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: false });
+      expect(affiliateCodes(r)).toContain('P0:UNREGISTERED_AFFILIATE_LINK');
+    });
+  });
+
+  test('undisclosed ⇒ P0 AFFILIATE_LINK_WITHOUT_DISCLOSURE; disclosure type affiliate clears it', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({ body: goodBody(), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
+      const ok = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(ok)).toEqual([]);
+      // EXACT type only — free text naming a commission is not a disclosure
+      // the renderer emits ("we receive no commission" would pass a keyword
+      // test; pre-push Codex r1 P1).
+      const textOnly = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ disclosure: { type: 'regulatory', text: 'Some links earn Waves a commission.' } }) }, { targetIsBlog: true });
+      expect(affiliateCodes(textOnly)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
+    });
+  });
+
+  test('an AffiliateLink in editable meta is P0 AFFILIATE_LINK_IN_META', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({
+        body: goodBody(),
+        frontmatter: fm({ meta_description: `Deals: ${link('rain-gauge')} today.` }),
+      }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toContain('P0:AFFILIATE_LINK_IN_META');
+    });
+  });
+
+  test('prohibited/red product ⇒ P0 PROHIBITED_AFFILIATE_PRODUCT', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({ body: goodBody('pro-termiticide'), frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toContain('P0:PROHIBITED_AFFILIATE_PRODUCT');
+    });
+  });
+
+  test('paused and structurally-invalid rows ⇒ P0 INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', () => {
+    withAffiliateEnv(() => {
+      for (const id of ['old-trap', 'bad-amazon']) {
+        const r = guardrails.evaluate({ body: goodBody(id), frontmatter: fm() }, { targetIsBlog: true });
+        expect(affiliateCodes(r)).toContain('P0:INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT');
+      }
+    });
+  });
+
+  test('yellow-class label review: fresh passes, stale (>180d) is P0 PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW', () => {
+    withAffiliateEnv(() => {
+      const fresh = guardrails.evaluate({ body: goodBody('ant-bait'), frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(fresh)).toEqual([]);
+      const stale = guardrails.evaluate({ body: goodBody('stale-dunks'), frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(stale)).toContain('P0:PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW');
+    });
+  });
+
+  test('page-class eligibility: wrong or missing post_type ⇒ P0 AFFILIATE_LINK_ON_PROTECTED_PAGE (fail closed)', () => {
+    withAffiliateEnv(() => {
+      const wrong = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ post_type: 'cost' }) }, { targetIsBlog: true });
+      expect(affiliateCodes(wrong)).toContain('P0:AFFILIATE_LINK_ON_PROTECTED_PAGE');
+      const missing = guardrails.evaluate({ body: goodBody(), frontmatter: { disclosure: { type: 'affiliate' } } }, { targetIsBlog: true });
+      expect(affiliateCodes(missing)).toContain('P0:AFFILIATE_LINK_ON_PROTECTED_PAGE');
+    });
+  });
+
+  test('density: more than 3 links, or a link before the first section heading, is P1', () => {
+    withAffiliateEnv(() => {
+      const four = `${goodBody()}\n\n${link('rain-gauge')} ${link('ant-bait')} ${link('rain-gauge')}`;
+      const r = guardrails.evaluate({ body: four, frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
+      const opener = `Buy ${link('rain-gauge')} now.\n\n## Later\n\nSee a [quote](/quote/).`;
+      const r2 = guardrails.evaluate({ body: opener, frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r2)).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
+    });
+  });
+
+  test('an affiliate post without a Waves service CTA link is P1 SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', () => {
+    withAffiliateEnv(() => {
+      const noCta = `Intro copy.\n\n## Measuring\n\nUse ${link('rain-gauge')} for this.`;
+      const r = guardrails.evaluate({ body: noCta, frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // A CTA hidden in a comment or code does not count (Codex r6 P1).
+      const hidden = `Intro copy.\n\n## Measuring\n\n{/* [quote](/quote/) */}\n\n\`[quote](/quote/)\`\n\nUse ${link('rain-gauge')} for this.`;
+      const r3 = guardrails.evaluate({ body: hidden, frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r3)).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // A real city-service page satisfies it too.
+      const cityCta = `Intro copy.\n\n## Measuring\n\nSee [lawn care](/lawn-care-bradenton-fl/). Use ${link('rain-gauge')}.`;
+      const r2 = guardrails.evaluate({ body: cityCta, frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r2)).toEqual([]);
+    });
+  });
+
+  test('refresh preserves but never adds (per product id, count-compared), fail closed without the prior body', () => {
+    withAffiliateEnv(() => {
+      const body = goodBody();
+      const preserved = guardrails.evaluate({ body }, { targetIsBlog: true, isRefresh: true, priorBody: body });
+      expect(affiliateCodes(preserved)).toEqual([]);
+      const doubled = guardrails.evaluate({ body: `${body}\n\nAlso ${link('rain-gauge')}.` }, { targetIsBlog: true, isRefresh: true, priorBody: body });
+      expect(affiliateCodes(doubled)).toContain('P0:AFFILIATE_LINK_ADDED_ON_REFRESH');
+      const noPrior = guardrails.evaluate({ body }, { targetIsBlog: true, isRefresh: true, priorBody: null });
+      expect(affiliateCodes(noPrior)).toContain('P0:AFFILIATE_LINK_ADDED_ON_REFRESH');
+    });
+  });
+
+  test('attribute parsing is name-exact and quote-aware: data-product= and product= inside another value do not resolve (Codex r2 P1)', () => {
+    withAffiliateEnv(() => {
+      const { collectAffiliateLinkTags } = guardrails._internals;
+      expect(collectAffiliateLinkTags('<AffiliateLink data-product="rain-gauge" placement="x">y</AffiliateLink>')[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags(`<AffiliateLink note='product="rain-gauge"' placement="x">y</AffiliateLink>`)[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags('<AffiliateLink product>y</AffiliateLink>')[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags('<AffiliateLink product=rain-gauge>y</AffiliateLink>')[0].productId).toBeNull();
+      expect(collectAffiliateLinkTags(`<AffiliateLink placement="x" product='rain-gauge'>y</AffiliateLink>`)[0].productId).toBe('rain-gauge');
+      expect(collectAffiliateLinkTags('<AffiliateLink title="a > b" product="rain-gauge" />')[0].productId).toBe('rain-gauge');
+      // A duplicated prop is ambiguous (React keeps the LAST, a reader sees the
+      // first) — it never resolves, so the draft parks as unregistered.
+      expect(collectAffiliateLinkTags('<AffiliateLink product="rain-gauge" product="pro-termiticide">x</AffiliateLink>')[0].productId).toBeNull();
+    });
+  });
+
+  test('a non-literal product prop cannot resolve — P0 UNREGISTERED', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({
+        body: `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product={pickProduct()} placement="x">y</AffiliateLink>`,
+        frontmatter: fm(),
+      }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toContain('P0:UNREGISTERED_AFFILIATE_LINK');
+    });
+  });
+
+  test('hardcoded prices near an affiliate link stay the existing global P0 (no "$19.97 on Amazon")', () => {
+    withAffiliateEnv(() => {
+      const r = guardrails.evaluate({
+        body: `Intro.\n\n## Sec\n\nSee [lawn care](/lawn-care-bradenton-fl/). It costs just $19.97 today: ${link('rain-gauge')}`,
+        frontmatter: fm(),
+      }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'HARDCODED_PRICE' && f.severity === 'P0')).toBe(true);
+    });
+  });
+
+  test('containsAffiliateMaterial: component tags, registry URLs, network URLs, tagged amazon — regardless of gate', () => {
+    withAffiliateEnv(() => {
+      expect(guardrails.containsAffiliateMaterial(`x ${link('anything')} y`)).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com/dp/B000TEST01?tag=wavespest-20')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com/dp/B000TEST01')).toBe(true); // registry plain_url
+      // Registry match is by PRODUCT identity (host+path): reordered/extra
+      // query params, fragments, and www-stripping still match (Codex r1 P1).
+      expect(guardrails.containsAffiliateMaterial('see https://amazon.com/dp/B000TEST01/?utm_source=x&tag=wavespest-20#reviews')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/test-bait?ref=1&aff=waves')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://amzn.to/abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://shareasale.com/r.cfm?b=1')).toBe(true);
+      // Direct-merchant tracking params on an UNREGISTERED path, any host (Codex r5 P1).
+      expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?aff=waves')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.thermacell.com/x?irclickid=abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://example.com/x?utm_medium=affiliate')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?utm_source=newsletter')).toBe(false);
+      // Scheme-less / scheme-relative shapes (Codex r6 P1).
+      expect(guardrails.containsAffiliateMaterial('grab it at amzn.to/abc today')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see www.amazon.com/dp/B000TEST01?tag=wavespest-20')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see //amzn.to/abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see solutionsstores.com/test-bait?aff=waves')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('visit wavespestcontrol.com/blog/ or epa.gov/pesticides')).toBe(false);
+      expect(guardrails.containsAffiliateMaterial('call 941.599.3489 e.g. today')).toBe(false);
+      expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);
+      expect(guardrails.containsAffiliateMaterial('')).toBe(false);
+    }, { gate: '' }); // gate OFF — stripping still detects
+  });
+
+  test('every affiliate finding code has a gate-retry directive', () => {
+    const { GATE_RETRY_INSTRUCTIONS } = require('../services/content/gate-retry-directives');
+    for (const code of [
+      'UNREGISTERED_AFFILIATE_LINK', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', 'AFFILIATE_LINK_IN_META',
+      'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
+      'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
+      'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY',
+    ]) {
+      expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
+    }
+  });
+});
+
 describe('outbound-link gate: operator-intercept citation exceptions (Codex round 1)', () => {
   test('required_sources hosts are allowed for that draft (binding must-link citations)', () => {
     const r = guardrails.evaluate(

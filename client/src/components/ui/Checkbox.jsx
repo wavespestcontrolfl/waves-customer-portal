@@ -11,7 +11,8 @@ export const Checkbox = forwardRef(function Checkbox(
       type="checkbox"
       id={id}
       className={cn(
-        'appearance-none w-4 h-4 rounded-xs bg-white',
+        // u-touch-hit (tokens.css): 44px hit area on coarse pointers only.
+        'u-touch-hit appearance-none w-4 h-4 rounded-xs bg-white',
         'border-hairline border-zinc-400',
         'checked:bg-zinc-900 checked:border-zinc-900',
         'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-1',

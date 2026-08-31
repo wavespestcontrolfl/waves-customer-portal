@@ -53,6 +53,7 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -429,7 +430,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
   const intervals = {
-    daily: 1, weekly: 7, biweekly: 14,
+    // every_6_weeks: see the rebooker copy's incident note — the
+    // parity test pins all three nextRecurringDate copies together.
+    daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42,
   };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
@@ -1175,18 +1178,35 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: serviceId }, {
+      }, 'appointment_rescheduled', 'appointment_confirmation', {
+        scheduled_service_id: serviceId,
+        // ABA guard input (codex #3609 r48): the slot this notice quotes —
+        // the shared guard accepts either the row's own start or the
+        // grouped stop's canonical start, so visitMove.visitStart works.
+        rendered_slot_ms: (() => {
+          const at = parseETDateTime(`${dateStr}T${start || '08:00'}`);
+          return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
+        })(),
+      }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
         preDispatchCheck: async () => {
-          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
           if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
           if (TERMINAL_FOR_NOTICE.includes(String(row.status))) {
             return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
           }
           const stillDate = normalizeDateOnly(row.scheduled_date) === dateStr;
-          const stillStart = normalizeHHMM(row.window_start) === start;
+          // Grouped move from a LATER chained member (codex r40): the
+          // dispatch route passes visitMove.visitStart — the STOP's
+          // earliest start — which legitimately differs from this row's
+          // own start; accept either (a stale write matches neither).
+          let stillStart = normalizeHHMM(row.window_start) === start;
+          if (!stillStart && row.visit_id) {
+            const stopStart = await require('../services/visit-groups').liveStopStartHHMM(db, row.visit_id).catch(() => null);
+            stillStart = !!stopStart && normalizeHHMM(stopStart) === start;
+          }
           return stillDate && stillStart
             ? { ok: true }
             : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
@@ -1236,11 +1256,17 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
   if (!scheduledServiceId) return;
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
+    // fromCommittedRow: the time is read from the committed visit inside
+    // the registration transaction (under a share lock), not from this
+    // in-memory copy — see registerAppointment. The values here are only
+    // the fallback for a row that is not visible yet; windowless then
+    // registers as a non-delivering placeholder, never an armed 08:00.
+    const start = normalizeHHMM(windowStart) || null;
     await AppointmentReminders.registerAppointment(
       scheduledServiceId, customerId,
-      `${scheduledDate}T${normalizeHHMM(windowStart) || '08:00'}`,
+      `${scheduledDate}T${start || '08:00'}`,
       serviceType, source,
-      { sendConfirmation: false },
+      { sendConfirmation: false, closeReminderWindows: !start, fromCommittedRow: true },
     );
   } catch (e) {
     logger.error(`[schedule] Reminder registration failed for spawned visit ${scheduledServiceId}: ${e.message}`);
@@ -3671,8 +3697,13 @@ router.get('/', async (req, res, next) => {
         skipWeekends: !!s.skip_weekends,
         weekendShift: s.weekend_shift || null,
         sourceEstimateId: s.source_estimate_id || null,
+        // Visit group identity (visit-group-scope.md §3): rows sharing a
+        // visit render as ONE stop card; `visit` summary attached below.
+        visitId: s.visit_id || null,
+        trackState: s.track_state || null,
       };
     }));
+    require('../services/visit-groups').visitSummariesForRows(enriched);
 
     // Group by technician
     const byTech = {};
@@ -5175,21 +5206,29 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
 
       // Create recurring instances from the dates precomputed (and locked)
-      // above.
+      // above. Children resolve the CURRENT catalog identity from the
+      // inserted parent (serviceId is optional on this endpoint — a legacy
+      // or stale label must not seed a whole series with a retired name).
+      // Only when something will actually be inserted: a one-off booking
+      // takes no catalog read here, and a failed read inside `trx` must not
+      // be able to poison an unrelated parent insert (codex #3604 r3 P2).
+      const childIdentity = (plannedChildDates.length || plannedBoosterDates.length)
+        ? await resolveSeriesChildIdentity(trx, svc)
+        : null;
       for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
           window_start: windowStart, window_end: computedEnd,
-          service_type: serviceType, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: timeWindow, zone, estimated_duration_minutes: duration,
           is_recurring: true, recurring_pattern: recurringPattern,
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(serviceType);
-        if (cols.service_id && serviceId) childData.service_id = serviceId;
-        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
+        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+        if (cols.service_id && (childIdentity.service_id || serviceId)) childData.service_id = childIdentity.service_id || serviceId;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
         if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
@@ -5256,15 +5295,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
             window_start: windowStart, window_end: computedEnd,
-            service_type: serviceType, status: 'pending',
+            service_type: childIdentity.service_type, status: 'pending',
             time_window: timeWindow, zone, estimated_duration_minutes: duration,
             is_recurring: false,
             recurring_parent_id: svc.id,
             notes: combinedNotes,
           };
-          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(serviceType);
-          if (cols.service_id && serviceId) boosterData.service_id = serviceId;
-          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
+          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+          if (cols.service_id && (childIdentity.service_id || serviceId)) boosterData.service_id = childIdentity.service_id || serviceId;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
@@ -5666,11 +5705,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const AppointmentReminders = require('../services/appointment-reminders');
       for (const appt of createdAppointments) {
         try {
+          // fromCommittedRow: the time is read from the committed row inside
+          // the registration transaction (UPDATE-only sync trigger — a
+          // reminder born at the wrong time never heals). Windowless →
+          // non-delivering placeholder, never an armed 08:00 nobody chose.
           await AppointmentReminders.registerAppointment(
             appt.id, customerId,
             `${appt.date}T${windowStart || '08:00'}`,
             serviceType, 'admin_manual',
-            { sendConfirmation: !!appt.confirmation, deferConfirmation: true }
+            { sendConfirmation: !!appt.confirmation, deferConfirmation: true, closeReminderWindows: !windowStart, fromCommittedRow: true }
           );
         } catch (e) {
           logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
@@ -6134,6 +6177,56 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              // Grouped visit (visit-group-scope.md §2; codex #3609 r23 P1):
+              // this bulk mover writes ONE row directly, so moving a member
+              // here would strand its siblings at the old stop and detach
+              // the visit — and a selection holding several members would
+              // move and text them as separate stops. Same rule as
+              // update-details: refuse before the first write; the schedule's
+              // move (the unit mover) carries the whole visit.
+              // ANY effective slot change (codex #3609 r25 P1) — a same-day
+              // window move detaches a member just as a date move does.
+              const bulkSlotChanges = dateOnly(svc.scheduled_date) !== bulkTargetDate
+                || (payload?.windowStart !== undefined && payload?.windowStart !== null && payload?.windowStart !== '')
+                || (payload?.windowEnd !== undefined && payload?.windowEnd !== null && payload?.windowEnd !== '');
+              if (svc.visit_id && bulkSlotChanges) {
+                // Lock order = the rebooker's (local gate r33): rung 1 (taken
+                // above) → tech-day fence → visit stop lock → row locks. The
+                // tech-day fence below is reentrant, so taking the pairs here
+                // first costs nothing and keeps stop→tech from ever inverting
+                // against a rebooker holding tech→stop.
+                if (normalizeDateOnly(svc.scheduled_date) !== bulkTargetDate) {
+                  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+                  await lockTechDays(trx, [
+                    { techId: svc.technician_id, date: normalizeDateOnly(svc.scheduled_date) },
+                    { techId: svc.technician_id, date: bulkTargetDate },
+                  ]);
+                }
+                // Under the row's STOP lock (the visit writers' own key), so a
+                // createOrJoinVisit that would add a sibling serializes BEFORE
+                // this count or after the write; the write below also pins
+                // the observed visit_id (local gate r27).
+                const { openMembers, lockStopForRow, frozenVisitVerdict } = require('../services/visit-groups');
+                await lockStopForRow(trx, id);
+                const members = await openMembers(trx, svc.visit_id);
+                if (members.length >= 2) {
+                  throw Object.assign(
+                    new Error('grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first'),
+                    { isValidation: true, code: 'VISIT_BULK_MOVE_UNSUPPORTED' },
+                  );
+                }
+                // One live member on a FROZEN / claimed visit (codex #3609 r26
+                // P1): this direct writer neither retargets the parent nor
+                // detaches frozen membership — the unit mover refuses the
+                // same case before its lone-member exit. Refuse.
+                const verdict = await frozenVisitVerdict(trx, svc.visit_id);
+                if (verdict.frozen) {
+                  throw Object.assign(
+                    new Error('this visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it'),
+                    { isValidation: true, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: verdict.reason },
+                  );
+                }
+              }
               // Persist the NORMALIZED date — the raw payload may carry a
               // 'T…' suffix that only the validator strips.
               const updates = {
@@ -6355,13 +6448,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     scheduled_date: prevDate,
                     window_start: svc.window_start ?? null,
                     window_end: svc.window_end ?? null,
+                    // Observed membership is part of the CAS (local gate r27):
+                    // a row grouped since the read misses instead of moving
+                    // alone (knex renders null as IS NULL).
+                    visit_id: svc.visit_id ?? null,
                   }),
                 svc,
               )
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
-                  new Error('the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry'),
+                  new Error('the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry'),
                   { isValidation: true },
                 );
               }
@@ -6746,10 +6843,40 @@ async function planCollectiveEditDateMove(req) {
   const target = validScheduleDate(scheduledDate);
   if (!target) return null;
   const row = await db('scheduled_services').where({ id: req.params.id })
-    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes');
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
   if (!row || row.is_recurring !== true) return null;
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
+  // Grouped row (local gate r28): the handler's own grouped slot guard runs
+  // AFTER this planner strips the slot keys from the body, so it would see
+  // a same-slot edit, save the other fields, and only then have the unit
+  // mover refuse the implicit series move — a partial save. Refuse HERE,
+  // before the body is touched and before any write (same message as the
+  // handler's guard).
+  if (row.visit_id) {
+    const vg = require('../services/visit-groups');
+    const members = await vg.openMembers(db, row.visit_id);
+    if (members.length >= 2) {
+      throw Object.assign(
+        httpError(409, 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+        { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+    // FROZEN visit (codex r30 P2): a lone-live-member anchor of a
+    // frozen/claimed/finalizing visit passes the count above, but the
+    // rebooker's frozenVisitVerdict deterministically refuses its date
+    // move AFTER this planner has stripped the slot keys and the handler
+    // has committed the other field edits — exactly the partial save this
+    // preflight exists to prevent. Refuse here, before anything is
+    // written (fail closed: an unreadable verdict is frozen).
+    const verdict = await vg.frozenVisitVerdict(db, row.visit_id);
+    if (verdict.frozen) {
+      throw Object.assign(
+        httpError(409, 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was changed.'),
+        { code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: verdict.reason },
+      );
+    }
+  }
   // Canonical window intake — the same presence/clear/malformed semantics
   // the handler applies: a half-cleared window is left for the handler's own
   // 422 (nothing moves); an explicit clear of BOTH bounds stays the
@@ -6859,6 +6986,13 @@ async function planCollectiveEditDateMove(req) {
         actorId: req.technicianId,
         reasonText: null,
       });
+      // Grouped siblings moved singly by moveVisitAsUnit sit outside the
+      // series effects' broadcast — other boards need them (codex #3609 r10).
+      for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(row.id))) {
+        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId }); } catch (err) {
+          logger.error(`[schedule/update-details] series board broadcast failed for grouped member ${movedId}: ${err.message}`);
+        }
+      }
       return {
         seriesMoveId: result.seriesMoveId || null,
         occurrencesRescheduled: result.occurrencesRescheduled || 0,
@@ -7205,10 +7339,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // occupies (start + new duration), so it validates too: 19:00 + 60→120
     // is 19:00-21:00 and refused.
     let preReadWindowRow = null;
-    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
+    // Observed visit membership at the slot-change pre-read; CAS'd on the
+    // locked row inside the transaction (codex #3609 r10).
+    let preReadVisitId;
+    // `!== undefined`, never truthiness (codex #3609 r28 P1): an explicit
+    // clear of both bounds is represented as window_start/window_end = null
+    // and must enter the same effective-slot comparison — and therefore the
+    // grouped/frozen membership guards and CAS — as any other slot change.
+    if (updates.window_start !== undefined || updates.window_end !== undefined || updates.scheduled_date !== undefined
       || updates.estimated_duration_minutes !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
       // Presence is not change (same ruling the in-trx occupancy probe below
       // already applies): BOTH schedule editors echo the current date, window
@@ -7236,6 +7377,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         && effectiveSlotStart === storedSlotStart
         && effectiveSlotEnd === storedSlotEnd
         && effectiveSlotDuration === storedSlotDuration;
+      // Grouped visit (visit-group-scope.md §2; codex #3609 r9): this
+      // endpoint writes the row directly, so a slot change here would
+      // leave the stop's other services behind and detach the visit. Slot
+      // changes on a grouped row go through the schedule's move (the unit
+      // mover) or after separating the services; every other field edits
+      // normally. Same-slot echoes from the editors pass untouched.
+      if (!effectiveSlotUnchanged) preReadVisitId = currentRow.visit_id || null;
+      if (!effectiveSlotUnchanged && currentRow.visit_id) {
+        const { openMembers } = require('../services/visit-groups');
+        const members = await openMembers(db, currentRow.visit_id);
+        if (members.length >= 2) {
+          return res.status(409).json({
+            error: 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here.',
+            code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED',
+            visitId: currentRow.visit_id,
+          });
+        }
+      }
       if (!effectiveSlotUnchanged && (updates.window_start || updates.window_end)) {
         // The CAS below is armed only when this pre-read actually fed a
         // derivation/validation (here and in the stored-window branch).
@@ -7872,6 +8031,62 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // Visit stop lock for a slot change on a row that sat in a ONE-member
+      // visit at the unlocked pre-read (local codex audit): a sibling can
+      // join that visit between the pre-read's member count and this
+      // transaction while the row's own visit_id stays unchanged, so the
+      // membership CAS below cannot see it. Taken right after rung 1 and
+      // BEFORE every row lock — the same relative position the rebooker's
+      // single-row path uses, so the two writers never invert — and the
+      // open member set is re-counted under it before any slot write.
+      if (preReadVisitId) {
+        // Lock order = the rebooker's (local gate r33): rung 1 → tech-day
+        // fence → visit stop lock → row locks. The fences this save takes
+        // later (assignment set, date-move pair) are pre-acquired here as a
+        // sorted union — reentrant, so the later calls never wait — so the
+        // stop lock can never be held while waiting on a tech-day key a
+        // rebooker holds in the opposite order.
+        {
+          const preFence = [];
+          if (assignmentShouldRun) {
+            const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+            const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
+              .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+            for (const row of preRows) {
+              preFence.push({ techId: row.technician_id, date: row.day });
+              preFence.push({ techId: requestedTechnicianId, date: row.day });
+              if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+                preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+                preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
+              }
+            }
+          }
+          if (updates.scheduled_date !== undefined) {
+            const prov = await trx('scheduled_services').where({ id: req.params.id })
+              .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+            if (prov) {
+              preFence.push({ techId: prov.technician_id, date: prov.day });
+              preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
+            }
+          }
+          if (preFence.length) {
+            const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+            await lockTechDays(trx, preFence);
+          }
+        }
+        try {
+          await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
+        } catch (lockErr) {
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+            throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          throw lockErr;
+        }
+      }
       // The plan's ongoing flag BEFORE this save applies its updates — the
       // ongoing top-up must fire on a real fixed→ongoing transition, never on
       // the value merely being present in the payload (Codex #3337 r4 P1).
@@ -8092,6 +8307,45 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // estimated_duration_minutes is part of the compare: a start-only
             // edit derives its end from it, so a concurrent duration-only
             // edit must not be overwritten with a block built on the old one.
+            // Grouped-membership CAS (codex #3609 r10): the unlocked
+            // grouped-row refusal above read visit_id; a row grouped (or
+            // split) since must not have its slot written alone.
+            if (preReadVisitId !== undefined && String(occRow.visit_id || '') !== String(preReadVisitId || '')) {
+              throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
+            // Same visit_id is not the same membership: under the stop lock
+            // taken above, a one-member visit that gained another live
+            // member since the pre-read is a grouped stop this editor must
+            // not move alone (local codex audit).
+            if (preReadVisitId && occRow.visit_id) {
+              const vg = require('../services/visit-groups');
+              const liveMembers = await vg.openMembers(trx, occRow.visit_id);
+              if (liveMembers.length >= 2) {
+                throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'VISIT_CHANGED_RETRY',
+                });
+              }
+              // One live member on a FROZEN / claimed / finalizing visit
+              // (codex #3609 r27 P1): a direct slot write would strand the
+              // parent and its issued link / records / payment at the old
+              // stop — the unit mover refuses the same case. Same verdict,
+              // under this stop lock, before the write.
+              const verdict = await vg.frozenVisitVerdict(trx, occRow.visit_id);
+              if (verdict.frozen) {
+                throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
+                  reason: verdict.reason,
+                });
+              }
+            }
             if (preReadWindowRow && (
               dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
               || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)
@@ -9123,13 +9377,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (nextDateStr <= etDateString()) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
+            // Children resolve the CURRENT catalog identity at insert — never
+            // the parent label verbatim (a terminal parent keeps its retired
+            // label by the backfills' Invariant 1).
+            const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
               technician_id: recurringTemplateTechnicianId(parent),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
-              service_type: parent.service_type,
+              service_type: childIdentity.service_type,
               status: 'pending',
               time_window: parent.time_window,
               zone: parent.zone,
@@ -9140,8 +9398,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             try {
               const cols = await db('scheduled_services').columnInfo();
               if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
-              if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(parent.service_type);
-              if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
+              if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+              if (cols.service_id && childIdentity.service_id) childData.service_id = childIdentity.service_id;
               if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
               if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
@@ -9151,6 +9409,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               const dType = discountType !== undefined ? discountType : parent.discount_type;
               const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
               copyLineDiscountFields(childData, parent, cols);
+              // After the parent-field copy (which writes the parent's own
+              // snapshot): a successful resolution stamps ITS key — a stale
+              // parent snapshot must not ride into the child (codex r5 P1).
+              if (cols.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
@@ -9201,7 +9463,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 customerId: parent.customer_id,
                 date: nextDateStr,
                 windowStart: parent.window_start,
-                serviceType: parent.service_type,
+                serviceType: childIdentity.service_type,
               });
             }
             if (parentAddons.length > 0 && childRow?.id) {
@@ -10967,13 +11229,14 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     blackoutDates: extendBlackoutDates,
   });
   for (const nd of extendDates) {
+    const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
       technician_id: recurringTemplateTechnicianId(parent),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
-      service_type: parent.service_type,
+      service_type: childIdentity.service_type,
       status: 'pending',
       time_window: parent.time_window,
       zone: parent.zone,
@@ -10986,16 +11249,17 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
-    if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+    if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
     if (cols.recurring_interval_days && parent.recurring_interval_days != null) data.recurring_interval_days = parent.recurring_interval_days;
     if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
     if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
-    if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+    if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
     const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
     copyLineDiscountFields(data, extensionPriceParent, cols);
+    if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
@@ -11052,7 +11316,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       customerId: parent.customer_id,
       date: nd,
       windowStart: parent.window_start,
-      serviceType: parent.service_type,
+      serviceType: childIdentity.service_type,
     });
   }
   if (result.added.length < need) {
@@ -11269,12 +11533,13 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
         } else if (!stillOngoing) {
           logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
         } else {
+          const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
             technician_id: recurringTemplateTechnicianId(parent),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
-            service_type: parent.service_type, status: 'pending',
+            service_type: childIdentity.service_type, status: 'pending',
             time_window: parent.time_window, zone: parent.zone,
             estimated_duration_minutes: parent.estimated_duration_minutes,
             is_recurring: true, recurring_pattern: parent.recurring_pattern,
@@ -11283,10 +11548,11 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
           if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
           if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-          if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
-          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
+          if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
+          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
           const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
           copyLineDiscountFields(nextData, extensionPriceParent, cols);
+          if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
@@ -11351,7 +11617,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               customerId: parent.customer_id,
               scheduledDate: nextStr,
               windowStart: parent.window_start,
-              serviceType: parent.service_type,
+              serviceType: childIdentity.service_type,
               dueAddons: parentAddons.length > 0 ? dueAddons : [],
             };
           }
@@ -11727,11 +11993,13 @@ router.put('/:id/status', async (req, res, next) => {
     // internally idempotent (atomic guard on track_state='scheduled',
     // SMS guard on track_sms_sent_at), so a retry from any path is safe.
     if (toStatus === 'en_route') {
+      let enRouteResult = null;
       try {
         const result = await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
+        enRouteResult = result;
         await recordTrackTransitionResultFailure({
           jobId: svc.id,
           action: 'mark_en_route',
@@ -11748,20 +12016,33 @@ router.put('/:id/status', async (req, res, next) => {
         });
       }
 
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
-          icon: '\u{1F697}',
-          preferenceKey: 'tech_en_route',
-          dedupeKey: `scheduled-service:${svc.id}:en-route`,
-          metadata: { scheduledServiceId: svc.id },
-        });
-      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+      // Visit group (codex #3603 r11): the bell/push is ONE per visit, like
+      // the text — visit-scoped dedupe key, and a member that did not own
+      // the visit notice (covered / claim in flight / claim error / lease
+      // expired) does not push at all.
+      const nonOwner = enRouteResult && ['covered', 'claim_in_flight', 'claim_error', 'lease_expired'].includes(String(enRouteResult.smsOutcome || ''));
+      if (!nonOwner) {
+        try {
+          const NotificationService = require('../services/notification-service');
+          await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
+            icon: '\u{1F697}',
+            preferenceKey: 'tech_en_route',
+            dedupeKey: svc.visit_id ? `visit:${svc.visit_id}:en-route` : `scheduled-service:${svc.id}:en-route`,
+            metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
+          });
+        } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+      }
     }
 
     if (toStatus === 'on_site') {
       try {
-        const result = await trackTransitions.markOnProperty(svc.id);
+        const result = await trackTransitions.markOnProperty(svc.id, {
+          // Audit provenance for the grouped fan-out (codex #3603 r3): the
+          // admin is the actor; the assigned tech stays the one named to
+          // the customer (actingTechId deliberately NOT set).
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
         await recordTrackTransitionResultFailure({
           jobId: svc.id,
           action: 'mark_on_property',
@@ -12206,18 +12487,49 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
-    if (!svc.pre_service_brief) return res.json({ brief: null });
+    const PrevisitBrief = require('../services/previsit-brief');
+    // Every `{brief: null}` answer optionally carries a deterministic
+    // `facts` block (access codes + last same-line visit's products) for
+    // the tech Visit Brief panel — GATE_VISIT_FACTS-gated because raw
+    // access codes on a path that previously answered `{brief: null}` are
+    // a new exposure surface. Computed AFTER the single ownership-scoped
+    // fetch above, so the reassignment protection covers it; fail-soft —
+    // a facts outage omits the key, never 500s the brief read.
+    const withFacts = async (payload) => {
+      if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
+      try {
+        const facts = await PrevisitBrief.deterministicVisitFacts(svc);
+        // Re-verify the assignment AFTER the facts queries (Codex P1 on
+        // #3638): they run outside the atomic ownership-scoped fetch
+        // above, so a dispatch reassignment during them would otherwise
+        // hand gate/garage/lockbox codes to the former technician — the
+        // exact check-then-read race the single-fetch design exists to
+        // prevent. No longer assigned → answer without the facts key.
+        const stillOwned = await db('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .modify((q) => technicianCurrentVisitFilter(req, q))
+          .first('scheduled_services.id');
+        // Ownership KNOWN lost mid-request → withhold everything, not
+        // just the facts: a served brief's cached access codes must not
+        // reach the former technician once the recheck has the signal.
+        if (!stillOwned) return { brief: null };
+        return { ...payload, facts };
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
+        return payload;
+      }
+    };
+    if (!svc.pre_service_brief) return res.json(await withFacts({ brief: null }));
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
     // from the read path (regeneration is already gated, and a rollback
     // toggle that keeps serving stored guidance can't withdraw it).
     // Everything this lane did not write — the legacy WDO brief and any
     // other/untyped legacy brief — serves exactly as it always has.
-    const PrevisitBrief = require('../services/previsit-brief');
     const parsedBrief = typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief;
     if (String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE) {
       if (!PrevisitBrief.briefGateEnabled()) {
-        return res.json({ brief: null });
+        return res.json(await withFacts({ brief: null }));
       }
       // A reschedule or a direct service_type rewrite (edit modal,
       // estimate acceptance, call flows) leaves the stored brief behind —
@@ -12226,10 +12538,16 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // grounding-hash mismatch, both stamps being hashed facts).
       const staleReason = PrevisitBrief.briefStaleReason(parsedBrief, svc);
       if (staleReason) {
-        return res.json({ brief: null, stale: staleReason });
+        return res.json(await withFacts({ brief: null, stale: staleReason }));
       }
     }
-    res.json({ brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+    const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
+    // Facts ride along with EVERY served brief (gated): the WDO and
+    // legacy shapes carry no access/last_visit at all, and even a served
+    // visit brief's access block is a snapshot from the :19/:49 sweep —
+    // a gate code changed since generation must reach the tech from the
+    // live facts, not the cached copy.
+    res.json(await withFacts(served));
   } catch (err) { next(err); }
 });
 
@@ -16012,20 +16330,22 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // the next cadence step.
         if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
+        const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
           technician_id: recurringTemplateTechnicianId(parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
-          service_type: parent.service_type, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: parent.time_window, zone: parent.zone,
           estimated_duration_minutes: parent.estimated_duration_minutes,
           is_recurring: true, recurring_pattern: parent.recurring_pattern,
           recurring_parent_id: parentId,
         };
-        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
         const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
+        if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -16034,12 +16354,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        spawned.push({ id: row?.id, date: nd });
+        spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;
       }
@@ -16088,21 +16408,23 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // candidate must not double-book an adjacent day.
         if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
+        const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
           technician_id: recurringTemplateTechnicianId(parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
-          service_type: parent.service_type, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: parent.time_window, zone: parent.zone,
           estimated_duration_minutes: parent.estimated_duration_minutes,
           is_recurring: true, recurring_pattern: parent.recurring_pattern,
           recurring_parent_id: parentId,
         };
         if (cols.recurring_ongoing) data.recurring_ongoing = true;
-        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
         const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
+        if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -16111,12 +16433,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        spawned.push({ id: row?.id, date: nd });
+        spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;
       }
@@ -16235,7 +16557,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       customerId: parent.customer_id,
       scheduledDate: row.date,
       windowStart: parent.window_start,
-      serviceType: parent.service_type,
+      serviceType: row.serviceType || parent.service_type,
       source: 'recurring_alert_action',
     });
     // A series cancel can take the per-parent lock right after our commit
@@ -16435,6 +16757,7 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,
   noCardOnFileAlert,
@@ -16513,3 +16836,5 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
+// Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
+module.exports.nextRecurringDate = nextRecurringDate;

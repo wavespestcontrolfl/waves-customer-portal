@@ -93,4 +93,38 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     // Empty Twilio list → benign skip, but the guard did NOT short-circuit.
     expect(out).toMatchObject({ success: true, skipped: true, reason: 'no_completed_recording' });
   });
+
+  test('a <Dial>-forwarded call with no parent recording asks Twilio for the accepted child leg too', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.list.mockClear();
+    db.__builder.update.mockClear();
+    const child = 'CAchild000000000000000000000000001';
+    recordingsSpy.list.mockImplementation(async ({ callSid }) => (callSid === child
+      ? [{ sid: 'REchild00000000000000000000000001', status: 'completed', dateCreated: '2026-08-29T12:34:10Z', duration: '199', uri: `/2010-04-01/Accounts/AC/Recordings/REchild00000000000000000000000001.json` }]
+      : []));
+    db.__state.call = {
+      id: 'c-forwarded', recording_url: null, transcription_metadata: null, duration_seconds: 257,
+      // jsonb metadata as the webhook persists it at /inbound-forward-accept
+      metadata: { forward_acceptance: { accepted: true, dial_call_sid: child } },
+    };
+    const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000004');
+    expect(recordingsSpy.list.mock.calls.map((c) => c[0].callSid)).toEqual(['CAtest0000000000000000000000000004', child]);
+    expect(out).toMatchObject({ success: true, recovered: true, recordingSid: 'REchild00000000000000000000000001' });
+    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: 'REchild00000000000000000000000001', transcription_status: 'pending' }));
+    recordingsSpy.list.mockImplementation(async () => []);
+  });
+
+  test('no recording on the parent OR the child leg reports which SIDs were checked', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.list.mockClear();
+    db.__state.call = {
+      id: 'c-forwarded-none', recording_url: null, transcription_metadata: null,
+      metadata: JSON.stringify({ forward_acceptance: { accepted: true, dial_call_sid: 'CAchild000000000000000000000000002' } }),
+    };
+    const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000005');
+    expect(out).toMatchObject({ skipped: true, reason: 'no_completed_recording', checkedSids: ['CAtest0000000000000000000000000005', 'CAchild000000000000000000000000002'] });
+    expect(recordingsSpy.list).toHaveBeenCalledTimes(2);
+  });
 });

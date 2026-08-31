@@ -39,9 +39,11 @@ export default function StickyActionBar({
   standalone = false,
 }) {
   if (!actions?.length) return null;
+  // --keyboard-inset (useAdminViewport) lifts the bar above the iOS keyboard
+  // in the Safari-bookmark shell; 0px whenever the keyboard is closed.
   const bottom = standalone
-    ? "env(safe-area-inset-bottom, 0)"
-    : "calc(56px + env(safe-area-inset-bottom, 0))";
+    ? "calc(env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))"
+    : "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))";
   return (
     <div
       role="toolbar"

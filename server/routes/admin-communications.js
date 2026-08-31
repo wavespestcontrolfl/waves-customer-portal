@@ -203,6 +203,8 @@ router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
   let manualReservationId = null;
   let parkedThreadIds = [];
+  let claimedReviewRequestId = null;
+  let claimedReviewClaimToken = null;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -224,6 +226,9 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
+      // Composer Insert Link: a pending inline review_requests row whose link
+      // rides in this body — marked delivered after a real send (below).
+      reviewRequestId,
     } = req.body;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -393,6 +398,123 @@ router.post('/sms', async (req, res, next) => {
       return res.status(409).json({ error: 'An automated reply is going out to this conversation right now — refresh in a moment and resend if it is still needed.' });
     }
 
+    // A composer-inserted review link rides this body — CLAIM the inline row
+    // BEFORE the provider call. createInline deliberately hands every
+    // composer the SAME pending unscheduled row (single live token), so two
+    // tabs or operators can both reach here holding this id before either's
+    // post-send mark lands; the conditional claim lets exactly one through
+    // and rejects the loser here, so at most one ask ever texts the
+    // customer. FAIL CLOSED on EVERY validation miss: a supplied
+    // reviewRequestId that doesn't verify completely (real inline row, its
+    // link in this body, the recipient owning it, the claim won) aborts the
+    // send — the tokenized review page carries customer/service data, so a
+    // mismatched recipient must never receive it, and an unverifiable state
+    // must never send untracked. Only a request with NO reviewRequestId
+    // sends unclaimed.
+    if (reviewRequestId) {
+      const abortUnsent = async (status, error) => {
+        await clearManualReservation();
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId, ...parkedThreadIds],
+          reason: 'Send was not attempted — suggestion reopened.',
+        });
+        return res.status(status).json({ error });
+      };
+      try {
+        const ReviewService = require('../services/review-request');
+        const rr = await db('review_requests')
+          .where({ id: String(reviewRequestId) })
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+        if (!rr || rr.triggered_by !== 'auto_inline') {
+          return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
+        }
+        const { existingShortUrlFor } = require('../services/short-url');
+        const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
+        // Canonical match: scheme dropped and the HOST compared case-
+        // insensitively (a host-case edit of a still-live URL must not read
+        // as "link gone" and 409 a valid send), but the PATH exactly — review
+        // tokens and short codes are case-sensitive, so a case-mangled path
+        // is a dead link and must not verify as the ask.
+        const bodyCarriesLink = (frag) => {
+          const bare = String(frag).replace(/^https?:\/\//i, '');
+          const slash = bare.indexOf('/');
+          if (slash < 0) return cleanBody.includes(bare); // bare token — exact
+          const host = bare.slice(0, slash).toLowerCase();
+          const path = bare.slice(slash);
+          for (let at = cleanBody.indexOf(path); at >= 0; at = cleanBody.indexOf(path, at + 1)) {
+            if (at >= host.length && cleanBody.slice(at - host.length, at).toLowerCase() === host) return true;
+          }
+          return false;
+        };
+        const linkInBody = [short, rr.token].filter(Boolean).some(bodyCarriesLink);
+        if (!linkInBody) {
+          // The client forgets the tracked entry when the operator deletes
+          // the line — an id arriving without its link is an anomaly, not a
+          // flow.
+          return abortUnsent(409, 'The review link is no longer in the message — remove the review request and try again.');
+        }
+        const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
+        if (!owner || normalizePhoneLast10(owner.phone) !== normalizePhoneLast10(to)) {
+          return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
+        }
+        // Live consent + the ask gates + the claim, serialized under the same
+        // per-customer review lock the mint runs under: a draft can sit open
+        // for hours, so the MINT-time gate is stale — a cadence or one-off
+        // ask may have delivered since (withdrawn unscheduled rows persist
+        // and are invisible to the other gates), and the customer may have
+        // switched review requests to email or off. Re-validate at the
+        // delivery seam so this send can't breach the cooldown/cap or text an
+        // email-only customer.
+        const { runExclusive } = require('../utils/cron-lock');
+        const seam = await runExclusive(
+          `review-send:${rr.customer_id}`,
+          async () => {
+            const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
+            if (!consent.allowed) return { consent };
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            if (!gate.allowed) return { gate };
+            return { claimed: await ReviewService.claimInlineForSend(rr.id) };
+          },
+          { recordHealth: false },
+        );
+        if (seam?.skipped) {
+          return abortUnsent(409, 'A review request to this customer is already being sent — try again in a moment.');
+        }
+        if (seam.consent) {
+          return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
+        }
+        if (seam.gate) {
+          const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
+          return abortUnsent(409, `${REVIEW_GATE_REASONS[seam.gate.outcome] || 'Review request blocked'} — remove the review link before sending.`);
+        }
+        if (!seam.claimed) {
+          return abortUnsent(409, 'This review link was already sent or canceled — remove it from the message and re-insert if still needed.');
+        }
+        claimedReviewRequestId = rr.id;
+        claimedReviewClaimToken = seam.claimed;
+        // Final pre-provider fence: the token we hold must still be the live
+        // claim (a stale-claim reclaim by another send supersedes it).
+        if (!(await ReviewService.inlineClaimStillHeld(rr.id, claimedReviewClaimToken))) {
+          claimedReviewRequestId = null;
+          return abortUnsent(409, 'This review link was just claimed by another send — remove it and re-insert if still needed.');
+        }
+      } catch (claimErr) {
+        logger.warn(`[communications] inline review pre-send claim failed — aborting send (requestId=${reviewRequestId}): ${claimErr.message}`);
+        // A claim already won before the throw (e.g. the fence re-check
+        // errored) must be handed back, or the row sits 'sending' and blocks
+        // retries for the whole stale window.
+        if (claimedReviewRequestId) {
+          try {
+            await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
+          } catch (releaseErr) {
+            logger.warn(`[communications] inline review claim release failed (requestId=${claimedReviewRequestId}): ${releaseErr.message}`);
+          }
+          claimedReviewRequestId = null;
+        }
+        return abortUnsent(503, 'Could not verify the inserted review link — try again in a moment.');
+      }
+    }
+
     const sendStartedAt = new Date();
     // Human-authored only when the operator typed the body, not when an
     // unedited AI suggestion is being sent through. The stale-month guard
@@ -439,7 +561,10 @@ router.post('/sms', async (req, res, next) => {
     // a stuck 'sending' row blocking auto-sends to the thread.
     await clearManualReservation();
     if (result.blocked || result.sent === false) {
-      // The reply never left — release the claim and the parked cards.
+      // The reply never left — release the claims and the parked cards.
+      if (claimedReviewRequestId) {
+        await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
+      }
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was blocked or failed — suggestion reopened.',
@@ -448,6 +573,40 @@ router.post('/sms', async (req, res, next) => {
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
+    }
+
+    // A composer-inserted review link rode this body — the send that just
+    // left IS the ask, so stamp the claimed inline row delivered (validation
+    // — real inline row, recipient owns it, link in body — already ran at
+    // the pre-send claim above; the claim is the key here). Guarded on a
+    // REAL provider send (same sentinel rule as the SLA stamp below — a
+    // suppressed send reports sent:true with nothing actually delivered, and
+    // marking then would silently drop the ask); a suppressed send hands the
+    // claim back instead. Fail-soft: bookkeeping never breaks a send that
+    // already happened — a stranded 'sending' claim is reconciled by
+    // claimInlineForSend on the next attempt (repaired to sent from the
+    // outbound log, or released once the provider confirms nothing left).
+    if (claimedReviewRequestId) {
+      try {
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        const ReviewService = require('../services/review-request');
+        if (isRealProviderSend(result)) {
+          // Retried once: a lost stamp after a REAL send is the one state
+          // that can double-text the ask, so it gets a second attempt here
+          // and, failing that, the stale-claim reconcile in
+          // claimInlineForSend repairs it from the outbound log.
+          try {
+            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
+          } catch (firstErr) {
+            logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${claimedReviewRequestId}): ${firstErr.message}`);
+            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
+          }
+        } else {
+          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
+        }
+      } catch (markErr) {
+        logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
+      }
     }
 
     // A reply from the Comms composer is a first response to any open lead
@@ -565,6 +724,24 @@ router.post('/sms', async (req, res, next) => {
     // Release the in-flight reservation so a throw mid-send can't strand a
     // 'sending' row that blocks auto-sends to the thread.
     await clearManualReservation();
+    // Same for the inline review claim: a throw with NO confirmed provider
+    // acceptance means the ask never left — hand the claim back so an
+    // immediate retry isn't blocked for the 10-minute stale window. A throw
+    // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
+    // same convention) means the ask DID text: stamp it delivered instead so
+    // it can never go out twice.
+    if (claimedReviewRequestId) {
+      try {
+        const ReviewService = require('../services/review-request');
+        if (err?.providerOutcome?.sent === true) {
+          await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
+        } else {
+          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
+        }
+      } catch (claimErr) {
+        logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
+      }
+    }
     // Guarded reopen: anything the send actually resolved before the throw
     // is no longer 'scheduled' and no-ops here.
     if (claimedDecisionId || parkedThreadIds.length) {
@@ -1432,6 +1609,188 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
   } catch (err) {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/customer-link  { phone, customerId?, kind }
+// The Insert Link sheet's other per-customer links — kind ∈ review_request |
+// pay_balance | estimate | referral. Same fail-closed recipient contract as
+// /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
+// cross-checked then expanded to the account, cross-account 409). Builders
+// live in services/composer-customer-links.js; a kind with nothing to insert
+// answers 404 with the builder's plain reason.
+// review_request mints a real review_requests row via createInline with
+// armSafetyNet:false — the row is UNSCHEDULED, so the operator's own POST
+// /sms send (carrying the returned requestId) is the ONLY thing that can
+// deliver it; an abandoned draft never auto-texts, and a withdrawn draft
+// just forgets the row client-side (the pending row is SHARED across
+// composers via createInline reuse, so canceling it would break a sibling
+// operator's valid send — the next insert reuses it instead).
+router.post('/customer-link', requireAdmin, async (req, res) => {
+  try {
+    const kind = String(req.body?.kind || '');
+    const builders = require('../services/composer-customer-links');
+    const builderByKind = {
+      review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
+      pay_balance: (ids) => builders.buildPayBalanceLink(ids),
+      estimate: (ids) => builders.buildLatestEstimateLink(ids),
+      referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+    };
+    if (!builderByKind[kind]) {
+      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral' });
+    }
+
+    const last10 = fullPhoneLast10(req.body?.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+
+    const customerId = req.body?.customerId;
+    let customerIds = [];
+    if (customerId && UUID_RE.test(String(customerId))) {
+      const customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'phone', 'account_id');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+      if (fullPhoneLast10(customer.phone) !== last10) {
+        return res.status(400).json({ error: 'phone must match the selected customer' });
+      }
+      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
+    } else {
+      const matches = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id', 'account_id');
+      if (!matches.length) {
+        return res.status(404).json({ error: 'No customer found for that number' });
+      }
+      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+      if (accountKeys.length > 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
+        });
+      }
+      customerIds = await customerIdsForAccount(accountKeys[0]);
+    }
+    if (!customerIds.length) {
+      return res.status(404).json({ error: 'No customer found for that number' });
+    }
+
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
+
+    // The single-customer kinds (review ask, referral) target the phone's
+    // owner: the operator-selected row first, else the account row whose
+    // phone matches the number, else the first sibling (sorted — the account
+    // expansion has no ORDER BY of its own).
+    const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+    let primaryId = selectedId;
+    if (!primaryId) {
+      const phoneRows = await db('customers')
+        .whereNull('deleted_at')
+        .whereIn('id', customerIds)
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id');
+      primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
+    }
+
+    const result = await builderByKind[kind](customerIds, primaryId);
+    if (!result?.url) {
+      return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
+    }
+    res.json({
+      kind,
+      url: stripSmsLinkScheme(result.url),
+      line: stripSmsLinkScheme(result.line),
+      firstName: recipientFirstName,
+      requestId: result.requestId || undefined,
+      balance: result.balance || undefined,
+      estimate: result.estimate || undefined,
+    });
+  } catch (err) {
+    logger.error(`customer-link lookup failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/communications/link-library
+// The Insert Link sheet's full searchable list (office review links computed
+// live + stored manual/sitemap rows) — filtering happens client-side. Read
+// stays at the router's tech-or-admin level: rows are public marketing URLs,
+// nothing customer-scoped.
+router.get('/link-library', async (req, res) => {
+  try {
+    const linkLibrary = require('../services/link-library');
+    const [links, lastSyncedAt] = await Promise.all([
+      linkLibrary.listLinks(),
+      linkLibrary.sitemapLastSyncedAt(),
+    ]);
+    res.json({ links, lastSyncedAt });
+  } catch (err) {
+    logger.error(`link-library list failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/link-library  { name, url, category?, clause?, keywords? }
+// Settings ▸ Link Library — add a hand-managed row.
+router.post('/link-library', requireAdmin, async (req, res) => {
+  try {
+    const linkLibrary = require('../services/link-library');
+    const { id, error } = await linkLibrary.createManualLink(req.body || {});
+    if (error) return res.status(400).json({ error });
+    res.json({ id });
+  } catch (err) {
+    logger.error(`link-library create failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/communications/link-library/:id — manual rows only;
+// synced rows follow their source (sitemap / office config).
+router.delete('/link-library/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid id' });
+    const linkLibrary = require('../services/link-library');
+    const result = await linkLibrary.deleteManualLink(id);
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`link-library delete failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/link-library/sync — Settings "Sync now":
+// re-pull the marketing site's sitemap on demand (the daily job in
+// services/scheduler.js does the same on schedule). { force: true } accepts
+// an over-cap shrinkage for THIS run — the admin-confirmed recovery path
+// after a genuine site restructure; the nightly job never forces.
+router.post('/link-library/sync', requireAdmin, async (req, res) => {
+  try {
+    const linkLibrary = require('../services/link-library');
+    const force = req.body?.force === true;
+    // Same advisory lock as the 2:50 AM job — an unlocked second execution
+    // path (two "Sync now" clicks, or a manual run overlapping the cron)
+    // reads the same snapshot and races inserts into the unique url index.
+    const { runExclusive } = require('../utils/cron-lock');
+    const result = await runExclusive(
+      'link-library-sitemap-sync',
+      () => linkLibrary.syncSitemapLinks({ force }),
+      { recordHealth: false },
+    );
+    if (result?.skipped) {
+      return res.status(409).json({ error: 'A sitemap sync is already running — try again in a moment' });
+    }
+    res.json(result);
+  } catch (err) {
+    logger.error(`link-library sync failed: ${err.message}`);
+    if (err.shrinkage) {
+      // Recoverable: the client offers a confirmed force re-run.
+      return res.status(409).json({ error: `Sitemap sync refused — ${err.message}`, shrinkage: true });
+    }
+    res.status(502).json({ error: `Sitemap sync failed — ${err.message}` });
   }
 });
 

@@ -25,10 +25,13 @@ jest.mock('../middleware/admin-auth', () => {
 // The visit row the route resolves windows against (scheduled_services
 // .first()); null = not found.
 let mockVisitRow = null;
+// Open members of the anchor's visit (visit-groups.openMembers → scheduled_services.select()); [] = none scripted.
+let mockOpenMembers = [];
 jest.mock('../models/db', () => {
   const chain = () => {
     const c = {};
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'leftJoin', 'join', 'select', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    c.select = async () => mockOpenMembers;
     c.first = async () => mockVisitRow;
     c.then = (resolve) => Promise.resolve([]).then(resolve);
     return c;
@@ -46,6 +49,9 @@ jest.mock('../services/rebooker', () => ({
   applyLiveMovePostCommitEffects: jest.fn(),
   collectiveMoveGateOn: () => process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
   previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, movableCount: 4, occurrenceIds: ['o1', 'o2', 'o3', 'o4'], skippedCount: 0, exceptionCount: 0, conflictCount: 0 }),
+}));
+jest.mock('../routes/admin-schedule', () => ({
+  sendRescheduleNoticeForVisit: jest.fn(async () => ({ sent: true, error: null })),
 }));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
@@ -81,7 +87,7 @@ async function reschedule(body) {
 
 const TARGET = etDateString(addETDays(new Date(), 7));
 
-beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; mockOpenMembers = []; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
 
 describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
   const recurringRow = () => ({ is_recurring: true, scheduled_date: etDateString(addETDays(new Date(), 2)), window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
@@ -115,6 +121,60 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(body.error).toMatch(/changed since the preview/);
     expect(body.preview).toMatchObject({ movableCount: 4 });
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a GROUPED recurring anchor moves as one visit (seriesPolicy single) — never widened, no series ack owed (local audit r26)', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = { ...recurringRow(), visit_id: '11111111-1111-4111-8111-111111111111' };
+    mockOpenMembers = [{ id: 'a', status: 'confirmed' }, { id: 'b', status: 'pending' }];
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' });
+    expect(status).toBe(200);
+    expect(SmartRebooker.previewSeriesMove).not.toHaveBeenCalled();
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ seriesPolicy: 'single' });
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expectOccurrenceIds');
+    // the observed membership rides in the rebooker CAS (codex r24 P1): an anchor detached since misses instead of moving alone un-acked
+    expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject({ visit_id: '11111111-1111-4111-8111-111111111111' });
+    // an UNGROUPED recurring anchor keeps the disclosure contract (no seriesPolicy override)
+    jest.clearAllMocks();
+    mockVisitRow = { ...recurringRow(), visit_id: null };
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' })).body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    // a visit_id with ONE live member is not grouped (the unit mover's own rule, local audit r30): the ack is still owed
+    jest.clearAllMocks();
+    mockVisitRow = { ...recurringRow(), visit_id: '11111111-1111-4111-8111-111111111111' };
+    mockOpenMembers = [{ id: 'a', status: 'confirmed' }];
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' })).body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('the single customer notice for a grouped unit move quotes the STOP\'s landed start (visitMove.visitStart), not the tapped member\'s (codex #3609 r25 P1)', async () => {
+    const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
+    mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: '11111111-1111-4111-8111-111111111111' };
+    SmartRebooker.reschedule.mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v1', moved: ['a', 'b'], failed: [], unchanged: [], visitStart: '10:00' } });
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
+    expect(status).toBe(200);
+    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '10:00');
+    // ungrouped: the requested start
+    jest.clearAllMocks();
+    mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: null };
+    await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
+    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '11:00');
+  });
+
+  test('a grouped move that only PARTLY succeeded texts nobody and returns a hard needsAttention (owner ruling 2026-08-30)', async () => {
+    const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
+    const AppointmentReminders = require('../services/appointment-reminders');
+    mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: '11111111-1111-4111-8111-111111111111' };
+    SmartRebooker.reschedule.mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v1', moved: ['a'], failed: [{ id: 'b', reason: 'slot taken', code: 'SLOT_TAKEN' }], unchanged: [], visitStart: '11:00' }, warnings: ['1 grouped service(s) did not move'] });
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
+    expect(status).toBe(200);
+    expect(sendRescheduleNoticeForVisit).not.toHaveBeenCalled();
+    expect(body.notificationSent).toBe(false);
+    expect(body.needsAttention).toMatchObject({ code: 'VISIT_MOVE_INCOMPLETE', memberIds: ['b'] });
+    expect(body.needsAttention.message).toMatch(/Only part of this stop finished moving/);
+    // the reminder sync ran as a NON-notifying move (coverDueWindows false — the sweep owns the corrected text once the stop is whole)
+    const syncCall = AppointmentReminders.handleReschedule.mock.calls[0];
+    expect(syncCall && syncCall[2]).toMatchObject({ sendNotification: false, coverDueWindows: false });
   });
 
   test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {

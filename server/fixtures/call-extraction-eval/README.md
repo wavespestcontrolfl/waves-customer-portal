@@ -5,6 +5,71 @@ pipeline. They store call ids, expected routing shape, and the reason the call
 matters. They do not store transcript text, customer names, phone numbers, or
 addresses.
 
+## Two layers per case
+
+- `expect` — pass/fail routing assertions (auto-route held, flag present,
+  scheduling status, …). Any failure fails the weekly run.
+- `gold` — the per-field **answer key** added 2026-08-31: reviewer-confirmed
+  values for the enum/boolean/date fields in `GOLD_FIELDS`
+  (`server/scripts/replay-call-extraction-variance.js`). An array value means
+  any of those values is correct. Every scored field feeds
+  `summary.goldAccuracy` (overall + per field), which the weekly eval logs and
+  includes in its regression email. Only `high`-severity fields
+  (`is_voicemail`, `is_spam`, `call_nature`, `scheduling_status`,
+  `agent_committed_booking`, `schedule_date`, `schedule_window_start`,
+  `quote_promised`) fail the run on a miss; `medium`/`low` misses only lower
+  the reported accuracy.
+
+Rules for labeling:
+
+- Gold values come from the reviewer's `reviewed_outcome` note (or an owner
+  re-review), never from what the current model happens to output. If the note
+  does not settle a field, leave it unlabeled — the fixture test rejects free
+  text, unknown fields, and any value outside the field's domain (boolean /
+  schema enum / date / time, enums read from
+  `call-extraction.model-output.schema.json`), and `GOLD_FIELDS` deliberately
+  contains no name/phone/email/address keys, so PII cannot enter the answer
+  key and an enum typo is a fixture error, never a permanent miss.
+- To label a new field, read the candidate off the weekly `--jsonl` output:
+  every result carries `current.fields` (the same redacted view), so the
+  candidate sheet never needs transcript access.
+- Set `gold_reviewed_at` when you add or change a case's gold block.
+
+Comparing models: point `CALL_EXTRACTION_PROVIDER` / `CALL_EXTRACTION_MODEL`
+at the challenger and run the manual command below — the per-field table is
+the bake-off scorecard (the 2026-07-18 bake-off only had pass/fail).
+
+## Speaker labels (`speaker-labels.json`)
+
+Owner-labeled ground truth for the Agent/Caller relabel pass
+(`OPENAI_TRANSCRIPT_LABEL_MODEL`). A case is exactly `id`, `call_log_id`,
+`labeled_at`, `labeled_by: owner`, `transcript_sha256` (of the raw diarized
+transcript rebuilt from `call_log.transcript_structured` exactly as
+`normalizeOpenAITranscript` renders it — the script verifies this against the
+production function at run time), and `segment_speakers` — one
+`agent`/`caller` label per non-empty diarized segment. Any other key is
+rejected, so transcript text or contact details cannot enter the file.
+
+```sh
+# 1. Write a labeling sheet to a private file (exclusive create, mode 0600,
+#    fresh mkdtemp path unless --out names a path that does not exist yet);
+#    stdout stays PII-free, so Railway logs never see transcript text
+node server/scripts/speaker-label-eval.js --sheet
+
+# 2. Read the sheet privately, verify every suggested label, paste the
+#    corrected stubs into speaker-labels.json, then DELETE the sheet file
+
+# 3. Score the production relabel pass (word- and line-level speaker accuracy)
+node server/scripts/speaker-label-eval.js
+
+# Challenger: OPENAI_TRANSCRIPT_LABEL_MODEL=<model> node server/scripts/speaker-label-eval.js
+```
+
+Suggested labels on the sheet come from the current model's stored output —
+they are the thing under test, so every line needs a human eye before it
+becomes gold. A re-transcribed call stops scoring (`transcript_drift`)
+rather than scoring against shifted lines.
+
 Run the scheduled eval path against production data from inside the Railway
 service:
 

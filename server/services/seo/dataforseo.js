@@ -9,6 +9,7 @@
 const logger = require('../logger');
 
 const BASE_URL = 'https://api.dataforseo.com/v3';
+const REQUEST_TIMEOUT_MS = Number(process.env.DATAFORSEO_TIMEOUT_MS) || 60000;
 
 function normalizeIndexedUrl(value) {
   return String(value || '')
@@ -75,6 +76,7 @@ class DataForSEO {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), // a stalled call must never hold a caller's lease/connection open
         });
 
         if (res.status === 429) {
@@ -167,9 +169,12 @@ class DataForSEO {
   }
 
   // Bulk domain rank for up to 1000 targets in ONE call (credit discipline).
+  // rank_scale: one_hundred so `rank` comes back 0–100 (DR semantics) — the
+  // default is 0–1000 and would saturate seo_link_domains.domain_rating.
+  // Items carry { target, rank } only — no referring_domains / traffic.
   async bulkRanks(targets) {
     if (!Array.isArray(targets) || targets.length === 0) return null;
-    return this.request('/backlinks/bulk_ranks/live', [{ targets }]);
+    return this.request('/backlinks/bulk_ranks/live', [{ targets, rank_scale: 'one_hundred' }]);
   }
 
   // Bulk backlink spam score for up to 1000 targets in ONE call — feeds the
@@ -177,6 +182,20 @@ class DataForSEO {
   async bulkSpamScore(targets) {
     if (!Array.isArray(targets) || targets.length === 0) return null;
     return this.request('/backlinks/bulk_spam_score/live', [{ targets }]);
+  }
+
+  // Bulk referring-domain counts for up to 1000 targets in ONE call
+  // (items: { target, referring_domains }).
+  async bulkReferringDomains(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    return this.request('/backlinks/bulk_referring_domains/live', [{ targets }]);
+  }
+
+  // Bulk organic traffic estimate for up to 1000 targets in ONE call
+  // (items: { target, metrics: { organic: { etv, count } } }); US / en.
+  async bulkTrafficEstimation(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    return this.request('/dataforseo_labs/google/bulk_traffic_estimation/live', [{ targets, location_code: 2840, language_code: 'en' }]);
   }
 
   // Keyword search volume

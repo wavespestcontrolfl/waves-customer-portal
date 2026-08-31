@@ -3301,3 +3301,38 @@ describe('rain-out service', () => {
     });
   });
 });
+
+describe('commit summary — visit-covered members are not separate stops (local codex audit)', () => {
+  const { summarizeCommitResults, coveredIdsFrom } = require('../services/rain-out')._test;
+  test('the admin-dispatch effects loop never re-syncs a covered member\'s reminder (the unit mover synced its real window)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+    const loop = src.slice(src.indexOf('for (const moved of result.results || [])'));
+    const sync = loop.indexOf('await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow');
+    const guard = loop.indexOf('if (!moved.coveredByVisit) {');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(sync);
+  });
+
+  test('coverage = moved + unchanged (already-at-target) members, never failed ones (codex r19)', () => {
+    expect(coveredIdsFrom({ visitMove: { moved: ['a'], unchanged: ['b'], failed: [{ id: 'c' }] } })).toEqual(['a', 'b']);
+    // a partly-moved stop's needsAttention is surfaced top-level (owner ruling 2026-08-30), never a soft warning
+    const partial = summarizeCommitResults([
+      { id: 'a', ok: true, newDate: '2026-09-02', smsSent: false, smsReason: 'grouped_move_incomplete', needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop moved', memberIds: ['c'] } },
+      { id: 'x', ok: true, newDate: '2026-09-02', smsSent: true, smsReason: null },
+    ]);
+    expect(partial.needsAttention).toEqual([{ id: 'a', code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop moved', memberIds: ['c'] }]);
+    expect(partial.results[0].smsSent).toBe(false);
+    expect(summarizeCommitResults([{ id: 'x', ok: true, newDate: '2026-09-02', smsSent: true, smsReason: null }])).not.toHaveProperty('needsAttention');
+    expect(coveredIdsFrom({ visitMove: { moved: [], failed: [], alreadyAtTarget: true, unchanged: ['a', 'b'] } })).toEqual(['a', 'b']);
+    expect(coveredIdsFrom({ success: true })).toEqual([]);
+  });
+  test('movedCount counts physical stops; covered members are counted apart; failures exclude covered', () => {
+    const out = summarizeCommitResults([
+      { id: 'a', ok: true, newDate: '2026-09-02', smsSent: true, warnings: ['w1'] },
+      { id: 'b', ok: true, coveredByVisit: 'v1', newDate: '2026-09-02', smsSent: false, smsReason: 'covered_by_visit' },
+      { id: 'c', ok: false, error: 'SLOT_TAKEN' },
+    ]);
+    expect(out).toMatchObject({ ok: true, movedCount: 1, coveredCount: 1, failedCount: 1, overlapCount: 1, overlapWarnings: ['w1'] });
+    expect(summarizeCommitResults([{ id: 'x', ok: false, error: 'boom' }])).toMatchObject({ ok: false, reason: 'boom', movedCount: 0, coveredCount: 0, failedCount: 1 });
+  });
+});

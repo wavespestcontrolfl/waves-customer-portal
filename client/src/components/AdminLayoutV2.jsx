@@ -58,47 +58,10 @@ export default function AdminLayoutV2() {
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+  const paletteRef = useRef(null);
 
-  // Give Safari home-screen bookmarks the admin app identity and launch URL.
-  // index.html defaults to the customer portal, so without this swap an admin
-  // bookmark can be installed as "Waves" with start_url "/". The html hook
-  // also lets portaled admin dialogs inherit the mobile form safeguards even
-  // though they render outside .admin-shell-v2.
-  useEffect(() => {
-    if (typeof document === "undefined") return undefined;
-    const root = document.documentElement;
-    const manifest = document.querySelector('link[rel="manifest"]');
-    const appTitle = document.querySelector(
-      'meta[name="apple-mobile-web-app-title"]',
-    );
-    const description = document.querySelector('meta[name="description"]');
-    const previous = {
-      manifest: manifest?.getAttribute("href"),
-      appTitle: appTitle?.getAttribute("content"),
-      description: description?.getAttribute("content"),
-      documentTitle: document.title,
-    };
-
-    root.classList.add("admin-app");
-    manifest?.setAttribute("href", "/admin-manifest.json");
-    appTitle?.setAttribute("content", "Waves Admin");
-    description?.setAttribute(
-      "content",
-      "Waves Pest Control admin portal — dispatch, customers, billing, and reports.",
-    );
-    document.title = "Waves Admin";
-
-    return () => {
-      root.classList.remove("admin-app");
-      if (manifest && previous.manifest != null)
-        manifest.setAttribute("href", previous.manifest);
-      if (appTitle && previous.appTitle != null)
-        appTitle.setAttribute("content", previous.appTitle);
-      if (description && previous.description != null)
-        description.setAttribute("content", previous.description);
-      document.title = previous.documentTitle;
-    };
-  }, []);
+  // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
+  // is covered. The layout only owns chrome geometry.
 
   // Restore route if we just returned from WavesPay (iOS often evicts the
   // tab during the hand-off, reloading the app to its default route).
@@ -109,7 +72,6 @@ export default function AdminLayoutV2() {
     // the errors-only lint config — a disable directive for it is itself an
     // unknown-rule error).
   }, []);
-  const paletteRef = useRef(null);
 
   useEffect(() => {
     const token = localStorage.getItem("waves_admin_token");
@@ -216,7 +178,7 @@ export default function AdminLayoutV2() {
         <div
           style={{
             position: "fixed",
-            top: 0,
+            top: "var(--vv-offset-top, 0px)",
             left: 0,
             right: 0,
             height: "calc(52px + env(safe-area-inset-top))",
@@ -309,8 +271,13 @@ export default function AdminLayoutV2() {
           flexShrink: 0,
           position: "fixed",
           left: 0,
-          top: 0,
-          bottom: 0,
+          top: isMobile ? "var(--vv-offset-top, 0px)" : 0,
+          bottom: isMobile ? "var(--keyboard-inset, 0px)" : 0,
+          paddingTop: isMobile ? "env(safe-area-inset-top, 0px)" : undefined,
+          paddingLeft: isMobile ? "env(safe-area-inset-left, 0px)" : undefined,
+          paddingBottom: isMobile
+            ? "env(safe-area-inset-bottom, 0px)"
+            : undefined,
           zIndex: 100,
           overflowY: "auto",
           transform: sidebarVisible ? "translateX(0)" : "translateX(-100%)",
@@ -640,7 +607,7 @@ export default function AdminLayoutV2() {
           aria-label="Primary"
           style={{
             position: "fixed",
-            bottom: 0,
+            bottom: "var(--keyboard-inset, 0px)",
             left: 0,
             right: 0,
             background: "var(--surface-primary)",
@@ -693,11 +660,10 @@ export default function AdminLayoutV2() {
                   />
                   <span
                     style={{
-                      fontSize: 10,
-                      lineHeight: 1,
-                      letterSpacing: "0.08em",
+                      fontSize: 12,
+                      lineHeight: 1.1,
+                      letterSpacing: "0.02em",
                       fontWeight: 500,
-                      textTransform: "uppercase",
                     }}
                   >
                     {label}

@@ -728,6 +728,13 @@ function validateContent(text, platform) {
     issues.push('Contains pricing claim — link to /pest-control-calculator/ instead');
   }
   issues.push(...complianceLanguageIssues(text));
+  // Affiliate links are web-only: validateContent is the last check on
+  // every FINAL platform text (generated or custom), so generated copy that
+  // introduces an affiliate/tracking URL after input sanitization still
+  // cannot post (Codex r6 P1).
+  if (require('./content/content-guardrails').containsAffiliateMaterial(text)) {
+    issues.push('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: contains affiliate material — affiliate links publish on the blog only');
+  }
 
   const phones = text.match(PHONE_PATTERN) || [];
   for (const phone of phones) {
@@ -1325,16 +1332,41 @@ async function uploadVideoToS3(buffer, filename) {
 const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'blog_auto', 'content_agent']);
 async function blogHeroSocialImageUrl(link) {
   try {
-    const pageUrl = new URL(String(link || ''));
-    if (!/(^|\.)wavespestcontrol\.com$/i.test(pageUrl.hostname)) return null;
-    const pageRes = await fetch(pageUrl.href, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    if (!pageRes.ok) return null;
+    // SSRF guard (same discipline as the GBP watermark fetch and the LinkedIn
+    // thumbnail upload): both server-side hops — the page and the og:image it
+    // names — must be on our own hosts (isTrustedImageHost: hub + social CDN),
+    // and redirects are refused outright so a trusted host can never 302 the
+    // server to a private/metadata address. A page whose og:image points
+    // anywhere else simply gets no hero (card fallback), never a fetch.
+    let pageUrl = new URL(String(link || ''));
+    if (!isTrustedImageHost(pageUrl.href)) return null;
+    // Blog-share lanes pass normalizeUrl'd links (trailing slash stripped) and
+    // the hub 301s those to its canonical slash form — allow exactly ONE
+    // redirect hop, and only to a trusted host, validated before it is
+    // fetched; a second hop or an off-host Location is a miss (no hero).
+    let pageRes = await fetch(pageUrl.href, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    if ([301, 302, 307, 308].includes(pageRes.status)) {
+      // Release the redirect body before anything else — an unconsumed manual
+      // redirect pins its undici connection (same discipline as linkIsLive).
+      if (pageRes.body && typeof pageRes.body.cancel === 'function') await pageRes.body.cancel().catch(() => {});
+      const location = pageRes.headers?.get?.('location');
+      const hop = location ? new URL(location, pageUrl) : null;
+      if (!hop || !isTrustedImageHost(hop.href)) return null;
+      pageUrl = hop;
+      pageRes = await fetch(pageUrl.href, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    }
+    if (pageRes.status !== 200) return null;
     const html = await pageRes.text();
     const match = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     if (!match) return null;
-    const imgRes = await fetch(new URL(match[1], pageUrl).href, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    if (!imgRes.ok) return null;
+    const imageUrl = new URL(match[1], pageUrl).href;
+    if (!isTrustedImageHost(imageUrl)) {
+      logger.warn(`[social] blog hero og:image is off-host for ${link} — no hero`);
+      return null;
+    }
+    const imgRes = await fetch(imageUrl, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    if (imgRes.status !== 200) return null;
     const buffer = Buffer.from(await imgRes.arrayBuffer());
     if (!buffer.length) return null;
     const slug = pageUrl.pathname.replace(/\/+$/, '').split('/').pop() || 'post';
@@ -1694,7 +1726,9 @@ async function postToGBP(locationId, summary, link, imageUrl, opts = {}) {
       locationId
     );
     logger.info(`[social] GBP post created for ${loc.name}`);
-    return { platform: 'gbp', location: locationId, success: true, postId: result.name };
+    // imageUrl only when media was attached — the text-only retry in
+    // publishToAll passes null and must read as "no image shipped".
+    return { platform: 'gbp', location: locationId, success: true, postId: result.name, ...(mediaUrl ? { imageUrl: mediaUrl } : {}) };
   } catch (err) {
     logger.error(`[social] GBP post failed for ${loc.name}: ${err.message}`);
     return { platform: 'gbp', location: locationId, success: false, error: err.message };
@@ -2024,6 +2058,49 @@ const SocialMediaService = {
   },
 
   /**
+   * Affiliate-material strip for the social channel (owner monetization
+   * pilot 2026-08-31: affiliate links are web-only). Pure; consumed by
+   * publishToAll (the convergence point for every share lane). A link that
+   * is itself affiliate material refuses the whole share; affiliate
+   * material in a copy field drops just that field.
+   */
+  sanitizeShareContent({ title, description, customContent, link }) {
+    const { containsAffiliateMaterial } = require('./content/content-guardrails');
+    if (containsAffiliateMaterial(link)) {
+      logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: refused share — link is affiliate material (${String(link).slice(0, 120)})`);
+      return { refused: true };
+    }
+    const drop = (field) => logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: dropped ${field} from share of ${String(link).slice(0, 120)}`);
+    const out = { refused: false, title, description, customContent };
+    for (const field of ['title', 'description']) {
+      if (out[field] && containsAffiliateMaterial(out[field])) { drop(field); out[field] = ''; }
+    }
+    // customContent is a per-platform caption map ({ facebook, gbp, … };
+    // gbp itself may be a nested { locationId: caption } map) or a single
+    // string — scan every string LEAF recursively, never a coerced object.
+    const scrub = (value, path) => {
+      if (typeof value === 'string') {
+        if (containsAffiliateMaterial(value)) { drop(path); return undefined; }
+        return value;
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const cleaned = {};
+        for (const [k, v] of Object.entries(value)) {
+          const kept = scrub(v, `${path}.${k}`);
+          if (kept !== undefined) cleaned[k] = kept;
+        }
+        return Object.keys(cleaned).length ? cleaned : undefined;
+      }
+      return value;
+    };
+    if (customContent) {
+      const kept = scrub(customContent, 'customContent');
+      out.customContent = kept === undefined ? null : kept;
+    }
+    return out;
+  },
+
+  /**
    * Publish content to all configured platforms.
    */
   // postId: update that existing social_media_posts row (a draft being approved
@@ -2036,6 +2113,17 @@ const SocialMediaService = {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
+    // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31):
+    // every share lane (RSS cron, poller post-merge, studio, manual) funnels
+    // through here, so this is the single strip point. A shared LINK that is
+    // itself affiliate material refuses the share outright; affiliate
+    // material in the copy fields is dropped field-by-field (the share goes
+    // out without it). Runs regardless of GATE_AFFILIATE_LINKS.
+    const stripped = this.sanitizeShareContent({ title, description, customContent, link });
+    if (stripped.refused) {
+      return { success: false, platforms: [{ platform: 'all', skipped: 'AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL' }] };
+    }
+    ({ title, description, customContent } = stripped);
     if (await isPausedByAdmin()) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] };
     }
@@ -2636,6 +2724,15 @@ const SocialMediaService = {
   async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true, complianceJudged = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { platform, success: false, error: 'Automation is disabled' };
+    }
+    // Same web-only affiliate guard as publishToAll: the admin
+    // publish-single route and the tech-social flow call this directly, so
+    // the strip must live at this lower level too.
+    {
+      const stripped = this.sanitizeShareContent({ title, description, customContent: content, link });
+      if (stripped.refused) return { platform, success: false, error: 'AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL' };
+      ({ title, description } = stripped);
+      content = stripped.customContent;
     }
     if (await isPausedByAdmin()) {
       return { platform, success: false, error: 'Automation is paused' };

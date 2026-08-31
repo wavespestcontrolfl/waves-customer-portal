@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
 const POLICY_KEY = 'review_incentives.policy';
 const DEFAULT_POLICY = {
@@ -331,7 +331,7 @@ async function insertPayout(attrs, conn = db, { syncLockHeld = false } = {}) {
       moneyBoundary,
       { recordHealth: false },
     );
-    if (outcome?.skipped && (outcome.reason === 'lease_held' || outcome.reason === 'no_connection')) {
+    if (wasLockSkipped(outcome)) {
       return { created: false, skipped: true, reason: 'sync_in_progress' };
     }
     return outcome;
@@ -1274,8 +1274,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
 
   return result;
   }, { recordHealth: false });
-  if (attributionOutcome?.skipped
-    && (attributionOutcome.reason === 'lease_held' || attributionOutcome.reason === 'no_connection')) {
+  if (wasLockSkipped(attributionOutcome)) {
     throw operationalError('Review sync is in progress for this location — retry the attribution in a moment', 409, 'review_sync_in_progress');
   }
 

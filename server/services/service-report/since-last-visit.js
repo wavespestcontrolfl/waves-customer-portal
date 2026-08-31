@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { reserviceReportCopyGateOn } = require('./reservice-report');
 
 function pressureValue(value) {
   const n = customerVisiblePressureIndex(value);
@@ -20,7 +21,7 @@ function readableActivityLine(currentFindings = []) {
   return String(current.title || '').trim();
 }
 
-async function buildSinceLastVisitContext({ record, currentPressureIndexOverride, knex = db, strict = false } = {}) {
+async function buildSinceLastVisitContext({ record, currentPressureIndexOverride, knex = db, strict = false, excludeCallbacks = false } = {}) {
   if (!record?.id || !record.customer_id) return undefined;
   const serviceLine = record.service_line || detectServiceLine(record.service_type);
   let priorQuery = knex('service_records')
@@ -47,6 +48,19 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
             .where('started_at', '<', record.started_at);
         });
       }
+    });
+  }
+  // Owner-delegated ruling 2026-08-30 (#3617 follow-up): a callback taken
+  // days after treatment at peak activity is a misleading baseline — the
+  // next regular visit's "since last visit" delta would read as a huge
+  // improvement. OPT-IN + gate-guarded: only the CUSTOMER-report path
+  // passes excludeCallbacks (dynamic-context) — the technician pre-visit
+  // brief must keep comparing against the true preceding visit, callback
+  // included (codex #3623 r2), and pest-pressure SCORING elsewhere still
+  // counts them (review-window.js — deliberate, untouched).
+  if (excludeCallbacks && reserviceReportCopyGateOn()) {
+    priorQuery = priorQuery.where(function notCallback() {
+      this.where('is_callback', false).orWhereNull('is_callback');
     });
   }
   // strict callers (pre-visit brief) must see an outage as an error, not

@@ -293,6 +293,13 @@ finding and warns on P1. Reviewers must return JSON matching
   (owner rule re-affirmed 2026-07-23). Invoice/prepay surfaces and
   commercial proposals are exempt; true monthly-billed legacy plans keep
   "/mo". No service is ever presented as a flat monthly spread.
+  A second owner-dictated shape (2026-08-30, iterated live on the rendered
+  page): the estimate payment section's breakdown boxes are prepay/invoice
+  previews (exempt class) — the prepay box shows the 12-month plan's LIST
+  annual as a line item (never labeled a total; the exact charge is quoted
+  at confirm), and the boxes carry no per-option timing sentence except the
+  card-lane Auto Pay note and the in-lane charged-when-you-approve
+  disclosure — the owner explicitly removed the rest.
   One owner-dictated exception (2026-08-13, iterated live on the rendered
   page): the service-report cross-sell card HEADLINE shows the bare
   per-application amount with no unit ("… protected for just $114!") —
@@ -450,7 +457,12 @@ finding and warns on P1. Reviewers must return JSON matching
 - **New `@waves/*` CJS workspace packages** must join
   `optimizeDeps.include` + `build.commonjsOptions.include` in
   `client/vite.config.js`, or linked packages fail Rollup named-export
-  analysis in prod builds.
+  analysis in prod builds. **Exception — SERVER-ONLY packages** (ones that
+  require Node built-ins such as `node:fs`, e.g. `@waves/affiliate-registry`;
+  `@waves/blog-schema` is data-only): they are never imported from `client/`
+  and must NOT be added to the Vite lists — pre-bundling a Node-API consumer
+  for the browser breaks the build. Mark them SERVER-ONLY in their
+  `package.json` description.
 - **Company name in written copy** is "Waves Pest Control" — never
   "Waves Lawn & Pest". The mascot logo artwork carrying the old name is
   current and intentional; do not flag it.

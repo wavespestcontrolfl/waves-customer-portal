@@ -58,6 +58,8 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+import VisitBriefPanel from './VisitBriefPanel';
+import { fmtMoney, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
@@ -188,6 +190,8 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
+import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
 
@@ -223,6 +227,11 @@ export default function TechHomePage() {
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
   const [rainChance, setRainChance] = useState(null);
+  // Visit Brief accordion: one stop expanded at a time (keyed by the
+  // stop's primary service id) + a per-stop session cache of the two
+  // detail fetches (estimate-source + visit-brief).
+  const [expandedStopId, setExpandedStopId] = useState(null);
+  const [stopDetail, setStopDetail] = useState({});
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
@@ -374,8 +383,88 @@ export default function TechHomePage() {
   // pending one, not the dead row. on_site / en_route still show — they
   // ARE the current focus, the En Route CTA is disabled there because the
   // server's PRE_EN_ROUTE gate rejects those.
-  const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
-  const nextStop = myServices.find((s) => !TERMINAL_STATUSES.has(s.status));
+  // Visit groups (visit-group-scope.md §3): rows sharing a visit are ONE
+  // stop — one card, one En Route / On Site tap (the server fans out to the
+  // siblings). Ungrouped rows are their own stop, exactly as before.
+  const stops = groupServicesIntoStops(myServices);
+  const nextVisitStop = nextStopOf(stops);
+  const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
+  const nextStopSummary = stopSummaryLabel(nextVisitStop);
+  // Grouped stop: window = union of members; alerts = every member's, deduped.
+  const nextStopWindowLabel = nextVisitStop && nextVisitStop.isVisit
+    ? serviceWindowLabel(stopWindow(nextVisitStop))
+    : serviceWindowLabel(nextStop);
+  const nextStopAlerts = nextVisitStop ? stopPropertyAlerts(nextVisitStop) : [];
+  // A grouped stop whose live members are not all at the primary's status
+  // (a fan-out that did not finish — codex #3603 r2): offer Sync Stop,
+  // which re-runs the primary's own transition; the server's fan-out is
+  // idempotent, so the lagging siblings catch up. Divergence-driven, so it
+  // survives reloads and does not depend on having seen the 409.
+  const stopOutOfSync = Boolean(
+    nextVisitStop && nextVisitStop.isVisit && nextStop
+      && nextVisitStop.services.some((s) => ['en_route', 'on_site'].includes(s.status))
+      && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status)
+        && (s.status !== nextStop.status
+          // Status matches but the customer-visible tracker lags (a sibling
+          // tracker write failed after the status commit — codex r3).
+          || (s.trackState && nextStop.trackState && s.trackState !== nextStop.trackState))),
+  );
+  // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
+  // that an admin/GPS signal already put on site pulls the whole stop to
+  // on_site; the server's on-site path accepts an en_route primary.
+  const handleSyncStop = () => {
+    if (!nextStop || !nextVisitStop) return;
+    const live = nextVisitStop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
+    const target = live.some((s) => s.status === 'on_site') ? 'on_site'
+      : live.some((s) => s.status === 'en_route') ? 'en_route' : null;
+    if (target === 'on_site') handleOnSite(nextStop.id);
+    else if (target === 'en_route') handleEnRoute(nextStop.id);
+  };
+  // Visit Brief detail loader — one estimate-source + one visit-brief
+  // fetch per MEMBER service of the stop (grouped siblings keep their own
+  // line-scoped history and possibly separate estimate provenance),
+  // cached for the session under the stop's primary id. Partial success
+  // is fine (each section fails soft); only everything failing renders
+  // the Retry row. A 404 (ownership filter / older stop) reads as
+  // "nothing linked", not an error.
+  const loadStopDetail = useCallback(async (stop) => {
+    const key = stop.primary.id;
+    // A refresh keeps the previous data visible while it fetches — codes
+    // and money must not flicker away on reopen.
+    setStopDetail((d) => ({
+      ...d,
+      [key]: { status: 'loading', byService: d[key]?.byService || {} },
+    }));
+    const soft = (path) => techRequest(path).catch((err) => {
+      if (/not found/i.test(err?.message || '')) return null;
+      throw err;
+    });
+    const results = await Promise.allSettled(stop.services.flatMap((s) => [
+      soft(`/admin/schedule/${s.id}/estimate-source`).then((v) => ['estimate', s.id, v]),
+      soft(`/admin/schedule/${s.id}/visit-brief`).then((v) => ['brief', s.id, v]),
+    ]));
+    const byService = {};
+    let fulfilled = 0;
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      fulfilled += 1;
+      const [kind, id, value] = r.value;
+      byService[id] = { ...byService[id], [kind]: value };
+    }
+    setStopDetail((d) => ({
+      ...d,
+      [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
+    }));
+  }, []);
+  const toggleStop = useCallback((stop) => {
+    const id = stop.primary.id;
+    const expanding = expandedStopId !== id;
+    setExpandedStopId(expanding ? id : null);
+    // Refetch on EVERY expand (not just the first): a gate code change, a
+    // settled payment, or a billing-posture change mid-day must show on
+    // reopen — the previous data stays rendered while the refresh loads.
+    if (expanding) loadStopDetail(stop);
+  }, [expandedStopId, loadStopDetail]);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -583,12 +672,23 @@ export default function TechHomePage() {
               <p style={{ fontSize: 12, color: DARK.muted, margin: '4px 0 0' }}>
                 {nextStop.address || nextStop.service_type || 'Service'}
               </p>
+              {nextStopSummary && (
+                <div data-testid="visit-stop-summary" style={{ marginTop: 6 }}>
+                  <p style={{ fontSize: 12, fontWeight: 600, color: DARK.teal, margin: 0 }}>{nextStopSummary}</p>
+                  {nextVisitStop.services.map((s) => (
+                    <p key={s.id} style={{ fontSize: 12, color: DARK.text, margin: '2px 0 0' }}>
+                      • {s.serviceType || s.service_type || 'Service'}
+                      {TERMINAL_STATUSES_VISIT.has(s.status) ? <span style={{ color: DARK.muted }}> · {String(s.status).replace(/_/g, ' ')}</span> : null}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
             <span style={{
               fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
               background: '#0ea5e920', color: DARK.teal,
             }}>
-              {serviceWindowLabel(nextStop) || 'Pending'}
+              {nextStopWindowLabel || 'Pending'}
             </span>
           </div>
           {/* Property alerts — the server compiles gate codes, pets, chemical
@@ -597,9 +697,9 @@ export default function TechHomePage() {
               dispatch board chips show; without this the tech had to ask the
               Intelligence Bar for the gate code. Objects here ({type, text});
               tolerate plain strings for the dispatch-shaped payload. */}
-          {Array.isArray(nextStop.propertyAlerts) && nextStop.propertyAlerts.length > 0 && (
+          {nextStopAlerts.length > 0 && (
             <div style={{ marginBottom: 12 }}>
-              {nextStop.propertyAlerts.map((a, i) => {
+              {nextStopAlerts.map((a, i) => {
                 const text = typeof a === 'string' ? a : a?.text;
                 if (!text) return null;
                 const isChemical = a?.type === 'chemical';
@@ -643,6 +743,15 @@ export default function TechHomePage() {
                 primary
                 disabled={onSiteState.pendingId === nextStop.id}
                 onClick={() => handleOnSite(nextStop.id)}
+              />
+            )}
+            {stopOutOfSync && (
+              <ActionBtn
+                label={(onSiteState.pendingId || enRouteState.pendingId) === nextStop.id ? 'Syncing…' : 'Sync Stop'}
+                icon="🔁"
+                primary
+                disabled={Boolean(onSiteState.pendingId || enRouteState.pendingId)}
+                onClick={handleSyncStop}
               />
             )}
           </div>
@@ -694,21 +803,28 @@ export default function TechHomePage() {
             fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
           }}>Today's Services</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {myServices.map((s) => (
-              <ServiceRow
-                key={s.id}
-                service={s}
-                onProject={() => (
+            {/* One row per STOP (visit-group siblings collapse — same
+                grouping as the Next Stop card); tap expands the Visit
+                Brief with the per-service action buttons inside. */}
+            {stops.map((stop) => (
+              <StopRow
+                key={stop.key}
+                stop={stop}
+                expanded={expandedStopId === stop.primary.id}
+                detail={stopDetail[stop.primary.id]}
+                onToggle={() => toggleStop(stop)}
+                onRetryDetail={() => loadStopDetail(stop)}
+                onProject={(s) => (
                   isTypedFindingsService(s)
                     ? openTypedCompletion(s)
                     : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
                 )}
-                onPhotos={() => setPhotoTarget({
+                onPhotos={(s) => setPhotoTarget({
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
                 })}
-                onZone={() => setZoneTarget(s)}
-                onLead={() => setLeadTarget(s)}
+                onZone={(s) => setZoneTarget(s)}
+                onLead={(s) => setLeadTarget(s)}
               />
             ))}
           </div>
@@ -1108,76 +1224,105 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
+// One route stop (visit-group siblings collapse into one row). Collapsed:
+// name, status·window, service label + short address, exception chips
+// (access alerts / collect-needed). Tap anywhere expands the Visit Brief
+// — the per-service action buttons (the old ServiceRow's) live inside it.
+function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead }) {
+  const service = stop.primary;
   const status = service.status || 'pending';
-  const statusColor = {
+  // A grouped transition that only partially fanned out leaves live
+  // members on DIFFERENT statuses — labeling the whole stop with the
+  // primary's would hide the divergence, so the row says "mixed" (each
+  // member's own status shows in the expanded Actions rows).
+  const liveStatuses = new Set(
+    stop.services
+      .filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status))
+      .map((s) => s.status || 'pending'),
+  );
+  const mixedStatus = liveStatuses.size > 1;
+  const statusColor = mixedStatus ? '#f59e0b' : {
     completed: '#22c55e',
     on_site: DARK.teal,
     en_route: '#f59e0b',
     skipped: '#94a3b8',
   }[status] || DARK.muted;
+  const statusLabel = mixedStatus ? 'mixed' : status.replace(/_/g, ' ');
+  const windowLabel = stop.isVisit ? serviceWindowLabel(stopWindow(stop)) : serviceWindowLabel(service);
+  const indicator = stopAccessIndicator(stopPropertyAlerts(stop));
+  // Aggregated across every member service — grouped siblings keep
+  // separate invoices, so a prepaid primary must not hide a sibling's
+  // amount due.
+  const money = stopCollectSummary(stop);
+  const street = shortAddress(service.address);
+  const serviceLabel = stopSummaryLabel(stop)
+    || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
+  const chipStyle = (color) => ({
+    fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
+    border: `1px solid ${color}`, color, background: `${color}1a`,
+  });
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
       background: DARK.card, border: `1px solid ${DARK.border}`,
       borderRadius: 10, padding: '10px 12px',
     }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <p style={{
-          margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
-          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-        }}>
-          {service.customer_name || service.customerName || 'Customer'}
-        </p>
-        <p style={{ margin: '2px 0 0', fontSize: 11, color: statusColor, textTransform: 'capitalize' }}>
-          {status.replace(/_/g, ' ')}
-          {serviceWindowLabel(service) && <span style={{ color: DARK.muted }}> · {serviceWindowLabel(service)}</span>}
-        </p>
-      </div>
-      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <button onClick={onProject} style={{
-          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: DARK.teal, cursor: 'pointer',
-        }}>
-          {/* A visit with an existing linked report continues it (in-place
-              editor) instead of creating a duplicate; a sent/closed report
-              or completed visit is terminal (openProjectOrContinue no-ops). */}
-          {service.linkedProject?.status === 'sent'
-            ? '🗂️ Sent'
-            : service.linkedProject?.status === 'closed' || service.status === 'completed'
-              ? '🗂️ Completed'
-              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
-        </button>
-        <button onClick={onPhotos} style={{
-          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: DARK.teal, cursor: 'pointer',
-        }}>
-          📷 Photos
-        </button>
-        {/* Hidden when the schedule feed marks the service trace-ineligible
-            (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
-            inspection stops, so the tracer has nothing true to capture.
-            Absent flag (older payloads, gate off) keeps the button — the
-            write route enforces the same registry either way. */}
-        {service.traceEligible !== false && (
-          <button onClick={onZone} aria-label="Trace treatment zone" style={{
-            padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-            border: `1px solid ${DARK.border}`, background: 'transparent',
-            color: DARK.teal, cursor: 'pointer',
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+        }}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 44 }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+            <p style={{
+              margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
+              {service.customer_name || service.customerName || 'Customer'}
+            </p>
+            <span style={{ fontSize: 12, fontWeight: 600, color: statusColor, textTransform: 'capitalize', flexShrink: 0 }}>
+              {statusLabel}
+              {windowLabel && <span style={{ color: DARK.muted, textTransform: 'none' }}> · {windowLabel}</span>}
+            </span>
+          </div>
+          <p style={{
+            margin: '3px 0 0', fontSize: 14, color: DARK.muted,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>
-            🛰️ Zone
-          </button>
-        )}
-        <button onClick={onLead} aria-label="Flag opportunity" style={{
-          padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: '#f59e0b', cursor: 'pointer',
-        }}>
-          🚩
-        </button>
+            {serviceLabel}{street ? ` · ${street}` : ''}
+          </p>
+          {(indicator.hasAlerts || money.collectNeeded) && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+              {indicator.hasAlerts && (
+                <span style={chipStyle(indicator.hasChemical ? '#ef4444' : DARK.teal)}>
+                  🔑 {indicator.count} alert{indicator.count === 1 ? '' : 's'}
+                </span>
+              )}
+              {money.collectNeeded && (
+                <span style={chipStyle('#f59e0b')}>💵 Collect {fmtMoney(money.amount)}</span>
+              )}
+            </div>
+          )}
+        </div>
+        <span aria-hidden="true" style={{ color: DARK.muted, fontSize: 14, flexShrink: 0 }}>
+          {expanded ? '▾' : '▸'}
+        </span>
       </div>
+      {expanded && (
+        <VisitBriefPanel
+          stop={stop}
+          detail={detail}
+          onRetry={onRetryDetail}
+          onPhotos={onPhotos}
+          onProject={onProject}
+          onZone={onZone}
+          onLead={onLead}
+        />
+      )}
     </div>
   );
 }

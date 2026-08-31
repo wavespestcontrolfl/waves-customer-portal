@@ -54,6 +54,71 @@ describe('buildPestReportV2 — protection status mapping', () => {
   });
 });
 
+describe('buildPestReportV2 — callback defense suppression (owner 2026-08-30)', () => {
+  it('suppressDefense drops the schematic rows but keeps the shell', () => {
+    const out = buildPestReportV2({ premiumExperience: premium(), suppressDefense: true });
+    expect(out.defense).toBeNull();
+    // Status/summary/receipt survive — R2 keeps Pest V2 on callbacks.
+    expect(out.status).toBeTruthy();
+    expect(out.pressureReceipt).toBeTruthy();
+  });
+
+  it('defense-only intelligence with suppressDefense composes no empty V2 shell', () => {
+    const out = buildPestReportV2({
+      premiumExperience: premium({
+        primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null,
+      }),
+      suppressDefense: true,
+    });
+    expect(out).toBeNull();
+  });
+
+  it('sparse callback keeps the shell only for content the section MOUNTS (codex P1 r1 + P2 r4)', () => {
+    // Defense + receipt only — the receipt is NOT mounted by the composed
+    // section, so keeping a shell for it would render an empty dashboard
+    // that also suppresses the legacy summary/coverage. No shell.
+    const receiptOnly = buildPestReportV2({
+      premiumExperience: premium({ primaryMove: null, bugFiles: [], weatherCall: null }),
+      suppressDefense: true,
+    });
+    expect(receiptOnly).toBeNull();
+
+    // Bug files and the forecast are unmounted too (codex P2 r5) — alone
+    // they must not keep a suppressed callback's shell alive either.
+    const bugFilesOnly = buildPestReportV2({
+      premiumExperience: premium({ primaryMove: null, pressureReceipt: null, weatherCall: null }),
+      suppressDefense: true,
+      forecast: { monthKey: '2026-08', pests: [] },
+    });
+    expect(bugFilesOnly).toBeNull();
+
+    const concernOnly = buildPestReportV2({
+      premiumExperience: premium({
+        primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null,
+      }),
+      suppressDefense: true,
+      customerConcern: 'Ants keep showing up around the kitchen window.',
+    });
+    expect(concernOnly).not.toBeNull();
+    expect(concernOnly.defense).toBeNull();
+    expect(concernOnly.customerConcern).toBeTruthy();
+
+    // A REGULAR visit with the same sparse content still composes no shell —
+    // the widened predicate is scoped to the suppression.
+    const regularSparse = buildPestReportV2({
+      premiumExperience: premium({
+        propertyDefenseStatus: null, primaryMove: null, bugFiles: [], weatherCall: null,
+      }),
+    });
+    expect(regularSparse).toBeNull();
+  });
+
+  it('default (regular visits) keeps the defense rows', () => {
+    const out = buildPestReportV2({ premiumExperience: premium() });
+    expect(out.defense?.items?.length).toBeGreaterThan(0);
+  });
+});
+
 describe('buildPestReportV2 — no internal zone letters reach the customer', () => {
   it('strips the leading "A · " zone letter from bug-file location', () => {
     const out = buildPestReportV2({ premiumExperience: premium() });
@@ -120,7 +185,29 @@ describe('buildPestReportV2 — supporting metric', () => {
 });
 
 describe('pestReportV2PdfSignature — PDF cache-key component', () => {
-  afterEach(() => { delete process.env.PEST_REPORT_V2; });
+  afterEach(() => { delete process.env.PEST_REPORT_V2; delete process.env.GATE_PEST_TRACE_OR_NOTHING; });
+
+  test('trace-or-nothing gate appends -ton1 to every pest-line key (cached PDFs re-render once)', () => {
+    process.env.PEST_REPORT_V2 = 'true';
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-ton1');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
+    })).toBe('-roachtyped2-ton1');
+    // Non-pest lines stay untouched in every gate state.
+    expect(pestReportV2PdfSignature({ service_line: 'lawn' })).toBe('');
+    delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c');
+  });
+
+  test('-ton1 keys pest PDFs even with PEST_REPORT_V2 off — the suppression is V2-independent (codex P1)', () => {
+    delete process.env.PEST_REPORT_V2;
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1');
+    delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
+  });
 
   it('is empty when the gate is off, regardless of line', () => {
     delete process.env.PEST_REPORT_V2;

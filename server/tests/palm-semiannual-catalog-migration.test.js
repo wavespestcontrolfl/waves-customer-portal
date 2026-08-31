@@ -174,7 +174,9 @@ describe('20260811000010 semiannual palm injection catalog row', () => {
     expect(converterSrc).toContain("...Object.values(LAWN_CADENCE_CATALOG_KEYS),");
     expect(converterSrc).toContain("'palm_injection_semiannual',\n]);");
     // …and BOTH catalog-lookup duration copies honor it.
-    expect((converterSrc.match(/default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS\.has\(unit\.catalogServiceKey\)/g) || []).length).toBe(2);
+    // identityOnlyCatalogKey() wraps the set (plus the gate-scoped T&S keys —
+    // GATE_SEPARATE_COMBO_VISITS); the two duration-copy sites consult it.
+    expect((converterSrc.match(/default_duration_minutes && !identityOnlyCatalogKey\(unit\.catalogServiceKey\)/g) || []).length).toBe(2);
     // No unconditional duration copy remains at either lookup.
     expect(converterSrc).not.toMatch(/if \(catalogRow\.default_duration_minutes\) \{?\s*\n?\s*(svc\.estimatedDurationMinutes|standaloneRow\.estimated_duration_minutes)/);
   });

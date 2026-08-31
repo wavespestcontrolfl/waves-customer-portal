@@ -1530,6 +1530,23 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
+  // Lawn add-ons priced from the DERIVED turf area inherit the lawn line's
+  // review contract: a LOW/field-verify turf basis is a guess, and these
+  // pricers are called directly so priceLawnCare's gate never runs for them
+  // (GH codex P1). An explicitly entered area is exact and stays exempt.
+  const turfDerivedNeedsReview = String(property.turfConfidence || '').toUpperCase() === 'LOW'
+    || (Array.isArray(property.turfFlags) && property.turfFlags.includes('FIELD_VERIFY_TURF_SQFT'));
+  const stampTurfReview = (line, usedDerivedArea) => {
+    if (!turfDerivedNeedsReview || !usedDerivedArea) return line;
+    line.requiresManualReview = true;
+    line.manualReviewReasons = Array.from(new Set([
+      ...(line.manualReviewReasons || []),
+      'low_confidence_turf_requires_field_verification',
+    ]));
+    line.requiresCustomQuote = true;
+    if (!line.customQuoteReason) line.customQuoteReason = 'low_confidence_turf_requires_field_verification';
+    return line;
+  };
   if (services.topDressing && !useCommercialManualQuote(services.topDressing, 'lawn_care')) {
     const topDressingOptions = serviceOptions(services.topDressing);
     const explicitArea = Math.max(0, Number(topDressingOptions.lawnSqFt) || 0);
@@ -1546,7 +1563,7 @@ function generateEstimate(input) {
     if (explicitArea > 0) {
       result.detail = `Covers ${Math.round(explicitArea).toLocaleString()} sq ft`;
     }
-    lineItems.push(result);
+    lineItems.push(stampTurfReview(result, explicitArea <= 0));
   }
   if (services.dethatching && !useCommercialManualQuote(services.dethatching, 'lawn_care')) {
     const dethatchingOptions = serviceOptions(services.dethatching);
@@ -1569,7 +1586,9 @@ function generateEstimate(input) {
     );
     (result.manualReviewReasons || []).forEach(addManualReviewReason);
     (result.warnings || []).forEach(addRoutingWarning);
-    lineItems.push(result);
+    // Exemption requires a POSITIVE explicit area — a negative or zero entry
+    // is not an exact measurement (codex P1: negative was truthy-exempt).
+    lineItems.push(stampTurfReview(result, !(Number(dethatchingOptions.lawnSqFt) > 0)));
   }
   if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
     const result = pricePlugging(
@@ -1580,7 +1599,7 @@ function generateEstimate(input) {
         afterHours: services.plugging.afterHours || false,
       }
     );
-    lineItems.push(result);
+    lineItems.push(stampTurfReview(result, !(Number(services.plugging.area) > 0)));
   }
   // Commercial bypass only with a POSITIVE explicit point count (pre-audit of
   // the codex #3594 r4 pattern): priceFoamDrill defaults to 5 points when the

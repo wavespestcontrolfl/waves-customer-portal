@@ -51,6 +51,15 @@ async function buildRecapPayload(scheduledServiceId, { knex = db } = {}) {
   const service = await loadServiceRecordForPdf(rec.id, knex);
   if (!service) return null;
   if (!isPestRecapEligible(service)) return null;
+  // Callbacks are recap-ineligible under the re-service copy gate (codex
+  // P1 r3, owner 2026-08-30): the recap video is a routine-visit
+  // celebration script — "Barrier active around your home", "It's
+  // working", "What's next" — and its WhereWeProtected beat renders the
+  // schematic barrier the callback REPORT now suppresses. A complaint
+  // re-visit gets no recap until the dedicated re-service story (PR B)
+  // defines one. Same kill switch as the report-side suppression.
+  const { isCallbackRecord, reserviceReportCopyGateOn } = require('./reservice-report');
+  if (reserviceReportCopyGateOn() && isCallbackRecord(service)) return null;
 
   const token = await ensureReportToken(rec.id, knex);
   const data = await buildReportV1Data(service, token, knex);

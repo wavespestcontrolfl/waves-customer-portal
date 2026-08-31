@@ -11,7 +11,8 @@ export const Radio = forwardRef(function Radio(
       type="radio"
       id={id}
       className={cn(
-        'appearance-none w-4 h-4 rounded-full bg-white',
+        // u-touch-hit (tokens.css): 44px hit area on coarse pointers only.
+        'u-touch-hit appearance-none w-4 h-4 rounded-full bg-white',
         'border-hairline border-zinc-400',
         'checked:border-zinc-900',
         'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-1',

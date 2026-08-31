@@ -2210,6 +2210,7 @@ export default function EstimateToolViewV2({
     leadServiceInterest: serviceInterest,
     homeSqFt: "",
     stories: "1",
+    unitCount: "",
     lotSqFt: "",
     propertyType: "Single Family",
     isCommercial: "NO",
@@ -2954,9 +2955,17 @@ export default function EstimateToolViewV2({
         ...(key === "preslabVolume" && !f._preslabJobContextEdited
           ? { preslabJobContext: String(val || "NONE").toUpperCase() === "NONE" ? "standalone" : "builderBatch" }
           : {}),
-        ...(key === "address" ? { measuredTurfSf: "" } : {}),
+        // Typing a NEW address immediately invalidates the previous
+        // address's unit count — the save-before-lookup path could
+        // otherwise permanently verify A's count against B (codex P1 r7).
+        ...(key === "address" ? { measuredTurfSf: "", unitCount: "", _unitCountEdited: false } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
+        // The edit is BOUND to the address it was typed for — every
+        // address-replacement path (typed, autocomplete, customer select,
+        // incoming prefill) then disarms the save without each needing its
+        // own reset (pre-push codex P1 r7).
+        ...(key === "unitCount" ? { _unitCountEdited: true, _unitCountAddress: f.address } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
@@ -3313,6 +3322,47 @@ export default function EstimateToolViewV2({
       setVerifySaveState("error");
     }
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
+
+  // Unit-count corrections have their OWN save action (pre-push codex P0
+  // r5): the shared sqft/lot/stories save would also bless every populated
+  // lookup dimension as tech-verified — correcting a wrong count must not
+  // permanently verify whole-building sqft it rode in with. It also needs
+  // to exist when NO fieldVerify flag rendered the shared button (a
+  // confident-but-wrong listing count produces no flag).
+  const [unitSaveState, setUnitSaveState] = useState("");
+  useEffect(() => {
+    setUnitSaveState("");
+  }, [form.address, form.unitCount, form._unitCountAddress]);
+  const unitCountNumber = Number(form.unitCount);
+  const unitCountSavable =
+    form._unitCountEdited &&
+    form._unitCountAddress === form.address &&
+    String(form.unitCount || "").trim() !== "" &&
+    Number.isInteger(unitCountNumber) &&
+    unitCountNumber >= 1;
+  const saveVerifiedUnitCount = useCallback(async () => {
+    const n = Number(form.unitCount);
+    if (!form.address || form._unitCountAddress !== form.address || !Number.isInteger(n) || n < 1) return;
+    setUnitSaveState("saving");
+    try {
+      const r = await fetch("/api/admin/estimator/property-lookup/verify", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ address: form.address, fields: { unitCount: n } }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setUnitSaveState("saved");
+      // The current quote must not keep pricing off the OLD count's
+      // classification/dimensions (pre-push codex P1 r6) — re-run the
+      // lookup so the rebuilt profile (verified count folded in
+      // server-side) replaces the stale one. doLookup is a hoisted
+      // component-scope function; a refresh failure leaves the saved
+      // override intact and the operator can re-run Lookup manually.
+      try { await doLookup(); } catch { /* override saved; manual re-lookup */ }
+    } catch {
+      setUnitSaveState("error");
+    }
+  }, [form.address, form.unitCount, form._unitCountAddress]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
@@ -3768,6 +3818,12 @@ export default function EstimateToolViewV2({
           _footprintUnknownLookup: ep.footprintUnknown === true,
           _poolCageSizeEdited: false,
           _storiesEdited: false,
+          _unitCountEdited: false,
+          // Every lookup re-seeds the count for ITS address — a value typed
+          // for the previous address must never linger where an edit could
+          // verify it against the wrong parcel (pre-push codex P1 r5).
+          // The truthy-1 seed renders blank: it is "no signal", not a fact.
+          unitCount: Number(ep.unitCount) > 1 ? String(ep.unitCount) : "",
         };
         // With derivation suppressed nothing would refresh a previous
         // address's auto-derived footprint — clear it (manual entries keep
@@ -4934,6 +4990,7 @@ export default function EstimateToolViewV2({
       address: "",
       homeSqFt: "",
       stories: "1",
+      unitCount: "",
       lotSqFt: "",
       propertyType: "Single Family",
       isCommercial: "NO",
@@ -5741,6 +5798,7 @@ export default function EstimateToolViewV2({
                       homeSqFt: "",
                       lotSqFt: "",
                       stories: "1",
+                      unitCount: "",
                       propertyType: "Single Family",
                       isCommercial: "NO",
                       commercialSubtype: "",
@@ -6304,6 +6362,30 @@ export default function EstimateToolViewV2({
               </div>{" "}
               <FieldV2 label="Lot Sq Ft">
                 <InputV2 k="lotSqFt" type="number" placeholder="8000" />
+              </FieldV2>
+              <FieldV2 label="Units on parcel">
+                <InputV2 k="unitCount" type="number" min="1" max="2000" placeholder="1" />
+                <div className="mt-1 text-11 opacity-70">
+                  Whole-parcel total. Corrects a wrong lookup count (e.g. a
+                  single condo unit read as the whole building) when saved as
+                  verified.
+                </div>
+                {unitCountSavable && (
+                  <button
+                    type="button"
+                    onClick={saveVerifiedUnitCount}
+                    disabled={unitSaveState === "saving" || unitSaveState === "saved"}
+                    className="mt-1 text-12 underline text-zinc-900 disabled:no-underline disabled:text-zinc-500"
+                  >
+                    {unitSaveState === "saving"
+                      ? "Saving verified count…"
+                      : unitSaveState === "saved"
+                        ? "Verified count saved — future lookups will use it"
+                        : unitSaveState === "error"
+                          ? "Save failed — tap to retry"
+                          : "Save unit count as field-verified"}
+                  </button>
+                )}
               </FieldV2>
               {(form.svcTs || form.svcInjection) && (
                 <>

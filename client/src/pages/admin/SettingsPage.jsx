@@ -7,6 +7,7 @@ import {
   ChevronRight,
   DollarSign,
   KeyRound,
+  Link2,
   MapPinned,
   Plug,
   RotateCcw,
@@ -141,6 +142,7 @@ const VALID_TABS = [
   "integrations",
   "gates",
   "team",
+  "link-library",
   "service-reports",
   "blackout-days",
   "kpi-targets",
@@ -153,7 +155,7 @@ const VALID_TABS = [
 // Tab state still holds the LEAF key (one of VALID_TABS); these groups only drive
 // which parent button is active and which leaf the parent jumps to.
 const SETTINGS_TAB_GROUPS = [
-  { key: "general", label: "General", Icon: Building2, tabs: ["general", "team"] },
+  { key: "general", label: "General", Icon: Building2, tabs: ["general", "team", "link-library"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
   { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
@@ -165,6 +167,7 @@ const SETTINGS_TAB_GROUPS = [
 const SETTINGS_LEAF_META = {
   general: { label: "General", Icon: Building2 },
   team: { label: "Team", Icon: Users },
+  "link-library": { label: "Link Library", Icon: Link2 },
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Service Reports", Icon: MapPinned },
   "blackout-days": { label: "Blackout Days", Icon: CalendarOff },
@@ -272,7 +275,7 @@ export default function SettingsPage() {
   // hooks than during the previous render" (codex P1).
   useEffect(() => {
     if (user && user.role !== "admin"
-      && ["service-reports", "blackout-days", "kpi-targets", "integrations", "gates", "system"].includes(tab)) {
+      && ["service-reports", "blackout-days", "kpi-targets", "integrations", "gates", "system", "link-library"].includes(tab)) {
       selectTab("general");
     }
     // selectTab is stable; errors-only lint config has no exhaustive-deps.
@@ -304,7 +307,7 @@ export default function SettingsPage() {
   // Portal Usage. Integrations (its tab renders "Admin access required"),
   // Service Reports, Scheduling, KPI targets, feature gates, and System
   // are owner-only.
-  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "gates", "system", "service-reports", "blackout-days"];
+  const OWNER_ONLY_SETTINGS_LEAVES = ["kpi-targets", "gates", "system", "service-reports", "blackout-days", "link-library"];
   const visibleGroups = SETTINGS_TAB_GROUPS.filter(
     (g) => isAdminRole || !["service-reports", "scheduling", "integrations"].includes(g.key),
   ).map((g) => (
@@ -571,6 +574,7 @@ export default function SettingsPage() {
         </div>
       )}
       {/* ── INTEGRATIONS ── */}
+      {tab === "link-library" && <LinkLibraryTab />}
       {tab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
       {/* ── FEATURE GATES ── */}
       {tab === "gates" && (
@@ -1399,6 +1403,328 @@ function KpiTargetsSettingsTab({ canAdmin }) {
 // searches) — enforced server-side at the slot engine's date enumeration.
 // Admin manual scheduling stays possible on purpose.
 const WEEKDAY_CHIP_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// ── Link Library (Settings ▸ General ▸ Link Library) ──────────────────────
+// The SMS composer's Insert Link sheet reads from this library. Rows marked
+// Synced maintain themselves (website pages from the sitemap nightly, Google
+// review links from the office config); hand-added rows are managed here.
+const LINK_LIBRARY_CATEGORIES = [
+  ["reviews", "Reviews"],
+  ["booking", "Booking & quotes"],
+  ["app", "Waves app"],
+  ["website", "Website"],
+  ["social", "Social"],
+];
+const LINK_LIBRARY_CATEGORY_LABELS = Object.fromEntries(LINK_LIBRARY_CATEGORIES);
+
+function LinkLibraryTab() {
+  const [links, setLinks] = useState(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [loadErr, setLoadErr] = useState(null);
+  const [notice, setNotice] = useState(null); // { ok, text }
+  const [syncing, setSyncing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+  const [form, setForm] = useState({ name: "", url: "", category: "website", clause: "" });
+
+  const load = () => {
+    setLoadErr(null);
+    adminFetch("/admin/communications/link-library")
+      .then((d) => {
+        setLinks(Array.isArray(d.links) ? d.links : []);
+        setLastSyncedAt(d.lastSyncedAt || null);
+      })
+      .catch((e) => setLoadErr(e.message));
+  };
+  useEffect(load, []);
+
+  const handleSync = async (force = false) => {
+    // A sync that would delete more than the shrinkage cap is refused (a
+    // truncated sitemap must not erase the library). After a REAL site
+    // restructure the owner confirms once and re-runs with force.
+    if (
+      force &&
+      !window.confirm(
+        "The sitemap now has far fewer pages than the library. Force-sync and delete every stored page no longer in it?",
+      )
+    ) {
+      return;
+    }
+    setSyncing(true);
+    setNotice(null);
+    try {
+      const r = await adminFetch("/admin/communications/link-library/sync", {
+        method: "POST",
+        body: JSON.stringify(force ? { force: true } : {}),
+      });
+      setNotice({ ok: true, text: `Synced ${r.fetched} website pages — ${r.added} added, ${r.updated} renamed, ${r.removed} removed.` });
+      load();
+    } catch (e) {
+      const shrinkage = /implausible shrinkage/i.test(String(e.message || ""));
+      setNotice({ ok: false, text: e.message, ...(shrinkage ? { shrinkage: true } : {}) });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleAdd = async (e) => {
+    e.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setNotice(null);
+    try {
+      await adminFetch("/admin/communications/link-library", {
+        method: "POST",
+        body: JSON.stringify(form),
+      });
+      setNotice({ ok: true, text: `${form.name.trim()} added — it's now searchable in the composer.` });
+      setForm({ name: "", url: "", category: "website", clause: "" });
+      load();
+    } catch (err) {
+      setNotice({ ok: false, text: err.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRemove = async (row) => {
+    setNotice(null);
+    try {
+      await adminFetch(`/admin/communications/link-library/${row.id}`, { method: "DELETE" });
+      setNotice({ ok: true, text: `${row.name} removed.` });
+      load();
+    } catch (err) {
+      setNotice({ ok: false, text: err.message });
+    }
+  };
+
+  const all = links || [];
+  const sitemapCount = all.filter((l) => l.source === "sitemap").length;
+  const q = search.trim().toLowerCase();
+  const matches = (l) =>
+    !q ||
+    q.split(/\s+/).every((t) =>
+      `${l.name} ${l.url} ${l.keywords || ""} ${LINK_LIBRARY_CATEGORY_LABELS[l.category] || ""}`
+        .toLowerCase()
+        .includes(t),
+    );
+  // Without a search the ~600 sitemap rows stay collapsed behind their count;
+  // office + manual rows always list.
+  const visible = all.filter((l) => (q ? matches(l) : l.source !== "sitemap"));
+
+  const inputStyle = {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: `1px solid ${D.inputBorder}`,
+    fontSize: 14,
+    color: D.text,
+    background: D.white,
+    boxSizing: "border-box",
+  };
+  const chipStyle = (synced) => ({
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
+    padding: "3px 8px",
+    borderRadius: 6,
+    background: synced ? "#E8F4FC" : D.bg,
+    color: synced ? "#065A8C" : D.muted,
+    whiteSpace: "nowrap",
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>Link Library</div>
+          <button
+            type="button"
+            onClick={() => handleSync()}
+            disabled={syncing}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: `1px solid ${D.inputBorder}`,
+              background: D.white,
+              color: D.heading,
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: syncing ? "default" : "pointer",
+              opacity: syncing ? 0.6 : 1,
+            }}
+          >
+            {syncing ? "Syncing…" : "Sync website pages now"}
+          </button>
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginTop: 6, lineHeight: 1.5 }}>
+          Everything here is searchable from the Messages composer's Insert Link button. Synced rows
+          maintain themselves — website pages come from the wavespestcontrol.com sitemap nightly and
+          the Google review links from the office list. Add anything else below.
+        </div>
+        <div style={{ fontSize: 12, color: D.muted, marginTop: 8 }}>
+          {links === null && !loadErr ? "Loading…" : `${all.length} links (${sitemapCount} website pages)`}
+          {lastSyncedAt && ` · website pages last synced ${new Date(lastSyncedAt).toLocaleString()}`}
+        </div>
+        {loadErr && (
+          <div style={{ fontSize: 13, color: D.red, marginTop: 8 }}>
+            {loadErr}{" "}
+            <button
+              type="button"
+              onClick={load}
+              style={{ border: 0, background: "none", color: D.heading, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div style={{ fontSize: 13, color: notice.ok ? D.green : D.red, marginTop: 8 }}>
+            {notice.text}
+            {notice.shrinkage && (
+              <button
+                type="button"
+                onClick={() => handleSync(true)}
+                disabled={syncing}
+                style={{
+                  marginLeft: 10,
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  border: `1px solid ${D.inputBorder}`,
+                  background: D.white,
+                  color: D.red,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  cursor: syncing ? "default" : "pointer",
+                }}
+              >
+                Force full reconcile…
+              </button>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={`Search all ${all.length || ""} links — try 'termite', 'review', 'app'…`}
+          aria-label="Search links"
+          style={{ ...inputStyle, marginBottom: 12 }}
+        />
+        {!q && sitemapCount > 0 && (
+          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
+            Plus {sitemapCount} website pages synced from the sitemap — search to find one.
+          </div>
+        )}
+        <div>
+          {visible.map((row) => {
+            const synced = row.source !== "manual";
+            return (
+              <div
+                key={row.key || row.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "10px 0",
+                  borderBottom: `1px solid ${D.border}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{row.name}</div>
+                  <div style={{ fontSize: 12, color: D.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {String(row.url).replace(/^https?:\/\//, "")}
+                  </div>
+                </div>
+                <span style={chipStyle(synced)}>
+                  {synced ? "Synced" : LINK_LIBRARY_CATEGORY_LABELS[row.category] || row.category}
+                </span>
+                {!synced && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(row)}
+                    aria-label={`Remove ${row.name}`}
+                    style={{ border: 0, background: "none", color: D.muted, cursor: "pointer", fontSize: 14, padding: 4 }}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {links !== null && !visible.length && (
+            <div style={{ fontSize: 13, color: D.muted, padding: "10px 0" }}>
+              No links match &ldquo;{search.trim()}&rdquo;.
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 10 }}>Add a link</div>
+        <form onSubmit={handleAdd} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <input
+            type="text"
+            value={form.name}
+            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            placeholder="Name — e.g. Termite inspection video"
+            aria-label="Link name"
+            required
+            style={inputStyle}
+          />
+          <input
+            type="url"
+            value={form.url}
+            onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+            placeholder="https://…"
+            aria-label="Link URL"
+            required
+            style={inputStyle}
+          />
+          <select
+            value={form.category}
+            onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
+            aria-label="Category"
+            style={inputStyle}
+          >
+            {LINK_LIBRARY_CATEGORIES.map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={form.clause}
+            onChange={(e) => setForm((f) => ({ ...f, clause: e.target.value }))}
+            placeholder="Text before the link (optional) — e.g. Watch our termite video here"
+            aria-label="Message text before the link"
+            style={inputStyle}
+          />
+          <button
+            type="submit"
+            disabled={saving}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 8,
+              border: 0,
+              background: D.teal,
+              color: D.white,
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: saving ? "default" : "pointer",
+              opacity: saving ? 0.6 : 1,
+            }}
+          >
+            {saving ? "Adding…" : "Add link"}
+          </button>
+        </form>
+      </Card>
+    </div>
+  );
+}
 
 function BlackoutDaysTab() {
   const [blackouts, setBlackouts] = useState([]);

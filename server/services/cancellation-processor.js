@@ -3,6 +3,7 @@ const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const { transitionJobStatus } = require('./job-status');
 const { etDateString } = require('../utils/datetime-et');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
 const CHURN_REASON = 'Customer cancellation request';
@@ -50,10 +51,287 @@ const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'cha
  * @returns {Promise<{cancelledCount:number, recurrenceStopped:number,
  *                    churned:boolean, ok:boolean, errors:string[]}>}
  */
-async function processCancellationRequest({ customerId, reason, requestId } = {}) {
+async function raiseTermiteRetrievalTask(customerId, requestId = null) {
+  // program filter: the table also holds rodent/trapping stations, which are
+  // always Waves-owned and are NOT bait-station rentals.
+  const stations = await db('termite_stations')
+    .where({ customer_id: customerId, program: 'termite' })
+    .select('id', 'owned_by', 'is_active');
+  const rented = (stations || []).filter((row) => row && row.owned_by === 'waves' && row.is_active !== false);
+  let flaggedRental = false;
+  if (!rented.length) {
+    // Customer-level flag (migration 20260726000003) covers rental programs
+    // whose stations were never pinned on the map.
+    const customer = await db('customers').where({ id: customerId }).first('termite_stations_rented');
+    flaggedRental = !!(customer && customer.termite_stations_rented === true);
+    if (!flaggedRental) return { raised: false, reason: 'no_rented_stations' };
+  }
+  const NotificationService = require('./notification-service');
+  const count = rented.length;
+  const result = await NotificationService.notifyAdmin(
+    'service',
+    'Termite stations to retrieve after cancellation',
+    (count
+      ? `${count} Waves-owned bait station${count === 1 ? '' : 's'} on this property need to be pulled — schedule the retrieval visit.`
+      : 'This account is flagged as a bait-station rental — confirm the stations on site and schedule the retrieval visit.')
+      + ' No charge to the customer.',
+    {
+      icon: '🪵',
+      // Forces the bell past GATE_ADMIN_BELL_POLICY (bellAllowed honours
+      // options.bell first): this is an office TASK, not an FYI, and must
+      // never be silenced by the category allowlist.
+      bell: true,
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      // Keyed per cancellation EVENT (request), not per customer: retries of
+      // the same request stay idempotent, while a restored customer who later
+      // cancels another rental program gets a fresh task.
+      dedupeKey: `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
+      metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental },
+    }
+  );
+  // notifyAdmin resolves null (never throws) when the deduped insert fails —
+  // surface that as an error so the cancel is not reported fully processed
+  // while Waves-owned stations have no retrieval task.
+  if (!result) throw new Error('admin notification did not persist');
+  if (result.suppressed) {
+    // With bell:true the only remaining suppression is the internal
+    // test-customer gate (no reason) — no task wanted there. Anything else
+    // means no row landed for a real account: fail loudly.
+    if (result.reason) throw new Error(`admin notification suppressed (${result.reason})`);
+    return { raised: false, reason: 'internal_test_customer', stationCount: count };
+  }
+  if (!result.id) throw new Error('admin notification did not persist');
+  return { raised: true, stationCount: count };
+}
+
+// Family key of a scheduled_services row (joined with services.*), or null
+// when the row is not WaveGuard plan evidence — the same classifier the
+// cancellation facts use, so a scoped cancel and the preview agree on which
+// visits belong to a family.
+function familyOfServiceRow(row) {
+  const {
+    detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
+  } = require('./self-booking-plan-sync');
+  if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return null;
+  const families = uniqueServiceFamilies(detectWaveGuardPlanKeys(row));
+  return families[0] || null;
+}
+
+async function familyScopedServiceIds(customerId, families) {
+  const rows = await db('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .where(function liveOrRecurring() {
+      this.where('s.recurring_ongoing', true)
+        .orWhere(function upcoming() {
+          this.whereIn('s.status', CANCELLABLE_STATUSES)
+            .where(function dateOrRescheduled() {
+              this.where('s.scheduled_date', '>=', etDateString()).orWhere('s.status', 'rescheduled');
+            });
+        });
+    })
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+  const ids = new Set();
+  for (const row of rows) {
+    const family = familyOfServiceRow(row);
+    if (family && families.includes(family)) ids.add(row.id);
+  }
+  return ids;
+}
+
+function tierDiscountRate(tier) {
+  const { WAVEGUARD } = require('./pricing-engine/constants');
+  const key = String(tier || '').toLowerCase();
+  const rate = Number(WAVEGUARD?.tiers?.[key]?.discount);
+  return Number.isFinite(rate) ? rate : 0;
+}
+
+/**
+ * Plan the per-family billing wind-down WITHOUT writing: which ledger
+ * components drop, what the remaining families reprice to at the demoted
+ * tier, and the resulting scalar. Components are slices of the BILLED
+ * monthly (net of the current tier discount), so a remaining family's new
+ * rate = gross at the old discount × (1 − new discount). Per-application
+ * and prepay lanes carry no monthly components to reprice — only the tier
+ * label moves. Fails closed when a monthly lane's ledger cannot attribute
+ * the scoped families (unattributed-only scalar).
+ */
+async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
+  const { inferTierFromServiceCount, uniqueServiceFamilies, detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  const { loadComponents } = require('./plan-rate-ledger');
+  const customer = await dbh('customers').where({ id: customerId })
+    .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'active');
+  if (!customer) return { ok: false, error: 'customer_missing' };
+  const rows = await dbh('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .where(function liveOrRecurring() {
+      this.where('s.recurring_ongoing', true)
+        .orWhere(function upcoming() {
+          this.whereIn('s.status', CANCELLABLE_STATUSES)
+            .where(function dateOrRescheduled() {
+              this.where('s.scheduled_date', '>=', etDateString()).orWhere('s.status', 'rescheduled');
+            });
+        });
+    })
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+  const owned = [];
+  for (const row of rows) {
+    if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+    for (const f of uniqueServiceFamilies(detectWaveGuardPlanKeys(row))) if (!owned.includes(f)) owned.push(f);
+  }
+  const inScope = scopedFamilies.filter((f) => owned.includes(f));
+  if (!inScope.length) return { ok: false, error: 'scope_not_owned' };
+  const remaining = owned.filter((f) => !inScope.includes(f));
+  if (!remaining.length) return { ok: false, error: 'scope_is_whole_account' };
+
+  const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
+  const tierAfter = inferTierFromServiceCount(remaining.length);
+  const discountBefore = tierDiscountRate(tierBefore);
+  const discountAfter = tierDiscountRate(tierAfter);
+
+  const components = await loadComponents(dbh, customerId);
+  const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';
+  const perApplicationLane = String(customer.billing_mode || '') === 'per_application';
+  const byFamily = new Map(components.map((c) => [c.family_key, Number(c.monthly_rate) || 0]));
+  // A family on HOLD carries its real price in plan_holds.held_monthly_rate
+  // (its component is 0) — reprice THAT and leave the component/source
+  // alone, or the resume would restore a stale rate / cancel the hold as
+  // obsolete (codex r2 P1).
+  const activeHolds = await dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).select('id', 'family_key', 'held_monthly_rate').catch(() => []);
+  const heldByFamily = new Map((activeHolds || []).map((h) => [h.family_key, h]));
+  const attributed = inScope.every((f) => byFamily.has(f) || heldByFamily.has(f)) && remaining.every((f) => byFamily.has(f) || heldByFamily.has(f));
+  if (monthlyLane && !attributed) return { ok: false, error: 'scoped_unattributed' };
+
+  const reprice = (rate) => {
+    if (!(rate > 0)) return 0;
+    const gross = discountBefore < 1 ? rate / (1 - discountBefore) : rate;
+    return Math.round(gross * (1 - discountAfter) * 100) / 100;
+  };
+  const remainingRates = remaining.map((f) => {
+    const hold = heldByFamily.get(f);
+    if (hold && hold.held_monthly_rate != null) {
+      const before = Number(hold.held_monthly_rate) || 0;
+      return { family: f, before, after: monthlyLane ? reprice(before) : null, heldHoldId: hold.id };
+    }
+    return { family: f, before: byFamily.get(f) ?? null, after: monthlyLane ? reprice(byFamily.get(f) || 0) : null };
+  });
+  // Scalar = Σ live components after reprice; held families contribute 0
+  // until they resume (their repriced rate lives on the hold).
+  const scalarAfter = monthlyLane
+    ? Math.round(remainingRates.filter((r) => !r.heldHoldId).reduce((sum, r) => sum + (r.after || 0), 0) * 100) / 100
+    : (customer.monthly_rate == null ? null : Number(customer.monthly_rate));
+
+  // Per-application lane (codex r2 P1): each surviving UNINVOICED upcoming
+  // visit carries its own tier-discounted price on the row — the demotion
+  // must reprice those rows or the old bundle discount lives on forever.
+  const perAppRows = [];
+  if (perApplicationLane) {
+    for (const row of rows) {
+      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+      const fam = uniqueServiceFamilies(detectWaveGuardPlanKeys(row))[0];
+      if (!fam || !remaining.includes(fam)) continue;
+      if (!CANCELLABLE_STATUSES.includes(String(row.status))) continue;
+      const price = Number(row.estimated_price);
+      if (!(price > 0)) continue;
+      perAppRows.push({
+        id: row.id, family: fam, before: price, after: reprice(price),
+        primarySet: row.primary_line_price !== null && row.primary_line_price !== undefined,
+        priorPrimary: row.primary_line_price,
+      });
+    }
+  }
+  return {
+    ok: true, owned, inScope, remaining, tierBefore, tierAfter, discountBefore, discountAfter,
+    monthlyLane, perApplicationLane, remainingRates, perAppRows,
+    scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
+  };
+}
+
+async function applyScopedWindDown(customerId, plan, { requestId } = {}) {
+  await db.transaction(async (trx) => {
+    if (plan.monthlyLane) {
+      await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
+      for (const r of plan.remainingRates) {
+        if (r.heldHoldId) {
+          // Held family: reprice the HOLD's saved rate; component stays 0 /
+          // source plan_hold so the resume restores the demoted price.
+          await trx('plan_holds').where({ id: r.heldHoldId, status: 'active' })
+            .update({ held_monthly_rate: r.after, updated_at: new Date() });
+          continue;
+        }
+        await trx('customer_plan_rates').where({ customer_id: customerId, family_key: r.family })
+          .update({ monthly_rate: r.after, source: 'cancellation_scoped', effective_at: new Date(), updated_at: new Date() });
+      }
+    }
+    if (plan.perApplicationLane) {
+      // CAS per row against the price we planned from; a row invoiced or
+      // repriced in the meantime is skipped, never double-adjusted.
+      for (const r of plan.perAppRows || []) {
+        const invoiced = await trx('invoices').where({ scheduled_service_id: r.id }).whereNot('status', 'void').first('id');
+        if (invoiced) continue;
+        const casWhere = { id: r.id, estimated_price: r.before };
+        if (r.primarySet) casWhere.primary_line_price = r.priorPrimary;
+        await trx('scheduled_services').where(casWhere)
+          .update({ estimated_price: r.after, ...(r.primarySet ? { primary_line_price: r.after } : {}), updated_at: new Date() });
+      }
+    }
+    const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };
+    if (plan.monthlyLane) update.monthly_rate = plan.scalarAfter;
+    await trx('customers').where({ id: customerId }).update(update);
+  });
+  try {
+    const rateLine = plan.monthlyLane
+      ? ` Monthly ${plan.scalarBefore} → ${plan.scalarAfter}; ${plan.remainingRates.map((r) => `${r.family} ${r.before} → ${r.after}`).join(', ')}.`
+      : '';
+    await db('customer_interactions').insert({
+      customer_id: customerId,
+      interaction_type: 'note',
+      subject: `Cancelled ${plan.inScope.join(', ')} — plan continues with ${plan.remaining.join(', ')}`,
+      body: `Portal cancellation request ${requestId || ''}`.trim()
+        + `. WaveGuard ${plan.tierBefore} → ${plan.tierAfter}.${rateLine}`,
+    });
+  } catch (noteErr) {
+    logger.warn(`[cancellation-processor] scoped audit note failed for ${customerId}: ${noteErr.message}`);
+  }
+}
+
+/**
+ * Whole-account (default) or FAMILY-SCOPED (`families` non-empty) cancel.
+ *
+ * Scoped: the customer stays active; only the named families' recurrence
+ * stops and their upcoming visits are pulled (the same per-visit
+ * follow-through as a whole-account cancel), the plan-rate ledger drops
+ * those components, and the scalar rate + WaveGuard tier are recomputed
+ * from what remains — the tier DEMOTES (ruling C-3: per-service cancel is
+ * real, so the bundle discount must follow the bundle). Termite retrieval
+ * is raised only when termite_bait is in scope. The result carries `scope`
+ * and `remaining` so the route reports exactly what happened.
+ */
+async function processCancellationRequest({ customerId, reason, requestId, families } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
   const errors = [];
+  const scopedFamilies = Array.isArray(families) ? families.filter(Boolean) : [];
+  const scoped = scopedFamilies.length > 0;
+  let scopedIds = null;
+  let scopedPlan = null;
+  if (scoped) {
+    try {
+      scopedIds = await familyScopedServiceIds(customerId, scopedFamilies);
+      // MONEY OUTRANKS the visit sweep: prove the wind-down is attributable
+      // BEFORE any visit is touched. A ledger that only carries the
+      // unattributed scalar cannot price "the families that stay" — fail
+      // closed and let the route offer a whole-account cancel instead.
+      scopedPlan = await planScopedWindDown(customerId, scopedFamilies);
+      if (!scopedPlan.ok) {
+        return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors: [scopedPlan.error], scope: scopedFamilies };
+      }
+    } catch (err) {
+      logger.error(`[cancellation-processor] scoped family resolution failed for ${customerId}: ${err.message}`);
+      return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors: ['scope_resolution'], scope: scopedFamilies };
+    }
+  }
 
   // 1. Churn + stop all billing FIRST — before the (potentially slow,
   // Stripe-touching) visit sweep. The monthly charge loop preselects
@@ -62,10 +340,12 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // window for a billing cron to charge a customer who just cancelled.
   let churned = false;
   let wasChurnedStage = false;
-  try {
+  // A scoped cancel never churns the account — the customer keeps the
+  // families that stay; their billing wind-down happens per family below.
+  if (!scoped) try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -97,30 +377,94 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         update.churn_reason_detail = cancelReason;
         update.churn_reason_code = 'unclassified';
       }
-      await db('customers').where({ id: customerId }).update(update);
+      // PR E (GATE_CANCEL_FLOW_V2): tier/rate wind-down — the 2026-08-30
+      // audit's money leak. Tier alignment only ever PROMOTES
+      // (self-booking-plan-sync), so a churned account that kept its
+      // waveguard_tier / monthly_rate rejoins later at the old discount
+      // forever. churn_mrr above already snapshotted the rate for reporting
+      // (first churn); on a repeat churn it was stamped the first time.
+      // Applied even when the stage was already 'churned' so admin
+      // stage-flip residue self-heals on the next processor run. The scalar
+      // clear and the per-family ledger reset run in ONE transaction —
+      // fail-closed: with GATE_PLAN_RATE_LEDGER authoritative, a surviving
+      // positive component would resurrect the old rate on a win-back, so a
+      // ledger failure must fail the churn write (→ 'churn' error → office
+      // review alert), never be swallowed. Dark: gate off → byte-identical
+      // to H0.
+      // Both saved payment METHODS (StripeService.charge() picks the default
+      // by payment_methods.autopay_enabled alone) and any armed
+      // failed-payment retry (the ladder does not check active/churn) are
+      // independent charge rails and belong to the same wind-down.
+      const disarmPaymentRails = async (dbh) => {
+        await dbh('payment_methods')
+          .where({ customer_id: customerId })
+          .update({ autopay_enabled: false });
+        await dbh('payments')
+          .where({ customer_id: customerId, status: 'failed' })
+          .whereNull('superseded_by_payment_id')
+          .whereNotNull('next_retry_at')
+          .update({ next_retry_at: null });
+      };
 
-      // Also disable the saved payment METHODS, mirroring the customer
-      // autopay-off path: StripeService.charge() picks the default method by
-      // payment_methods.autopay_enabled alone (it never re-checks the
-      // customer flags), so a billing run that already preselected this
-      // customer would otherwise still charge the saved card.
-      await db('payment_methods')
-        .where({ customer_id: customerId })
-        .update({ autopay_enabled: false });
-
-      // Disarm any pending failed-payment retry so the retry ladder can't
-      // re-charge a cancelled customer (it does not check active/churn).
-      await db('payments')
-        .where({ customer_id: customerId, status: 'failed' })
-        .whereNull('superseded_by_payment_id')
-        .whereNotNull('next_retry_at')
-        .update({ next_retry_at: null });
+      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+        // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
+        // authoritative ledger reset, payment-method disable, retry disarm —
+        // is ONE transaction. All-or-nothing is what makes the abort below
+        // sound: on a throw here, nothing persisted and the account is
+        // exactly as it was. The advisory ledger reset (gate off for
+        // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
+        // advisory hiccup must never take the committed wind-down back.
+        update.waveguard_tier = null;
+        update.waveguard_tier_source = null;
+        update.monthly_rate = null;
+        // Repeat churn (admin stage-flip residue): the first churn may never
+        // have stamped churn_mrr — snapshot the rate before clearing it, or
+        // the reporting dollars are gone for good.
+        if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
+          update.churn_mrr = Number(customer.monthly_rate);
+        }
+        // Per-application lane fields (billing_mode + per_application_fee)
+        // are NOT cleared here: they are the live price for unsettled work
+        // (an in-progress visit, or a completed-but-uninvoiced application),
+        // and any pre-check would race a pending→en_route transition. They
+        // are cleared AFTER the visit sweep by one atomic conditional UPDATE
+        // (see the gated block near the end of this function).
+        const { resetLedgerToScalar } = require('./plan-rate-ledger');
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: customerId }).update(update);
+          // The ledger clear is atomic with the wind-down REGARDLESS of the
+          // ledger-read gate (codex r48): rows left behind while the gate
+          // is off become authoritative the moment it flips, resurrecting
+          // the cancelled rate on a win-back. A failure here rolls the
+          // whole wind-down back and the gated abort below stops the run
+          // BEFORE any service is swept — nothing is left half-done.
+          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+          await disarmPaymentRails(trx);
+        });
+      } else {
+        // Legacy (H0) path, byte-identical: sequential writes, and on failure
+        // the catch below records 'churn' and CONTINUES like H0 did.
+        await db('customers').where({ id: customerId }).update(update);
+        await disarmPaymentRails(db);
+      }
 
       churned = true;
     }
   } catch (err) {
     errors.push('churn');
     logger.error(`[cancellation-processor] failed to churn customer ${customerId}: ${err.message}`);
+    if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+      // ABORT (gated path only): the wind-down is a single transaction, so a
+      // throw means NOTHING persisted and the account is still active and
+      // chargeable. Continuing into the recurrence stop and visit sweep
+      // would cancel SERVICE on a live billing account — the exact inversion
+      // this processor exists to prevent. Return partial (ok=false): the
+      // request row + admin review alert carry it, and both retry paths
+      // (60s dedupe, inactive-account) re-run this processor idempotently.
+      // The legacy path deliberately keeps H0's continue-and-flag behavior —
+      // its writes are sequential, so "nothing persisted" cannot be assumed.
+      return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors };
+    }
   }
 
   // 2. Stop any recurring series BEFORE reading the visit list, so a
@@ -128,11 +472,39 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // recurring_ongoing=false instead of minting a fresh occurrence behind the
   // sweep's back. (The straggler re-sweep below covers an extension already
   // in flight past its flag read.)
+  // Rented termite bait stations are Waves property and come out of the
+  // ground when the program ends (signed agreement text, migration
+  // 20260729000001) — but nothing scheduled that retrieval until H0
+  // (2026-08-30). Raise an office task, deduped per request so retries never
+  // double-bell. Failure is recorded in `errors` and never blocks the churn.
+  // Only once the churn actually persisted: a failed customer update leaves
+  // the account active and billable, and staff must never be told to pull
+  // hardware from a live program.
+  // A cancel supersedes any live hold on the affected families — the
+  // lifecycle must not later text a false restart or restore a stale rate
+  // (codex r1 P2).
+  try {
+    let holdQuery = db('plan_holds').where({ customer_id: customerId, status: 'active' });
+    if (scoped) holdQuery = holdQuery.whereIn('family_key', scopedFamilies);
+    await holdQuery.update({ status: 'cancelled', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[cancellation-processor] hold invalidation failed for ${customerId}: ${err.message}`);
+  }
+
+  if (churned || (scoped && scopedFamilies.includes('termite_bait'))) {
+    try {
+      await raiseTermiteRetrievalTask(customerId, requestId);
+    } catch (err) {
+      errors.push('termite_retrieval_task');
+      logger.error(`[cancellation-processor] termite station retrieval task failed for ${customerId}: ${err.message}`);
+    }
+  }
+
   let recurrenceStopped = 0;
   try {
-    recurrenceStopped = await db('scheduled_services')
-      .where({ customer_id: customerId, recurring_ongoing: true })
-      .update({ recurring_ongoing: false, updated_at: new Date() });
+    let stopQuery = db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
+    if (scopedIds) stopQuery = stopQuery.whereIn('id', [...scopedIds]);
+    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, updated_at: new Date() });
   } catch (err) {
     errors.push('stop_recurrence');
     logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
@@ -157,6 +529,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       .whereNotIn('status', ['en_route', 'on_site', 'completed', 'cancelled', 'skipped', 'no_show'])
       .select('id');
     for (const row of [...inProgressByStatus, ...inProgressByTrack]) {
+      if (scopedIds && !scopedIds.has(row.id)) continue;
       errors.push(`in_progress_visit:${row.id}`);
       logger.warn(`[cancellation-processor] visit ${row.id} is in progress — left for manual handling`);
     }
@@ -203,7 +576,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   const processed = new Set();
 
   function sweepCancellable() {
-    return db('scheduled_services')
+    let query = db('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('status', CANCELLABLE_STATUSES)
       .where(function () {
@@ -220,8 +593,9 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       // flips first; the status sync is best-effort), so a status-only filter
       // would sweep a visit a tech is actively working. NULL-safe for legacy
       // rows with no track_state.
-      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))")
-      .select('id', 'status');
+      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))");
+    if (scopedIds) query = query.whereIn('id', [...scopedIds]);
+    return query.select('id', 'status');
   }
 
   async function processVisit(svc) {
@@ -450,8 +824,33 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     }
   }
 
+  // Per-application lane fields (billing_mode + per_application_fee) are
+  // deliberately RETAINED at churn (codex rounds 14→34 converged here):
+  // they are the price authority for any straggler completion or a
+  // deliberately rebooked visit on the churned account, and no clear can
+  // be made race-free without every booking writer joining a shared lock
+  // protocol. NULL rate + autopay off already stop all automatic billing;
+  // the residue is visible in audit-churned-accounts-live-state.js and the
+  // office clears the lane after quiescence (ops/agents/
+  // churn-residue-backfill.js does it with guards for the backlog).
+
   // Audit trail on the customer timeline — only the first time we churn, and
   // written AFTER the sweep so the note carries the final visit count.
+  // Scoped wind-down AFTER the sweep (the plan was proven attributable up
+  // front, so this cannot fail on attribution; a write failure is reported
+  // and leaves the visits cancelled — the office repairs the rate, never the
+  // reverse).
+  let scopedWoundDown = false;
+  if (scoped && scopedPlan?.ok) {
+    try {
+      await applyScopedWindDown(customerId, scopedPlan, { requestId });
+      scopedWoundDown = true;
+    } catch (err) {
+      errors.push('scoped_wind_down');
+      logger.error(`[cancellation-processor] scoped wind-down failed for ${customerId}: ${err.message}`);
+    }
+  }
+
   if (churned && !wasChurnedStage) {
     try {
       await db('customer_interactions').insert({
@@ -492,7 +891,19 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       (ok ? '' : ` (errors: ${errors.join(', ')})`)
   );
 
-  return { cancelledCount, recurrenceStopped, churned, ok, errors };
+  return {
+    cancelledCount, recurrenceStopped, churned, ok, errors,
+    ...(scoped ? {
+      scope: scopedPlan?.inScope || scopedFamilies,
+      remaining: scopedPlan?.remaining || [],
+      tierBefore: scopedPlan?.tierBefore ?? null,
+      tierAfter: scopedPlan?.tierAfter ?? null,
+      scopedWoundDown,
+    } : {}),
+  };
 }
 
-module.exports = { processCancellationRequest, CHURN_REASON, CANCELLABLE_STATUSES };
+module.exports = {
+  processCancellationRequest, raiseTermiteRetrievalTask, planScopedWindDown, familyOfServiceRow,
+  CHURN_REASON, CANCELLABLE_STATUSES,
+};

@@ -149,6 +149,10 @@ const STATE_COPY = {
   in_progress: { title: 'Your technician is on the way', body: "This visit is already underway, so it can't be changed online. Need us? Text or call." },
   in_progress_on_site: { title: 'Your technician has arrived', body: "This visit is underway, so it can't be changed online. Need us? Text or call." },
   past: { title: "This visit's time has passed", body: "If we missed each other, pick a new time below - or text or call and we'll sort it out." },
+  // Grouped visit: /reschedule/:token refuses every grouped visit while the
+  // unit move is staff-only (#3609), so the past-state recovery is the
+  // call/text path, never a "Pick a new time" link that dead-ends.
+  past_grouped: { title: "This visit's time has passed", body: "If we missed each other, text or call and we'll move the whole visit together for you." },
   // Staff are choosing the replacement slot; the old date/window on the row
   // is stale and deliberately not shown as booked.
   pending_rebook: { title: "We're finding you a new time", body: "Your reschedule request is in - our office is picking the new slot and we'll text you as soon as it's set." },
@@ -224,8 +228,13 @@ function TechBlock({ tech }) {
   );
 }
 
-function PlanNote({ plan }) {
+function PlanNote({ plan, grouped }) {
   if (!plan) return null;
+  // A grouped one-time row shares its stop with other services — "a single
+  // scheduled service" would contradict the visit list right above (codex
+  // #3609 r34). The recurring copy talks about the plan, not the visit's
+  // service count, so it stays; the one-time sentence is suppressed.
+  if (grouped && !plan.isRecurring) return null;
   return (
     <div data-glass="soft" style={{
       display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 8,
@@ -321,11 +330,21 @@ export default function AppointmentPage() {
         body: JSON.stringify({
           date: data?.appointment?.date ?? null,
           windowStart: data?.appointment?.windowStart ?? null,
+          // Identity of the member set this page showed as one appointment:
+          // the server confirms exactly that set (never siblings the page
+          // did not render); null = the single-service page.
+          membershipKey: data?.service?.visit?.membershipKey ?? null,
         }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
-        setData((prev) => (prev ? { ...prev, confirmed: true } : prev));
+        // Grouped: the server reports the VISIT's state after the fan-out —
+        // a dispatch-owned sibling can stay pending, so the pill follows the
+        // answer a reload would give, not an assumed "Confirmed".
+        // confirmable is cleared either way: the tap did its work (a
+        // dispatch-owned sibling that stays pending is the office's, not a
+        // reason to keep offering the button).
+        setData((prev) => (prev ? { ...prev, confirmed: body.confirmed !== false, confirmable: false } : prev));
         return;
       }
       // The visit changed under us (cancelled, moved, started) — reload so
@@ -377,14 +396,19 @@ export default function AppointmentPage() {
   }
 
   if (data?.state !== 'upcoming') {
+    const grouped = !!data?.service?.visit;
     const stateKey = data?.state === 'in_progress' && data?.phase === 'on_site'
       ? 'in_progress_on_site'
-      : data?.state;
+      : data?.state === 'past' && grouped
+        ? 'past_grouped'
+        : data?.state;
     const copy = STATE_COPY[stateKey] || STATE_COPY.not_available;
     // A missed pending/confirmed visit stays self-service rebookable
     // (reschedule-public deliberately allows it) - the token in this URL is
     // the same reschedule token, so the recovery path costs one link.
-    const action = data?.state === 'past'
+    // Not for a grouped visit: the reschedule route rejects it (reason
+    // 'grouped'), so the link would be a deterministic dead end (codex r12).
+    const action = data?.state === 'past' && !grouped
       ? { href: `/reschedule/${token}`, label: 'Pick a new time' }
       : null;
     return <Page><MessageCard title={copy.title} body={copy.body} action={action} /></Page>;
@@ -409,6 +433,12 @@ export default function AppointmentPage() {
               The text carrying the link already greets the right person. */}
           Your {serviceLabel} is {isTomorrow ? 'tomorrow' : 'booked'}.
         </div>
+        {Array.isArray(data.service?.visit?.services) && data.service.visit.services.length > 1 && (
+          /* Visit group: one link covers every service at this stop. */
+          <div data-testid="visit-services" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5 }}>
+            This visit includes {data.service.visit.services.join(' · ')}.
+          </div>
+        )}
 
         <div data-glass="soft" style={{
           display: 'flex', alignItems: 'center', gap: 12, marginTop: 16,
@@ -450,7 +480,7 @@ export default function AppointmentPage() {
         ) : null}
 
         <TechBlock tech={data.tech} />
-        <PlanNote plan={data.plan} />
+        <PlanNote plan={data.plan} grouped={!!data.service?.visit} />
 
         {/* The server's confirmable flag mirrors the POST guard exactly
             (pending only, not dispatch-owned) — rendering on anything less
@@ -467,7 +497,9 @@ export default function AppointmentPage() {
               {confirming ? 'Confirming…' : 'Confirm this appointment'}
             </button>
             <div style={{ fontSize: 14, color: S.muted, marginTop: 10, textAlign: 'center', lineHeight: 1.5 }}>
-              Time doesn't work? Pick a different one below — no call needed.
+              {data.rescheduleToken
+                ? "Time doesn't work? Pick a different one below — no call needed."
+                : "Time doesn't work? Text or call us and we'll sort it out."}
             </div>
           </>
         )}
@@ -480,19 +512,21 @@ export default function AppointmentPage() {
           </div>
         ) : null}
 
-        <a
-          data-glass="soft"
-          href={`${API_BASE}/public/appointment/${token}/calendar.ics`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-            marginTop: 12, padding: '12px 16px', borderRadius: 8,
-            background: S.soft, border: `1px solid ${S.softBorder}`,
-            fontSize: 15, fontWeight: 600, color: S.text, textDecoration: 'none',
-          }}
-        >
-          <Icon name="calendar" size={16} />
-          Add to calendar
-        </a>
+        {data.calendarEligible ? (
+          <a
+            data-glass="soft"
+            href={`${API_BASE}/public/appointment/${token}/calendar.ics`}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              marginTop: 12, padding: '12px 16px', borderRadius: 8,
+              background: S.soft, border: `1px solid ${S.softBorder}`,
+              fontSize: 15, fontWeight: 600, color: S.text, textDecoration: 'none',
+            }}
+          >
+            <Icon name="calendar" size={16} />
+            Add to calendar
+          </a>
+        ) : null}
       </Card>
 
       {data.rescheduleToken ? (
@@ -506,6 +540,17 @@ export default function AppointmentPage() {
           <a href={`/reschedule/${data.rescheduleToken}`} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
             See open times
           </a>
+        </Card>
+      ) : data.service?.visit ? (
+        /* Grouped visit: self-serve moves are staff-only for now (#3609) —
+           say so here instead of offering a slot picker that would refuse. */
+        <Card>
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+            Need a different time?
+          </div>
+          <div data-testid="visit-grouped-reschedule" style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+            This visit includes more than one service, so we'll move the whole visit together for you — just text or call.
+          </div>
         </Card>
       ) : null}
 

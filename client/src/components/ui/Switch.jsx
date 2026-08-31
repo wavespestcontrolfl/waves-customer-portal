@@ -15,7 +15,8 @@ export const Switch = forwardRef(function Switch(
       disabled={disabled}
       onClick={() => onChange && onChange(!checked)}
       className={cn(
-        'relative inline-flex items-center h-4 w-7 rounded-full transition-colors',
+        // u-touch-hit (tokens.css): 44px hit area on coarse pointers only.
+        'u-touch-hit relative inline-flex items-center h-4 w-7 rounded-full transition-colors',
         'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-1',
         checked ? 'bg-zinc-900' : 'bg-zinc-300',
         disabled && 'opacity-50 cursor-not-allowed',

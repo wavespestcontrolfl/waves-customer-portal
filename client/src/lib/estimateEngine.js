@@ -938,11 +938,16 @@ function hasNonNegativeNumber(value) {
     Number(value) >= 0;
 }
 
-function normalizeGrassType(grassType) {
+// Alias match only — null for a value no track claims (server mirror:
+// matchGrassTrack in service-pricing.js). An unsupported type must never be
+// silently priced off the St. Augustine table.
+function matchGrassTrack(grassType) {
   const raw = String(grassType || '').trim();
   const compact = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Compact forms of every server GRASS_TYPE_ALIASES entry (constants.js) —
+  // a value the server accepts must never be parked as unsupported here.
   const aliases = {
-    st_augustine: ['A', 'B', 'STAUGUSTINE', 'STAUG'],
+    st_augustine: ['A', 'B', 'STAUGUSTINE', 'STAUG', 'STAUGUST', 'STAUGUSTINESHADE'],
     bermuda: ['C1', 'BERMUDA'],
     zoysia: ['C2', 'ZOYSIA'],
     bahia: ['D', 'BAHIA'],
@@ -951,7 +956,11 @@ function normalizeGrassType(grassType) {
   for (const [track, values] of Object.entries(aliases)) {
     if (values.includes(compact)) return track;
   }
-  return 'st_augustine';
+  return null;
+}
+
+function normalizeGrassType(grassType) {
+  return matchGrassTrack(grassType) || 'st_augustine';
 }
 
 const DETHATCHING_CONFIG = {
@@ -1850,7 +1859,11 @@ export function calculateEstimate(inputs) {
   const trenchingConcretePct = trenchingConcretePctRaw > 1
     ? trenchingConcretePctRaw / 100
     : trenchingConcretePctRaw;
+  const requestedGrassType = String(_grassType || '').trim();
   const grassType = normalizeGrassType(_grassType);
+  // Explicit unmatched grass (paspalum etc.) — same defaulted-loudly contract
+  // as the server engine; an empty track is the ordinary default, not unknown.
+  const grassTypeWasDefaulted = matchGrassTrack(_grassType) === null && requestedGrassType !== '';
   const lawnFreq = resolveLawnFreq(_lawnFreq);
   const mosquitoStationCount = Math.max(0, Math.round(Number(_mosquitoStationCount) || 0));
   const mosquitoDunkCount = Math.max(0, Math.round(Number(_mosquitoDunkCount) || 0));
@@ -2080,6 +2093,12 @@ export function calculateEstimate(inputs) {
   }
 
   const turfArea = computeTurfArea();
+  // LOW-graded turf is a provenance guess, not a measurement — turf-priced
+  // results built on it carry the send-gate marker so a CLIENT_FALLBACK
+  // persist can never store the guessed price as customer-ready (server
+  // mirror: the lawn line's low_confidence_turf manualReviewReason).
+  const lowConfidenceTurf = String(turfArea.turfConfidence || '').toUpperCase() === 'LOW'
+    || (turfArea.turfFlags || []).includes('FIELD_VERIFY_TURF_SQFT');
   const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch || svcPlugging;
   if (hasTurfPricedService) {
     turfArea.turfFlags.forEach(flag => {
@@ -2369,8 +2388,21 @@ export function calculateEstimate(inputs) {
     if (customQuoteFlag) {
       addLawnCustomQuoteNote();
     }
+    if (grassTypeWasDefaulted && !notes.some(n => n.type === 'LAWN_UNKNOWN_GRASS')) {
+      notes.push({
+        type: 'LAWN_UNKNOWN_GRASS',
+        text: `Grass type "${requestedGrassType}" is not a supported track — priced off the St. Augustine table pending review.`,
+        priority: 'HIGH',
+      });
+    }
     R.lawnMeta = {
       lsf, sc, tf, oa, grassType, grassCode: lp.code, grassName: lp.name, hardscape,
+      requestedGrassType: requestedGrassType || null,
+      grassTypeWasDefaulted,
+      // Consumed by the pages' estimateRequiresQuote deep scan — an
+      // unsupported grass type or a low-confidence turf basis must not be
+      // sendable from the client fallback without review (codex P1 ×2).
+      ...(grassTypeWasDefaulted || lowConfidenceTurf ? { requiresCustomQuote: true } : {}),
       turfEstimated: turfArea.turfEstimated,
       turfConfidence: turfArea.turfConfidence,
       turfBasis: turfArea.turfBasis,
@@ -2817,7 +2849,22 @@ export function calculateEstimate(inputs) {
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
     else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
     const fp = Math.max(115, otP(Math.max(115, Math.round(bl * tm))));
-    otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
+    if (grassTypeWasDefaulted && !notes.some(n => n.type === 'LAWN_UNKNOWN_GRASS')) {
+      notes.push({
+        type: 'LAWN_UNKNOWN_GRASS',
+        text: `Grass type "${requestedGrassType}" is not a supported track — priced off the St. Augustine table pending review.`,
+        priority: 'HIGH',
+      });
+    }
+    otItems.push({
+      name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl,
+      // Same send-gate marker as the recurring lawnMeta — a one-time-only
+      // quote on an unsupported grass type or low-confidence turf must not
+      // be sendable unreviewed.
+      ...(grassTypeWasDefaulted || lowConfidenceTurf
+        ? { requiresCustomQuote: true, ...(grassTypeWasDefaulted ? { requestedGrassType } : {}) }
+        : {}),
+    });
   }
 
   /* ── One-Time Mosquito ───────────────────────────────────── */
@@ -2867,7 +2914,13 @@ export function calculateEstimate(inputs) {
     const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
     const e4 = otP(Math.max(450, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.35)));
     R.td = e8;
-    otItems.push({ name: 'Lawn Top Dressing Service', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
+    otItems.push({
+      name: 'Lawn Top Dressing Service', price: e8, detail: 'St. Augustine standard', depth: '1/8"',
+      // An explicit topDressArea is exact and needs no turf verification; a
+      // blank area derives from the (possibly guessed) turf estimate, so a
+      // low-confidence basis carries the send-gate marker here too (codex P1).
+      ...(lowConfidenceTurf && !(topDressArea > 0) ? { requiresCustomQuote: true } : {}),
+    });
     R.tdTiers = [
       { name: '1/8" Depth', price: e8, detail: 'St. Augustine standard' },
       { name: '1/4" Depth', price: e4, detail: 'Bermuda / leveling — 2x material' },
@@ -2903,6 +2956,10 @@ export function calculateEstimate(inputs) {
       price: sp,
       baseEstimatePrice: dth.estimatedPrice ?? dth.price,
       detail: dth.detail || 'One-time service',
+      // A dethatching area derived from a guessed turf estimate carries the
+      // send-gate marker like the other turf-priced lines (a manual sqft
+      // entry grades the turf HIGH, so lowConfidenceTurf is already false).
+      ...(lowConfidenceTurf ? { requiresCustomQuote: true } : {}),
     });
   }
 

@@ -87,6 +87,60 @@ describe('call extraction replay scheduled eval', () => {
     expect(notifications).toEqual([]);
   });
 
+  test('carries answer-key accuracy into the result and the failure notification', async () => {
+    const goldAccuracy = {
+      labeled: 40,
+      correct: 37,
+      unscored: 2,
+      accuracy: 0.925,
+      byField: {
+        is_spam: { severity: 'high', labeled: 20, correct: 20, accuracy: 1, missCaseIds: [] },
+        call_nature: { severity: 'high', labeled: 12, correct: 10, accuracy: 0.8333, missCaseIds: ['termite-lead-apr22', 'oosa-guard-stays'] },
+        urgency: { severity: 'medium', labeled: 8, correct: 7, accuracy: 0.875, missCaseIds: ['voicemail-urgency-callback-missed'] },
+      },
+    };
+
+    const green = await runCallExtractionReplayEval({
+      runReplay: jest.fn(async () => replayRun({ summary: { ...replayRun().summary, goldAccuracy } })),
+      notify: async () => { throw new Error('green run must not notify'); },
+      sendEmail: failIfRealEmail,
+    });
+    expect(green.status).toBe('pass');
+    expect(green.goldAccuracy).toEqual(goldAccuracy);
+    // Medium/low misses don't notify, so the done log must name the field
+    // AND the fixture cases that missed — otherwise a green run discards them.
+    const logger = require('../services/logger');
+    const doneLines = logger.info.mock.calls.map(([line]) => line).filter((line) => String(line).includes('[call-replay-eval] done'));
+    const doneLine = doneLines[doneLines.length - 1]; // the green run above (the mock accumulates across tests)
+    expect(doneLine).toContain('Answer-key accuracy: 92.5% (37/40 fields, 2 unscored)');
+    expect(doneLine).toContain('call_nature 10/12 [termite-lead-apr22, oosa-guard-stays]');
+    expect(doneLine).toContain('urgency 7/8 [voicemail-urgency-callback-missed]');
+
+    const notifications = [];
+    const red = await runCallExtractionReplayEval({
+      runReplay: jest.fn(async () => failingRun()).mockImplementation(async () => {
+        const run = failingRun();
+        run.summary.goldAccuracy = goldAccuracy;
+        return run;
+      }),
+      notify: async (row) => { notifications.push(row); },
+      sendEmail: failIfRealEmail,
+    });
+    expect(red.status).toBe('fail');
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].body).toContain('Answer-key accuracy: 92.5% (37/40 fields, 2 unscored) — misses: call_nature 10/12 [termite-lead-apr22, oosa-guard-stays], urgency 7/8 [voicemail-urgency-callback-missed]');
+    expect(JSON.parse(notifications[0].metadata).summary.goldAccuracy.byField.call_nature.missCaseIds).toEqual(['termite-lead-apr22', 'oosa-guard-stays']);
+
+    // Older/mocked runs without gold data report an empty key, never a crash.
+    expect(replayRun().summary.goldAccuracy).toBeUndefined();
+    const legacy = await runCallExtractionReplayEval({
+      runReplay: jest.fn(async () => replayRun()),
+      notify: async () => {},
+      sendEmail: failIfRealEmail,
+    });
+    expect(legacy.goldAccuracy).toEqual({ labeled: 0, correct: 0, unscored: 0, accuracy: null, byField: {} });
+  });
+
   test('first failure followed by pass is flaky and does not notify', async () => {
     const notifications = [];
     const runReplay = jest.fn()

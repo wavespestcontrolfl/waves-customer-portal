@@ -16,6 +16,7 @@ import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
+import CancelFlow from '../components/portal/CancelFlow';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp, nativePlatform } from '../native/platform';
+import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -4794,7 +4796,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     // Email/Both can only be offered once an email is on file —
                     // otherwise the backend silently falls back to SMS and the
                     // customer would think email was configured when it wasn't.
-                    const hasEmail = !!customer.email;
+                    // Channels are account-level: on a secondary property the
+                    // account primary's email counts (the senders fall back to
+                    // it), so key on the server's account-level flag when the
+                    // payload carries it (#1995 E) and on this row otherwise.
+                    const hasEmail = prefs && prefs.channelEmailAvailable != null
+                      ? !!prefs.channelEmailAvailable
+                      : !!customer.email;
                     const opts = hasEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
                     const selectable = isOn && hasEmail;
                     return (
@@ -9850,7 +9858,7 @@ function PlanStationMap({ map }) {
   );
 }
 
-function MyPlanTab({ customer, focusService }) {
+function MyPlanTab({ customer, focusService, onOpenRequest }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -9873,16 +9881,6 @@ function MyPlanTab({ customer, focusService }) {
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
-  const [showPauseForm, setShowPauseForm] = useState(false);
-  const [showCancelForm, setShowCancelForm] = useState(false);
-  const [pauseDuration, setPauseDuration] = useState('1');
-  const [pauseReason, setPauseReason] = useState('');
-  const [cancelReason, setCancelReason] = useState('');
-  const [cancelDetails, setCancelDetails] = useState('');
-  const [pauseSubmitted, setPauseSubmitted] = useState(false);
-  const [cancelSubmitted, setCancelSubmitted] = useState(false);
-  const [pauseSubmitting, setPauseSubmitting] = useState(false);
-  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [showTierExplorer, setShowTierExplorer] = useState(false);
   const lawnHealth = useLawnHealth(customer.id);
   const compact = useIsMobile(760);
@@ -10753,167 +10751,14 @@ function MyPlanTab({ customer, focusService }) {
           {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Pause or cancel your plan any time.</div>
-            {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
-                <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Pause My Plan</button>
-                <button type="button" onClick={() => setShowCancelForm(true)} style={smallLinkButton}>Cancel</button>
-              </div>
-            )}
-
-            {showPauseForm && !pauseSubmitted && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Pause My Plan</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  {/* This only files an office request — the copy must not
-                      promise a hold the office hasn't confirmed. */}
-                  Send us a pause request and we&apos;ll confirm the dates and any billing changes with you before your plan is held.
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                  {['1', '2'].map(d => (
-                    <button data-glass-accent={pauseDuration === d ? '' : undefined} key={d} type="button" onClick={() => setPauseDuration(d)} style={{
-                      border: `1px solid ${pauseDuration === d ? B.yellow : '#D8D0C0'}`,
-                      background: pauseDuration === d ? '#F8FCFE' : '#fff',
-                      color: pauseDuration === d ? B.glassNavy : B.grayDark,
-                      borderRadius: 8,
-                      padding: '8px 12px',
-                      cursor: 'pointer',
-                      fontSize: 14,
-                      fontWeight: 800,
-                      fontFamily: FONTS.body,
-                    }}>
-                      {d} month{d === '2' ? 's' : ''}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  value={pauseReason}
-                  onChange={e => setPauseReason(e.target.value)}
-                  placeholder="Reason (optional)"
-                  aria-label="Pause reason"
-                  className="waves-focus-ring"
-                  style={{
-                    width: '100%',
-                    marginTop: 10,
-                    padding: '10px 12px',
-                    borderRadius: 8,
-                    fontSize: 14,
-                    border: '1px solid #D8D0C0',
-                    fontFamily: FONTS.body,
-                    boxSizing: 'border-box',
-                  }}
-                />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                  <button
-                    type="button"
-                    disabled={pauseSubmitting}
-                    onClick={async () => {
-                      if (pauseSubmitting) return;
-                      setPauseSubmitting(true);
-                      try {
-                        await api.createRequest?.({
-                          category: 'pause',
-                          subject: `Pause plan for ${pauseDuration} month(s)`,
-                          description: `Customer requested to pause their WaveGuard ${tierName} plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
-                        });
-                        setPauseSubmitted(true);
-                        setShowPauseForm(false);
-                      } catch (err) {
-                        showCustomerAlert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                      } finally {
-                        setPauseSubmitting(false);
-                      }
-                    }}
-                    data-glass-accent="" style={{ ...primaryButton, opacity: pauseSubmitting ? 0.65 : 1, cursor: pauseSubmitting ? 'wait' : 'pointer' }}
-                  >
-                    {pauseSubmitting ? 'Sending...' : 'Submit Pause'}
-                  </button>
-                  <button data-glass-accent="" type="button" onClick={() => setShowPauseForm(false)} style={secondaryButton}>Never mind</button>
-                </div>
-              </div>
-            )}
-
-            {pauseSubmitted && (
-              <div style={{ marginTop: 12, color: B.glassNavy, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
-                Pause request submitted. We will confirm within 1 business day.
-              </div>
-            )}
-
-            {showCancelForm && !cancelSubmitted && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Cancellation Request</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  Pausing keeps your discount and service spot reserved.
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
-                  {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
-                    <button key={r} type="button" onClick={() => setCancelReason(r)} className="waves-focus-ring" style={{
-                      padding: '13px 16px',
-                      borderRadius: 999,
-                      fontSize: 14,
-                      fontWeight: 800,
-                      border: `1px solid ${cancelReason === r ? B.red : '#D8D0C0'}`,
-                      background: cancelReason === r ? `${B.red}10` : '#fff',
-                      color: cancelReason === r ? B.red : B.grayDark,
-                      cursor: 'pointer',
-                      fontFamily: FONTS.body,
-                    }}>{r}</button>
-                  ))}
-                </div>
-                <textarea
-                  value={cancelDetails}
-                  onChange={e => setCancelDetails(e.target.value)}
-                  placeholder="Anything else you'd like us to know?"
-                  aria-label="Cancellation details"
-                  rows={3}
-                  className="waves-focus-ring"
-                  style={{
-                    width: '100%',
-                    marginTop: 10,
-                    padding: '12px 14px',
-                    borderRadius: 8,
-                    fontSize: 16,
-                    border: '1px solid #D8D0C0',
-                    fontFamily: FONTS.body,
-                    resize: 'vertical',
-                    boxSizing: 'border-box',
-                  }}
-                />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                  <button
-                    type="button"
-                    disabled={cancelSubmitting}
-                    onClick={async () => {
-                      if (cancelSubmitting) return;
-                      setCancelSubmitting(true);
-                      try {
-                        await api.createRequest?.({
-                          category: 'cancellation',
-                          subject: `Cancel WaveGuard ${tierName} plan`,
-                          description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
-                        });
-                        setCancelSubmitted(true);
-                        setShowCancelForm(false);
-                      } catch (err) {
-                        showCustomerAlert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                      } finally {
-                        setCancelSubmitting(false);
-                      }
-                    }}
-                    style={{ ...primaryButton, background: B.grayMid, minHeight: 44, fontSize: 16, opacity: cancelSubmitting ? 0.65 : 1, cursor: cancelSubmitting ? 'wait' : 'pointer' }}
-                  >
-                    {cancelSubmitting ? 'Sending...' : 'Submit Request'}
-                  </button>
-                  <button data-glass-accent="" type="button" onClick={() => setShowCancelForm(false)} style={{ ...secondaryButton, minHeight: 44, fontSize: 16 }}>Keep My Plan</button>
-                </div>
-              </div>
-            )}
-
-            {cancelSubmitted && (
-              <div style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
-                Cancellation request received. We will reach out to finalize.
-              </div>
-            )}
+            {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
+                the H0 single-step form inside the component when the gate is off. */}
+            <CancelFlow
+              tierName={tierName}
+              compact={compact}
+              onOpenRequest={onOpenRequest}
+              styles={{ muted, subtle, primaryButton, secondaryButton, smallLinkButton }}
+            />
           </section>
           )}
         </aside>
@@ -15345,6 +15190,26 @@ export default function PortalPage() {
     { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
     { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
   ];
+  // Rate-the-app: inside the native shell an https store URL is a webview
+  // navigation that strands the SPA (same trap as window.open — F-017), so
+  // hand off to the OS through the store URL schemes, which Capacitor routes
+  // externally exactly like the tel:/sms: links above. In a browser, open
+  // the matching store page in a new tab.
+  const openStoreReview = () => {
+    const platform = isNativeApp() ? nativePlatform() : null;
+    const writeReviewUrl = `${APP_STORE_URL}${APP_STORE_URL.includes('?') ? '&' : '?'}action=write-review`;
+    if (platform === 'ios') {
+      window.location.href = writeReviewUrl.replace(/^https:\/\//, 'itms-apps://');
+      return;
+    }
+    if (platform === 'android') {
+      let packageId = null;
+      try { packageId = new URL(PLAY_STORE_URL).searchParams.get('id'); } catch { /* https fallback below */ }
+      window.location.href = packageId ? `market://details?id=${packageId}` : PLAY_STORE_URL;
+      return;
+    }
+    window.open(/Android/i.test(navigator.userAgent || '') ? PLAY_STORE_URL : writeReviewUrl, '_blank', 'noopener,noreferrer');
+  };
   const shellMaxWidth = 1040;
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
@@ -15672,6 +15537,41 @@ export default function PortalPage() {
                   })}
                   <button
                     type="button"
+                    onClick={() => { openStoreReview(); setShowMenu(false); }}
+                    style={{
+                      width: '100%',
+                      border: 'none',
+                      background: 'transparent',
+                      borderRadius: 8,
+                      padding: '10px 8px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      textAlign: 'left',
+                      fontFamily: FONTS.body,
+                    }}
+                  >
+                    <span style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: 8,
+                      background: PORTAL_SHELL.soft,
+                      color: PORTAL_SHELL.text,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <Icon name="star" size={16} strokeWidth={2} />
+                    </span>
+                    <span style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>Rate the Waves App</span>
+                      <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Love the app? Leave a quick review</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={async () => {
                       // Flush any debounced property edits while the token is
                       // still valid — logout revokes the refresh session, so a
@@ -15800,7 +15700,7 @@ export default function PortalPage() {
         )}
         <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the

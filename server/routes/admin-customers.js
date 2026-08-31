@@ -112,6 +112,7 @@ function techSafeSort(sort) {
 const TECH_360_STRIPPED_KEYS = [
   'interactions', 'smsLog', 'payments', 'invoices', 'cards',
   'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
+  'annualPrepayEstimateSuggestion',
   'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
   'tags',
   // Sibling properties on the account: authorization is per-customer, so an
@@ -1323,7 +1324,7 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
   ['serviceReportNotifyBilling', 'service_report_notify_billing'],
 ];
 
-const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);
+const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
@@ -3009,6 +3010,20 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
+    // The COMPLETE consumed-estimate set for the prefill exclusion — the
+    // display list above is capped at 5, and an estimate linked to an older
+    // term must still never suggest again. A read failure poisons the set
+    // (null) so the suggestion is skipped entirely rather than built from an
+    // incomplete exclusion list.
+    const consumedEstimateIdsPromise = db.schema.hasTable('annual_prepay_terms')
+      .then((exists) => exists
+        ? db('annual_prepay_terms')
+          .where({ customer_id: c.id })
+          .whereNotNull('source_estimate_id')
+          .pluck('source_estimate_id')
+        : [])
+      .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
+
     const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
@@ -3282,6 +3297,28 @@ router.get('/:id', async (req, res, next) => {
         bankName: contract.bank_name,
       })),
       annualPrepayTerms: (annualPrepayTerms || []).map(mapAnnualPrepayTerm),
+      // Prefill hint for the "Record collected annual prepay" modal — which
+      // estimate this prepay most credibly comes from and the amount its own
+      // accept-as-prepay lane would invoice. Suggestion-only; never blocks
+      // the 360 payload.
+      annualPrepayEstimateSuggestion: await (async () => {
+        try {
+          // A null consumed set means the exclusion read failed — skip the
+          // suggestion rather than build it from an incomplete list.
+          const consumedEstimateIds = await consumedEstimateIdsPromise;
+          if (consumedEstimateIds === null) return null;
+          return await require('../services/annual-prepay-estimate-suggestion')
+            .buildAnnualPrepayEstimateSuggestion(estimates, {
+              // Estimates already consumed by ANY term priced a PRIOR year.
+              excludeEstimateIds: consumedEstimateIds,
+              resolveLineCadence: cadenceFromEstimateLine,
+              db,
+            });
+        } catch (e) {
+          logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
+          return null;
+        }
+      })(),
       prepaidPlans: (prepaidPlans || []).map((plan) => ({
         ...plan,
         paidAt: plan.paidAt instanceof Date ? plan.paidAt.toISOString() : plan.paidAt,
@@ -4069,19 +4106,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         .catch(() => {});
     }
 
-    // Fire-and-forget: trigger cancellation save when deactivating a customer
-    if (updates.active === false) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          cancellationSave.initiate(req.params.id, 'default').catch(err =>
-            logger.error(`[customers] Cancellation save on deactivation failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // The automated cancellation-save SMS sequence no longer fires on
+    // deactivation (owner ruling 2026-08-29: it promised a "retention offer"
+    // and a waived setup fee that were never defined; win-back is a manual
+    // send by the owner). The workflow module and its templates stay for
+    // sequences already in flight.
 
     // Contact change events for the 360 timeline — post-commit, best-effort
     // (the recorder never throws). Compaction above puts every slot column in
@@ -4179,20 +4208,8 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
       body: notes || '', admin_user_id: req.technicianId,
     });
 
-    // Fire-and-forget: trigger cancellation save workflow when moving to churned or at_risk
-    if (stage === 'churned' || (stage === 'at_risk' && oldStage !== 'at_risk')) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          const cancelReason = req.body.churnReason || 'default';
-          cancellationSave.initiate(req.params.id, cancelReason).catch(err =>
-            logger.error(`[customers] Cancellation save failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // Stage moves to churned / at_risk no longer start the cancellation-save
+    // SMS sequence (owner ruling 2026-08-29 — see the deactivation note above).
 
     // Fire-and-forget: update health score on stage change
     try {
@@ -5071,6 +5088,13 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const reference = cleanOptionalText(req.body?.reference);
     const note = cleanOptionalText(req.body?.note);
+
+    // DELIBERATELY NO estimate provenance/claim here: closing an estimate is
+    // an ACCEPTANCE, and acceptance belongs to the canonical converter
+    // (conversion, deposits, group follow-ups, lead pipeline). The
+    // estimate-derived prefill is suggestion-only; linking the term to its
+    // estimate is a follow-up that extends the manual-acceptance mechanism
+    // rather than growing a parallel accept path on this recording route.
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     const invoiceNotes = [
       'Created from Customer 360 annual prepay.',
@@ -5366,7 +5390,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // Body: {
 //   amount: number    — non-zero; negative deducts
 //   kind:   string     — 'prepayment' | 'goodwill' | 'adjustment'
-//   method?: string    — cash/check/zelle/card/other (prepayment only)
+//   method?: string    — cash/check/zelle/venmo/paypal/other (prepayment only)
 //   note?:  string
 // }
 //
@@ -5381,7 +5405,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // also applies the required card surcharge); booking it as a manual cash-
 // style payments row here would grant spendable credit + paid revenue
 // without actually collecting the card.
-const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 
 router.post('/:id/credits', requireAdmin, async (req, res, next) => {
   try {

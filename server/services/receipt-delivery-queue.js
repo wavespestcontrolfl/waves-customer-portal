@@ -23,6 +23,13 @@ async function enqueueReceiptDelivery({
   stripePaymentIntentId = null,
   source = 'stripe_webhook',
   nextAttemptAt = new Date(),
+  // Payment provenance for the receipt SMS's quiet-hours decision (owner
+  // ruling 2026-08-29 + Codex P1 on PR #3598): true only when the enqueue
+  // site KNOWS the payment was the customer's own action (Pay routes; the
+  // succeeded webhook checks the PI's machine markers). Default false is
+  // fail-closed — unstamped rows are treated as machine charges and their
+  // receipt text waits for the 8AM window.
+  customerInitiated = false,
 } = {}) {
   if (!invoiceId) return { enqueued: false, reason: 'missing_invoice_id' };
 
@@ -34,6 +41,7 @@ async function enqueueReceiptDelivery({
     next_attempt_at: nextAttemptAt,
     attempts: 0,
     max_attempts: DEFAULT_MAX_ATTEMPTS,
+    customer_initiated: customerInitiated === true,
     updated_at: db.fn.now(),
   };
 
@@ -202,7 +210,13 @@ async function processReceiptDeliveryJob(job) {
     const InvoiceService = require('./invoice');
     const { sendReceiptEmail } = require('./invoice-email');
 
-    smsResult = await InvoiceService.sendReceipt(invoice.id, { hasEmailLeg: true })
+    smsResult = await InvoiceService.sendReceipt(invoice.id, {
+      hasEmailLeg: true,
+      // Persisted payment provenance (see enqueueReceiptDelivery): a
+      // customer-initiated payment's receipt sends at any hour; a machine
+      // charge's receipt holds for the window and reschedules below.
+      customerInitiated: job.customer_initiated === true,
+    })
       .catch((err) => ({
         sent: false,
         reason: err.message,

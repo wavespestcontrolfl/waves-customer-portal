@@ -590,7 +590,11 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
 
-  const intervals = { daily: 1, weekly: 7, biweekly: 14 };
+  // every_6_weeks MUST be here (series-move incident 2026-08-30): the seeder's
+  // copy has it, this one didn't, so a collective series move projected
+  // siblings on the generic 91-day fallback (09-02 -> 12-02 instead of
+  // 10-14). The parity test pins all three copies together.
+  const intervals = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
@@ -927,6 +931,20 @@ class SmartRebooker {
   }
 
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
+    try {
+      return await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
+    } catch (err) {
+      // The single-row CAS found the row grouped AFTER the pre-read (codex
+      // #3609 r13 P2): re-enter once so the fresh read routes through the
+      // unit mover (whole-visit move) instead of moving the lone member.
+      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED' && !options._membershipRetried) {
+        return this.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, _membershipRetried: true });
+      }
+      throw err;
+    }
+  }
+
+  async rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
     const allowedStatuses = options.allowLive === true
@@ -943,6 +961,47 @@ class SmartRebooker {
     // `expect` pin (date/window) carries over as the series writer's own
     // expectAnchor fence; excludeServiceIds is a batch-mover concept the
     // series path has no use for.
+    //
+    // Visit group (visit-group-scope.md §2, R3 ruled rev 5): a grouped row
+    // moves its WHOLE visit — every live member, each through this same
+    // choke point with visitPolicy:'single'. "Just this service" is the
+    // explicit split action, never a flag here. Gate-independent: existing
+    // visits keep their lifecycle even if the creation gate is later unset.
+    // A grouped pre-read whose visit the mover declined (fewer than two
+    // live members, or not open) falls through to the single-row path —
+    // but the stop lock was released with the plan, so a sibling can join
+    // that same visit before this move commits (codex #3609 r14 P2). The
+    // move transaction re-takes the stop lock and re-counts the members
+    // (soloVisitRecheck below); a visit that gained a member re-enters
+    // through the unit mover.
+    let soloVisitRecheck = false;
+    if (options.visitPolicy !== 'single' && service.visit_id) {
+      const unit = await require('./visit-groups').moveVisitAsUnit({
+        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
+      });
+      if (unit) return unit;
+      // The caller's DISCLOSURE decision assumed a grouped visit (dispatch
+      // sets seriesPolicy 'single' + expectGroupedVisit on that basis; local
+      // gate r44): if the locked plan found the visit solo — a sibling went
+      // terminal since the caller's count — proceeding single-row would move
+      // a recurring occurrence without the acknowledgement an ungrouped
+      // anchor requires. Surface CHANGED; the client refreshes and
+      // re-submits against the now-ungrouped anchor.
+      if (options.expectGroupedVisit === true) {
+        throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+      }
+      soloVisitRecheck = true;
+    }
+    // Membership fence (codex #3609 r13 P2): the row read above was
+    // ungrouped, so this request takes the single-row path — but
+    // createOrJoinVisit can group it between that read and the move
+    // transaction, and normal callers do not carry membership in `expect`.
+    // Pin visit_id IS NULL in the CAS below; a miss that finds the row
+    // grouped surfaces VISIT_MEMBERSHIP_CHANGED and reschedule() re-enters
+    // through the unit mover. A caller that fenced membership itself, or
+    // an explicit single-row member move, keeps its own contract.
+    const membershipFenced = options.visitPolicy !== 'single' && !service.visit_id
+      && !Object.prototype.hasOwnProperty.call(options.expect || {}, 'visit_id');
     if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
       // A retry of a series move that already committed finds the anchor ON
       // the target (no date delta) — resolve the prior move by request
@@ -1099,7 +1158,24 @@ class SmartRebooker {
     const overlapAdvisory = options.overlapAdvisory === true;
     let overlapWarned = false;
 
-    await db.transaction(async (trx) => {
+    // Deadlock victim retry (codex #3609 r26 P2): the solo-visit recheck
+    // takes the row's stop lock AFTER this transaction's tech-day lock,
+    // while createOrJoinVisit holds the stop lock and re-points members
+    // through assignDispatchJob (tech-day). Postgres aborts one side with
+    // 40P01; the grouping writer already retries, so this side must too or
+    // a chosen-victim reschedule fails instead of re-entering the
+    // membership check. Nothing committed on a 40P01 abort.
+    const moveTrx = async (body) => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await db.transaction(body);
+        } catch (err) {
+          if (err && err.code === '40P01' && attempt < 2) { overlapWarned = false; continue; }
+          throw err;
+        }
+      }
+    };
+    await moveTrx(async (trx) => {
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -1126,11 +1202,111 @@ class SmartRebooker {
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
       }
+      if (soloVisitRecheck) {
+        // AFTER rung 1 / the tech lock and BEFORE every row lock (the
+        // 'visit.stop' key is outside the occupancy ORDERING CONTRACT; the
+        // admin editor takes it in the same relative position, so the two
+        // writers never invert). Under the row's stop lock (serializes with
+        // createOrJoinVisit), an OPEN visit that now has another live
+        // member is a whole-visit move: surface it like the ungrouped
+        // membership miss so reschedule() re-enters through the unit
+        // mover. A stop that moved under us gets the same remedy.
+        const vg = require('./visit-groups');
+        try {
+          await vg.lockStopForRow(trx, serviceId);
+        } catch (lockErr) {
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+            throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+          }
+          throw lockErr;
+        }
+        // The row's CURRENT visit under the lock, never the stale pre-read
+        // (codex #3609 r28 P1): a split-and-rejoin lands the row in visit B
+        // while service.visit_id still names A — counting A would let this
+        // single move rip the row out of B.
+        const lockedSolo = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
+        const currentVisitId = lockedSolo ? lockedSolo.visit_id : service.visit_id;
+        if (String(currentVisitId || '') !== String(service.visit_id || '')) {
+          throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+        }
+        const visit = currentVisitId ? await trx('service_visits').where({ id: currentVisitId }).first('status') : null;
+        // A visit that entered FINALIZATION (closing, …) after the plan
+        // observed one member must not lose that member (local codex gate
+        // P0): the detach seam ignores non-open visits, so the solo move
+        // would strand the parent and its issued/payment artifacts at the
+        // old stop. Anything other than open or dissolved is frozen —
+        // the same verdict visit-groups' guards give.
+        if (visit && String(visit.status) !== 'open' && String(visit.status) !== 'dissolved') {
+          throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'visit_not_open' });
+        }
+        if (visit && String(visit.status) === 'open') {
+          const members = await vg.openMembers(trx, currentVisitId);
+          if (members.some((m) => String(m.id) !== String(serviceId))) {
+            throw Object.assign(new Error('Cannot reschedule — another service joined this visit concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+          }
+        }
+      }
+      // Unit-move exclusion contract (codex #3609 r5): the rows a batch
+      // mover hides from the occupancy probes (excludeServiceIds) must
+      // still sit at the snapshot the plan was built from. Lock them FOR
+      // UPDATE inside THIS transaction and verify; they stay locked through
+      // the conflict checks and the write, so a sibling split and re-booked
+      // into this target cannot slip between the check and the commit.
+      if (Array.isArray(options.excludeExpect) && options.excludeExpect.length) {
+        // The moving row is locked TOGETHER with the excluded rows, in id
+        // order (ORDER BY id under FOR UPDATE locks in output order), so two
+        // concurrent unit moves tapping different members of one visit take
+        // the same row locks in the same sequence — no A-then-B / B-then-A
+        // deadlock between their primary transactions (codex r6).
+        const ids = [...new Set([String(serviceId), ...options.excludeExpect.map((x) => String(x.id))])].sort();
+        const rows = await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate()
+          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+        // A durable completion claim on ANY member (local codex audit P0):
+        // the legacy /complete handler claims service_completion_attempts
+        // under the row's stop lock and then completes the row where it
+        // sits — this move must not commit underneath its side effects.
+        // The unit mover refused live claims when it planned; this repeats
+        // it under THIS member's row locks for a claim that landed since:
+        // the primary ⇒ nothing moved; a sibling ⇒ a reported failed member
+        // the detach seam separates. No catch — an unreadable ledger fails
+        // the move, never opens it.
+        const liveClaim = await trx('service_completion_attempts').whereIn('service_id', ids)
+          .whereIn('status', require('./visit-groups').LIVE_COMPLETION_CLAIM_STATUSES).first('id', 'service_id');
+        if (liveClaim) {
+          throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_COMPLETION_IN_FLIGHT', memberId: liveClaim.service_id,
+          });
+        }
+        const norm = (v) => (v ? String(v).slice(0, 5) : null);
+        const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
+        for (const exp of options.excludeExpect) {
+          const cur = rows.find((r) => String(r.id) === String(exp.id));
+          // Any extra key the caller snapshots (status, the auto-dispatch
+          // opt-out flags) is part of the contract too.
+          const extras = Object.keys(exp).filter((k) => !['id', 'visit_id', 'scheduled_date', 'window_start', 'window_end'].includes(k));
+          const same = cur
+            && (exp.visit_id === undefined || String(cur.visit_id || '') === String(exp.visit_id || ''))
+            && day(cur.scheduled_date) === day(exp.scheduled_date)
+            && (exp.window_start === undefined || norm(cur.window_start) === norm(exp.window_start))
+            // An absent end in the contract = "derived by the rebooker" (a
+            // start-only landing); it is not compared (codex #3609 r11).
+            && (exp.window_end === undefined || norm(cur.window_end) === norm(exp.window_end))
+            && extras.every((k) => (cur[k] === null || cur[k] === undefined ? null : cur[k]) === (exp[k] === undefined ? null : exp[k]));
+          if (!same) {
+            throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_PLAN_STALE', memberId: exp.id,
+            });
+          }
+        }
+      }
       if (keptTechId && updates.window_start && occupancyGateEnd) {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
           .where('technician_id', keptTechId)
-          .whereNot('id', serviceId)
+          // Visit members move together (moveVisitAsUnit passes them in
+          // excludeServiceIds) — a chained sibling's OLD slot is not a
+          // conflict for the shifted primary (codex #3609 r1).
+          .whereNotIn('id', [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))])
           .whereNotIn('status', ['cancelled', 'completed'])
           // Expired estimate-slot holds are dead weight until cleanup
           // reclaims them — same active-reservation predicate
@@ -1211,6 +1387,9 @@ class SmartRebooker {
         // operator lock/move is caught atomically here, not just by a prior read.
         // .where({}) is a no-op, so callers that omit it are unaffected.
         .where(options.expect || {})
+        // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
+        // (knex renders null as IS NULL); see membershipFenced above.
+        .where(membershipFenced ? { visit_id: null } : {})
         // When the occupancy gate derived its span FROM the duration (null
         // stored end), pin that duration in the CAS: a concurrent
         // duration-only edit (admin editor commits exactly that) would
@@ -1227,6 +1406,15 @@ class SmartRebooker {
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
         });
       if (updated === 0) {
+        if (membershipFenced) {
+          const now = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
+          if (now && now.visit_id) {
+            throw Object.assign(new Error('Cannot reschedule — the service was grouped into a visit concurrently'), {
+              statusCode: 409,
+              code: 'VISIT_MEMBERSHIP_CHANGED',
+            });
+          }
+        }
         throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
           statusCode: 409,
         });
@@ -1297,16 +1485,24 @@ class SmartRebooker {
       logger.error(`[rebooker] call follow-up shift failed for ${serviceId}: ${err.message}`);
     }
 
-    // Check escalation
-    const count = await db('reschedule_log')
-      .where({ scheduled_service_id: serviceId })
-      .count('* as count').first();
+    // Check escalation — best-effort, post-commit: the move is already
+    // committed, so a failure here must not be reported as a failed move
+    // (a grouped unit move would otherwise abort with its primary landed —
+    // codex #3609 r13 P1).
+    try {
+      const count = await db('reschedule_log')
+        .where({ scheduled_service_id: serviceId })
+        .count('* as count').first();
 
-    if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
-      const customer = await db('customers').where({ id: service.customer_id }).first();
-      logger.warn(`Service ${serviceId} for ${customer.first_name} ${customer.last_name} has been rescheduled ${count.count} times — needs manual review`);
-      await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
-        .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
+      if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
+        // IDs only — never the customer's name in plaintext logs (AGENTS.md
+        // non-card PII rule; local codex audit).
+        logger.warn(`[rebooker] service ${serviceId} (customer ${service.customer_id}) has been rescheduled ${count.count} times — needs manual review`);
+        await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
+          .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
+      }
+    } catch (escErr) {
+      logger.warn(`[rebooker] escalation check failed for ${serviceId} (move already committed): ${escErr.message}`);
     }
 
     // This writer moves the visit with a direct UPDATE, not
@@ -1322,21 +1518,27 @@ class SmartRebooker {
       logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
     }
 
-    // Visit-group seam (visit-group-scope.md §2, R3 interim): a moved
-    // child whose stop no longer matches its visit detaches; the remainder
-    // dissolves when one untouched row is left. Unit-moves arrive with the
-    // #3562 collective-move integration. Best-effort post-commit.
-    try {
-      await require('./visit-groups').handleChildStopChanged(serviceId);
-    } catch (vgErr) {
-      logger.warn(`[rebooker] visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
+    // Visit-group seam (visit-group-scope.md §2): a moved child whose stop
+    // no longer matches its visit detaches; the remainder dissolves when one
+    // untouched row is left. A unit move (moveVisitAsUnit) passes
+    // skipVisitSeam and runs this once for every member AFTER they all
+    // moved — per member it would detach the first mover from siblings
+    // still on the old stop. Best-effort post-commit.
+    if (!options.skipVisitSeam) {
+      try {
+        await require('./visit-groups').handleChildStopChanged(serviceId);
+      } catch (vgErr) {
+        logger.warn(`[rebooker] visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
+      }
     }
 
     if (overlapWarned) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
-      return { success: true, originalDate, newDate, warnings: [slotOverlapWarning(newDateStr)] };
+      // previousStatus: the status the CAS matched — the row's real
+      // pre-move state, for callers that restore it (auto-dispatch).
+      return { success: true, originalDate, newDate, previousStatus: service.status, warnings: [slotOverlapWarning(newDateStr)] };
     }
-    return { success: true, originalDate, newDate };
+    return { success: true, originalDate, newDate, previousStatus: service.status };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the
@@ -1358,6 +1560,20 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    // Direct series callers (customer pull-forward, explicit admin series
+    // branch) reach the visit-unit choke point too (codex #3609 r1/r3): a
+    // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)
+    // until the series_moves-backed visit operation ships; an ungrouped or
+    // single-member visit proceeds as a series.
+    if (options.visitPolicy !== 'single' && service.visit_id) {
+      const unit = await require('./visit-groups').moveVisitAsUnit({
+        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,
+        // The caller asked for a SERIES move explicitly: the primary re-enters
+        // rescheduleSeries regardless of the collective choke-point gate.
+        options: { ...options, primaryViaSeries: true },
+      });
+      if (unit) return unit;
+    }
     // Staff-advisory overlap mode — same contract as the single path above:
     // occupancy clashes commit and warn (per clashing date); validation and
     // concurrency aborts are unaffected.
@@ -1541,6 +1757,9 @@ class SmartRebooker {
         .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
         .select(
           'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
+          // Locked membership recheck below (codex #3609 r26 P1) — read with
+          // the authoritative sweep, never a second query.
+          'visit_id', 'property_id',
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
           'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'updated_at',
           'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
@@ -1635,6 +1854,11 @@ class SmartRebooker {
       const seriesFingerprint = (list) => list.map((s) => [
         String(s.id),
         dateOnly(s.scheduled_date),
+        // Property is part of the identity: the visit STOP LOCKS above are
+        // keyed on it (property, else customer), so a property re-link
+        // while this sweep waited means the locks guard the wrong stop —
+        // abort like any other concurrent series change (codex #3609 r33).
+        String(s.property_id || ''),
         s.date_exception === true ? 'x' : '-',
         s.date_exception_cadence_date ? dateOnly(s.date_exception_cadence_date) : '',
         (RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId))) ? 'm' : '-',
@@ -1694,6 +1918,28 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          // Visit stop locks for EVERY swept occurrence, right after
+          // rung 1 — the same occupancy-then-stop order the single-row
+          // writers take (codex #3609 r31 P1 + uncapped audit):
+          // createOrJoinVisit serializes on the stop lock, never on the
+          // occupancy/maintenance locks, so a grouping racing this sweep
+          // either committed (visible in the locked read below) or waits
+          // behind these locks. Keys from the PRE-lock read, deduped +
+          // SORTED (two overlapping sweeps acquire in one order); the
+          // fingerprint below carries the property leg, so a key that
+          // drifted while we waited aborts. Property-less rows are
+          // included — explicit office groups fall back to the
+          // customer-anchored stop key (stopBaseKey's own fallback).
+          if (options.visitPolicy !== 'single' && sweptIds.length) {
+            const vg = require('./visit-groups');
+            const sweptSet = new Set(sweptIds.map(String));
+            const keys = [...new Set(siblings
+              .filter((x) => sweptSet.has(String(x.id)))
+              .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date })))].sort();
+            for (const vgKey of keys) {
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
+            }
+          }
           // Rung 1 → the per-parent recurring-series maintenance lock, the
           // order update-details already takes (occupancy, then
           // maintenance, then comms). Byte-identical key to admin-schedule's
@@ -1726,6 +1972,50 @@ class SmartRebooker {
             });
           }
           siblings = locked;
+          // Membership recheck from the LOCKED sweep (codex #3609 r26 P1):
+          // an anchor that was ungrouped at the unlocked read can have been
+          // attached by createOrJoinVisit since — a series sweep would move
+          // the anchor and its cadence alone while the committed join's
+          // sibling stays behind, and the post-commit seam would then detach
+          // the anchor. A grouped anchor here gets the same refusal the
+          // up-front unit check gives, under the visit's own stop lock (raw
+          // advisory lock + count — the sweep's read already carries
+          // visit_id/property_id). Explicit single-row member moves
+          // (visitPolicy 'single') keep their own contract.
+          if (options.visitPolicy !== 'single') {
+            // EVERY swept occurrence is membership-checked, not only the
+            // anchor (codex #3609 r31 P1): a later cadence occurrence in a
+            // two-service visit would otherwise be moved directly by the
+            // series loop, stranding its grouped sibling (or, frozen,
+            // leaving issued artifacts describing the old stop). The
+            // LOCKED sweep read above ran UNDER the stop locks (acquired
+            // right after rung 1, before the maintenance lock) and carries
+            // visit_id, so it IS the authoritative membership snapshot — a
+            // grouping racing this sweep either committed before the locks
+            // (visible here) or waits behind them, and the property-aware
+            // fingerprint aborted any stop-key drift.
+            const vg = require('./visit-groups');
+            const sweptSet = new Set(sweptIds.map(String));
+            const visitIds = [...new Set(siblings
+              .filter((x) => sweptSet.has(String(x.id)) && x.visit_id)
+              .map((x) => String(x.visit_id)))];
+            for (const vid of visitIds) {
+              const liveRes = await trx.raw(
+                "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
+                [vid],
+              );
+              if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
+                throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+              }
+              // A frozen lone-member visit is just as unmovable by the
+              // sweep: its seam preserves membership and the issued
+              // artifacts would keep describing the old stop.
+              const verdict = await vg.frozenVisitVerdict(trx, vid);
+              if (verdict.frozen) {
+                throw Object.assign(new Error('This series includes a service on a visit with an issued link, records or a payment in progress — finish that visit, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
+              }
+            }
+          }
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
           // The acknowledged set: a surface confirmed exactly the previewed
@@ -2465,7 +2755,10 @@ class SmartRebooker {
       const { handleChildStopChanged } = require('./visit-groups');
       for (const occ of committedResult.rescheduledOccurrences || []) {
         const occId = occ && (occ.id || occ.serviceId || occ);
-        if (occId) await handleChildStopChanged(occId);
+        // The anchor's own seam is deferred by a unit move (skipVisitSeam);
+        // projected future occurrences keep the per-row seam — a series
+        // shift never carries their same-day visit siblings (out of scope).
+        if (occId && !(options.skipVisitSeam && String(occId) === String(serviceId))) await handleChildStopChanged(occId);
       }
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
@@ -2652,3 +2945,6 @@ module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;
 module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;
+// Parity-test surface (series-move incident): the three nextRecurringDate copies
+// must agree — see tests/recurring-date-parity.test.js.
+module.exports.nextRecurringDate = nextRecurringDate;

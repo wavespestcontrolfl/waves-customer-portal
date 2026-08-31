@@ -39,8 +39,25 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed');
+      .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed', 'visit_id');
     if (!svc?.reschedule_token) return { url: null, line: '' };
+    // GROUPED / FROZEN visits self-serve-reschedule as a whole (or not at
+    // all) — /reschedule/:token deterministically refuses their rows, so
+    // a "Reschedule here" line would be a dead end (codex #3609 on-merge
+    // r3). Same verdict the page applies: 2+ live members, or a frozen
+    // visit, suppresses the link; an unreadable membership fails closed.
+    if (svc.visit_id) {
+      try {
+        const vg = require('./visit-groups');
+        const members = await vg.openMembers(db, svc.visit_id);
+        if (members.length >= 2) return { url: null, line: '' };
+        const verdict = await vg.frozenVisitVerdict(db, svc.visit_id);
+        if (verdict.frozen) return { url: null, line: '' };
+      } catch (vgErr) {
+        logger.warn(`[reschedule-link] grouped-visit check failed for ${scheduledServiceId} — link suppressed: ${vgErr.message}`);
+        return { url: null, line: '' };
+      }
+    }
     // Never mint a self-serve link for a dispatch-owned booking the office
     // hasn't reviewed (codex #3429 r2 P1): reminders now arm before office
     // confirm, and a bearer reschedule URL would let the recipient move a

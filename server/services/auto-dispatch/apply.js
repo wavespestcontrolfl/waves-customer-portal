@@ -15,6 +15,11 @@ const db = require('../../models/db');
 const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
+const routeTiers = require('./route-tiers');
+const { classifyServiceCategory } = require('./service-category');
+const { etDateString } = require('../../utils/datetime-et');
+const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
+const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
@@ -38,7 +43,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded');
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -86,12 +91,147 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
   return payload;
 }
 
+/**
+ * Grouped-visit member guard for the unit mover (codex #3609 r13 P1): the
+ * apply-time HARD guards are evaluated for the tapped row only — the 72h
+ * reminder freeze is queried by that one id, the candidate technician's
+ * capability by that row's category, and revalidatePlacement reads that one
+ * row. A grouped move drags every sibling through the same reschedule, so
+ * each locked member must pass the same guards or the automatic move is
+ * refused before the first write. Runs INSIDE the unit mover's plan
+ * transaction, under the stop lock, on the FOR UPDATE member rows.
+ *   - status: live pending/confirmed only ('rescheduled' is a customer
+ *     request the mover would otherwise treat as movable)
+ *   - per-row eligibility (local audit): the SAME isEligibleForAutoDispatch
+ *     gate the orchestrator applies to the tapped row (recurring child, not
+ *     a parent template, live status, not locked/excluded, outside the
+ *     lock/tier window, active non-archived customer, usable geo) plus the
+ *     active-plan check — a one-time/booster/template/lapsed sibling is
+ *     never dragged through an automatic move
+ *   - reminder freeze (route tiers on): any sibling inside the sendable
+ *     band, or an unreadable check, refuses (fail closed)
+ *   - drift / tier legality (route tiers on): each sibling's OWN durable
+ *     anchor and tier radius must admit best.date (the orchestrator checks
+ *     the tapped row only) — a sibling at its cumulative ±5-day limit must
+ *     not be dragged past it; unreadable anchor evidence refuses (fail closed)
+ *   - technician reassignment: the chosen tech must not be DEACTIVATED for
+ *     a sibling's service category (the scorer's hard filter)
+ *   - preferred time (codex r16 P1): each sibling's DERIVED start (the plan
+ *     shifts siblings by the primary's offset) must sit inside the
+ *     customer's explicit preferred_time_window — the candidate filter
+ *     checked the primary's start only
+ *   - skip_weekends (codex r15 P1): a sibling whose series skips weekends
+ *     never lands on a Saturday (the candidate generator's HARD filter,
+ *     evaluated for the tapped row only)
+ *   - same-series date (codex r14 P1): the target date must not already
+ *     hold another occurrence of a sibling's recurring series (the scorer's
+ *     HARD candidate-date exclusion, evaluated for the tapped row only) —
+ *     the rebooker checks time/technician occupancy, so a different-time
+ *     duplicate of the series would otherwise commit
+ */
+function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
+  const refuse = (memberId, why) => Object.assign(
+    new Error(`Cannot auto-move this stop: grouped service ${memberId} ${why}`),
+    { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId, isOperational: true },
+  );
+  return async ({ trx, members, targets }) => {
+    const siblings = (members || []).filter((m) => String(m.id) !== String(service.id));
+    if (!siblings.length) return;
+    for (const m of siblings) {
+      if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
+    }
+    if (config.prefs && config.prefs.preferred_time_window) {
+      for (const t of (targets || [])) {
+        if (t.isPrimary || !t.startHHMM) continue;
+        if (violatesPreferredTime(t.startHHMM, config.prefs)) throw refuse(t.id, `would start at ${t.startHHMM}, outside the customer's preferred time window`);
+      }
+    }
+    const rows = await trx('scheduled_services as ss')
+      .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+      .whereIn('ss.id', siblings.map((m) => m.id))
+      .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
+        'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
+    const memberIds = (members || []).map((m) => m.id);
+    const today = etDateString(new Date());
+    const eligCtx = {
+      today,
+      lockBoundary: config.lockBoundary,
+      lockWindowDays: config.lockWindowDays,
+      ...(config.routeTiersEnabled === true ? { routeTiers: { enabled: true, today } } : {}),
+    };
+    for (const r of rows) {
+      if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
+      const elig = isEligibleForAutoDispatch(r, eligCtx);
+      if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
+      const plan = await isRecurringPlanActive(r, trx);
+      if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
+    }
+    if (isSaturday(best.date)) {
+      const weekend = rows.find((r) => r.skip_weekends === true);
+      if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
+    }
+    if (config.routeTiersEnabled === true) {
+      const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
+      if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
+      const frozen = siblings.find((m) => freeze.frozen.has(m.id));
+      if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
+      // Same legality math as the orchestrator's pass-1/apply-time checks,
+      // per SIBLING: its own anchor (durable evidence, fail closed), its own
+      // days-out tier radius, the destination floor — best.date must fall
+      // inside the sibling's window or the grouped move is refused.
+      const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
+      if (anchorMap === null) throw refuse(siblings[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
+      for (const r of rows) {
+        const anchor = routeTiers.resolveAnchor(r, anchorMap);
+        if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
+        const daysOut = routeTiers.daysBetween(today, toDateStr(r.scheduled_date));
+        const radius = routeTiers.tierRadiusForDaysOut(daysOut);
+        const window = radius > 0 ? routeTiers.tierMoveWindow({ origDate: r.scheduled_date, anchorDate: anchor, today, radius }) : null;
+        if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
+          throw refuse(r.id, `cannot legally move to ${best.date} (${daysOut} days out, tier radius ±${radius}, drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor})`);
+        }
+      }
+    }
+    for (const r of rows) {
+      if (!r.recurring_parent_id && r.is_recurring !== true) continue;
+      const parentId = r.recurring_parent_id || r.id;
+      // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
+      // non-request row of the series except the members moving together.
+      const clash = await trx('scheduled_services')
+        .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+        .whereNotIn('id', memberIds)
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where('scheduled_date', best.date)
+        .first('id');
+      if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
+    }
+    if (techChanged && best.technician_id) {
+      const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
+      if (categories.length) {
+        const caps = await trx('technician_capabilities')
+          .where({ technician_id: best.technician_id }).whereIn('service_category', categories)
+          .select('service_category', 'active');
+        const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
+        const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
+        if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
+      }
+    }
+  };
+}
+
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
+  // Remaining per-run change budget (orchestrator): a grouped visit whose
+  // LOCKED member count exceeds it is refused inside the unit move before
+  // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
+  if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
   const techChanged = !!best.technician_id
     && String(best.technician_id) !== String(service.technician_id || '');
   if (techChanged) options.technicianId = best.technician_id;
+  // Every grouped member re-passes the apply-time hard guards under the
+  // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
+  options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
 
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
   // reschedule() reloads it but only guards status — if staff locked/excluded it
@@ -125,7 +265,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // later visit -7d and compound on the next run) — hard-coded here, not a
   // caller convention (owner ruling 2026-08-28).
   options.seriesPolicy = 'single';
-  await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
+  const moveResult = await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
   // reschedule() forces status→'confirmed'. The recurring-lifecycle code counts
   // only PENDING recurring rows for plan-extend / plan_ending, so silently
@@ -144,9 +284,22 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
       auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
       updated_at: db.fn.now(),
     };
-    if (postStatus === 'pending') stamp.status = 'pending';
-    await db('scheduled_services').where({ id: service.id }).update(stamp);
-    if (postStatus === 'pending') {
+    // Every stamp is fenced on the exact slot + status this move wrote
+    // (local codex audit): a staff confirm or a newer move landing between
+    // the commit and this bookkeeping is newer state — never rewound to
+    // pending, never stamped as this run's (a stale stamp would attribute
+    // the operator's placement to auto-dispatch and skew drift/cooldown).
+    // A fence miss skips ALL bookkeeping for the row.
+    // The pending restore also requires customer_confirmed=false (codex r17):
+    // an admin/customer confirm landing after the commit keeps status +
+    // slot but flips the marker — never rewound to pending. The complete
+    // landed slot (end too) is part of the fence.
+    const stamped = await db('scheduled_services')
+      .where({ id: service.id, status: 'confirmed', scheduled_date: best.date, window_start: best.start_time, window_end: best.end_time, ...(postStatus === 'pending' ? { customer_confirmed: false } : {}) })
+      .update(postStatus === 'pending' ? { ...stamp, status: 'pending' } : stamp);
+    if (Number(stamped) !== 1) {
+      logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${service.id}: the row changed after the move (newer state kept)`);
+    } else if (postStatus === 'pending') {
       // The rebooker just logged pending→confirmed; record the compensating
       // confirmed→pending so the job_status_history timeline stays consistent.
       await db('job_status_history').insert({
@@ -157,6 +310,53 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
   }
 
+  // A grouped stop that only PARTLY moved (primary committed, a sibling
+  // lost its CAS / hit a conflict) is an explicit failure for auto-dispatch
+  // (codex #3609 r7): no operator consumes the warning here, so the run
+  // must not report the optimization as applied. Bookkeeping for the rows
+  // that DID move still runs below; the throw carries movedCount so the
+  // orchestrator's change count and cap stay honest.
+  const partialFailed = Array.isArray(moveResult?.visitMove?.failed) ? moveResult.visitMove.failed : [];
+
+  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit): every
+  // sibling went through the same reschedule() and was forced 'confirmed'
+  // too. Apply the identical restoration + bookkeeping per moved sibling
+  // from its pre-move state, so a pending recurring sibling keeps counting
+  // toward plan extension (codex #3609 r4). Best-effort, like the tapped row.
+  const siblingMembers = (moveResult?.visitMove?.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
+  for (const sib of siblingMembers) {
+    try {
+      const stamp = {
+        last_auto_dispatch_at: db.fn.now(),
+        last_auto_dispatch_run_id: runId,
+        auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
+        updated_at: db.fn.now(),
+      };
+      // Fenced on the post-move 'confirmed' the rebooker wrote (codex r5)
+      // AND the exact slot the unit move landed (local audit): a staff
+      // confirm/reschedule after the unit move is newer state — never
+      // rewound to pending, never stamped as this run's. A miss skips ALL
+      // bookkeeping for the row; a mover that reports no landed slot cannot
+      // be fenced ⇒ skipped too (fail closed). The history row only follows
+      // a real restoration.
+      if (!sib.landed) {
+        logger.warn(`[auto-dispatch] post-move bookkeeping skipped for grouped sibling ${sib.id}: no landed slot to fence on`);
+        continue;
+      }
+      const restore = sib.previousStatus === 'pending';
+      const stamped = await db('scheduled_services').where({ id: sib.id, status: 'confirmed', ...sib.landed, ...(restore ? { customer_confirmed: false } : {}) }).update(restore ? { ...stamp, status: 'pending' } : stamp);
+      if (Number(stamped) !== 1) {
+        logger.warn(`[auto-dispatch] post-move bookkeeping skipped for grouped sibling ${sib.id}: the row changed after the move (newer state kept)`);
+      } else if (restore) {
+        await db('job_status_history').insert({
+          job_id: sib.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
+        });
+      }
+    } catch (stampErr) {
+      logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for grouped sibling ${sib.id} (move already applied): ${stampErr.message}`);
+    }
+  }
+
   // Keep appointment_reminders aligned with the new date/time — otherwise the
   // 72h/24h reminder cron can still fire for the OLD slot. Non-notifying sync
   // (same as the dispatch reschedule path); best-effort.
@@ -165,7 +365,11 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     const reminderRecord = await AppointmentReminders.handleReschedule(
       service.id,
       `${best.date}T${best.start_time || '08:00'}`,
-      { sendNotification: false },
+      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
+      // round): a full success no longer releases inside the mover — this
+      // sync is the fenced finalizer and its repair-release clears the
+      // cohort; a partial/failed-retarget move keeps the hold for staff.
+      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
     );
     // handleReschedule flips confirmation_sent→true assuming a reschedule notice
     // will follow; auto-dispatch sends none. If a creation confirmation was still
@@ -181,6 +385,23 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
   }
 
+  const movedCount = 1 + siblingMembers.length;
+  if (partialFailed.length) {
+    throw Object.assign(
+      new Error(`grouped visit only partly moved — ${partialFailed.map((f) => `${f.id}: ${f.reason}`).join('; ')}`),
+      { code: 'VISIT_PARTIAL_MOVE', movedCount, failedMembers: partialFailed.map((f) => f.id) },
+    );
+  }
+  // Every member moved but the visit record could not follow (codex r8):
+  // the cleanup seam may detach/dissolve the group against a parent that
+  // still names the old stop — an escalation, not a success.
+  if (moveResult?.visitMove?.parentRetargetFailed) {
+    throw Object.assign(
+      new Error(`grouped visit moved but its visit record could not be retargeted — ${(moveResult.warnings || []).join('; ')}`),
+      { code: 'VISIT_PARENT_RETARGET_FAILED', movedCount },
+    );
+  }
+
   let notification = null;
   try {
     notification = await emitAutoDispatchChanged(service, best, runId, config);
@@ -188,7 +409,45 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.error(`[auto-dispatch] notify hook failed for ${service.id}: ${err.message}`);
   }
 
-  return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification };
+  return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification, movedCount };
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement };
+/**
+ * How many scheduled_services rows an auto-dispatch move of `service` would
+ * change: 1, or every live member of its visit group (moveVisitAsUnit moves
+ * them together). The orchestrator reserves this many changes against
+ * maxChangesPerRun BEFORE applying (codex #3609 r7). Fail-safe: a lookup
+ * error counts as 1 (the tapped row) so the cap is never a reason to skip
+ * on a transient read failure — the apply path revalidates everything.
+ */
+async function unitMoveSize(service, best = null) {
+  try {
+    const row = await db('scheduled_services').where({ id: service.id }).first('visit_id');
+    if (!row || !row.visit_id) return 1;
+    const members = await require('../visit-groups').openMembers(db, row.visit_id);
+    if (!best) return Math.max(1, members.length);
+    // Only members the unit plan would actually CHANGE count (codex #3609
+    // r22 P2) — the same already-at-target rule moveVisitAsUnit applies
+    // under its lock: a member stays put when it is already on the target
+    // date, already on the requested technician (when one is requested),
+    // and either windowless (it keeps no window on a same-day move) or the
+    // move shifts no window. The tapped row always changes.
+    const newDate = String(best.date || '').slice(0, 10);
+    const wantTech = best.technician_id && String(best.technician_id) !== String(service.technician_id || '') ? String(best.technician_id) : null;
+    const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+    const windowShifts = !!best.start_time && hhmm(best.start_time) !== hhmm(service.window_start);
+    const changing = members.filter((m) => {
+      if (String(m.id) === String(service.id)) return true;
+      if (String(m.scheduled_date instanceof Date ? m.scheduled_date.toISOString() : m.scheduled_date || '').slice(0, 10) !== newDate) return true;
+      if (wantTech && String(m.technician_id || '') !== wantTech) return true;
+      if (!m.window_start) return false;
+      return windowShifts;
+    });
+    return Math.max(1, changing.length);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] unit size lookup failed for ${service.id}: ${err.message}`);
+    return 1;
+  }
+}
+
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard };

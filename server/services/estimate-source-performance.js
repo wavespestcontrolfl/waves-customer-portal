@@ -186,11 +186,17 @@ async function sourcePerformance({ days = 90 } = {}) {
       .orWhere('created_at', '>=', cutoff))
     .select(
       'id', 'source', 'status', 'accepted_at', 'declined_at', 'expires_at',
-      'created_at', 'updated_at',
+      'created_at', 'updated_at', 'disposition', 'decline_reason',
     );
+  const { effectiveDisposition, excludedFromRates } = require('./estimate-winloss');
   for (const row of resolved) {
     const resolvedAt = resolutionDateMs(row);
     if (resolvedAt == null || resolvedAt < cutoffMs) continue;
+    // One denominator rule across the page's cards (GH codex P1):
+    // invalid/duplicate leads and converted-elsewhere rows were never
+    // winnable offers — win-loss-slices already drops them, so this card
+    // must too, or a source with more junk traffic looks artificially bad.
+    if (excludedFromRates(effectiveDisposition(row))) continue;
     const bucket = buckets.get(sourceKey(row.source));
     bucket.resolved += 1;
     if (row.status === 'accepted') bucket.won += 1;

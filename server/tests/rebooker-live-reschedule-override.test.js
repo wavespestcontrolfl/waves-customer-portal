@@ -166,7 +166,7 @@ describe('live-status reschedule override (allowLive)', () => {
       await expect(SmartRebooker.reschedule(
         'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
         { allowLive: true },
-      )).resolves.toEqual({
+      )).resolves.toMatchObject({
         success: true,
         originalDate: BASE,
         newDate: TARGET,

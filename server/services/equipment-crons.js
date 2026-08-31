@@ -4,7 +4,7 @@
  * Nightly maintenance checks and weekly warranty expiration alerts.
  * Call initEquipmentCrons() from your main scheduler or index.js.
  */
-const cron = require('node-cron');
+const cron = require('../utils/scheduled-cron');
 const logger = require('./logger');
 const equipmentService = require('./equipment-maintenance');
 

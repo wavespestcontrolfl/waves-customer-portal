@@ -17,6 +17,11 @@ jest.mock('../services/customer-contact', () => ({
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
+  existingShortUrlFor: jest.fn().mockResolvedValue(null),
+}));
+// Provider-side reconcile for stale inline claims (claimInlineForSend).
+jest.mock('../services/twilio', () => ({
+  findOutboundMessageSince: jest.fn(async () => ({ unavailable: true })),
 }));
 // Manual create() runs under the per-customer advisory lock; with the db mock
 // there is no pool so the real runExclusive would fail closed (skipped:
@@ -493,7 +498,9 @@ describe('review request follow-up flow', () => {
         orderByRaw: jest.fn(function () { return this; }),
         limit: jest.fn().mockResolvedValue([]),
       }),
-      // 3. queued-ask check — returns THIS pending row, so the resend is the
+      // 3. in-flight composer claim check — none.
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      // 4. queued-ask check — returns THIS pending row, so the resend is the
       //    one already_queued outcome allowed through (queuedId match).
       chain({
         whereRaw: jest.fn(function () { return this; }),
@@ -545,7 +552,7 @@ describe('review request follow-up flow', () => {
     });
   });
 
-  test('marks inline delivery only for pending unsent rows', async () => {
+  test('marks inline delivery only for unsent pending/claimed rows', async () => {
     const updateQuery = chain();
     db.mockImplementation((table) => {
       if (table === 'review_requests') return updateQuery;
@@ -556,10 +563,347 @@ describe('review request follow-up flow', () => {
 
     expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline' });
     expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
-    expect(updateQuery.where).toHaveBeenCalledWith('status', 'pending');
+    // 'pending' = the dispatch path, 'sending' = the composer's pre-send claim.
+    expect(updateQuery.whereIn).toHaveBeenCalledWith('status', ['pending', 'sending']);
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_for: null,
       status: 'sent',
     }));
+  });
+
+  test('claimInlineForSend claims conditionally and reports a lost claim', async () => {
+    const updateQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return updateQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
+    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline', status: 'pending' });
+    expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
+
+    // A colleague's fresh (non-stale) claim already holds the row — the
+    // conditional UPDATE matches nothing, the stale lookup finds nothing,
+    // and the caller must reject its own send.
+    updateQuery.update.mockResolvedValueOnce(0);
+    updateQuery.first.mockResolvedValueOnce(undefined);
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+  });
+
+  test('a stale claim with outbound-log evidence is repaired to sent, not reclaimed', async () => {
+    const rrQuery = chain();
+    const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+    rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
+    rrQuery.first.mockResolvedValueOnce({ id: 'rr-inline', token: 'tok-64chars' });
+    smsLogQuery.first.mockResolvedValueOnce({ id: 'sms-1' }); // the ask already left
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      if (table === 'sms_log') return smsLogQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+    // The missing delivered stamp is repaired from the log evidence.
+    expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+  });
+
+  // A stale claim with NO local log evidence is decided by the PROVIDER —
+  // twilio.js swallows post-accept sms_log insert failures, so a missing
+  // local row proves nothing on its own.
+  function wireStaleClaimNoLocalEvidence() {
+    const rrQuery = chain();
+    const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+    rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
+    rrQuery.first.mockResolvedValueOnce({
+      id: 'rr-inline', token: 'tok-64chars', customer_id: 'cust-1', claimed_at: new Date('2026-06-03T13:00:00.000Z'),
+    });
+    smsLogQuery.first.mockResolvedValue(undefined);
+    const customersQuery = chain({ first: jest.fn().mockResolvedValue({ phone: '+19415550123' }) });
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      if (table === 'sms_log') return smsLogQuery;
+      if (table === 'customers') return customersQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    return { rrQuery };
+  }
+
+  test('stale claim, provider unreachable → stays blocked (unknown is not "not sent")', async () => {
+    const { findOutboundMessageSince } = require('../services/twilio');
+    findOutboundMessageSince.mockResolvedValueOnce({ unavailable: true });
+    const { rrQuery } = wireStaleClaimNoLocalEvidence();
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+    expect(rrQuery.update).toHaveBeenCalledTimes(1); // only the missed pending claim
+  });
+
+  test('stale claim, provider has the message → repaired to sent, not reclaimed', async () => {
+    const { findOutboundMessageSince } = require('../services/twilio');
+    findOutboundMessageSince.mockResolvedValueOnce({ found: true });
+    const { rrQuery } = wireStaleClaimNoLocalEvidence();
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+    expect(findOutboundMessageSince).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550123', bodyFragment: 'tok-64chars',
+    }));
+    expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+  });
+
+  test('stale claim, provider confirms nothing left → pre-provider crash, claim released', async () => {
+    const { findOutboundMessageSince } = require('../services/twilio');
+    findOutboundMessageSince.mockResolvedValueOnce({ found: false });
+    const { rrQuery } = wireStaleClaimNoLocalEvidence();
+    rrQuery.update.mockResolvedValueOnce(1); // the reclaim
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
+    expect(rrQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+  });
+
+  test('reviewSmsAllowedNow refuses deleted / already-reviewed customers, an exclusive email channel, and fails closed on a read failure', async () => {
+    const prefsQuery = chain();
+    const customersQuery = chain();
+    customersQuery.first.mockResolvedValue({ id: 'cust-1', deleted_at: null, has_left_google_review: false });
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsQuery;
+      if (table === 'customers') return customersQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    // Live customer state the mint-time check can't see: a draft can outlive
+    // an archive or the CSR's already-reviewed toggle.
+    customersQuery.first.mockResolvedValueOnce({ id: 'cust-1', deleted_at: new Date(), has_left_google_review: false });
+    prefsQuery.first.mockResolvedValueOnce(null);
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'customer_deleted' });
+
+    customersQuery.first.mockResolvedValueOnce({ id: 'cust-1', deleted_at: null, has_left_google_review: true });
+    prefsQuery.first.mockResolvedValueOnce(null);
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'already_reviewed' });
+
+    prefsQuery.first.mockResolvedValueOnce({ review_request: true, sms_enabled: true, review_request_channel: 'email' });
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'email_only' });
+
+    prefsQuery.first.mockResolvedValueOnce({ review_request: true, sms_enabled: true, review_request_channel: 'both' });
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: true });
+
+    prefsQuery.first.mockResolvedValueOnce(null); // no row — SMS consent is re-checked downstream
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: true });
+
+    prefsQuery.first.mockRejectedValueOnce(new Error('db down'));
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'prefs_unavailable' });
+  });
+
+  test('composer mint refuses an email-only review preference', async () => {
+    const insert = insertReturning({ id: 'rr-new', token: null });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }) });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue({ review_request: true, sms_enabled: true, review_request_channel: 'email' }) });
+      }
+      if (table === 'review_requests') {
+        return { ...chain({ first: jest.fn().mockResolvedValue(null) }), insert: insert.query.insert };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.createInline({ customerId: 'cust-1', armSafetyNet: false })).toBeNull();
+    expect(insert.query.insert).not.toHaveBeenCalled();
+  });
+
+  test('claim token fences mark/release and the pre-provider check — a superseded holder cannot act', async () => {
+    const rrQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    const mine = new Date('2026-06-03T14:00:00.000Z');
+    const theirs = new Date('2026-06-03T14:11:00.000Z'); // a later reclaim
+
+    // Fenced mark + release scope the UPDATE to the token the caller holds.
+    await ReviewService.markInlineDelivered('rr-inline', mine);
+    expect(rrQuery.where).toHaveBeenCalledWith('claimed_at', mine);
+    await ReviewService.releaseInlineClaim('rr-inline', mine);
+    expect(rrQuery.where).toHaveBeenCalledWith('claimed_at', mine);
+
+    // Pre-provider fence: the row now carries the reclaim's token.
+    rrQuery.first.mockResolvedValueOnce({ claimed_at: theirs });
+    expect(await ReviewService.inlineClaimStillHeld('rr-inline', mine)).toBe(false);
+    rrQuery.first.mockResolvedValueOnce({ claimed_at: mine });
+    expect(await ReviewService.inlineClaimStillHeld('rr-inline', mine)).toBe(true);
+  });
+
+  test('a live composer claim blocks every canonical one-off ask path via the gates', async () => {
+    // The composer's row is 'sending' + unscheduled: invisible to the queued
+    // arm and the delivered stats, yet about to text — the in-flight arm
+    // must refuse a concurrent /trigger or satisfaction ask.
+    const statsSpy = jest.spyOn(ReviewService, 'getDeliveredAskStats').mockResolvedValue({ count: 0, lastAt: null });
+    const rrQuery = chain();
+    rrQuery.first.mockResolvedValueOnce({ id: 'rr-in-flight' });
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      if (table === 'review_sequences') return chain({ first: jest.fn().mockResolvedValue(null) });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.checkUnscheduledAskGates('cust-1')).toEqual({ allowed: false, outcome: 'in_flight' });
+    expect(rrQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1', status: 'sending' });
+    expect(rrQuery.where).toHaveBeenCalledWith('claimed_at', '>=', expect.any(Date));
+    statsSpy.mockRestore();
+  });
+
+  test('releaseInlineClaim hands a claimed row back to pending', async () => {
+    const updateQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return updateQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await ReviewService.releaseInlineClaim('rr-inline');
+
+    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', status: 'sending' });
+    expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending' }));
+  });
+
+  test('composer mint (armSafetyNet:false) inserts an UNSCHEDULED row', async () => {
+    const insert = insertReturning({ id: 'rr-composer', token: null });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue(null) });
+      }
+      if (table === 'review_requests') {
+        return {
+          ...chain({ first: jest.fn().mockResolvedValue(null) }),
+          insert: insert.query.insert,
+        };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      armSafetyNet: false,
+    });
+
+    expect(insert.holder.payload).toEqual(expect.objectContaining({
+      customer_id: 'cust-1',
+      triggered_by: 'auto_inline',
+      scheduled_for: null,
+      status: 'pending',
+    }));
+    expect(result.requestId).toBe('rr-composer');
+  });
+
+  test('composer mint reuses an existing pending unscheduled row instead of stacking tokens', async () => {
+    const insert = insertReturning({ id: 'rr-new', token: null });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue(null) });
+      }
+      if (table === 'review_requests') {
+        return {
+          ...chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'rr-open-tab',
+              token: 'token-open-tab',
+              status: 'pending',
+              sms_sent_at: null,
+              scheduled_for: null,
+            }),
+          }),
+          insert: insert.query.insert,
+        };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      armSafetyNet: false,
+    });
+
+    expect(result).toMatchObject({ requestId: 'rr-open-tab', token: 'token-open-tab' });
+    expect(insert.query.insert).not.toHaveBeenCalled();
+  });
+
+  test('composer reuse also matches a row mid-claim and reuses its short URL', async () => {
+    const { existingShortUrlFor } = require('../services/short-url');
+    // Another tab's /sms is between claim and delivery-mark: status 'sending'.
+    // Minting a fresh token here would ride past the claim gate — the reuse
+    // query must see the claimed row too.
+    const rrChain = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'rr-claimed',
+        token: 'token-claimed',
+        status: 'sending',
+        sms_sent_at: null,
+        scheduled_for: null,
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue(null) });
+      }
+      if (table === 'review_requests') return rrChain;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    // The row already has a minted code — the second insert must carry the
+    // SAME short URL, or its body slips past the /sms linkInBody claim gate.
+    existingShortUrlFor.mockResolvedValueOnce('https://portal.wavespestcontrol.com/s/abc123');
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      armSafetyNet: false,
+    });
+
+    expect(rrChain.whereIn).toHaveBeenCalledWith('status', ['pending', 'sending']);
+    expect(result).toMatchObject({
+      requestId: 'rr-claimed',
+      token: 'token-claimed',
+      url: 'https://portal.wavespestcontrol.com/s/abc123',
+    });
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('manual-ask detection recognizes the seeded Yelp and Facebook write-a-review links', async () => {
+    for (const body of [
+      'Review us on Yelp here: yelp.com/writeareview/biz/waves-pest-control-bradenton-6',
+      'Review us on Facebook here: facebook.com/wavespestcontrol/reviews',
+    ]) {
+      db.mockImplementation((table) => {
+        if (table === 'sms_log') {
+          return chain({
+            whereNotIn: jest.fn(function () { return this; }),
+            select: jest.fn().mockResolvedValue([
+              { message_body: body, created_at: new Date('2026-06-01T12:00:00.000Z') },
+            ]),
+          });
+        }
+        if (table === 'review_requests') {
+          return chain({ select: jest.fn().mockResolvedValue([]) });
+        }
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      const detected = await ReviewService.manualReviewAskSentRecently('cust-1');
+      expect(detected).toBe(true);
+    }
   });
 });

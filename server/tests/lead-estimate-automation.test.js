@@ -157,6 +157,23 @@ describe('lead estimate automation gate', () => {
     expect(draft.estimateData.engineResult.lineItems[0]).toEqual(expect.objectContaining({
       service: 'mosquito',
     }));
+
+    // Send-time pricing-audit provenance survives compaction (codex
+    // pre-push P1 ×2): the numeric cadence, program/addOns COGS inputs,
+    // and the gross/net witnesses the audit normalizer consumes.
+    const li = draft.estimateData.engineResult.lineItems[0];
+    expect(Number(li.visitsPerYear ?? li.visits ?? li.appsPerYear)).toBeGreaterThan(0);
+    expect(li).toHaveProperty('program');
+    expect(li).toHaveProperty('addOns');
+    expect(li).toHaveProperty('priceBeforeDiscount');
+    expect(li).toHaveProperty('annualBeforeDiscount');
+    expect(li).toHaveProperty('costs');
+    expect(li).toHaveProperty('installation');
+    expect(li).toHaveProperty('bedArea');
+    // The gross witness must not be silently rewritten to the net.
+    if (li.annual != null && li.annualBeforeDiscount != null) {
+      expect(li.annualBeforeDiscount).toBeGreaterThanOrEqual(li.annual);
+    }
   });
 
   test('rodent bait lead drafts keep the new-model provenance (perApplicationBilled / stations / pricingBasis) — codex #3591 r9 P0', () => {

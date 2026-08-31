@@ -39,4 +39,47 @@ function counterpartServiceName(name) {
   return BY_LOWER.get(String(name || '').trim().toLowerCase()) || null;
 }
 
-module.exports = { CADENCE_CONVENTION_RENAMES, counterpartServiceName };
+/**
+ * Pre-convention series labels — the generation of labels stamped BEFORE
+ * the ten renamed names existed ("Quarterly Pest Control", "Lawn Care",
+ * "General Pest Control (Quarterly)", …). A label alone is ambiguous
+ * ("Pest Control" is quarterly OR monthly); the (label, recurring_pattern)
+ * pair is the cadence evidence and maps to exactly one current catalog
+ * name.
+ *
+ * Source of truth is migration 20260829000040's UNLINKED_MAPPING (which
+ * relabeled the OPEN visits); the runtime copy exists because TERMINAL
+ * series parents keep their closed-under label by that migration's
+ * Invariant 1 — and series generation reads the parent — so the generator
+ * resolves the current name at insert instead of copying the parent label
+ * verbatim. The backfill test asserts this list equals the migration's.
+ */
+const LEGACY_LABEL_CADENCE_NAMES = [
+  ['Quarterly Pest Control', 'quarterly', 'Quarterly Pest Control Service'],
+  ['Pest Control', 'quarterly', 'Quarterly Pest Control Service'],
+  ['General Pest Control (Quarterly)', 'quarterly', 'Quarterly Pest Control Service'],
+  ['General Pest Control', 'quarterly', 'Quarterly Pest Control Service'],
+  ['General Pest Control (Semiannual)', 'semiannual', 'Semiannual Pest Control Service'],
+  ['General Pest Control (Bi-Monthly)', 'bimonthly', 'Bi-Monthly Pest Control Service'],
+  ['Pest Control', 'monthly', 'Monthly Pest Control Service'],
+  ['Lawn Care', 'monthly_nth_weekday', 'Monthly Lawn Care Service'],
+  ['Lawn Care', 'every_6_weeks', 'Every 6 Weeks Lawn Care Service'],
+  ['Lawn Care Service', 'bimonthly', 'Bi-Monthly Lawn Care Service'],
+];
+
+const LEGACY_BY_PAIR = new Map(
+  LEGACY_LABEL_CADENCE_NAMES.map(([label, pattern, to]) => [`${label.toLowerCase()}|${pattern}`, to])
+);
+
+/** Current catalog name for a pre-convention (label, cadence) pair, or null. */
+function legacyCatalogName(label, recurringPattern) {
+  if (!label || !recurringPattern) return null;
+  return LEGACY_BY_PAIR.get(`${String(label).trim().toLowerCase()}|${String(recurringPattern).trim()}`) || null;
+}
+
+module.exports = {
+  CADENCE_CONVENTION_RENAMES,
+  LEGACY_LABEL_CADENCE_NAMES,
+  counterpartServiceName,
+  legacyCatalogName,
+};

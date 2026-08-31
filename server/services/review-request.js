@@ -7,7 +7,13 @@ const {
   addETDays,
   etDateString,
 } = require("../utils/datetime-et");
-const { shortenOrPassthrough } = require("./short-url");
+const { shortenOrPassthrough, existingShortUrlFor } = require("./short-url");
+
+// How long a composer's pre-provider claim ('sending' + claimed_at) counts
+// as live: the ask gates block every canonical one-off path for this long,
+// and claimInlineForSend reconciles (never blindly reclaims) a claim older
+// than this. Comfortably past any provider HTTP timeout.
+const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
@@ -268,6 +274,22 @@ function unshortenedReviewUrl(token) {
 }
 
 async function buildReviewUrl(request, customerId) {
+  // One deterministic URL per request row — reuse the earliest minted code
+  // so every insert of the SAME reused row carries the SAME short link. The
+  // /sms claim gate matches the body against existingShortUrlFor (the
+  // earliest code); a second insert minting a fresh code would slip past
+  // that linkInBody check and send unclaimed and unmarked. Lookup failure
+  // falls through to a fresh mint (never block building the link).
+  try {
+    const existing = await existingShortUrlFor({
+      kind: "review",
+      entityType: "review_requests",
+      entityId: request.id,
+    });
+    if (existing) return existing;
+  } catch {
+    /* fall through to mint */
+  }
   const longUrl = unshortenedReviewUrl(request.token);
   return shortenOrPassthrough(longUrl, {
     kind: "review",
@@ -664,7 +686,11 @@ const ReviewService = {
    * post-service enrollment.
    */
   async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
-    const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
+    // yelp.com/writeareview and facebook.com/<page>/reviews are the Insert
+    // Link sheet's seeded write-a-review destinations (link-library.js) —
+    // an operator texting one is a personal ask exactly like a pasted
+    // g.page link, and must stand the cadence down the same way.
+    const MANUAL_ASK_RE = /g\.page\/|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
     // A forwarded copy of one of our own (now shorter) templates says just
     // "review" with a branded /l/ short link (codex #3235 r4 P1) — /l/ alone
     // is any portal short link (reports, appointments), so require BOTH the
@@ -1625,25 +1651,52 @@ const ReviewService = {
    * @returns {{ url: string, requestId: string, token: string }|null}
    * shortened review URL metadata, or null when the caller should skip the suffix.
    */
-  async createInline({ customerId, serviceRecordId }) {
+  /**
+   * armSafetyNet: the dispatch completion-SMS caller keeps the +120min
+   * safety-net send (the completion SMS is already committed, so the ask
+   * must not be lost to a delivery hiccup). Composer mints pass false —
+   * the row is created UNSCHEDULED and only ever becomes "sent" when the
+   * operator's own send carries it (markInlineDelivered), so an abandoned
+   * draft can never auto-text the customer two hours later.
+   */
+  async createInline({ customerId, serviceRecordId, armSafetyNet = true }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) return null;
     // CSR flagged this customer as already-reviewed — caller treats null
     // as "skip the review suffix" so the completion SMS goes out clean.
     if (customer.has_left_google_review) return null;
 
-    try {
-      const prefs = await db("notification_prefs")
-        .where({ customer_id: customerId })
-        .first();
-      if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
-        return null;
+    const consent = await this.reviewSmsAllowedNow(customerId);
+    if (!consent.allowed) {
+      if (consent.reason === "prefs_unavailable") {
+        logger.warn(`[review] Inline request skipped; prefs lookup failed (customerId=${customerId})`);
       }
-    } catch (err) {
-      logger.warn(
-        `[review] Inline request skipped; prefs lookup failed (customerId=${customerId} errType=${err?.name || "Error"})`,
-      );
       return null;
+    }
+
+    // Composer mints (unscheduled, no service record) reuse an existing
+    // pending unscheduled row for the customer: checkUnscheduledAskGates's
+    // already_queued arm only sees rows with a scheduled_for (they "will
+    // send automatically" — an unscheduled row won't), so without reuse a
+    // second tab or session could mint a second live token for the same
+    // customer. Reuse returns the SAME token, so there is only ever one.
+    // 'sending' rows count too: that's a live pre-provider claim (or a
+    // stranded one) — minting a fresh token during that window would let a
+    // second ask ride past the claim gate; reusing it hands back the same
+    // token, whose send the claim gate then serializes.
+    if (!serviceRecordId && !armSafetyNet) {
+      const existing = await db("review_requests")
+        .where({ customer_id: customerId, triggered_by: "auto_inline" })
+        .whereIn("status", ["pending", "sending"])
+        .whereNull("sms_sent_at")
+        .whereNull("scheduled_for")
+        .whereNull("service_record_id")
+        .orderBy("created_at", "desc")
+        .first();
+      if (existing) {
+        const url = await buildReviewUrl(existing, customerId);
+        return { url, requestId: existing.id, token: existing.token };
+      }
     }
 
     // Reuse an existing request for this service so we don't stack tokens.
@@ -1719,7 +1772,7 @@ const ReviewService = {
         service_type: serviceType,
         service_date: serviceDate,
         triggered_by: "auto_inline",
-        scheduled_for: new Date(Date.now() + 120 * 60000),
+        scheduled_for: armSafetyNet ? new Date(Date.now() + 120 * 60000) : null,
         sms_sent_at: null,
         status: "pending",
       })
@@ -1734,19 +1787,186 @@ const ReviewService = {
     return { url, requestId: request.id, token: request.token };
   },
 
-  async markInlineDelivered(requestId) {
+  async markInlineDelivered(requestId, claimToken = null) {
     if (!requestId) return;
-    await db("review_requests")
+    let q = db("review_requests")
       .where({ id: requestId })
       .whereNull("sms_sent_at")
-      .where("status", "pending")
-      .update({
-        sms_sent_at: new Date(),
-        scheduled_for: null,
-        status: "sent",
-      });
+      // "sending" = the composer path's pre-send claim (claimInlineForSend);
+      // "pending" = the dispatch completion-SMS path, which sends under its
+      // own per-service row so it needs no claim.
+      .whereIn("status", ["pending", "sending"]);
+    // Composer callers pass their claim token: a holder superseded by a
+    // reclaim must not stamp the replacement claim's row.
+    if (claimToken) q = q.where("claimed_at", claimToken);
+    await q.update({
+      sms_sent_at: new Date(),
+      scheduled_for: null,
+      status: "sent",
+    });
   },
 
+  /**
+   * Atomically claim a pending inline row for an in-flight operator send.
+   * createInline deliberately hands every composer the SAME pending
+   * unscheduled row (single live token), so two tabs can both reach /sms
+   * holding this id before either's post-send mark lands — the conditional
+   * UPDATE lets exactly one through and the loser's send is rejected before
+   * the provider call, so at most one ask ever texts the customer. A claim
+   * orphaned by a crash between the claim and the post-send mark is
+   * RECONCILED against the outbound log after 10 minutes: a
+   * delivered-but-unmarked ask (provider send succeeded, the delivered
+   * stamp failed) is repaired to "sent". A stale claim with no LOCAL
+   * evidence is not handed back on that alone — twilio.js deliberately
+   * swallows a post-accept sms_log insert failure, so a missing row cannot
+   * prove the send didn't happen — the PROVIDER is asked instead: a
+   * matching message there repairs the stamp, a positive "none" proves a
+   * pre-provider crash and releases the claim, and an unreachable provider
+   * leaves the row 'sending' (unscheduled, so it can never auto-send, and
+   * createInline keeps reusing it so no second token mints around the
+   * block). Re-texting a solicitation is the one unacceptable outcome.
+   */
+  async claimInlineForSend(requestId) {
+    if (!requestId) return false;
+    // The claim stamp doubles as the FENCE token: mark/release only act
+    // while claimed_at still equals the token the caller was handed, so a
+    // holder superseded by a later reclaim can neither mark nor release the
+    // replacement claim (inlineClaimStillHeld re-checks it pre-provider).
+    const token = new Date();
+    const claimed = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
+      .whereNull("sms_sent_at")
+      .update({ status: "sending", claimed_at: token });
+    if (claimed > 0) return token;
+
+    // Not pending — a stale abandoned claim is the only other claimable
+    // state, and only after reconciling it against the outbound log.
+    const staleBefore = new Date(Date.now() - INLINE_CLAIM_STALE_MS);
+    const row = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", "<", staleBefore)
+      .first("id", "token", "customer_id", "claimed_at");
+    if (!row) return false;
+
+    // Any outbound sms_log row carrying this ask's link (long token or its
+    // short URL) is proof the ask reached the provider — excluding
+    // in-flight/reservation ('sending') and failure rows, which are not
+    // evidence of delivery.
+    let frags = [row.token];
+    try {
+      const short = await existingShortUrlFor({
+        kind: "review",
+        entityType: "review_requests",
+        entityId: row.id,
+      });
+      if (short) frags.push(short);
+    } catch {
+      /* no short URL — the token fragment still reconciles */
+    }
+    frags = frags.filter(Boolean).map((f) => String(f).replace(/^https?:\/\//, ""));
+    for (const frag of frags) {
+      const evidence = await db("sms_log")
+        .where("direction", "outbound")
+        .whereNotIn("status", ["sending", "failed", "undelivered", "blocked", "canceled"])
+        .where("message_body", "like", `%${frag}%`)
+        .first("id");
+      if (evidence) {
+        // The ask went out — repair the missing stamp.
+        await this.markInlineDelivered(requestId);
+        return false;
+      }
+    }
+
+    // No local evidence is NOT proof of no send (twilio.js swallows a
+    // post-accept sms_log insert failure). Ask the PROVIDER: a message to
+    // the customer carrying this link after the claim means it went out —
+    // repair the stamp; the provider positively confirming none = a
+    // pre-provider crash, and the claim is safely handed back so the
+    // customer's review sends aren't blocked forever. Provider unreachable
+    // = unknown → stay blocked (fail closed).
+    const owner = await db("customers").where({ id: row.customer_id }).first("phone");
+    const to = owner?.phone ? toE164(owner.phone) || owner.phone : null;
+    const TwilioService = require("./twilio");
+    for (const frag of frags) {
+      const provider = await TwilioService.findOutboundMessageSince({
+        to,
+        sentAfter: row.claimed_at,
+        bodyFragment: frag,
+      });
+      if (provider.unavailable) return false;
+      if (provider.found) {
+        await this.markInlineDelivered(requestId);
+        return false;
+      }
+    }
+    const reclaimToken = new Date();
+    const reclaimed = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", "<", staleBefore)
+      .update({ claimed_at: reclaimToken });
+    return reclaimed > 0 ? reclaimToken : false;
+  },
+
+  /** Final pre-provider fence: is `claimToken` still the live claim on the row? */
+  async inlineClaimStillHeld(requestId, claimToken) {
+    if (!requestId || !claimToken) return false;
+    const row = await db("review_requests")
+      .where({ id: requestId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .first("claimed_at");
+    return !!row?.claimed_at && new Date(row.claimed_at).getTime() === new Date(claimToken).getTime();
+  },
+
+  /**
+   * Live SMS-review consent, shared by the inline mint and the composer
+   * send seam (mint-time prefs go stale while a draft sits open). Mirrors
+   * sendRequest's channel resolver: review requests off, SMS off, or an
+   * EXCLUSIVE 'email' channel preference all refuse an SMS ask. No prefs
+   * row = allowed (SMS consent is re-checked downstream in
+   * sendCustomerMessage). FAIL CLOSED on a prefs read failure — the
+   * composer's conversational send policy does not enforce review
+   * preferences, so an unverified state must not text.
+   */
+  async reviewSmsAllowedNow(customerId) {
+    // Live CUSTOMER eligibility first — the same suppressions sendSMS
+    // applies (soft-deleted, CSR already-reviewed flag); a draft can outlive
+    // either change.
+    let customer;
+    let prefs;
+    try {
+      customer = await db("customers").where({ id: customerId }).first("id", "deleted_at", "has_left_google_review");
+      prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
+    } catch {
+      return { allowed: false, reason: "prefs_unavailable" };
+    }
+    if (!customer || customer.deleted_at) return { allowed: false, reason: "customer_deleted" };
+    if (customer.has_left_google_review) return { allowed: false, reason: "already_reviewed" };
+    if (prefs && prefs.review_request === false) return { allowed: false, reason: "review_off" };
+    if (prefs && prefs.sms_enabled === false) return { allowed: false, reason: "sms_off" };
+    if (prefs && prefs.review_request_channel === "email") return { allowed: false, reason: "email_only" };
+    return { allowed: true };
+  },
+
+  async releaseInlineClaim(requestId, claimToken = null) {
+    if (!requestId) return;
+    let q = db("review_requests")
+      .where({ id: requestId, status: "sending" })
+      .whereNull("sms_sent_at");
+    // Fenced: a superseded holder must not release the replacement claim.
+    if (claimToken) q = q.where("claimed_at", claimToken);
+    await q.update({ status: "pending", claimed_at: null });
+  },
+
+  /**
+   * Retire a composer-minted inline row (operator withdrew the link) — one
+   * CONDITIONAL update, so a send that marks the row delivered between the
+   * caller's read and this write can't have its delivered state overwritten
+   * to suppressed (the read-then-act race). Composer rows are unscheduled,
+   * so there is no scheduled send to race — this guards the operator's own
+   * /sms delivery marking. Returns whether a pending row was suppressed.
+   */
   async markInlineDeliveryFailed(requestId) {
     if (!requestId) return;
     await db("review_requests").where({ id: requestId }).update({
@@ -2937,6 +3157,18 @@ const ReviewService = {
     if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
       return { allowed: false, outcome: "cooldown" };
     }
+
+    // A composer send mid-flight: its row is claimed ('sending', fresh
+    // claimed_at) and unscheduled, so neither the queued arm below nor the
+    // delivered stats see it — yet the ask is about to text. Block every
+    // canonical one-off path for the claim's lifetime (a claim older than
+    // the stale window is reconciled by claimInlineForSend, not blocking).
+    const inFlight = await db("review_requests")
+      .where({ customer_id: customerId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", ">=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
+      .first("id");
+    if (inFlight) return { allowed: false, outcome: "in_flight" };
 
     const queued = await db("review_requests")
       .where({ customer_id: customerId, status: "pending" })

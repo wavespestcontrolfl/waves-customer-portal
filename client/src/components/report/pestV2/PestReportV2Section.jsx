@@ -18,7 +18,7 @@ import {
 } from './PestReportV2';
 import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
 
-export default function PestReportV2Section({ data, print = false, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null }) {
+export default function PestReportV2Section({ data, print = false, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null, traceOrNothing = false }) {
   if (!data) return null;
   return (
     // No inset: cards align edge-to-edge with the report's .sr-section cards — the
@@ -37,8 +37,10 @@ export default function PestReportV2Section({ data, print = false, token = null,
       />
       {/* "Where we protected": the technician-traced spray map is COMBINED
           into the status hero above (owner 2026-07-21) — the schematic
-          centerpiece renders only for visits without a trace. */}
-      {!tracedMap && data.defense ? <PestProtectionMap defense={data.defense} print={print} /> : null}
+          centerpiece renders only for visits without a trace, and under
+          GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31) not even then:
+          traced map or nothing, on every pest report. */}
+      {!tracedMap && !traceOrNothing && data.defense ? <PestProtectionMap defense={data.defense} print={print} /> : null}
       {data.primaryMove ? <PestPrimaryMove primaryMove={data.primaryMove} /> : null}
       {/* What the homeowner flagged during the visit — acknowledged as its own
           card so it never reads as ignored (owner audit 2026-07-29). */}

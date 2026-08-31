@@ -295,13 +295,21 @@ describe('archiveConvertedOpenEstimates', () => {
       calls.find((c) => c.table === 'estimates' && c.m === 'whereNotNull').args,
     ).toEqual(['customer_id']);
 
-    // Stamp is archived_at + updated_at only — status is never rewritten
-    // (no implicit accept; acceptance has money side-effects).
+    // Stamp is archive + disposition only — status is never rewritten
+    // (no implicit accept; acceptance has money side-effects). The
+    // disposition marks the row converted_other_path so win/loss analytics
+    // never counts this customer's WIN as an estimate loss (estimator
+    // audit 2026-08-29); COALESCE keeps any staff-stamped value.
     const update = calls.find((c) => c.m === 'update');
     expect(Object.keys(update.args[0]).sort()).toEqual([
       'archived_at',
+      'disposition',
+      'disposition_at',
+      'disposition_source',
       'updated_at',
     ]);
+    expect(update.args[0].status).toBeUndefined();
+    expect(String(update.args[0].disposition.__raw ?? update.args[0].disposition)).toContain("COALESCE(disposition, 'converted_other_path')");
 
     // First-conversion semantics: one has-signal OR-pair (paid invoice /
     // completed visit), and a none-before NOT EXISTS per EVIDENCE source —

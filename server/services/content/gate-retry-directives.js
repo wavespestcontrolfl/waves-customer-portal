@@ -35,6 +35,19 @@ const GATE_RETRY_INSTRUCTIONS = {
   COMPARISON_UNKNOWN_COMPETITOR: 'Remove every business name that get_competitor_facts did not return — replace each with a generic provider category ("national chain", "local SWFL company", "DIY"); never invent a business name or pull one from web search. EXCEPTION: a business your operator brief itself names (its binding title/thesis/outline) MUST stay in prose/title/meta as briefed — remove it only from the <ComparisonTable> block (columns, cells, headers), where its attributes cannot be validated; keep the table options generic and make the briefed comparison in prose instead.',
   COMPARISON_DISPARAGEMENT: 'Remove all negative or disparaging language about named businesses; comparisons must be neutral and factual.',
   COMPARISON_UNCLASSIFIED_OPTION: 'Every comparison-table option must be either a generic category (no business names) or a competitor from the curated allowlist — replace unlisted names with generic categories.',
+  // Affiliate family (owner monetization pilot 2026-08-31). The writer only
+  // ever references product IDs its BRIEF supplies — it never invents one,
+  // never pastes a retailer URL, and never adds affiliate links unasked.
+  UNREGISTERED_AFFILIATE_LINK: 'Remove every <AffiliateLink> whose product id your brief did not explicitly supply — never invent a product id, compute the prop, or paste a retailer/tracking URL; if the brief supplied no affiliate products, this post carries none.',
+  AFFILIATE_LINK_WITHOUT_DISCLOSURE: 'This post carries an <AffiliateLink>, so frontmatter.disclosure must be type "affiliate" (FTC material-connection rule) — set it, or remove every affiliate component.',
+  AFFILIATE_LINK_IN_META: 'Remove every <AffiliateLink> (and any retailer URL) from title/meta fields — affiliate links are body-only; metas stay informational.',
+  AFFILIATE_LINK_ADDED_ON_REFRESH: 'A refresh may preserve the affiliate links the live body already carries but may NEVER add one — remove every <AffiliateLink> the live body does not already contain, occurrence for occurrence.',
+  AFFILIATE_LINK_ON_PROTECTED_PAGE: 'This post type never carries affiliate links (it captures local service intent) — remove every <AffiliateLink>; keep the Waves service CTA as the only call to action.',
+  PROHIBITED_AFFILIATE_PRODUCT: 'This product is prohibited (restricted-use/professional class or an explicit owner denial) — remove the recommendation entirely; do not substitute another product unless the brief names one.',
+  INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT: 'This affiliate product is not currently active — remove the <AffiliateLink> (a plain unlinked product mention is fine if the prose needs it) or use an active product id your brief supplies.',
+  PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW: 'This consumer-pesticide product\'s manual label review is missing or stale, so it cannot be linked — remove the <AffiliateLink>; the product may be discussed in prose under the normal product-claim rules but not linked until the owner re-verifies its registry row.',
+  SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE: 'Add a Waves service CTA link (e.g. /pest-control-calculator/, /quote/, or the relevant city-service page) BEFORE any product recommendation — affiliate links are fallback monetization; the service CTA stays primary.',
+  EXCESSIVE_AFFILIATE_LINK_DENSITY: 'Cap affiliate links at 3 per post and keep the opening section product-free — answer the reader\'s question first, then recommend at most one primary product and one alternative later in the piece.',
 };
 
 // The header defaults to the RUN-LEVEL framing (one feedback-informed

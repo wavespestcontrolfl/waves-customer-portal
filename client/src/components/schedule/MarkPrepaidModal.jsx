@@ -28,6 +28,8 @@ function adminFetch(path, options = {}) {
 const METHODS = [
   { value: 'cash', label: 'Cash' },
   { value: 'zelle', label: 'Zelle' },
+  { value: 'venmo', label: 'Venmo' },
+  { value: 'paypal', label: 'PayPal' },
   { value: 'check', label: 'Check' },
   { value: 'card_over_phone', label: 'Card (over phone)' },
   { value: 'other', label: 'Other' },

@@ -549,6 +549,22 @@ export class ApiClient {
     return this.request('/requests');
   }
 
+  // Cancel-flow v2 (GATE_CANCEL_FLOW_V2). Preview is read-only despite the
+  // verb; 404 = gate off, the caller falls back to the single-step form.
+  cancelResolutionPreview(body = {}) {
+    return this.request('/requests/cancel-resolution', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  cancelResolutionAccept(body) {
+    return this.request('/requests/cancel-resolution/accept', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
   queryCustomerPricing(prompt, targetTier) {
     return this.request('/customer-pricing/query', {
       method: 'POST',
