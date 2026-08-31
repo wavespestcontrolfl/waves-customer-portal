@@ -569,16 +569,23 @@ async function getMrrTrend(months) {
 
   const results = settled;
 
-  // Growth rates. Never computed across the lane-definition boundary
-  // (#3669, Codex r8): the pre-boundary point holds the old wide
-  // population, so a crossing pair would report every excluded residue
-  // row as negative growth (and contaminate avg_growth_pct) — same rule
-  // the Net MRR bridge applies (mrr-bridge.js LANE_DEFINITION_BOUNDARY).
+  // Growth rates. Never computed across the lane-definition step (#3669,
+  // Codex r8+r9): pre-boundary points hold the old wide population, and —
+  // unlike the per-customer snapshots, whose writer refuses pre-boundary
+  // rewrites — the DEPLOY month's AGGREGATE is already narrow (this
+  // function recomputes it live, and recordMrrSnapshot overwrites it at
+  // month-end). So the first narrowed aggregate point can be the deploy
+  // month itself, one month before LANE_DEFINITION_BOUNDARY. Suppress
+  // every pair whose earlier point predates the boundary AND whose later
+  // point is at or after the aggregate step floor (the earliest month this
+  // change can deploy into) — Jul→Aug and Aug→Sep both null, exact growth
+  // resumes with Sep→Oct; avg_growth_pct already skips nulls.
   const { LANE_DEFINITION_BOUNDARY } = require('../mrr-bridge');
+  const AGGREGATE_STEP_FLOOR = '2026-08-01';
   for (let i = 1; i < results.length; i++) {
     const prev = results[i - 1];
-    const crossesLaneBoundary = prev.date < LANE_DEFINITION_BOUNDARY && results[i].date >= LANE_DEFINITION_BOUNDARY;
-    results[i].growth_pct = (!crossesLaneBoundary && prev.mrr > 0)
+    const crossesLaneStep = prev.date < LANE_DEFINITION_BOUNDARY && results[i].date >= AGGREGATE_STEP_FLOOR;
+    results[i].growth_pct = (!crossesLaneStep && prev.mrr > 0)
       ? Math.round((results[i].mrr - prev.mrr) / prev.mrr * 100)
       : null;
   }

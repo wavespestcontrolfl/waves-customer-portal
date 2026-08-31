@@ -317,11 +317,15 @@ router.get('/billing-health', async (req, res, next) => {
     // the other attention buckets is guaranteed to catch them (Codex P2 on
     // #2939). Overlaps no_payment_method when the method pointer is also
     // NULL — both chips firing for one account is truthful, so no subtraction.
+    // Card-dependent audience (Codex #3669 r9): dues-lane accounts AND
+    // per-application accounts — a per-application customer's saved card is
+    // HOW their per-visit charge collects (see admin-billing-recovery), so
+    // an unchargeable/missing method is actionable on that lane too, rate
+    // or no rate. The coverage metrics above stay dues-lane only.
     const unchargeable = await db('customers as c')
       .where({ 'c.active': true })
       .whereNull('c.deleted_at')
-      .where('c.monthly_rate', '>', 0)
-      .whereRaw(MONTHLY_LANE_SQL)
+      .where(function cardDependentLanes() { this.where(function monthlyLane() { this.where('c.monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL); }).orWhere('c.billing_mode', 'per_application'); })
       .where('c.autopay_enabled', true)
       .whereRaw(
         'NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)',
@@ -331,12 +335,12 @@ router.get('/billing-health', async (req, res, next) => {
       .count('* as n').first()
       .catch(() => ({ n: 0 }));
 
-    // Customers with no autopay payment method
+    // Customers with no autopay payment method — card-dependent audience
+    // (dues lane ∪ per-application), same rationale as `unchargeable`.
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
       .whereNull('deleted_at')
-      .where('monthly_rate', '>', 0)
-      .whereRaw(MONTHLY_LANE_SQL)
+      .where(function cardDependentLanes() { this.where(function monthlyLane() { this.where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL); }).orWhere('billing_mode', 'per_application'); })
       .whereNull('autopay_payment_method_id')
       .count('* as n').first();
 
@@ -414,12 +418,14 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
     const now = new Date();
     const sixtyDaysOut = new Date(); sixtyDaysOut.setDate(sixtyDaysOut.getDate() + 60);
 
-    // No payment method
+    // No payment method — card-dependent audience (dues lane ∪
+    // per-application): a per-application customer's saved card is how
+    // their per-visit charge collects, so a missing method is actionable
+    // there too (Codex #3669 r9).
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
       .whereNull('deleted_at')
-      .where('monthly_rate', '>', 0)
-      .whereRaw(MONTHLY_LANE_SQL)
+      .where(function cardDependentLanes() { this.where(function monthlyLane() { this.where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL); }).orWhere('billing_mode', 'per_application'); })
       .whereNull('autopay_payment_method_id')
       .select('id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier');
 
