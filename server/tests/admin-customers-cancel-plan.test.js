@@ -66,6 +66,8 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
   coveredTermsAsOf: jest.fn(() => ({
     where: jest.fn(function where() { return this; }),
+    orderBy: jest.fn(function orderBy() { return this; }),
+    select: jest.fn(async () => mockState.annual_prepay_terms || []),
     first: jest.fn(async () => (mockState.annual_prepay_terms || [])[0] || null),
   })),
   recordDecision: (...args) => mockRecordDecision(...args),
@@ -231,6 +233,10 @@ describe('POST /:id/cancel-plan/preview', () => {
     ];
     let body = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'end_of_coverage' })).json();
     expect(body.effectiveDate).toBe('end_of_coverage');
+    // The "visits pulled" preview counts only what the button pulls — the
+    // impact math gets the processor's keep-through boundary.
+    const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28' });
     expect(body.effectiveOn).toBe('2027-02-28');
     expect(body.prepay).toEqual(expect.objectContaining({ termId: 'term-1', termEnd: '2027-02-28', disposition: 'end_at_term', refund: null }));
 
@@ -275,7 +281,9 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', requestId: request.id, families: [], keepThrough: null, waiveLateFee: true,
       actor: { type: 'admin', userId: 'admin-1' },
-      reason: `Admin cancellation request ${request.id}`,
+      // The recorded reason (code + note) feeds churn classification — never
+      // the request-id boilerplate when the operator said why.
+      reason: 'price — Too expensive',
     }));
     expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', serviceRequestId: request.id, families: [], reasonCode: 'price', reasonText: 'Too expensive', processed: true,
@@ -379,9 +387,12 @@ describe('POST /:id/cancel-plan', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ keepThrough: null }));
-      expect(mockRecordDecision).not.toHaveBeenCalled();
-      expect(mockState.updates).toEqual([expect.objectContaining({ table: 'annual_prepay_terms', count: 1, patch: expect.objectContaining({ status: 'cancelled' }) })]);
-      expect(mockState.annual_prepay_terms[0].renewal_decision).toBeNull();
+      // The term is DECIDED through move 8 (recordDecision) — this lane never
+      // writes annual_prepay_terms.status directly (writer set is pinned by
+      // the term-states guard test). Coverage revocation happens when the
+      // recorded refund actually lands (move 9).
+      expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', adminUserId: 'admin-1' }));
+      expect(mockState.updates || []).toEqual([]);
       expect(body.refund).toEqual(expect.objectContaining({ amount: 360, remainingVisits: 3, needsManualCalc: false }));
       expect(body.prepayTermOutcome).toBe('ended_now');
       expect(mockOpenCase.mock.calls[0][0].snapshot.refund).toEqual(expect.objectContaining({ amount: 360 }));
@@ -401,6 +412,76 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockState.inserted).toBeUndefined();
     }));
 
+    test('two live terms → 409 multiple_prepay_terms; nothing is written', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms.push({
+        id: 'term-2', customer_id: 'cust-1', term_start: '2026-06-01', term_end: '2027-05-31', plan_label: 'Annual Lawn',
+        prepay_amount: '600.00', coverage_visit_count: 6, status: 'active', renewal_decision: null,
+      });
+      const res = await post(baseUrl, '/cancel-plan');
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('multiple_prepay_terms');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('a term already decided renew → 409 prepay_term_decided before any write', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'renew';
+      mockState.annual_prepay_terms[0].status = 'renewed';
+      const res = await post(baseUrl, '/cancel-plan');
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('prepay_term_decided');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('a paid payment_pending term → 409 prepay_term_not_actionable (recordDecision would silently miss)', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].status = 'payment_pending';
+      const res = await post(baseUrl, '/cancel-plan');
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('prepay_term_not_actionable');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('retry after a decided cancel reuses the recorded case — no second request, processor run, or customer text', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage' }),
+      }];
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual(expect.objectContaining({ duplicate: true, requestId: 'req-9', caseId: 'case-9', processed: true, prepayTermOutcome: 'decision_already_recorded' }));
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+      expect(mockRecordDecision).not.toHaveBeenCalled();
+      expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    }));
+
+    test('a pre-existing decided-cancel term with NO recorded case still runs; the decision write is skipped', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+      expect(mockRecordDecision).not.toHaveBeenCalled();
+      expect(mockProcess).toHaveBeenCalledTimes(1);
+      // The refund task is still owed.
+      expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('billing');
+    }));
+
+    test('refund math ignores completed visits stamped to ANOTHER term (overlapping terms)', () => withServer(async (baseUrl) => {
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01', annual_prepay_term_id: 'term-1' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01', annual_prepay_term_id: null },
+        { id: 's3', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-01', annual_prepay_term_id: 'term-OTHER' },
+      ];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
+    }));
+
     test('a scoped cancel leaves the term alone', () => withServer(async (baseUrl) => {
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'] });
       const body = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
@@ -409,6 +490,43 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockState.updates || []).toEqual([]);
     }));
   });
+
+  test('a green processor with a failed follow-up step (case write) still bells the office', () => withServer(async (baseUrl) => {
+    mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
+    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(body.processed).toBe(true);
+    expect(body.errors).toEqual(['case_write']);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, text] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(category).toBe('service');
+    expect(title).toMatch(/needs review/);
+    expect(text).toContain('a follow-up step failed');
+    expect(text).toContain('case_write');
+  }));
+
+  test('a body customerId cannot re-point the cancel: the path id is authoritative', () => withServer(async (baseUrl) => {
+    const res = await post(baseUrl, '/cancel-plan', { customerId: 'cust-EVIL' });
+    expect(res.status).toBe(200);
+    expect(mockState.inserted.find((i) => i.table === 'service_requests').row.customer_id).toBe('cust-1');
+    expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+  }));
+
+  test('a failed processor run never touches the prepaid term or raises the refund task', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, status: 'active', renewal_decision: null,
+    }];
+    mockProcess.mockRejectedValueOnce(new Error('sweep down'));
+    const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+    expect(body.processed).toBe(false);
+    expect(body.prepayTermOutcome).toBe('skipped_processor_failed');
+    expect(body.errors).toEqual(expect.arrayContaining(['processor_threw', 'prepay_term_disposition_skipped']));
+    expect(mockRecordDecision).not.toHaveBeenCalled();
+    expect(mockState.updates || []).toEqual([]);
+    // The only office notification is the review bell — never the refund task.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('service');
+  }));
 
   test('a partial processor run reports processed:false, keeps the errors, and bells the office once', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'] });

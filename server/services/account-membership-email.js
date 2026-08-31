@@ -363,19 +363,28 @@ async function sendCancellationReceived({
   // tierAfter } — the account stays, so the line names what stopped and
   // what continues; never "your plan is cancelled" (ruling C-3).
   scope = null,
+  // When the cancel takes effect on a date other than the request (C3
+  // end-of-coverage), the caller names it; the request date is the fallback.
+  effectiveAt = null,
+  // End-of-coverage cancel: paid visits STAY through effectiveAt — never
+  // claim upcoming visits are off the calendar.
+  keptThrough = false,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
   const submittedAt = request.created_at || request.createdAt || new Date();
+  const effectiveDateLabel = displayDate(effectiveAt || submittedAt);
   const scopedLabels = scope && Array.isArray(scope.cancelled) && scope.cancelled.length ? scope.cancelled : null;
   const remainingLabels = scope && Array.isArray(scope.remaining) ? scope.remaining.filter(Boolean) : [];
   const outcomeLine = processed === true
     ? (scopedLabels
-      ? `${scopedLabels.join(' and ')} ${scopedLabels.length > 1 ? 'are' : 'is'} cancelled as of ${displayDate(submittedAt)}: those upcoming visits are off the calendar.`
+      ? `${scopedLabels.join(' and ')} ${scopedLabels.length > 1 ? 'are' : 'is'} cancelled as of ${effectiveDateLabel}: those upcoming visits are off the calendar.`
         + (remainingLabels.length
           ? ` ${remainingLabels.join(' and ')} continue${remainingLabels.length > 1 ? '' : 's'}${scope.tierAfter ? ` under WaveGuard ${scope.tierAfter}` : ''}, and AutoPay stays as it was for ${remainingLabels.length > 1 ? 'them' : 'it'}.`
           : '')
         + ' Charges for visits already completed remain payable.'
-      : `Your plan is cancelled as of ${displayDate(submittedAt)}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`)
+      : (keptThrough
+        ? `Your plan is cancelled and will not renew. Visits already paid for stay on the calendar through ${effectiveDateLabel}; after that, nothing further is scheduled or charged, and autopay is off. Charges for visits already completed remain payable.`
+        : `Your plan is cancelled as of ${effectiveDateLabel}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`))
     : 'Our office is closing out your plan by hand and will confirm exactly what has stopped within 1 business day.';
   return sendTemplate({
     customerId,

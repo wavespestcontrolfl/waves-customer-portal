@@ -5136,7 +5136,9 @@ function cancelPlanErrorResponse(res, err) {
 router.post('/:id/cancel-plan/preview', requireAdmin, async (req, res, next) => {
   try {
     const AdminCancellation = require('../services/admin-cancellation');
-    const preview = await AdminCancellation.previewCancelPlan({ customerId: req.params.id, ...(req.body || {}) });
+    // Body spreads FIRST — the path id is authoritative; a stray customerId
+    // in a reused payload must never re-point the preview or the cancel.
+    const preview = await AdminCancellation.previewCancelPlan({ ...(req.body || {}), customerId: req.params.id });
     res.json(preview);
   } catch (err) {
     if (cancelPlanErrorResponse(res, err)) return;
@@ -5148,8 +5150,8 @@ router.post('/:id/cancel-plan', requireAdmin, async (req, res, next) => {
   try {
     const AdminCancellation = require('../services/admin-cancellation');
     const outcome = await AdminCancellation.commitCancelPlan({
-      customerId: req.params.id,
       ...(req.body || {}),
+      customerId: req.params.id,
       actor: { type: 'admin', userId: req.technicianId || null },
     });
     res.json({ success: true, ...outcome });

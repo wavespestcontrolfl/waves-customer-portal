@@ -147,6 +147,32 @@ describe('CancelPlanDialog', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel Pest Control' })).toBeEnabled());
   });
 
+  it('a failed preview refresh disables the commit even though the prior preview stays rendered', async () => {
+    let failNext = false;
+    const prepay = {
+      termId: 'term-1', planLabel: 'Annual Pest', termStart: '2026-03-01', termEnd: '2027-02-28',
+      prepaidAmount: 480, includedVisits: 4, disposition: 'end_now_refund',
+      refund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
+    };
+    stubFetch((path) => {
+      if (path.endsWith('/cancel-plan/preview')) {
+        if (failNext) return response({ error: 'boom' }, 500);
+        return response(previewBody({ prepay }));
+      }
+      return response({});
+    });
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText('the whole plan');
+    expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).toBeEnabled();
+
+    // The operator changes the facts; the refresh FAILS. The old facts stay
+    // on screen, but the red button must not commit choices it never showed.
+    failNext = true;
+    fireEvent.click(screen.getByLabelText(/^End of paid coverage/));
+    await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /^Cancel/ })).toBeDisabled();
+  });
+
   it('annual prepay: effective-date choice drives the disposition; the refund line is the server number and is never automatic', async () => {
     const prepay = (disposition) => ({
       termId: 'term-1', planLabel: 'Annual Pest', termStart: '2026-03-01', termEnd: '2027-02-28', prepaidAmount: 480, includedVisits: 4,

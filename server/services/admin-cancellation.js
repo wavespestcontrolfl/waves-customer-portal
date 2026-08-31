@@ -26,10 +26,12 @@
  *   end_at_term      keep every covered visit through term_end
  *                    (processor keepThrough), decide the term 'cancel' so
  *                    it never renews — coverage rides out its paid window.
- *   end_now_refund   pull everything now, cancel the term's coverage, and
- *                    RECORD the refund (prepaid ÷ included visits × remaining
- *                    visits) on the case + an office task to issue it to the
- *                    original method. Never refunds through Stripe itself.
+ *   end_now_refund   pull everything now, decide the term 'cancel' (move 8)
+ *                    and RECORD the refund (prepaid ÷ included visits ×
+ *                    remaining visits) on the case + an office task to issue
+ *                    it to the original method. Never refunds through Stripe
+ *                    itself; the refund landing later fires the renewal
+ *                    module's own coverage revocation (move 9).
  *
  * Dark behind GATE_CANCEL_FLOW_V2 (call-time read). Kill switch = unset.
  */
@@ -102,13 +104,35 @@ async function loadCustomer(customerId) {
   return customer;
 }
 
-async function liveTermFor(customerId) {
+// The canonical coverage query (same one billing reads) admits more term
+// shapes than this lane can END truthfully: a paid `payment_pending` row the
+// activation sweep has not flipped, a decided `renewed`/`switch_plan` row, a
+// decided lapse riding out its window, or several covered terms at once. A
+// shape recordDecision's guard would silently miss is REFUSED here, before
+// any write — never "processed" with the term left live.
+async function resolveLiveTerm(customerId, wholeAccount) {
+  if (!wholeAccount) return null;
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
-  const term = await coveredTermsAsOf(db, etDateString())
+  const terms = await coveredTermsAsOf(db, etDateString())
     .where('t.customer_id', customerId)
-    .first('t.id', 't.term_start', 't.term_end', 't.plan_label', 't.prepay_amount',
+    .orderBy('t.term_end', 'desc')
+    .select('t.id', 't.term_start', 't.term_end', 't.plan_label', 't.prepay_amount',
       't.coverage_visit_count', 't.coverage_service_type', 't.status', 't.renewal_decision');
-  return term || null;
+  if (!terms || !terms.length) return null;
+  if (terms.length > 1) {
+    throw new CancelPlanError(409, 'multiple_prepay_terms',
+      'This account has more than one live annual-prepay term — a whole-plan cancel cannot pick one. Dispose of the extra term from the invoice tools first.');
+  }
+  const term = terms[0];
+  if (term.renewal_decision && term.renewal_decision !== 'cancel') {
+    throw new CancelPlanError(409, 'prepay_term_decided',
+      `The annual-prepay term is already decided "${term.renewal_decision}". Clear that renewal decision first, then cancel.`);
+  }
+  if (!term.renewal_decision && !ANNUAL_PREPAY_TERM_ACTIVE_STATUSES.includes(String(term.status))) {
+    throw new CancelPlanError(409, 'prepay_term_not_actionable',
+      `The annual-prepay term is "${term.status}" right now and cannot take a cancel decision. Retry once it activates, or dispose of it from the invoice tools.`);
+  }
+  return term;
 }
 
 const dateOnly = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
@@ -140,12 +164,18 @@ async function computePrepayRefund(term) {
     completed = await db('scheduled_services')
       .where({ customer_id: term.customer_id, status: 'completed', prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
       .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
-      .select('id');
+      .select('id', 'annual_prepay_term_id');
   } catch (err) {
     logger.warn(`[admin-cancellation] covered-visit count failed for term ${term.id}: ${err.message}`);
     return { ...base, reason: 'covered_visit_count_failed' };
   }
-  const completedVisits = Array.isArray(completed) ? completed.length : 0;
+  // Overlapping terms: a covered visit stamped with ANOTHER term's id must
+  // not shrink THIS term's remaining count (rows predating the term-id stamp
+  // fall back to the window test above).
+  const ownRows = (Array.isArray(completed) ? completed : []).filter(
+    (r) => r.annual_prepay_term_id == null || String(r.annual_prepay_term_id) === String(term.id),
+  );
+  const completedVisits = ownRows.length;
   const remainingVisits = Math.max(0, base.includedVisits - completedVisits);
   const amount = Math.round((base.prepaidAmount / base.includedVisits) * remainingVisits * 100) / 100;
   return { ...base, completedVisits, remainingVisits, amount, needsManualCalc: false };
@@ -214,12 +244,15 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   const input = normalizeInput(raw);
   const customer = await loadCustomer(customerId);
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
+  const term = await resolveLiveTerm(customerId, wholeAccount);
+  const prepayPlan = resolvePrepay(input, term, wholeAccount);
+  // The preview's "visits pulled" must count what pressing the button pulls:
+  // an end-of-coverage cancel KEEPS dated visits through term_end (the
+  // processor's keepThrough floor), so the impact math gets the same boundary.
   const [eligible, impact] = await Promise.all([
     hasCancellableWork(customerId),
-    buildCancellationImpact(customerId, wholeAccount ? [] : scope),
+    buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough }),
   ]);
-  const term = wholeAccount ? await liveTermFor(customerId) : null;
-  const prepayPlan = resolvePrepay(input, term, wholeAccount);
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
@@ -301,11 +334,57 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
       'There is no active plan, recurring service, or upcoming visit on this account to cancel.');
   }
 
-  const term = wholeAccount ? await liveTermFor(customerId) : null;
+  const term = await resolveLiveTerm(customerId, wholeAccount);
   const prepayPlan = resolvePrepay(input, term, wholeAccount);
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
+
+  // Idempotency latch: an end-of-coverage cancel leaves the account with
+  // cancellable work (the kept covered visits), so a retry or double-click
+  // sails past the eligibility gate. The durable proof a prior run finished
+  // is the term's decided-'cancel' state PLUS its recorded case — reuse that
+  // outcome; never open a second request, run the processor again, or text
+  // the customer twice for the same cancellation.
+  if (term && term.renewal_decision === 'cancel') {
+    let prior = null;
+    try {
+      const recent = await db('cancellation_cases')
+        .where({ customer_id: customerId })
+        .orderBy('created_at', 'desc')
+        .limit(10)
+        .select('id', 'service_request_id', 'status', 'snapshot');
+      prior = (recent || []).find((c) => {
+        const snap = typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {});
+        return String(snap.prepayTermId || '') === String(term.id);
+      }) || null;
+    } catch (dupErr) {
+      logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
+    }
+    if (prior) {
+      logger.info(`[admin-cancellation] duplicate cancel for customer ${customerId} matched case ${prior.id} — returning the recorded outcome`);
+      return {
+        requestId: prior.service_request_id || null,
+        caseId: prior.id,
+        duplicate: true,
+        processed: prior.status !== 'open',
+        visitsPulled: 0,
+        scope: [],
+        remaining: [],
+        tierBefore: null,
+        tierAfter: null,
+        effectiveDate: prepayPlan.keepThrough || etDateString(),
+        keptThrough: prepayPlan.keepThrough,
+        lateFeeWaived: false,
+        prepayDisposition: prepayPlan.prepayDisposition,
+        prepayTermOutcome: 'decision_already_recorded',
+        confirmation: null,
+        confirmationChannels: [],
+        confirmationRequested: false,
+        errors: [],
+      };
+    }
+  }
 
   let caseSnapshot = null;
   try {
@@ -335,9 +414,13 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
   const errors = [];
   let result = null;
   try {
+    const reasonParts = [input.reasonCode, input.note].filter(Boolean);
     result = await processCancellationRequest({
       customerId,
-      reason: `Admin cancellation request ${request.id}`,
+      // The recorded reason feeds customers.churn_reason_detail and the AI
+      // churn classification — boilerplate here misclassifies every
+      // admin-driven churn (the Pareto reads the customer columns).
+      reason: reasonParts.length ? reasonParts.join(' — ') : `Admin cancellation request ${request.id}`,
       requestId: request.id,
       families: wholeAccount ? [] : scope,
       actor: { type: actorType, userId: actorUserId },
@@ -351,9 +434,18 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
   const processed = !!(result && result.ok && (result.churned || result.scopedWoundDown));
   if (result && Array.isArray(result.errors)) errors.push(...result.errors);
 
-  // Annual-prepay term disposition (whole-account only).
+  // Annual-prepay term disposition (whole-account only) — GATED on a
+  // successful wind-down: deciding the term (or raising the refund task)
+  // after a failed processor run would suppress renewal / promise money on
+  // an account that did NOT cancel. A failed run bells the office below and
+  // the operator retries; the retry re-runs processor-then-disposition in
+  // the documented order.
   let termOutcome = null;
-  if (term && prepayPlan.prepayDisposition) {
+  if (term && prepayPlan.prepayDisposition && !processed) {
+    termOutcome = 'skipped_processor_failed';
+    errors.push('prepay_term_disposition_skipped');
+  }
+  if (term && prepayPlan.prepayDisposition && processed) {
     try {
       if (prepayPlan.prepayDisposition === 'end_at_term') {
         const { recordDecision } = require('./annual-prepay-renewals');
@@ -365,16 +457,23 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
         });
         termOutcome = decided ? 'ends_at_term' : 'decision_already_recorded';
       } else {
-        const ended = await db('annual_prepay_terms')
-          .where({ id: term.id })
-          .whereIn('status', ANNUAL_PREPAY_TERM_ACTIVE_STATUSES)
-          .whereNull('renewal_decision')
-          .update({
-            status: 'cancelled',
-            renewal_notes: `Cancel plan (${actorLabel}) — ended now; unused value refund recorded on the cancellation case.`,
-            updated_at: new Date(),
-          });
-        termOutcome = ended ? 'ended_now' : 'term_not_live';
+        // end_now_refund: decide the term 'cancel' through the SAME move-8
+        // guard the renewals module owns — this file must never write
+        // annual_prepay_terms.status directly (the term state machine's
+        // writer set is pinned by docs/annual-prepay-term-states.md and its
+        // guard test). Coverage formally ends when the office issues the
+        // recorded refund: the refund landing on the prepay invoice fires
+        // move 9 (syncTermForRefundedPayment), which revokes coverage and
+        // clears the prepaid stamps. Until then the decided term rides out
+        // with no visits left — the processor pulled them above.
+        const { recordDecision } = require('./annual-prepay-renewals');
+        const decided = term.renewal_decision === 'cancel' ? null : await recordDecision({
+          termId: term.id,
+          action: 'cancel',
+          adminUserId: actorUserId,
+          notes: `Cancel plan (${actorLabel}) — ended now; unused-value refund recorded on the cancellation case.`,
+        });
+        termOutcome = decided ? 'ended_now' : 'decision_already_recorded';
         await raisePrepayRefundTask({ customer, request, term, refund, actorLabel });
       }
     } catch (err) {
@@ -423,19 +522,28 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
       result,
       processed,
       effectiveAt: prepayPlan.keepThrough ? `${prepayPlan.keepThrough}T12:00:00-04:00` : request.created_at,
+      // End-of-coverage keeps paid visits on the calendar — the generic
+      // "upcoming visits are off the calendar" copy would be false, so the
+      // senders switch to the end-of-term wording.
+      keptThrough: !!prepayPlan.keepThrough,
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });
   }
 
-  // Exception-based: only a partial run bells the office.
-  if (!processed) {
+  // Exception-based: a partial run OR any post-processor failure (refund
+  // task, term disposition, case write) bells the office — a missing refund
+  // task must never disappear into logs behind a green processor result.
+  if (!processed || errors.length) {
     try {
       const NotificationService = require('./notification-service');
       await NotificationService.notifyAdmin(
         'service',
-        `Cancel plan did not fully complete for ${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
-        `${actorLabel} cancelled ${wholeAccount ? 'the whole plan' : scope.map(familyLabelOf).join(', ')} but auto-processing did not fully complete — review the calendar/account manually.`
+        `Cancel plan needs review for ${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
+        `${actorLabel} cancelled ${wholeAccount ? 'the whole plan' : scope.map(familyLabelOf).join(', ')}`
+          + (processed
+            ? ' — the plan wound down, but a follow-up step failed'
+            : ' but auto-processing did not fully complete — review the calendar/account manually.')
           + (errors.length ? ` (failed: ${errors.join(', ')})` : ''),
         {
           bell: true,

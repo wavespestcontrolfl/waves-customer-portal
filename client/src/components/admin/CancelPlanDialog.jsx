@@ -134,7 +134,12 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
   const owned = impact?.families || [];
   const prepay = preview?.prepay || null;
   const scopeBlocked = !wholeAccount && (families.length === 0 || preview?.scopedSupported === false);
-  const canCommit = !!preview && preview.eligible && !scopeBlocked && !loading && !running && !result;
+  // !loadErr: a FAILED refresh leaves the prior preview rendered (so the
+  // scope checkboxes survive), but it must never back the red button — the
+  // facts shown and the scope committed have to come from the same
+  // successful response (in-flight refreshes are already blocked by
+  // !loading, and out-of-order responses by the effect's cancelled flag).
+  const canCommit = !!preview && !loadErr && preview.eligible && !scopeBlocked && !loading && !running && !result;
 
   const commit = async () => {
     setRunning(true);

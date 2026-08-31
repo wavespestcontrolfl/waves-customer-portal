@@ -47,6 +47,9 @@ function familyLabelOf(key) {
  * @param {string}  [args.entryPoint] send-window entry point; the portal's
  *                  customer-action entry point bypasses quiet hours, an
  *                  admin-initiated send declares its own.
+ * @param {boolean} [args.keptThrough] end-of-coverage cancel: paid visits
+ *                  stay on the calendar through effectiveAt, so the copy must
+ *                  not claim upcoming visits are off the calendar.
  * @param {string}  [args.identityTrustLevel]
  * @param {string}  [args.urgency]
  * @returns {Promise<{ smsSent: boolean, emailSent: boolean, smsTemplateKey: string, channels: string[] }>}
@@ -54,13 +57,16 @@ function familyLabelOf(key) {
 async function sendCancellationConfirmations({
   customer, request, result, processed,
   effectiveAt = null,
+  keptThrough = false,
   entryPoint = 'customer_service_request',
   identityTrustLevel = 'authenticated_portal',
   urgency = 'routine',
 } = {}) {
   const scopedProcessed = !!processed && Array.isArray(result?.scope) && result.scope.length > 0;
   const smsTemplateKey = processed
-    ? (scopedProcessed ? 'service_cancellation_scoped_confirmation' : 'service_cancellation_confirmation')
+    ? (scopedProcessed
+      ? 'service_cancellation_scoped_confirmation'
+      : (keptThrough ? 'service_cancellation_end_of_term_confirmation' : 'service_cancellation_confirmation'))
     : 'service_cancellation_received';
   let smsSent = false;
   let emailSent = false;
@@ -107,6 +113,8 @@ async function sendCancellationConfirmations({
       customerId: customer.id,
       request,
       processed: !!processed,
+      effectiveAt,
+      keptThrough: !!keptThrough,
       ...(Array.isArray(result?.scope) && result.scope.length ? {
         scope: {
           cancelled: result.scope.map(familyLabelOf),

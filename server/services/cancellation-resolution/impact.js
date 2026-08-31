@@ -20,7 +20,7 @@ const { familyLabel } = require('./templates');
 
 const labelOf = (key) => familyLabel(key) || String(key || '').replace(/_/g, ' ');
 
-async function buildCancellationImpact(customerId, requestedFamilies = []) {
+async function buildCancellationImpact(customerId, requestedFamilies = [], { after = null } = {}) {
   const { planScopedWindDown, familyOfServiceRow } = require('../cancellation-processor');
   const { inferTierFromServiceCount } = require('../self-booking-plan-sync');
 
@@ -47,13 +47,21 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
   for (const row of rows) {
     const family = familyOfServiceRow(row);
     if (!family) continue;
-    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, nextVisitDate: null });
+    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null });
     const slot = perFamily.get(family);
-    const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (String(row.scheduled_date).slice(0, 10) >= today || row.status === 'rescheduled');
+    const d = String(row.scheduled_date).slice(0, 10);
+    const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (d >= today || row.status === 'rescheduled');
     if (upcoming) {
       slot.upcoming += 1;
-      const d = String(row.scheduled_date).slice(0, 10);
       if (!slot.nextVisitDate || d < slot.nextVisitDate) slot.nextVisitDate = d;
+      // Keep-through boundary (C3 end-of-coverage): dated visits on or
+      // before it are KEPT by the processor's sweep floor, so they are not
+      // "pulled". An undated/rescheduled row has no date to keep it.
+      const kept = after && row.status !== 'rescheduled' && d <= String(after);
+      if (!kept) {
+        slot.pulled += 1;
+        if (!slot.nextPulledDate || d < slot.nextPulledDate) slot.nextPulledDate = d;
+      }
     }
   }
   const owned = [...perFamily.keys()];
@@ -113,9 +121,9 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
   }
 
   const cancelledFamilies = wholeAccount ? owned : scope;
-  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.upcoming || 0), 0);
+  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.pulled || 0), 0);
   const nextVisitCancelled = cancelledFamilies
-    .map((f) => perFamily.get(f)?.nextVisitDate)
+    .map((f) => perFamily.get(f)?.nextPulledDate)
     .filter(Boolean)
     .sort()[0] || null;
 
