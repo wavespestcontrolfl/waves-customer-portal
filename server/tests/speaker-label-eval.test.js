@@ -4,6 +4,7 @@ const { etDateString } = require('../utils/datetime-et');
 
 const {
   CASE_KEYS,
+  FIXTURE_DESCRIPTION,
   assertMatchesProductionNormalizer,
   buildSheet,
   canonicalRawTranscript,
@@ -166,13 +167,14 @@ describe('speaker label eval', () => {
       segment_speakers: ['agent', 'caller'],
     };
     const write = (cases, extraTop = {}) => {
-      fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: 'call-speaker-labels.v1', description: 'test', cases, ...extraTop }));
+      fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: 'call-speaker-labels.v1', description: FIXTURE_DESCRIPTION, cases, ...extraTop }));
       return tmp;
     };
     try {
       expect(loadFixture(write([valid])).cases).toHaveLength(1);
-      // Top-level keys and case ids are locked too — no authored free text anywhere.
+      // Top-level keys, the description, and case ids are locked too — no authored free text anywhere.
       expect(() => loadFixture(write([valid], { notes: 'called Pat back' }))).toThrow(/unsupported top-level key "notes"/);
+      expect(() => loadFixture(write([valid], { description: 'Agent: hi, this is a transcript' }))).toThrow(/canonical pointer text/);
       expect(() => loadFixture(write([{ ...valid, id: 'jane-doe' }]))).toThrow(/generated form label-11111111/);
       // Extra fields are where PII would sneak in — rejected by name, not by regex.
       expect(() => loadFixture(write([{ ...valid, note: 'spoke with Pat Example' }]))).toThrow(/unsupported key "note"/);
@@ -237,14 +239,16 @@ describe('speaker label eval', () => {
       id: expectedCaseId(callId), call_log_id: callId, labeled_at: '2026-08-31', labeled_by: 'owner', transcript_sha256: sha, segment_speakers: speakers,
     });
     const tmp = path.join(TMP_DIR, 'tmp-speaker-score.json');
+    const badCount = 'eeeeeeee-1111-4111-8111-111111111111';
     fs.writeFileSync(tmp, JSON.stringify({
       schemaVersion: 'call-speaker-labels.v1',
-      description: 'test',
-      cases: [mk(ids[0], goodSha), mk(ids[1], 'b'.repeat(64)), mk(ids[2], goodSha), mk(ids[3], goodSha, ['agent'])],
+      description: FIXTURE_DESCRIPTION,
+      cases: [mk(ids[0], goodSha), mk(ids[1], 'b'.repeat(64)), mk(ids[2], goodSha), mk(ids[3], goodSha, ['agent']), mk(badCount, goodSha, ['agent', 'caller'])],
     }));
-    const db = () => ({ select: () => ({ whereIn: async () => [row(ids[0]), row(ids[1]), row(ids[2])] }) });
+    const db = () => ({ select: () => ({ whereIn: async () => [row(ids[0]), row(ids[1]), row(ids[2]), row(badCount)] }) });
+    const modelCalls = [];
     const labelTranscript = async (text, opts) => {
-      expect(opts.call.id).toBe(opts.call.id);
+      modelCalls.push(opts.call.id);
       if (opts.call.id === ids[2]) return null; // production guard tripped
       return relabel(text);
     };
@@ -259,7 +263,10 @@ describe('speaker label eval', () => {
         { caseId: 'label-bbbbbbbb', status: 'transcript_drift' },
         { caseId: 'label-cccccccc', status: 'labeling_failed' },
         { caseId: 'label-dddddddd', status: 'call_not_found' },
+        { caseId: 'label-eeeeeeee', status: 'segment_count_mismatch' },
       ]);
+      // Drift, missing rows, and a wrong-length label array never spend a model call.
+      expect(modelCalls.sort()).toEqual([ids[0], ids[2]].sort());
     } finally {
       fs.rmSync(tmp, { force: true });
     }

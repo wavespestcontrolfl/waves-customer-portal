@@ -41,6 +41,9 @@ const { etDateString } = require('../utils/datetime-et');
 
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', 'fixtures', 'call-extraction-eval', 'speaker-labels.json');
 const SCHEMA_VERSION = 'call-speaker-labels.v1';
+// The fixture's description is a fixed pointer, not prose — a free-form
+// string would be the one field left where transcript text could be typed.
+const FIXTURE_DESCRIPTION = 'Owner-labeled speaker ground truth for the Agent/Caller relabel pass. Schema, labeling procedure, and PII rules: server/fixtures/call-extraction-eval/README.md (Speaker labels).';
 const SPEAKERS = new Set(['agent', 'caller']);
 // Exact key allowlist for a fixture case. Anything else (a note, a name, a
 // snippet) is rejected so PII cannot ride into the repo on an extra field.
@@ -224,7 +227,9 @@ function loadFixture(fixturePath) {
   for (const key of Object.keys(doc)) {
     if (!TOP_KEYS.has(key)) throw new Error(`speaker-label fixture has unsupported top-level key "${key}" (allowed: ${[...TOP_KEYS].join(', ')})`);
   }
-  if (typeof doc.description !== 'string') throw new Error('speaker-label fixture description must be a string');
+  if (doc.description !== FIXTURE_DESCRIPTION) {
+    throw new Error('speaker-label fixture description must be the canonical pointer text (FIXTURE_DESCRIPTION) — put notes in the README, never in the fixture');
+  }
   if (!Array.isArray(doc.cases)) throw new Error('speaker-label fixture must contain a cases array');
   const seen = new Set();
   for (const item of doc.cases) {
@@ -299,6 +304,14 @@ async function runScore(opts, deps) {
       results.push({ ...base, status: 'transcript_drift' });
       continue;
     }
+    // Build the gold stream BEFORE the paid model call: a label array that
+    // does not match the pinned transcript is a fixture error, detectable
+    // locally, and must not spend an API call or abort the whole run.
+    if (item.segment_speakers.length !== canonical.renders.length) {
+      results.push({ ...base, status: 'segment_count_mismatch', expected: canonical.renders.length, actual: item.segment_speakers.length });
+      continue;
+    }
+    const gold = goldWordStream(canonical.renders, item.segment_speakers);
     let labeled = null;
     try {
       labeled = await deps.labelTranscript(canonical.text, { call: row });
@@ -313,7 +326,6 @@ async function runScore(opts, deps) {
       results.push({ ...base, status: 'labeling_failed' });
       continue;
     }
-    const gold = goldWordStream(canonical.renders, item.segment_speakers);
     results.push({ ...base, ...scoreLabeling(gold, modelWordStream(labeled), canonical.renders.length) });
   }
 
@@ -501,6 +513,7 @@ if (require.main === module) {
 
 module.exports = {
   CASE_KEYS,
+  FIXTURE_DESCRIPTION,
   TOP_KEYS,
   assertMatchesProductionNormalizer,
   buildSheet,
