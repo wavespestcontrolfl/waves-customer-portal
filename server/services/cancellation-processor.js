@@ -383,6 +383,7 @@ async function processCancellationRequest({
   const scoped = scopedFamilies.length > 0;
   let scopedIds = null;
   let scopedPlan = null;
+  let scopedRepairOnly = false;
   if (scoped) {
     try {
       scopedIds = await familyScopedServiceIds(customerId, scopedFamilies);
@@ -392,7 +393,38 @@ async function processCancellationRequest({
       // closed and let the route offer a whole-account cancel instead.
       scopedPlan = await planScopedWindDown(customerId, scopedFamilies);
       if (!scopedPlan.ok) {
-        return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors: [scopedPlan.error], scope: scopedFamilies };
+        // Repair retry: when a FIRST attempt of this same request already
+        // pulled every selected visit, the families are gone from the live
+        // rows (scope_not_owned) and no plan can be built — but rows that
+        // request cancelled may still carry failed side effects (invoice
+        // void, reminders, card fees, tracker). A caller-scoped reason with
+        // prior-cancelled rows for THIS customer is the proof; then run
+        // repair-only — no wind-down (run 1 applied it or belled its
+        // failure), no live sweep (scopedIds is empty), just the repair
+        // pass. Without that proof the refusal stands.
+        let repairable = false;
+        if (scopedPlan.error === 'scope_not_owned' && reason) {
+          try {
+            const priorCancelled = await db('job_status_history')
+              .where({ to_status: 'cancelled', notes: cancelReason })
+              .select('job_id');
+            const ids = [...new Set(priorCancelled.map((h) => h.job_id))];
+            if (ids.length) {
+              repairable = !!(await db('scheduled_services')
+                .whereIn('id', ids)
+                .where({ status: 'cancelled', customer_id: customerId })
+                .first('id'));
+            }
+          } catch (probeErr) {
+            logger.warn(`[cancellation-processor] scoped repair probe failed for ${customerId}: ${probeErr.message}`);
+          }
+        }
+        if (!repairable) {
+          return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors: [scopedPlan.error], scope: scopedFamilies };
+        }
+        logger.info(`[cancellation-processor] scoped repair-only retry for ${customerId} (${scopedPlan.error}) — re-running side effects on the prior attempt's cancelled rows`);
+        scopedRepairOnly = true;
+        scopedPlan = null;
       }
     } catch (err) {
       logger.error(`[cancellation-processor] scoped family resolution failed for ${customerId}: ${err.message}`);
@@ -989,7 +1021,10 @@ async function processCancellationRequest({
   // front, so this cannot fail on attribution; a write failure is reported
   // and leaves the visits cancelled — the office repairs the rate, never the
   // reverse).
-  let scopedWoundDown = false;
+  // Repair-only retries report the wind-down as settled: run 1 either
+  // applied it or belled its failure ('scoped_wind_down'), and with the
+  // families gone from the live rows no new plan can be built here.
+  let scopedWoundDown = scopedRepairOnly;
   if (scoped && scopedPlan?.ok) {
     try {
       await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed });

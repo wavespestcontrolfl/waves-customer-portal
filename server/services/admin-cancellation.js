@@ -624,7 +624,6 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
 
   // Scoped feasibility BEFORE the request row exists (fail closed).
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
-  if (scopeError) throw scopeErrorToHttp(scopeError);
   const subject = wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`;
   // The still-open acceptance from a recent attempt (same customer, scope,
   // actor) — reused by retries so the processor's repair pass can find the
@@ -641,6 +640,19 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       return null;
     }
   };
+  if (scopeError) {
+    // A scoped retry whose first run already pulled every selected visit no
+    // longer OWNS those families — refusing scope_not_owned here would
+    // strand the first attempt's failed per-visit side effects forever. An
+    // open acceptance for the same scoped subject is the proof this is a
+    // retry: proceed, and the processor itself verifies the prior-cancelled
+    // rows (repair-only mode) and still refuses a genuinely un-owned scope.
+    // Every OTHER scope refusal (covered prepaid visits, unattributable
+    // ledger) stands regardless.
+    const retryAcceptance = scopeError === 'scope_not_owned' ? await findOpenAcceptance() : null;
+    if (!retryAcceptance) throw scopeErrorToHttp(scopeError);
+    logger.info(`[admin-cancellation] scoped repair retry for ${customerId} — open acceptance ${retryAcceptance.id} overrides scope_not_owned`);
+  }
   if (!(await hasCancellableWork(customerId))) {
     // A prior partial run may have already wound the account down and then
     // lost a follow-up step (case write, refund task, confirmation) —

@@ -531,6 +531,14 @@ function confirmationDisplayParams(toolName, params, preview) {
           ? `ends at term ${prepay.termEnd}; no renewal`
           : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
       } : {}),
+      // The fee-or-waive exposure on the pulled visits (both card fee
+      // lanes) — a money fact the operator must see BEFORE confirming;
+      // unresolved lanes read fee-may-apply, never a silent no-fee.
+      ...(preview.visit_fees && (preview.visit_fees.applies || preview.visit_fees.unresolved) ? {
+        visit_fees: preview.visit_fees.total != null
+          ? `$${preview.visit_fees.total.toFixed(2)} in scheduled-visit fees on ${preview.visit_fees.visits.length} pulled visit(s) unless waived`
+          : `fee may apply to ${preview.visit_fees.visits.length} pulled visit(s) — amount unverifiable; waive or the fee rail judges at commit`,
+      } : {}),
       waive_late_fee: preview.waive_late_fee === true,
       send_confirmation: preview.send_confirmation !== false
         ? (reachable || 'no phone or email on file — nothing can send')

@@ -452,6 +452,28 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(2);
   }));
 
+  test('a scoped retry after its visits were pulled is not stranded by scope_not_owned — the acceptance carries it to the repair pass', () => withServer(async (baseUrl) => {
+    // Run 1: feasible scoped cancel; a per-visit side effect failed.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'], errors: ['invoice_void:s1'] });
+    const first = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+    expect(first.processed).toBe(false);
+    // Retry: the family is gone from the live rows — ownership resolution
+    // refuses, but the open acceptance proves this is a repair retry.
+    mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: true, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: [], cancelledCount: 0 });
+    const second = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(second.processed).toBe(true);
+    // The processor got the SAME request-scoped reason both times, so its
+    // repair pass finds run 1's rows.
+    expect(mockProcess.mock.calls[0][0].reason).toBe(mockProcess.mock.calls[1][0].reason);
+    // A genuinely un-owned scope with NO acceptance still refuses 409.
+    mockState.service_requests = [];
+    const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('scope_not_owned');
+  }));
+
   test('a wound-down account with a lost follow-up step can still retry — the open acceptance beats nothing_to_cancel', () => withServer(async (baseUrl) => {
     // First run: the wind-down lands, the case write fails.
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));

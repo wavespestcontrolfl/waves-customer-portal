@@ -146,7 +146,11 @@ jest.mock('../models/db', () => {
       whereNot(col, val) { conds.push((r) => r[col] !== val); return q; },
       whereNull(col) { conds.push((r) => r[col] == null); return q; },
       whereNotNull(col) { conds.push((r) => r[col] != null); return q; },
-      whereIn(col, vals) { conds.push((r) => vals.includes(r[col])); return q; },
+      // Scoped-path support: the aliased join reads its own (empty) table,
+      // so live-row family resolution yields scope_not_owned — exactly the
+      // post-first-attempt state the repair-only retry runs from.
+      leftJoin() { return q; },
+      whereIn(col, vals) { conds.push((r) => (vals instanceof Set ? vals.has(r[col]) : vals.includes(r[col]))); return q; },
       whereNotIn(col, vals) { conds.push((r) => !vals.includes(r[col])); return q; },
       whereRaw(sql) {
         if (/track_state\s+IS\s+NULL\s+OR\s+track_state\s+NOT\s+IN/i.test(sql)) {
@@ -953,6 +957,31 @@ describe('processCancellationRequest', () => {
       expect(result).toEqual(expect.objectContaining({ ok: false, churned: false, cancelledCount: 0, errors: ['keep_through_missing_coverage'] }));
       expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
       expect(db.__tables.customers[0].active).toBe(true);
+    });
+
+    test('scoped repair retry: scope_not_owned WITH prior-cancelled rows for this request re-runs side effects instead of refusing', async () => {
+      seedActive();
+      // Run 1 of request r1 already cancelled the visit; a side effect
+      // (invoice void) failed. The family is gone from the live rows.
+      db.__tables.scheduled_services = [
+        { id: 'sv1', customer_id: 'c1', status: 'cancelled', scheduled_date: FUTURE, track_state: 'cancelled', cancelled_at: new Date(), recurring_ongoing: false },
+      ];
+      db.__tables.job_status_history = [
+        { job_id: 'sv1', from_status: 'confirmed', to_status: 'cancelled', notes: 'Admin cancellation request r1' },
+      ];
+      const InvoiceService = require('../services/invoice');
+      InvoiceService.voidOpenInvoicesForCancelledService.mockClear();
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
+      expect(result).toEqual(expect.objectContaining({ ok: true, churned: false, scopedWoundDown: true }));
+      // The repair pass re-ran the failed per-visit side effects.
+      expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('sv1');
+      // The account was NOT churned and nothing new was cancelled.
+      expect(db.__tables.customers[0].active).toBe(true);
+
+      // No prior-cancelled rows for the reason → the refusal stands.
+      db.__tables.job_status_history = [];
+      const refused = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r2', requestId: 'r2', families: ['lawn_care'] });
+      expect(refused).toEqual(expect.objectContaining({ ok: false, errors: ['scope_not_owned'] }));
     });
 
     test('a past keepThrough is ignored — the sweep never widens', async () => {
