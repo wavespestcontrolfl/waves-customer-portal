@@ -16,7 +16,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { getCloseoutStatus, FACT_NAMES } = require('../closeout-status');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../../utils/datetime-et');
 
 // Each closeout load is ~20 indexed probes — bound the day-sweep fan-out
 // (same bound the command center uses).
@@ -73,7 +73,10 @@ async function getCloseoutStatusTool(input) {
 
 async function listOpenCloseouts(input) {
   const raw = String(input?.date || '').trim();
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : etDateString();
+  // Absent → today ET. Supplied → must be a REAL calendar date; an impossible
+  // or malformed value is an error, never an empty all-clear.
+  const date = raw ? validCalendarDate(raw) : etDateString();
+  if (!date) return { error: `Invalid date '${raw.slice(0, 20)}' — use YYYY-MM-DD`, date: raw.slice(0, 20) };
   let visits = [];
   try {
     visits = await db('scheduled_services')

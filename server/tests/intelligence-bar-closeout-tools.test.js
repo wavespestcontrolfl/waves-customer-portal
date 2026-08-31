@@ -84,10 +84,14 @@ test('list_open_closeouts sweeps completed visits and returns only non-closed on
   expect(json).not.toMatch(/first_name|last_name|phone|email|address/);
 });
 
-test('list_open_closeouts: bad date falls back to today; db outage is an error, not an empty all-clear', async () => {
+test('list_open_closeouts: absent date = today; malformed or impossible dates error (codex r1); db outage is an error, not an empty all-clear', async () => {
   db.mockImplementation(() => visitChain([]));
-  const out = await executeCloseoutTool('list_open_closeouts', { date: 'nope' });
+  const out = await executeCloseoutTool('list_open_closeouts', {});
   expect(out.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  expect(out.openCloseouts).toEqual([]);
+  expect((await executeCloseoutTool('list_open_closeouts', { date: 'nope' })).error).toMatch(/Invalid date/);
+  expect((await executeCloseoutTool('list_open_closeouts', { date: '2026-02-30' })).error).toMatch(/Invalid date/);
+  expect((await executeCloseoutTool('list_open_closeouts', { date: '2026-8-31' })).error).toMatch(/Invalid date/);
   db.mockImplementation(() => { throw new Error('conn refused'); });
   expect((await executeCloseoutTool('list_open_closeouts', {})).error).toMatch(/unavailable/);
 });
