@@ -515,6 +515,10 @@ function confirmationDisplayParams(toolName, params, preview) {
     // customer gets texted/emailed, and any recorded refund (never an
     // automatic one).
     const prepay = preview.prepay || null;
+    // Only the channels that CAN send (preview.confirmation_channels) — a
+    // customer with no phone must not be promised "SMS + email".
+    const channels = preview.confirmation_channels || {};
+    const reachable = [channels.sms && 'SMS', channels.email && 'email'].filter(Boolean).join(' + ');
     return {
       customer: preview.customer_name || params.customer_id,
       scope: preview.whole_account ? 'whole account' : (preview.scope || []).join(', '),
@@ -528,7 +532,9 @@ function confirmationDisplayParams(toolName, params, preview) {
           : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
       } : {}),
       waive_late_fee: preview.waive_late_fee === true,
-      send_confirmation: preview.send_confirmation !== false ? 'SMS + email' : 'no customer communication',
+      send_confirmation: preview.send_confirmation !== false
+        ? (reachable || 'no phone or email on file — nothing can send')
+        : 'no customer communication',
       ...(preview.reason_code ? { reason_code: preview.reason_code } : {}),
       ...(preview.note ? { note: preview.note } : {}),
       ...(preview.termite_retrieval ? { termite_stations: 'retrieval task will be raised' } : {}),
@@ -746,6 +752,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
+  }
+  // cancel_plan: pin the approved facts (visit pull, refund dollars, term,
+  // scope) into the stored action — the confirmed commit refuses with
+  // preview_changed when the live numbers no longer match the card the
+  // operator approved (a visit completed/appeared, a term edit).
+  if (toolUse.name === 'cancel_plan' && preview?.preview_fingerprint) {
+    params.preview_fingerprint = preview.preview_fingerprint;
   }
   // Phone identifiers are MUTABLE — a newer estimate for the same phone can
   // appear between preview and Confirm, and the confirmed re-resolve would

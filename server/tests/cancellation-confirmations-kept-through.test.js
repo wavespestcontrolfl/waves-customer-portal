@@ -45,6 +45,16 @@ test('scoped processed wins over keptThrough (a scoped cancel never has a kept t
   expect(out.smsTemplateKey).toBe('service_cancellation_scoped_confirmation');
 });
 
+test('the processor-verified fee waiver reaches the email (never warn about a waived fee)', async () => {
+  await sendCancellationConfirmations({
+    customer, request, result: { scope: [], lateFeeWaived: true }, processed: true,
+  });
+  expect(mockEmail).toHaveBeenCalledWith(expect.objectContaining({ feeWaived: true }));
+  mockEmail.mockClear();
+  await sendCancellationConfirmations({ customer, request, result: { scope: [] }, processed: true });
+  expect(mockEmail).toHaveBeenCalledWith(expect.objectContaining({ feeWaived: false }));
+});
+
 test('unprocessed stays on the received (by-hand) template even with keptThrough', async () => {
   const out = await sendCancellationConfirmations({ customer, request, result: null, processed: false, keptThrough: true });
   expect(out.smsTemplateKey).toBe('service_cancellation_received');

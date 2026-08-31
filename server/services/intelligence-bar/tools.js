@@ -1632,6 +1632,9 @@ function cancelPlanServiceInput(input) {
     sendConfirmation: input.send_confirmation !== false,
     reasonCode: input.reason_code || null,
     note: input.note || '',
+    // Pinned at proposal time by the pending-action layer; the commit
+    // refuses (preview_changed) when the live facts no longer match it.
+    previewFingerprint: input.preview_fingerprint || null,
   };
 }
 
@@ -1674,6 +1677,7 @@ async function cancelPlan(input, actionContext = {}) {
       waive_late_fee: preview.waiveLateFee,
       send_confirmation: preview.sendConfirmation,
       confirmation_channels: preview.confirmationChannels,
+      preview_fingerprint: preview.previewFingerprint,
       reason_code: preview.reasonCode,
       note: preview.note || null,
       note_to_operator: 'PREVIEW ONLY — nothing was cancelled. The operator commits from the confirmation card; the customer is texted and emailed only if send_confirmation stays on.',

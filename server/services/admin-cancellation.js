@@ -137,6 +137,27 @@ async function resolveLiveTerm(customerId, wholeAccount) {
 
 const dateOnly = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
 
+// The facts the operator approves on the preview (visit count, refund
+// dollars, term, boundary, scope) — fingerprinted so the commit can refuse
+// with 409 preview_changed when a covered visit completes, a visit appears,
+// or the term is edited during the confirmation window (codex C3 r3 P2).
+// Both surfaces carry it: the dialog echoes previewFingerprint into the
+// commit body; the IB pending action pins it at proposal time.
+function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, scope, wholeAccount }) {
+  const crypto = require('crypto');
+  const facts = {
+    scope: wholeAccount ? [] : [...scope].sort(),
+    termId: term ? String(term.id) : null,
+    termEnd: term ? dateOnly(term.term_end) : null,
+    disposition: prepayPlan ? prepayPlan.prepayDisposition : null,
+    keepThrough: prepayPlan ? prepayPlan.keepThrough : null,
+    refundAmount: refund ? refund.amount : null,
+    refundManual: refund ? refund.needsManualCalc : null,
+    visitsPulled: impact ? (impact.visitsCancelled ?? null) : null,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(facts)).digest('hex');
+}
+
 /**
  * Ruling C-6: prepaid amount ÷ included visits × remaining visits. Included
  * visits = the term's coverage_visit_count; completed = covered visits
@@ -314,6 +335,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     : null;
   const today = etDateString();
   return {
+    previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, scope, wholeAccount }),
     enabled: true,
     customer: customerSummary(customer),
     eligible,
@@ -355,9 +377,14 @@ async function raisePrepayRefundTask({ customer, request, term, refund, actorLab
     `${amountLine} Term ${term.plan_label || term.id} (${dateOnly(term.term_start)} to ${dateOnly(term.term_end)}) was ended now by ${actorLabel}. Nothing has been refunded automatically.`,
     {
       // Office TASK, never an FYI — must survive the bell policy allowlist.
+      // Deduped by TERM, not by request: a retry after a lost case write
+      // opens a new request, and a request-keyed task would hand staff two
+      // independently actionable refund instructions for the same term
+      // (double-refund risk). One term ends now exactly once; a deduped
+      // result (the prior task stands) counts as persisted.
       bell: true,
       link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
-      dedupeKey: `prepay_refund:${request.id}`,
+      dedupeKey: `prepay_refund:term:${term.id}`,
       metadata: {
         kind: 'annual_prepay_refund',
         customerId: customer.id,
@@ -415,6 +442,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // the processor again, or text the customer twice for the same cancel.
   if (term && term.renewal_decision === 'cancel') {
     let prior = null;
+    let priorSnap = null;
     try {
       const recent = await db('cancellation_cases')
         .where({ customer_id: customerId })
@@ -423,34 +451,57 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         .select('id', 'service_request_id', 'status', 'snapshot');
       prior = (recent || []).find((c) => {
         const snap = typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {});
-        return String(snap.prepayTermId || '') === String(term.id)
+        const match = String(snap.prepayTermId || '') === String(term.id)
           && String(snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '');
+        if (match) priorSnap = snap;
+        return match;
       }) || null;
     } catch (dupErr) {
       logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
     }
     if (prior) {
       logger.info(`[admin-cancellation] duplicate cancel for customer ${customerId} matched case ${prior.id} — returning the recorded outcome`);
+      // The recorded run's facts (what was pulled, what the customer was
+      // sent) answer the retry — a lost response must not be reported as
+      // "nothing pulled / nothing sent". Cases predating the outcome record
+      // fall back to the conservative zeros.
+      const outcome = priorSnap && priorSnap.outcome ? priorSnap.outcome : null;
       return {
         requestId: prior.service_request_id || null,
         caseId: prior.id,
         duplicate: true,
         processed: prior.status !== 'open',
-        visitsPulled: 0,
-        scope: [],
+        visitsPulled: outcome ? Number(outcome.visitsPulled) || 0 : 0,
+        scope: outcome && Array.isArray(outcome.scope) ? outcome.scope : [],
         remaining: [],
-        tierBefore: null,
-        tierAfter: null,
+        tierBefore: outcome ? outcome.tierBefore ?? null : null,
+        tierAfter: outcome ? outcome.tierAfter ?? null : null,
         effectiveDate: prepayPlan.keepThrough || etDateString(),
         keptThrough: prepayPlan.keepThrough,
-        lateFeeWaived: false,
+        lateFeeWaived: outcome ? outcome.lateFeeWaived === true : false,
         prepayDisposition: prepayPlan.prepayDisposition,
         prepayTermOutcome: 'decision_already_recorded',
-        confirmation: null,
-        confirmationChannels: [],
-        confirmationRequested: false,
+        confirmation: outcome ? outcome.confirmation ?? null : null,
+        confirmationChannels: outcome && Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [],
+        confirmationRequested: outcome ? outcome.confirmationRequested === true : false,
         errors: [],
       };
+    }
+  }
+
+  // Approved-facts check (409 preview_changed): when the caller carries the
+  // preview's fingerprint, the live facts must still match what the operator
+  // saw — a visit that completed/appeared or an edited term changes the
+  // visit pull and the refund dollars, and pressing Confirm must not
+  // silently commit different numbers. Checked before any write.
+  const suppliedFingerprint = raw.previewFingerprint == null || raw.previewFingerprint === ''
+    ? null : String(raw.previewFingerprint);
+  if (suppliedFingerprint) {
+    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough });
+    const liveFingerprint = cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, scope, wholeAccount });
+    if (liveFingerprint !== suppliedFingerprint) {
+      throw new CancelPlanError(409, 'preview_changed',
+        'The cancellation facts changed since this preview (a visit completed or appeared, or the prepay term was edited). Re-open the preview and approve the current numbers.');
     }
   }
 
@@ -557,6 +608,20 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   }
 
   // The durable case (after the wind-down, like the portal path).
+  const caseSnapshotBody = {
+    actor: { type: actorType, userId: actorUserId },
+    effectiveDate: prepayPlan.effectiveDate,
+    effectiveOn: prepayPlan.keepThrough || etDateString(),
+    waiveLateFee: input.waiveLateFee,
+    prepayDisposition: prepayPlan.prepayDisposition,
+    prepayTermId: term ? term.id : null,
+    prepayTermOutcome: termOutcome,
+    refund,
+    sendConfirmation: input.sendConfirmation,
+    tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
+    monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
+    billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
+  };
   let caseRow = null;
   try {
     caseRow = await CancellationResolution.openCancellationCase({
@@ -567,20 +632,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       reasonText: input.note || null,
       resolution: null,
       resolutionOutcome: null,
-      snapshot: {
-        actor: { type: actorType, userId: actorUserId },
-        effectiveDate: prepayPlan.effectiveDate,
-        effectiveOn: prepayPlan.keepThrough || etDateString(),
-        waiveLateFee: input.waiveLateFee,
-        prepayDisposition: prepayPlan.prepayDisposition,
-        prepayTermId: term ? term.id : null,
-        prepayTermOutcome: termOutcome,
-        refund,
-        sendConfirmation: input.sendConfirmation,
-        tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
-        monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
-        billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
-      },
+      snapshot: caseSnapshotBody,
       processed,
     });
   } catch (caseErr) {
@@ -611,6 +663,34 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });
+  }
+
+  // Record the run's outcome on the case (best-effort): a later duplicate
+  // retry answers from these facts — what was pulled and what the customer
+  // was actually sent — instead of reporting "nothing sent" for a run whose
+  // response was lost (codex C3 r3 P2). A lost write here only degrades a
+  // future duplicate's reporting; the run itself already happened.
+  if (caseRow) {
+    try {
+      await db('cancellation_cases').where({ id: caseRow.id }).update({
+        snapshot: JSON.stringify({
+          ...caseSnapshotBody,
+          outcome: {
+            visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
+            scope: Array.isArray(result?.scope) ? result.scope : (wholeAccount ? [] : scope),
+            tierBefore: result?.tierBefore ?? (caseSnapshot ? caseSnapshot.waveguard_tier : null),
+            tierAfter: result?.tierAfter ?? null,
+            lateFeeWaived: input.waiveLateFee,
+            confirmationRequested: input.sendConfirmation,
+            confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
+            confirmationChannels: confirmations.channels,
+          },
+        }),
+        updated_at: new Date(),
+      });
+    } catch (outcomeErr) {
+      logger.warn(`[admin-cancellation] outcome record failed for case ${caseRow.id}: ${outcomeErr.message}`);
+    }
   }
 
   // Exception-based: a partial run OR any post-processor failure (refund

@@ -369,6 +369,9 @@ async function sendCancellationReceived({
   // End-of-coverage cancel: paid visits STAY through effectiveAt — never
   // claim upcoming visits are off the calendar.
   keptThrough = false,
+  // Office-waived scheduled-visit fee (C3 waiveLateFee, verified by the
+  // processor): the in-window fee clause would contradict the waiver.
+  feeWaived = false,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
   const submittedAt = request.created_at || request.createdAt || new Date();
@@ -384,7 +387,9 @@ async function sendCancellationReceived({
         + ' Charges for visits already completed remain payable.'
       : (keptThrough
         ? `Your plan is cancelled and will not renew. Visits already paid for stay on the calendar through ${effectiveDateLabel}; after that, nothing further is scheduled or charged, and autopay is off. Charges for visits already completed remain payable.`
-        : `Your plan is cancelled as of ${effectiveDateLabel}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`))
+        : `Your plan is cancelled as of ${effectiveDateLabel}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable${feeWaived
+          ? ', and our office waived the scheduled-visit fee'
+          : ', and a visit already inside its late-cancellation window keeps its scheduled-visit fee'}.`))
     : 'Our office is closing out your plan by hand and will confirm exactly what has stopped within 1 business day.';
   return sendTemplate({
     customerId,

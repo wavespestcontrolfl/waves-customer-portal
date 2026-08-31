@@ -60,6 +60,7 @@ describe('cancel_plan unconfirmed', () => {
     expect(mockPreview).toHaveBeenCalledWith({
       customerId: CUSTOMER, families: ['pest_control'], effectiveDate: 'now', prepayDisposition: null,
       waiveLateFee: true, sendConfirmation: false, reasonCode: 'price', note: 'too expensive',
+      previewFingerprint: null,
     });
     expect(result).toEqual(expect.objectContaining({
       preview: true, customer_id: CUSTOMER, customer_name: 'Pat Tester', eligible: true, whole_account: true,
@@ -113,6 +114,18 @@ describe('cancel_plan confirmed (server-derived)', () => {
     expect(result.processed).toBe(false);
     expect(result.warning).toMatch(/in_progress_visit:s9/);
     expect(result.refund).toEqual({ amount: 360, needsManualCalc: false });
+  });
+
+  test('the pinned preview fingerprint travels into the commit (preview_changed enforcement)', async () => {
+    mockPreview.mockResolvedValueOnce({ ...PREVIEW, previewFingerprint: 'f'.repeat(64) });
+    const preview = await executeTool('cancel_plan', { customer_id: CUSTOMER }, { technicianId: 'admin-1' });
+    expect(preview.preview_fingerprint).toBe('f'.repeat(64));
+    mockCommit.mockResolvedValueOnce({
+      requestId: 'req-3', processed: true, visitsPulled: 0, scope: [], remaining: [], tierBefore: null, tierAfter: null,
+      effectiveDate: '2026-08-31', lateFeeWaived: false, prepayDisposition: null, confirmationChannels: [], confirmationRequested: false, errors: [],
+    });
+    await executeTool('cancel_plan', { customer_id: CUSTOMER, preview_fingerprint: 'f'.repeat(64), confirmed: true }, { technicianId: 'admin-1' });
+    expect(mockCommit).toHaveBeenCalledWith(expect.objectContaining({ previewFingerprint: 'f'.repeat(64) }));
   });
 
   test('a commit refusal (scope changed under the card) is a tool error with its code', async () => {

@@ -51,6 +51,7 @@ function previewBody(overrides = {}) {
     reasonCode: null,
     reasonCodes: ['price', 'other'],
     note: '',
+    previewFingerprint: 'fp-approved-1',
     ...overrides,
   };
 }
@@ -111,6 +112,9 @@ describe('CancelPlanDialog', () => {
     const commitCall = calls.find((c) => c.path.endsWith('/cancel-plan') && !c.path.includes('preview'));
     expect(commitCall.body).toEqual({
       families: [], effectiveDate: 'now', prepayDisposition: null, waiveLateFee: true, sendConfirmation: true, reasonCode: 'price', note: 'Called in',
+      // The approved facts ride into the commit — the server refuses
+      // (preview_changed) if the live numbers moved.
+      previewFingerprint: 'fp-approved-1',
     });
     expect(screen.getByText('sms + email')).toBeInTheDocument();
     expect(screen.getByText('waived')).toBeInTheDocument();
@@ -159,6 +163,32 @@ describe('CancelPlanDialog', () => {
     fireEvent.click(screen.getByLabelText(/^Pest Control/));
     await waitFor(() => expect(calls.at(-1).body.families).toEqual(['pest_control']));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel Pest Control' })).toBeEnabled());
+  });
+
+  it('checking EVERY service in scoped mode never commits a whole-account cancel from the scoped button', async () => {
+    stubFetch((path, body) => {
+      if (path.endsWith('/cancel-plan/preview')) {
+        if (body.families.length === 0) return response(previewBody());
+        if (body.families.length === 2) {
+          // The server canonicalizes an all-families selection to whole-account.
+          return response(previewBody({ wholeAccount: true, scope: [], scopeLabels: [], scopedSupported: null }));
+        }
+        return response(previewBody({ wholeAccount: false, scope: body.families, scopeLabels: ['Pest Control'], scopedSupported: true }));
+      }
+      return response({});
+    });
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText('the whole plan');
+
+    fireEvent.click(screen.getByLabelText('Only these services'));
+    fireEvent.click(screen.getByLabelText(/^Pest Control/));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel Pest Control' })).toBeEnabled());
+
+    fireEvent.click(screen.getByLabelText(/^Lawn Care/));
+    await screen.findByText(/switch to "The whole plan"/);
+    // The commit stays disabled: a whole-account sweep (which can pull visits
+    // with no checkbox) must be approved from whole-plan mode.
+    expect(screen.getByRole('button', { name: /^Cancel/ })).toBeDisabled();
   });
 
   it('a failed preview refresh disables the commit even though the prior preview stays rendered', async () => {

@@ -115,6 +115,9 @@ async function sendCancellationConfirmations({
       processed: !!processed,
       effectiveAt,
       keptThrough: !!keptThrough,
+      // Verified waiver outcome from the processor — the email must not
+      // warn about an in-window scheduled-visit fee the office waived.
+      feeWaived: result?.lateFeeWaived === true,
       ...(Array.isArray(result?.scope) && result.scope.length ? {
         scope: {
           cancelled: result.scope.map(familyLabelOf),

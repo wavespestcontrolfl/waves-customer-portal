@@ -387,7 +387,7 @@ describe('POST /:id/cancel-plan', () => {
       const body = await res.json();
       expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ keepThrough: '2027-02-28' }));
       expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', adminUserId: 'admin-1' }));
-      expect(mockState.updates || []).toEqual([]);
+      expect((mockState.updates || []).filter((u) => u.table === 'annual_prepay_terms')).toEqual([]);
       expect(body).toEqual(expect.objectContaining({ effectiveDate: '2027-02-28', keptThrough: '2027-02-28', prepayDisposition: 'end_at_term', prepayTermOutcome: 'ends_at_term' }));
       expect(body.refund).toBeUndefined();
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -409,7 +409,7 @@ describe('POST /:id/cancel-plan', () => {
       // the term-states guard test). Coverage revocation happens when the
       // recorded refund actually lands (move 9).
       expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', adminUserId: 'admin-1' }));
-      expect(mockState.updates || []).toEqual([]);
+      expect((mockState.updates || []).filter((u) => u.table === 'annual_prepay_terms')).toEqual([]);
       expect(body.refund).toEqual(expect.objectContaining({ amount: 360, remainingVisits: 3, needsManualCalc: false }));
       expect(body.prepayTermOutcome).toBe('ended_now');
       expect(mockOpenCase.mock.calls[0][0].snapshot.refund).toEqual(expect.objectContaining({ amount: 360 }));
@@ -419,7 +419,7 @@ describe('POST /:id/cancel-plan', () => {
       expect(title).toMatch(/refund/i);
       expect(text).toContain('$360.00');
       expect(text).toContain('Nothing has been refunded automatically');
-      expect(opts).toEqual(expect.objectContaining({ bell: true, dedupeKey: `prepay_refund:${body.requestId}` }));
+      expect(opts).toEqual(expect.objectContaining({ bell: true, dedupeKey: 'prepay_refund:term:term-1' }));
     }));
 
     test('contradictory pair → 400 prepay_disposition_mismatch', () => withServer(async (baseUrl) => {
@@ -465,17 +465,47 @@ describe('POST /:id/cancel-plan', () => {
       mockState.annual_prepay_terms[0].status = 'cancelled';
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
-        snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' }),
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 4, scope: [], tierBefore: 'Silver', tierAfter: null, lateFeeWaived: false,
+            confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms', 'email'],
+          },
+        }),
       }];
       const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toEqual(expect.objectContaining({ duplicate: true, requestId: 'req-9', caseId: 'case-9', processed: true, prepayTermOutcome: 'decision_already_recorded' }));
+      // The RECORDED outcome answers the retry — never "nothing pulled /
+      // nothing sent" for a run whose response was lost.
+      expect(body).toEqual(expect.objectContaining({
+        visitsPulled: 4, confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms', 'email'],
+      }));
       expect(mockState.inserted).toBeUndefined();
       expect(mockProcess).not.toHaveBeenCalled();
       expect(mockRecordDecision).not.toHaveBeenCalled();
       expect(sendCancellationConfirmations).not.toHaveBeenCalled();
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    }));
+
+    test('a commit carrying the preview fingerprint is refused (409 preview_changed) when the refund facts moved', () => withServer(async (baseUrl) => {
+      const previewBody = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
+      expect(previewBody.previewFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      // The same facts commit cleanly…
+      const ok = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
+      expect(ok.status).toBe(200);
+    }));
+
+    test('preview_changed: an edited term amount between preview and commit refuses before any write', () => withServer(async (baseUrl) => {
+      const previewBody = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
+      // The office edits the term (refund dollars change) during the window.
+      mockState.annual_prepay_terms[0].prepay_amount = '999.00';
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('preview_changed');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
     }));
 
     test('a prior end_at_term case does NOT swallow a new end-now-refund request (disposition must match)', () => withServer(async (baseUrl) => {
@@ -545,7 +575,7 @@ describe('POST /:id/cancel-plan', () => {
       const body = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
       expect(body.prepayDisposition).toBeNull();
       expect(mockRecordDecision).not.toHaveBeenCalled();
-      expect(mockState.updates || []).toEqual([]);
+      expect((mockState.updates || []).filter((u) => u.table === 'annual_prepay_terms')).toEqual([]);
     }));
   });
 
@@ -604,7 +634,7 @@ describe('POST /:id/cancel-plan', () => {
     expect(body.prepayTermOutcome).toBe('skipped_processor_failed');
     expect(body.errors).toEqual(expect.arrayContaining(['processor_threw', 'prepay_term_disposition_skipped']));
     expect(mockRecordDecision).not.toHaveBeenCalled();
-    expect(mockState.updates || []).toEqual([]);
+    expect((mockState.updates || []).filter((u) => u.table === 'annual_prepay_terms')).toEqual([]);
     // The only office notification is the review bell — never the refund task.
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('service');

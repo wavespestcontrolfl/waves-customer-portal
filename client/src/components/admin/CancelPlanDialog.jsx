@@ -133,7 +133,13 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
   const impact = preview?.impact || null;
   const owned = impact?.families || [];
   const prepay = preview?.prepay || null;
-  const scopeBlocked = !wholeAccount && (families.length === 0 || preview?.scopedSupported === false);
+  // "Only these services" with every family checked canonicalizes server-side
+  // to a WHOLE-ACCOUNT cancel (which can also pull visits with no checkbox —
+  // commercial/unclassified rows). Never commit that from scoped mode: the
+  // button label and the hidden prepay disposition would misstate what the
+  // request does. The operator flips to Whole plan mode instead.
+  const modeMismatch = !wholeAccount && preview?.wholeAccount === true;
+  const scopeBlocked = !wholeAccount && (families.length === 0 || preview?.scopedSupported === false || modeMismatch);
   // !loadErr: a FAILED refresh leaves the prior preview rendered (so the
   // scope checkboxes survive), but it must never back the red button — the
   // facts shown and the scope committed have to come from the same
@@ -155,6 +161,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
           sendConfirmation,
           reasonCode: reasonCode || null,
           note,
+          // The approved facts: the server refuses (preview_changed) when
+          // the live numbers no longer match this preview.
+          previewFingerprint: preview?.previewFingerprint ?? null,
         }),
       });
       setResult(r);
@@ -224,6 +233,11 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                       {preview.scopeError === "scope_not_owned"
                         ? "That service is not on the plan any more."
                         : "The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first."}
+                    </div>
+                  )}
+                  {modeMismatch && (
+                    <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">
+                      That selection is every service on the plan — switch to "The whole plan" to cancel the account.
                     </div>
                   )}
                 </div>
