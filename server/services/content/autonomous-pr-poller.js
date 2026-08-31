@@ -1562,6 +1562,10 @@ async function maybeAutoMerge(run, pr) {
         logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the affiliate belt (operator action)`);
         return { pending: true, reason: 'queue_row_moved_during_gating' };
       }
+      // Same last-step guard as the blog path (3.9): the base tip must still
+      // be the one the body-image check hashed after this path's own async
+      // work.
+      if (await baseMovedSinceBodyImageCheck()) return { pending: true, reason: 'base_moved_during_gating' };
       mergeRes = await doMerge();
     }
   } catch (err) {
