@@ -11649,6 +11649,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
     let invoiceLinkDelivered = false;
+    // Quiet-hours cohort (GH Codex P2 r5): a phone-only after-hours accept
+    // queues the invoice SMS for the 8 AM window open (sms.scheduled) and
+    // returns ok:false — delivery is in flight, not failed. Tracked apart
+    // from invoiceLinkDelivered so ONLY the acceptance-text gate below
+    // counts it; the prepay stamp resolution and the accept notification
+    // still require a CONFIRMED delivery.
+    let invoiceSmsQueued = false;
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
@@ -12909,6 +12916,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           delivery = await runDelivery();
         }
         if (delivery?.payUrl) invoicePayUrl = delivery.payUrl;
+        if (delivery?.sms?.scheduled === true) invoiceSmsQueued = true;
         if (delivery?.ok) {
           invoiceLinkDelivered = true;
         } else {
@@ -12936,18 +12944,52 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // No phone or no WaveGuard tier (the template names one; lawn/commercial
     // prepay has none — never invent "Bronze") ⇒ no text. Kill switch:
     // disable the estimate_accepted_annual_prepay admin SMS template.
-    if (annualPrepaySelected && invoiceId && invoiceLinkDelivered && acceptSmsPhone && String(estimate.waveguard_tier || '').trim()) {
+    // invoiceSmsQueued counts as delivery here (GH Codex P2 r5): the queued
+    // pay-link SMS goes out at 8 AM and the channel-neutral copy ("is on
+    // the way") stays truthful — without it the phone-only after-hours
+    // cohort would never receive this one-shot text.
+    if (annualPrepaySelected && invoiceId && (invoiceLinkDelivered || invoiceSmsQueued)) {
       try {
+        // Live-account resolution (GH Codex P1 r5): estimate.customer_phone
+        // is an intake-time snapshot, while the invoice legs deliver to the
+        // CURRENT customers.phone — a billing-bearing text (tier + exact
+        // amount due) must resolve the same live contact (account-primary
+        // fallback for secondary-property rows, #1995) or not send at all.
+        // The tier likewise comes from the converted customer row: the
+        // accept transaction just wrote the converter-derived tier there,
+        // which also covers engine-generated drafts whose tier lives only
+        // in estimate_data (GH Codex P2 r5) — and the non-membership
+        // predicate keeps Commercial / One-Time / lawn-only NULL tiers out
+        // of a template that names a WaveGuard tier.
+        let prepaySmsPhone = '';
+        let prepayTier = '';
+        if (customerId) {
+          const { withAccountPrimaryContact } = require('../services/customer-contact');
+          const liveRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'account_id', 'is_primary_profile', 'waveguard_tier');
+          const liveContact = liveRow ? await withAccountPrimaryContact(liveRow) : null;
+          prepaySmsPhone = String(liveContact?.phone || '').trim();
+          prepayTier = String(liveRow?.waveguard_tier || '').trim();
+        } else {
+          // Customer-less accept: the estimate token is the only identity —
+          // its snapshot phone/tier are all there is (trust level below
+          // stays estimate_token_verified for this branch).
+          prepaySmsPhone = acceptSmsPhone;
+          prepayTier = String(estimate.waveguard_tier || '').trim();
+        }
+        const { membershipTierKey, NON_MEMBERSHIP_TIER_KEYS } = require('../services/membership-state');
+        const prepayTierKey = membershipTierKey(prepayTier);
         const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
         const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
-        if (!finalRow || finalRow.payer_id || !(Number(finalDue) > 0)) {
+        if (!prepaySmsPhone || !prepayTierKey || NON_MEMBERSHIP_TIER_KEYS.has(prepayTierKey)) {
+          logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!prepaySmsPhone ? 'no live phone' : 'no WaveGuard membership tier'}`);
+        } else if (!finalRow || finalRow.payer_id || !(Number(finalDue) > 0)) {
           logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!finalRow ? 'invoice unreadable' : (finalRow.payer_id ? 'payer-billed' : 'nothing due after credit')}`);
         } else {
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_annual_prepay',
             {
               first_name: firstName,
-              waveguard_tier: String(estimate.waveguard_tier).trim(),
+              waveguard_tier: prepayTier,
               amount_text: ` for ${fmtMoney(finalDue)}`,
             },
             { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
@@ -12956,7 +12998,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
           } else {
             const sendResult = await sendCustomerMessage({
-              to: acceptSmsPhone,
+              to: prepaySmsPhone,
               body: customerBody,
               channel: 'sms',
               audience: customerId ? 'customer' : 'lead',
