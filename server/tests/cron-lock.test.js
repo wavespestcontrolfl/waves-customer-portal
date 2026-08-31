@@ -253,6 +253,74 @@ describe('cron-lock runExclusive', () => {
     expect(replayBody).not.toHaveBeenCalled();
   });
 
+  test('a coalesced retry keeps the ORIGINAL deadline — it never runs late after a timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      const conn = mockConnection(true);
+      db.client.acquireConnection.mockResolvedValue(conn);
+
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const herd = Array.from({ length: 10 }, (_, i) =>
+        runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
+      await Promise.resolve();
+
+      const firstBody = jest.fn();
+      const first = runExclusive('billing-monthly', firstBody, { recordHealth: false, waitForSlot: true });
+      await jest.advanceTimersByTimeAsync(1000);
+      // A second tick coalesces behind the first (deadline fixed at ITS
+      // arrival, ~1s after the first).
+      const secondBody = jest.fn(async () => 'billed-late');
+      const second = runExclusive('billing-monthly', secondBody, { recordHealth: false, waitForSlot: true });
+
+      // Both deadlines pass with the cap still full; the first times out.
+      await jest.advanceTimersByTimeAsync(10 * 60 * 1000);
+      await expect(first).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+      // The second inherits no_connection and retries — but its own
+      // deadline has passed too, so it must NOT start a fresh 10-minute
+      // wait and run whenever a slot opens.
+      await expect(second).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+
+      release('swept');
+      await expect(Promise.all(herd)).resolves.toEqual(Array(10).fill('swept'));
+      expect(firstBody).not.toHaveBeenCalled();
+      expect(secondBody).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a slot timeout is recorded as a FAILED run in job_health', async () => {
+    jest.useFakeTimers();
+    try {
+      const conn = mockConnection(true);
+      db.client.acquireConnection.mockResolvedValue(conn);
+
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const herd = Array.from({ length: 10 }, (_, i) =>
+        runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
+      await Promise.resolve();
+
+      // recordHealth on (a real scheduled job): the lost tick must not
+      // leave job_health showing the previous success.
+      const late = runExclusive('billing-monthly', jest.fn());
+      await jest.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      await expect(late).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+
+      expect(db).toHaveBeenCalledWith('job_health');
+      expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
+        last_status: 'failed',
+        last_error: expect.stringContaining('no lock slot'),
+      }));
+
+      release('swept');
+      await Promise.all(herd);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a queued tick fails (no_connection) instead of running past the wait bound', async () => {
     jest.useFakeTimers();
     try {
@@ -292,14 +360,25 @@ describe('cron-lock runExclusive', () => {
       const herd = Array.from({ length: 5 }, (_, i) =>
         runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
 
-      // Cap is full, but an admin-route dynamic lock keeps the immediate
-      // try-lock behavior — an HTTP request parked behind a long cron
-      // would mutate after the client gave up.
-      const sent = await runExclusive('review-send:cust-42', async () => 'sent', { recordHealth: false });
-      expect(sent).toBe('sent');
+      // Cap is full: an admin-route dynamic lock must neither wait (an
+      // HTTP request parked behind a long cron would mutate after the
+      // client gave up) nor bypass the cap (a burst of request locks would
+      // pin the half of the pool reserved for job bodies and web routes).
+      // It fails fast with the skip every caller already maps to "retry".
+      const sendBody = jest.fn(async () => 'sent');
+      const denied = await runExclusive('review-send:cust-42', sendBody, { recordHealth: false });
+      expect(denied).toEqual({ skipped: true, reason: 'no_connection' });
+      expect(sendBody).not.toHaveBeenCalled();
+      expect(db.client.acquireConnection).toHaveBeenCalledTimes(5);
 
       release('swept');
       await Promise.all(herd);
+
+      // Slot free again: it runs, and returns its slot.
+      const sent = await runExclusive('review-send:cust-42', sendBody, { recordHealth: false });
+      expect(sent).toBe('sent');
+      const again = await runExclusive('review-send:cust-43', async () => 'sent-too', { recordHealth: false });
+      expect(again).toBe('sent-too');
     } finally {
       delete db.client.pool;
     }

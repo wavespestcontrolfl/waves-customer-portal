@@ -82,7 +82,7 @@ router.post('/run', async (req, res) => {
     logger.info(`[auto-dispatch] manual run requested by tech ${req.technicianId} mode=${mode}`);
     // Share the cron's advisory lock so a manual run can't overlap the 4:10 cron
     // (or another manual run) and double-apply past the per-run cap / stale guard.
-    const result = await runExclusive('auto-dispatch-recurring', () => runAutoDispatch({ mode, triggeredBy: 'manual' }));
+    const result = await runExclusive('auto-dispatch-recurring', () => runAutoDispatch({ mode, triggeredBy: 'manual' }), { waitForSlot: false });
     // runExclusive's lock sentinel is { skipped: true, reason }. A completed run
     // returns a numeric `skipped` count — don't misread that as a lock conflict.
     if (result && result.skipped === true) {

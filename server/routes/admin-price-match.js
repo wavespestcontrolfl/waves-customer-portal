@@ -105,10 +105,12 @@ router.post('/scan', async (req, res, next) => {
       return res.json(result);
     }
     res.status(202).json({ ok: true, started: true });
+    // Manual trigger: shares the cron's lock + health row but is request-
+    // scoped — fail fast rather than queue behind the cron herd.
     runExclusive('price-scan-weekly', async () => {
       const result = await runWeeklyScan();
       logger.info(`[price-match] manual scan run by ${req.technicianId}: ${JSON.stringify(result)}`);
-    }).catch((err) => logger.error(`[price-match] manual scan failed: ${err.message}`));
+    }, { waitForSlot: false }).catch((err) => logger.error(`[price-match] manual scan failed: ${err.message}`));
     return undefined;
   } catch (err) { return next(err); }
 });
