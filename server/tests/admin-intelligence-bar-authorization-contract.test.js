@@ -1,15 +1,7 @@
 /**
-
- *
-
-
-
-
-
-
-
-
-
+ * W0B authorization contract — route-level invariants. The mock scaffold
+ * mirrors admin-intelligence-bar-ui-confirm.test.js (same trust-boundary
+ * fixtures); the contract and cancellation suites are at the bottom.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
