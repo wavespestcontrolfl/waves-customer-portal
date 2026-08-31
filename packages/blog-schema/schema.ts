@@ -642,25 +642,63 @@ const SERVICE_CTA_LINK_RE =
 // and tolerant of nested braces. Unbalanced braces are left alone.
 function blankMdxExpressions(src: string): string {
   const out = src.split('');
-  let i = 0;
+  const blankRange = (a: number, b: number) => { for (let k = a; k <= b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  // Strings INSIDE an expression are honored so a `}` in {'a}b'} doesn't end it early.
+  const closeOfExpression = (i: number): number => {
+    let depth = 0; let q: string | null = null;
+    for (let j = i; j < src.length; j += 1) {
+      const c = src[j];
+      if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+      if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+      if (c === '{') depth += 1;
+      else if (c === '}') { depth -= 1; if (depth === 0) return j; }
+    }
+    return -1;
+  };
+  // Context aware: inside a TAG quotes delimit attribute values (a brace in
+  // title="a {b}" is not an expression); in PROSE an apostrophe is text
+  // (don't / it's), so only braces matter there.
+  let i = 0; let inTag = false; let quote: string | null = null;
   while (i < src.length) {
     const ch = src[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const q = ch; i += 1;
-      while (i < src.length && src[i] !== q) i += src[i] === '\\' ? 2 : 1;
+    if (inTag) {
+      if (quote) { if (ch === quote) quote = null; i += 1; continue; }
+      if (ch === '"' || ch === "'") { quote = ch; i += 1; continue; }
+      if (ch === '>') { inTag = false; i += 1; continue; }
+      if (ch === '{') { const j = closeOfExpression(i); if (j > 0) { blankRange(i, j); i = j + 1; continue; } }
       i += 1; continue;
     }
-    if (ch === '{') {
-      let depth = 0; let j = i;
-      for (; j < src.length; j += 1) {
-        if (src[j] === '{') depth += 1;
-        else if (src[j] === '}') { depth -= 1; if (depth === 0) break; }
-      }
-      if (j < src.length) { for (let k = i; k <= j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j + 1; continue; }
-    }
+    if (ch === '<' && /[A-Za-z/!]/.test(src[i + 1] || '')) { inTag = true; i += 1; continue; }
+    if (ch === '{') { const j = closeOfExpression(i); if (j > 0) { blankRange(i, j); i = j + 1; continue; } }
     i += 1;
   }
   return out.join('');
+}
+
+// Quote-aware attribute text of the tag opening at `start` (index of `<`):
+// a `>` inside a quoted value does not end the tag. null = unterminated.
+function tagAttrsAt(src: string, start: number): string | null {
+  const m = /^<[A-Za-z][\w.]*/.exec(src.slice(start, start + 64));
+  if (!m) return null;
+  let j = start + m[0].length; let q: string | null = null; let depth = 0;
+  for (; j < src.length; j += 1) {
+    const c = src[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '{') depth += 1;
+    else if (c === '}') depth -= 1;
+    else if (c === '>' && depth === 0) return src.slice(start + m[0].length, j);
+  }
+  return null;
+}
+
+// Every opening tag named `name` in `src` → [{ start, attrs }] (attrs null = unterminated).
+function tagsNamed(src: string, name: string): Array<{ start: number; attrs: string | null }> {
+  const re = new RegExp(`<${name}\\b`, 'g');
+  const found: Array<{ start: number; attrs: string | null }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) found.push({ start: m.index, attrs: tagAttrsAt(src, m.index) });
+  return found;
 }
 
 // A service-route path (exact route, optional ?query/#fragment).
@@ -674,10 +712,8 @@ const SERVICE_ROUTE_PATH_RE =
 // not the required CTA (fail closed).
 function hasServiceCtaBefore(prefix: string): boolean {
   if (SERVICE_CTA_LINK_RE.test(prefix)) return true;
-  const ctaRe = /<InlineCTA\b([^>]*)>/g;
-  let m: RegExpExecArray | null;
-  while ((m = ctaRe.exec(prefix)) !== null) {
-    const attrs = m[1];
+  for (const { attrs } of tagsNamed(prefix, 'InlineCTA')) {
+    if (attrs === null) continue; // unterminated — never counts
     if (!/\bctaHref\s*=/.test(attrs)) return true;
     const href = /\bctaHref\s*=\s*["']([^"']*)["']/.exec(attrs)?.[1];
     if (href && SERVICE_ROUTE_PATH_RE.test(href.trim())) return true;
@@ -716,10 +752,7 @@ export function validateAffiliateUsage(
   cleaned = cleaned.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
   cleaned = cleaned.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
 
-  const positions: number[] = [];
-  const re = /<AffiliateLink\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(cleaned)) !== null) positions.push(m.index);
+  const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
 
@@ -749,14 +782,11 @@ export function validateAffiliateUsage(
   // prop (product={"x"}, placement={p}) is seen and rejected: the registry
   // checks only work on quoted literals, and the resolver would receive a
   // value the gate never validated.
-  const invRe = /<AffiliateLink\b([^>]*)>/g;
-  let inv: RegExpExecArray | null;
   const checked = new Set<string>();
   const unmasked = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length)).replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length)).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
-  while ((inv = invRe.exec(unmasked)) !== null) {
-    const attrs = inv[1];
-    const id = /\bproduct\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
-    const placement = /\bplacement\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
+  for (const { attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
+    const id = attrs === null ? undefined : /\bproduct\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
+    const placement = attrs === null ? undefined : /\bplacement\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
     if (!id || !placement) {
       blockers.push('every <AffiliateLink> needs quoted literal product="…" and placement="…" props — expression-valued or missing props cannot be validated against the registry');
       continue;
