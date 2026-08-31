@@ -75,6 +75,24 @@ function replaceOrInsert(html, pattern, replacement) {
   return html.replace('</head>', `    ${replacement}\n  </head>`);
 }
 
+// Inject a class onto the <html ...> tag (idempotent). Lets a section serve
+// its scoping class (e.g. html.admin-app for /admin form/font rules) on
+// first paint instead of waiting for a React effect — the class a Safari
+// home-screen install captures. Appends to an existing class attribute
+// without double-adding; adds one when absent.
+function addHtmlClass(html, className) {
+  return html.replace(/<html\b([^>]*)>/i, (tag, attrs) => {
+    const existing = /\bclass="([^"]*)"/i.exec(attrs);
+    if (!existing) return `<html${attrs} class="${escapeHtml(className)}">`;
+    const classes = existing[1].split(/\s+/).filter(Boolean);
+    if (classes.includes(className)) return tag;
+    return `<html${attrs.replace(
+      existing[0],
+      `class="${existing[1]} ${escapeHtml(className)}"`,
+    )}>`;
+  });
+}
+
 function applyHtmlMetadata(html, metadata = {}) {
   let output = String(html || '');
   const title = metadata.title || 'Waves Customer Portal';
@@ -92,6 +110,7 @@ function applyHtmlMetadata(html, metadata = {}) {
   output = replaceOrInsert(output, /<meta property="og:description" content="[^"]*"\s*\/?>/i, `<meta property="og:description" content="${escapedDescription}" />`);
   output = replaceOrInsert(output, /<meta name="twitter:title" content="[^"]*"\s*\/?>/i, `<meta name="twitter:title" content="${escapedTitle}" />`);
   output = replaceOrInsert(output, /<meta name="twitter:description" content="[^"]*"\s*\/?>/i, `<meta name="twitter:description" content="${escapedDescription}" />`);
+  if (metadata.htmlClass) output = addHtmlClass(output, metadata.htmlClass);
   return output;
 }
 

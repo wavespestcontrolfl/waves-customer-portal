@@ -187,11 +187,12 @@ input[type="week"] {
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
    beats class-based rules in the cascade.
-   .admin-shell-v2 stays as an additional selector because html.admin-app is
-   added in a useEffect, which can run after the browser's first paint on a
-   cold /admin mount — the shell class is present in the initial markup, so
-   keeping it avoids a Roboto font flash / layout shift. The index.html
-   first-paint script also adds html.admin-app on /admin paths. */
+   .admin-shell-v2 stays as an additional selector because in Vite dev
+   html.admin-app is only added by a useEffect, which can run after the
+   browser's first paint on a cold /admin mount — the shell class is present
+   in the initial markup, so keeping it avoids a Roboto font flash / layout
+   shift. In production renderHTML (server/index.js) injects html.admin-app
+   server-side for /admin paths. */
 html.admin-app,
 html.admin-app *,
 .admin-shell-v2,
@@ -288,8 +289,9 @@ html.admin-app [style*="overflow-x: auto"]:has(> table) {
 }
 
 /* Staff auth pages sit outside AdminLayoutV2. They still get html.admin-app
-   (Safari bookmark first paint + AdminSafariShell) so 16px/44px input rules
-   apply; this class keeps the form off the notch and the iOS toolbar. */
+   (server-rendered in prod, AdminSafariShell's effect otherwise) so 16px/44px
+   input rules apply; this class keeps the form off the notch and the iOS
+   toolbar. */
 html.admin-app .admin-auth-page {
   min-height: var(--admin-vh, 100dvh);
   padding: calc(20px + env(safe-area-inset-top, 0px))

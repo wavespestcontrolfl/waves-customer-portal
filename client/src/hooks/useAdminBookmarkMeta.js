@@ -14,8 +14,8 @@ import {
  * writing customer defaults over them on every non-admin route was a bug.
  * Entering /admin snapshots the current identity first, so leaving via SPA
  * navigation puts back exactly what the destination-side route had (the
- * snapshot is null on a cold /admin load where the index.html first-paint
- * script already installed admin meta — restore then falls back to the
+ * snapshot is null on a cold prod /admin load, where the server already
+ * rendered admin meta + html.admin-app — restore then falls back to the
  * customer defaults).
  */
 export default function useAdminBookmarkMeta(active) {

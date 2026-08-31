@@ -15,9 +15,17 @@ describe("Safari admin bookmark first paint", () => {
     );
   });
 
-  it("swaps admin identity before React so /admin/login installs Waves Admin", () => {
-    expect(html).toMatch(/admin-manifest\.json/);
-    expect(html).toMatch(/Waves Admin/);
-    expect(html).toMatch(/classList\.add\('admin-app'\)/);
+  it("carries no inline admin first-paint script — renderHTML owns prod first paint", () => {
+    // Production SPA HTML is served through renderHTML in server/index.js,
+    // whose SECTIONS table already swaps manifest/title/apple-title/
+    // theme-color and injects html.admin-app for /admin (applyHtmlMetadata,
+    // server/services/report-page-metadata.js) before the response goes
+    // out. A second inline mechanism here can silently diverge from it —
+    // this test keeps the duplicate from coming back. (Vite dev serves the
+    // raw file; there AdminSafariShell's effect applies admin identity
+    // after mount, which is fine — dev is not a home-screen install
+    // surface.)
+    expect(html).not.toMatch(/admin-manifest\.json/);
+    expect(html).not.toMatch(/classList\.add/);
   });
 });

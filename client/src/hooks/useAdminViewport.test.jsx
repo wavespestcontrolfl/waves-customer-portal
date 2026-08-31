@@ -19,6 +19,7 @@ describe("useAdminViewport", () => {
     vi.stubGlobal("visualViewport", {
       height: 520,
       offsetTop: 12,
+      scale: 1,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     });
@@ -41,6 +42,26 @@ describe("useAdminViewport", () => {
     expect(
       document.documentElement.style.getPropertyValue("--keyboard-inset"),
     ).toBe("268px");
+  });
+
+  it("does not mistake pinch zoom for a keyboard — falls back to the layout viewport", () => {
+    vi.stubGlobal("visualViewport", {
+      height: 400,
+      offsetTop: 30,
+      scale: 2,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    syncAdminViewportVars();
+    expect(document.documentElement.style.getPropertyValue("--admin-vh")).toBe(
+      "800px",
+    );
+    expect(
+      document.documentElement.style.getPropertyValue("--vv-offset-top"),
+    ).toBe("0px");
+    expect(
+      document.documentElement.style.getPropertyValue("--keyboard-inset"),
+    ).toBe("0px");
   });
 
   it("subscribes while active and clears the vars on unmount", () => {

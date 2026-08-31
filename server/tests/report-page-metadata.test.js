@@ -73,6 +73,38 @@ describe('report page metadata', () => {
     expect(updated).toContain('<meta name="twitter:title" content="Service report · May 16, 2026 · WaveGuard pest" />');
   });
 
+  test('injects htmlClass onto the html tag for section-scoped first paint', () => {
+    const html = '<html lang="en"><head><title>Old</title></head><body></body></html>';
+
+    const updated = applyHtmlMetadata(html, {
+      title: 'Waves Admin',
+      htmlClass: 'admin-app',
+    });
+
+    expect(updated).toContain('<html lang="en" class="admin-app">');
+  });
+
+  test('htmlClass injection is idempotent and appends to an existing class attribute', () => {
+    const alreadyTagged = '<html lang="en" class="admin-app"><head><title>Old</title></head><body></body></html>';
+    const otherClass = '<html lang="en" class="theme-dark"><head><title>Old</title></head><body></body></html>';
+
+    expect(
+      applyHtmlMetadata(alreadyTagged, { htmlClass: 'admin-app' }),
+    ).toContain('<html lang="en" class="admin-app">');
+    expect(
+      applyHtmlMetadata(otherClass, { htmlClass: 'admin-app' }),
+    ).toContain('<html lang="en" class="theme-dark admin-app">');
+  });
+
+  test('leaves the html tag untouched when htmlClass is not provided', () => {
+    const html = '<html lang="en"><head><title>Old</title></head><body></body></html>';
+
+    const updated = applyHtmlMetadata(html, { title: 'Waves Tech' });
+
+    expect(updated).toContain('<html lang="en">');
+    expect(updated).not.toContain('class=');
+  });
+
   test('loads report metadata with a lightweight token lookup', async () => {
     const first = jest.fn().mockResolvedValue({
       service_type: 'Residential Pest Control',

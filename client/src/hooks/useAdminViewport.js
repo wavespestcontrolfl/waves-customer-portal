@@ -11,8 +11,14 @@ export function syncAdminViewportVars() {
   const root = document.documentElement;
   const vv = window.visualViewport;
   const layoutH = window.innerHeight;
-  const height = vv ? vv.height : layoutH;
-  const offsetTop = vv ? vv.offsetTop : 0;
+  // Pinch zoom ALSO shrinks visualViewport.height (CSS px) while
+  // innerHeight stays the layout height, so the height delta only means
+  // "keyboard" at scale ≈ 1. When meaningfully zoomed, fall back to the
+  // layout viewport — otherwise the zoom delta reads as a phantom keyboard
+  // and shoves the fixed tab bar / action bars hundreds of px up the page.
+  const usable = vv && !(vv.scale > 1.01);
+  const height = usable ? vv.height : layoutH;
+  const offsetTop = usable ? vv.offsetTop : 0;
   const keyboardInset = Math.max(0, layoutH - height - offsetTop);
   root.style.setProperty("--admin-vh", `${Math.round(height)}px`);
   root.style.setProperty("--vv-offset-top", `${Math.round(offsetTop)}px`);

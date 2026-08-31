@@ -3,8 +3,10 @@
  *
  * `index.html` is the customer document (manifest, title, theme-color).
  * Without an early swap, Add to Home Screen from /admin/login installs
- * the customer app. The inline script in index.html applies this on first
- * paint; React re-applies it for SPA navigations onto /admin/*.
+ * the customer app. In production, renderHTML (server/index.js) swaps the
+ * identity server-side before first paint; React re-applies it here for
+ * SPA navigations onto /admin/* (and for Vite dev, which serves the raw
+ * customer document).
  *
  * Off /admin/* this module must stay hands-off: /tech installs its own
  * manifest + "Field Tools" title, and customer token pages (reports,
@@ -51,10 +53,10 @@ function setMeta(name, content) {
 /**
  * Capture the document's current bookmark identity so it can be restored
  * on SPA leave. Returns null on a document already carrying admin identity
- * (the index.html first-paint script runs before React on a cold /admin
- * load) — there is no pre-admin state to go back to, so restore falls
- * back to the customer defaults instead of "restoring" admin meta onto a
- * customer route.
+ * (a cold /admin load in production is server-rendered with html.admin-app
+ * before React mounts) — there is no pre-admin state to go back to, so
+ * restore falls back to the customer defaults instead of "restoring" admin
+ * meta onto a customer route.
  */
 export function snapshotBookmarkMeta() {
   if (typeof document === "undefined") return null;

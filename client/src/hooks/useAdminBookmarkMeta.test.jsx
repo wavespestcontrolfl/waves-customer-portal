@@ -127,11 +127,11 @@ describe("useAdminBookmarkMeta", () => {
     );
   });
 
-  it("falls back to customer defaults after a cold /admin load (first-paint script already applied admin)", () => {
-    // The index.html inline script runs before React on a direct /admin
-    // load: html.admin-app is set and the meta is already admin. There is
-    // no pre-admin state to snapshot, so leaving /admin must produce the
-    // customer defaults — never "restore" admin identity.
+  it("falls back to customer defaults after a cold /admin load (server-rendered admin identity)", () => {
+    // renderHTML (server/index.js) injects html.admin-app + admin meta
+    // before React on a direct prod /admin load. There is no pre-admin
+    // state to snapshot, so leaving /admin must produce the customer
+    // defaults — never "restore" admin identity.
     document.documentElement.classList.add("admin-app");
     seedHead({
       manifest: "/admin-manifest.json",
