@@ -407,15 +407,23 @@ function withCacheBreakpoint(messages) {
   return [...messages.slice(0, -1), { ...last, content }];
 }
 
-// UI-backed write confirmation (issue #1568). FAIL-CLOSED (owner ruling
-// 2026-08-30): the gate is ON unless GATE_IB_UI_CONFIRM is explicitly
-// 'false' — an unset/typo'd env var must never silently let the legacy bare
-// writes (SMS/email sends included) execute straight from the model loop.
-// 'false' is the kill switch; read per-request so it can be toggled without
-// a restart.
+// UI-backed write confirmation (issue #1568) is STRUCTURAL (owner rulings
+// 2026-08-30/31): NO environment value restores direct model-loop writes —
+// a config switch must never mean "turn off the safety layer". The
+// emergency control is IB_WRITES_DISABLED=true, which refuses every
+// Intelligence Bar write (proposals, /execute writes, /confirm-action
+// commits) while reads stay available; the fallback for a broken confirm
+// UI is the normal admin screen, never ungated AI execution. Read
+// per-request so it can be toggled without a restart. (GATE_IB_UI_CONFIRM
+// is retired and intentionally ignored.)
 function uiConfirmEnabled() {
-  return process.env.GATE_IB_UI_CONFIRM !== 'false';
+  return true;
 }
+
+function ibWritesDisabled() {
+  return process.env.IB_WRITES_DISABLED === 'true';
+}
+const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
@@ -1654,6 +1662,11 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop. The confirmation id goes to the client only.
+          if (ibWritesDisabled()) {
+            result = { error: IB_WRITES_DISABLED_MESSAGE };
+            failed = true;
+            errorMessage = result.error;
+          } else {
           try {
             const proposed = await proposePendingWrite({
               toolUse,
@@ -1673,6 +1686,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
             result = { error: err.message || 'Could not create the pending action' };
             failed = true;
             errorMessage = result.error;
+          }
           }
         } else if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
@@ -1847,6 +1861,9 @@ router.post('/execute', async (req, res, next) => {
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
+    if (ibWritesDisabled() && (UI_GATED_WRITE_TOOL_NAMES.has(action) || CONFIRMED_ACTION_TOOL_NAMES.has(action))) {
+      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    }
 
     let executionParams = params || {};
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
@@ -1897,6 +1914,12 @@ router.post('/confirm-action', async (req, res, next) => {
   try {
     const id = String(req.body?.pending_action_id || '').trim();
     if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+
+    // Emergency write freeze covers commits too — a pending action proposed
+    // before the freeze must not slip through after it.
+    if (ibWritesDisabled()) {
+      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    }
 
     const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req));
     if (claim.error) {

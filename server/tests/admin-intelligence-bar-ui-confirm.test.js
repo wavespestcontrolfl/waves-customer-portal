@@ -246,14 +246,16 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(onPrompt).toContain('WRITE CONFIRMATION (UI mode)');
     expect(onPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
 
+    // The boundary is structural: the retired GATE_IB_UI_CONFIRM value is
+    // ignored — UI mode holds no matter what the env says.
     process.env.GATE_IB_UI_CONFIRM = 'false';
     scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
     await withServer(async (baseUrl) => {
       await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
     });
     const offPrompt = mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
-    expect(offPrompt).toContain('WRITE CONFIRMATION (conversational mode)');
-    expect(offPrompt).not.toContain('WRITE CONFIRMATION (UI mode)');
+    expect(offPrompt).toContain('WRITE CONFIRMATION (UI mode)');
+    expect(offPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
   });
 
   test('prompt caching: system block breakpoint, one message breakpoint per round (no accumulation), pageData on the user turn not the system prompt', async () => {
@@ -314,20 +316,43 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     });
   });
 
-  test('gate off: legacy behavior unchanged, no pendingActions field', async () => {
+  test('NO env value restores direct model-loop writes: retired gate=false still proposes', async () => {
     process.env.GATE_IB_UI_CONFIRM = 'false';
-    mockExecuteTool.mockResolvedValue({ success: true });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
-      [{ type: 'text', text: 'Done.' }],
+      [{ type: 'text', text: 'Proposed.' }],
     ]);
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'set city', context: 'customers' });
-      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
-      expect(mockCreatePendingAction).not.toHaveBeenCalled();
-      expect(body.pendingActions).toBeUndefined();
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      expect(body.pendingActions).toHaveLength(1);
     });
+  });
+
+  test('IB_WRITES_DISABLED freezes writes: no execution, no proposal — reads unaffected', async () => {
+    process.env.IB_WRITES_DISABLED = 'true';
+    try {
+      scriptModelTurns([
+        [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+        [{ type: 'text', text: 'Writes are disabled.' }],
+      ]);
+
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'set city', context: 'customers' });
+        expect(mockExecuteTool).not.toHaveBeenCalled();
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+        expect(body.pendingActions).toEqual([]);
+
+        // The model-visible tool result explains the freeze.
+        const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+        const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+        expect(toolResult.error).toContain('disabled');
+      });
+    } finally {
+      delete process.env.IB_WRITES_DISABLED;
+    }
   });
 
   test('image-backed turns send valid vision blocks, drop invalid images, and redact persisted telemetry', async () => {
@@ -511,18 +536,35 @@ describe('/confirm-action commit path', () => {
     });
   });
 
-  test('/execute still works for gated writes when the gate is off (legacy behavior)', async () => {
+  test('/execute refuses gated writes regardless of the retired env value — no bypass exists', async () => {
     process.env.GATE_IB_UI_CONFIRM = 'false';
-    mockExecuteTool.mockResolvedValue({ success: true });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
         method: 'POST',
         headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'update_customer', params: { customer_id: 'c1', updates: { city: 'Venice' } } }),
       });
-      expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(409);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
     });
+  });
+
+  test('IB_WRITES_DISABLED: /confirm-action refuses commits of already-proposed actions', async () => {
+    process.env.IB_WRITES_DISABLED = 'true';
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pending_action_id: PENDING_ID }),
+        });
+        expect(res.status).toBe(409);
+        expect(mockClaimForConfirm).not.toHaveBeenCalled();
+        expect(mockExecuteTool).not.toHaveBeenCalled();
+      });
+    } finally {
+      delete process.env.IB_WRITES_DISABLED;
+    }
   });
 
   test('missing pending_action_id is a 400', async () => {

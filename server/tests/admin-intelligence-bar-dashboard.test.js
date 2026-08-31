@@ -253,12 +253,10 @@ describe('dashboard intelligence-bar guard', () => {
     });
   });
 
-  test('admin can execute create_customer (legacy path — UI-confirm gate explicitly off)', async () => {
-    // The gate is fail-closed (unset ⇒ ON, /execute answers 409 for UI-gated
-    // writes); this test covers the role guard on the legacy direct path, so
-    // it opts out via the explicit kill switch.
+  test('admin /execute of a UI-gated write is refused — the confirm boundary is structural, no env bypass', async () => {
+    // The retired GATE_IB_UI_CONFIRM value is ignored: even an admin commits
+    // gated writes only through /confirm-action.
     process.env.GATE_IB_UI_CONFIRM = 'false';
-    mockExecuteTool.mockResolvedValue({ success: true, customer_id: 'cust-1' });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
@@ -269,13 +267,8 @@ describe('dashboard intelligence-bar guard', () => {
           params: { first_name: 'Jeff', phone: '9415550100', confirmed: true },
         }),
       });
-      const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body.success).toBe(true);
-      expect(mockExecuteTool).toHaveBeenCalledWith(
-        'create_customer',
-        expect.objectContaining({ first_name: 'Jeff', confirmed: true }),
-      );
+      expect(res.status).toBe(409);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
     });
     delete process.env.GATE_IB_UI_CONFIRM;
   });
