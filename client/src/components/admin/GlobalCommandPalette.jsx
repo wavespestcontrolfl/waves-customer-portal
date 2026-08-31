@@ -294,9 +294,13 @@ function GlobalCommandPalette(_props, ref) {
   // the id is set from query responses and from resume-on-open.
   const [threadId, setThreadId] = useState(null);
   const resumeAttemptedRef = useRef(false);
-  // Bumped by submit/"New chat" so a still-inflight resume response can't
-  // clobber newer state (it only applies if the epoch is unchanged).
+  // Bumped by submit/"New chat" so a still-inflight resume or query response
+  // can't clobber newer state (it only applies if the epoch is unchanged).
   const threadEpochRef = useRef(0);
+  // True once /threads/latest answered 200 — the server gate is on. While
+  // false the palette keeps the exact pre-thread ephemeral behavior
+  // (conversation cleared on route/context change).
+  const threadsAvailableRef = useRef(false);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
   const [attachments, setAttachments] = useState([]);
@@ -371,12 +375,19 @@ function GlobalCommandPalette(_props, ref) {
     setAttachmentBusy(false);
   }, [setAttachmentBusy]);
 
-  // Context change no longer wipes the conversation (operating-terminal
-  // scope, owner-ratified 2026-08-31): the thread survives route changes —
-  // the server trims what reaches the model, and tool availability is
-  // recalculated per request from the new context. Attachments stay
-  // per-message.
+  // With threads enabled, a context change no longer wipes the conversation
+  // (operating-terminal scope, owner-ratified 2026-08-31): the thread
+  // survives route changes — the server trims what reaches the model, and
+  // tool availability is recalculated per request from the new context.
+  // Gate off (or not yet probed): the exact pre-thread ephemeral behavior —
+  // clear everything. Attachments stay per-message either way.
   useEffect(() => {
+    if (!threadsAvailableRef.current) {
+      threadEpochRef.current += 1;
+      setConversationHistory([]);
+      setResponse(null);
+      setPendingActions([]);
+    }
     resetAttachments();
   }, [context, resetAttachments]);
 
@@ -389,6 +400,7 @@ function GlobalCommandPalette(_props, ref) {
     const epoch = threadEpochRef.current;
     adminFetch("/admin/intelligence-bar/threads/latest")
       .then((data) => {
+        threadsAvailableRef.current = true; // 200 = gate on (thread may be null)
         if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
         const hist = data?.thread?.conversationHistory;
         if (hist?.length) {
@@ -416,6 +428,7 @@ function GlobalCommandPalette(_props, ref) {
       const q = (text || prompt).trim();
       if (!q || loading || attachmentsLoadingRef.current) return;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
+      const epoch = threadEpochRef.current;
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
@@ -436,12 +449,16 @@ function GlobalCommandPalette(_props, ref) {
               : {}),
           }),
         });
-        setResponse(data.response);
-        setPendingActions(data.pendingActions || []);
-        setConversationHistory(data.conversationHistory || []);
-        if (data.threadId) setThreadId(data.threadId);
+        // "New chat" (or a context reset) while the query was inflight —
+        // drop the stale response instead of restoring the cleared thread.
+        if (threadEpochRef.current === epoch) {
+          setResponse(data.response);
+          setPendingActions(data.pendingActions || []);
+          setConversationHistory(data.conversationHistory || []);
+          if (data.threadId) setThreadId(data.threadId);
+        }
       } catch (err) {
-        setResponse(`Error: ${err.message}`);
+        if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
       }
       setLoading(false);
       setPrompt("");
