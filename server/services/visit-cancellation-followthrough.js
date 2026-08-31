@@ -62,6 +62,10 @@ async function runVisitCancellationFollowThrough({
   reason = null,
   source = 'cancellation',
   now = new Date(),
+  // Authorization-bound callers (Intelligence Bar confirm card, W0B): the
+  // exact invoice ids the operator approved for voiding. Anything minted
+  // after approval is logged for the office instead of voided.
+  approvedInvoiceIds = null,
 } = {}) {
   const ids = (Array.isArray(targetIds) ? targetIds : []).filter(Boolean);
   if (ids.length === 0) return { settled: 0 };
@@ -125,7 +129,9 @@ async function runVisitCancellationFollowThrough({
     const InvoiceService = require('./invoice');
     for (const id of ids) {
       try {
-        await InvoiceService.voidOpenInvoicesForCancelledService(id);
+        await InvoiceService.voidOpenInvoicesForCancelledService(id, {
+          onlyInvoiceIds: Array.isArray(approvedInvoiceIds) ? approvedInvoiceIds : null,
+        });
       } catch (e) {
         logger.error(`[${source}] cancellation invoice void failed (target ${id}): ${e.message}`);
       }

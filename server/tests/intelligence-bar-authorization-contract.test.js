@@ -119,11 +119,12 @@ test('cancel_appointment discloses the late-cancel fee and invoice voids from th
     },
   });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual('Late-cancel fee of $49.00 WILL be charged to the card on file');
-  expect(labels).toContainEqual('Void invoice INV-1001 (sent, $120.00) — applied credits/deposits restored');
+  expect(labels).toContainEqual(expect.stringMatching(/^Late-cancel fee of \$49\.00 will be charged to the card on file/));
+  expect(labels).toContainEqual(expect.stringMatching(/^Void invoice INV-1001 \(sent, \$120\.00\) — applied credits\/deposits restored; skipped for office review/));
+  expect(labels).toContainEqual(expect.stringMatching(/^Only the invoices listed above are voided/));
   expect(c.effects.find((e) => e.label.startsWith('Cancel Quarterly Pest'))).toMatchObject({ kind: 'operational', before: 'scheduled', after: 'cancelled' });
   expect(labels.some((l) => l.includes('fingerprint'))).toBe(false);
-  expect(c.effects.filter((e) => e.kind === 'billing').length).toBe(2);
+  expect(c.effects.filter((e) => e.kind === 'billing').length).toBe(3);
 
   const unresolved = buildContract({
     toolName: 'cancel_appointment', params: {}, displayParams: {},

@@ -2285,6 +2285,10 @@ async function cancelAppointment(input) {
   // then runs on the same rows immediately after. Drift ⇒ no transition, no
   // follow-through, preview_changed back to the card.
   const approvedFingerprint = input._cancellation_fingerprint ? String(input._cancellation_fingerprint) : null;
+  // The approved effect set, verified under lock — bound into the post-
+  // commit rails below (fee posture → waiveFee, invoice set → approved ids)
+  // so the follow-through can only do what the card disclosed.
+  let approvedEffects = null;
   try {
     const { transitionJobStatus } = require('../job-status');
     await db.transaction(async (trx) => {
@@ -2300,6 +2304,7 @@ async function cancelAppointment(input) {
           err.previewChanged = true;
           throw err;
         }
+        approvedEffects = live;
       }
       await transitionJobStatus({
         jobId: appointment_id,
@@ -2362,10 +2367,26 @@ async function cancelAppointment(input) {
     const staleCommit = cancelledAtCommit
       && (Date.now() - new Date(cancelledAtCommit).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
     if (cancelledAtCommit && !staleCommit) {
-      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtCommit) });
+      // Authorization-bound (W0B): the fee rail may only charge if the
+      // approved posture said a fee applies, and only the approved invoice
+      // set is voided — the follow-through cannot exceed the card.
+      await runVisitCancellationFollowThrough({
+        targetIds: [appointment_id],
+        source: 'intelligence-bar',
+        now: new Date(cancelledAtCommit),
+        ...(approvedEffects ? {
+          waiveFee: !approvedEffects.fee?.applies,
+          approvedInvoiceIds: (approvedEffects.invoices || []).map((i) => String(i.id)),
+        } : {}),
+      });
     } else {
       logger.warn(`[intelligence-bar] cancellation instant for ${appointment_id} is ${staleCommit ? 'stale' : 'missing'} — fee legs waived (fail free)`);
-      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true });
+      await runVisitCancellationFollowThrough({
+        targetIds: [appointment_id],
+        source: 'intelligence-bar',
+        waiveFee: true,
+        ...(approvedEffects ? { approvedInvoiceIds: (approvedEffects.invoices || []).map((i) => String(i.id)) } : {}),
+      });
     }
   } catch (e) {
     logger.error(`[intelligence-bar] cancel follow-through failed for ${appointment_id}: ${e.message}`);

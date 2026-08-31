@@ -253,8 +253,8 @@ describe('W0B cancellation money effects', () => {
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._cancellation_fingerprint).toBe(cancellationFingerprint(PREVIEW));
       const labels = stored.contract.effects.map((e) => e.label);
-      expect(labels).toContainEqual('Late-cancel fee of $49.00 WILL be charged to the card on file');
-      expect(labels).toContainEqual('Void invoice INV-1001 (sent, $120.00) — applied credits/deposits restored');
+      expect(labels).toContainEqual(expect.stringMatching(/^Late-cancel fee of \$49\.00 will be charged/));
+      expect(labels).toContainEqual(expect.stringMatching(/^Void invoice INV-1001 \(sent, \$120\.00\)/));
       expect(body.pendingActions[0].contract.effects.map((e) => e.label)).toEqual(labels);
       // Internal pins never ride to the card.
       expect(body.pendingActions[0].params._cancellation_fingerprint).toBeUndefined();

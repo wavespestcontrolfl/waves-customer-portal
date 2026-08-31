@@ -195,18 +195,25 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.customer_name ? ` for ${a.customer_name}` : ''}`, {
       before: a.status || null, after: 'cancelled',
     });
+    // Wording states what the rails GUARANTEE, not the best case: a charge
+    // may still land in review (office alerted), a hold may be parked for
+    // the rebooked visit instead of released, and a void is skipped when
+    // money is in flight or the invoice sits on a finalized statement.
     if (c.fee?.applies) {
       const amt = c.fee.amount != null ? `$${Number(c.fee.amount).toFixed(2)}` : 'the agreed';
       push('billing', c.fee.unresolved
-        ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified)`
-        : `Late-cancel fee of ${amt} WILL be charged to the card on file`);
+        ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified; unresolved outcomes go to office review)`
+        : `Late-cancel fee of ${amt} will be charged to the card on file (a failed charge goes to office review, never silently dropped)`);
     } else if (c.fee?.rail && c.fee.rail !== 'none') {
-      push('billing', 'No late-cancel fee (outside the fee window) — card hold released');
+      push('billing', 'No late-cancel fee (outside the fee window) — the card hold is released, or parked for the rebooked visit when park-on-cancel is on');
     }
     for (const inv of c.invoices || []) {
       const total = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : '';
       const credit = Number(inv.credit_applied) > 0 ? `; $${Number(inv.credit_applied).toFixed(2)} account credit restored` : '';
-      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''}) — applied credits/deposits restored${credit}`);
+      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''}) — applied credits/deposits restored${credit}; skipped for office review if a payment is in flight or it sits on a finalized statement`);
+    }
+    if ((c.invoices || []).length) {
+      push('billing', 'Only the invoices listed above are voided — anything created after this card is left for office review');
     }
   }
 
