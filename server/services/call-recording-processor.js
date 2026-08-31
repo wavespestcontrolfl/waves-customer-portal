@@ -2251,6 +2251,32 @@ function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workab
   return out;
 }
 
+
+// The SLA clock for a call-born lead starts when the CUSTOMER called, not
+// when the pipeline finished minting the row. first_contact_at anchored at
+// row-insert time erased every second of processing delay from
+// response_time_minutes and from the "leads waiting over 30m for first
+// contact" card — the 2026-08-31 wedge showed a 3-minute response for a
+// caller who actually waited 23. callStartedAt() also backs the call's own
+// length out of the fallback rows the status/recording callbacks insert
+// AFTER the call ends, where created_at is already post-call.
+//
+// The 24h clamp applies ONLY when a call that had ALREADY been processed is
+// re-run — the one pass that can mint a lead from an arbitrarily old call
+// and would otherwise write a months-long response time into the SLA
+// analytics. Not keyed on `force`: the admin panel sends force=true for
+// pending and wedged rows too, so clamping on it would erase the wait from
+// the very recovery the stall watchdog's alert asks the owner to perform. A
+// pending call that sat through a multi-day outage waited multi-day days,
+// and erasing that is the exact bug this change exists to fix.
+function leadFirstContactAt(call, { reprocessOfProcessed = false } = {}) {
+  const { callStartedAt } = require('../utils/call-timeline');
+  const callAt = callStartedAt(call);
+  if (!callAt) return new Date();
+  if (!reprocessOfProcessed) return callAt;
+  return (Date.now() - callAt.getTime()) <= 24 * 3600 * 1000 ? callAt : new Date();
+}
+
 async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null, stampedLeadVia = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
@@ -5948,6 +5974,17 @@ const CallRecordingProcessor = {
     const processingStartedAt = new Date();
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
+    // Captured BEFORE the claim rewrites processing_status. This — not
+    // opts.force — is what "re-running a finished call" means: the admin
+    // panel sends force=true even for a pending/wedged row, so keying the
+    // SLA clamp on force would erase the real wait from exactly the manual
+    // recovery this feature's own alert tells the owner to perform. All
+    // three COMPLETED states count: a months-old voicemail or spam row
+    // re-run and newly read as a lead must not inject its original call
+    // time into the SLA analytics. The retry states (extraction_failed,
+    // no_transcription) are unfinished work and keep the real wait.
+    const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+    const wasAlreadyProcessed = COMPLETED_STATUSES.has(call.processing_status);
 
     // Dedup guard — skip if already fully processed (prevents duplicate
     // SMS on webhook retries). opts.force=true bypasses the guard so the
@@ -9337,7 +9374,7 @@ const CallRecordingProcessor = {
             // first_contact_channel stays 'call' — attribution sweeps and the
             // channel-mix dashboards key on it, and a voicemail IS a call.
             lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
-            first_contact_at: new Date(),
+            first_contact_at: leadFirstContactAt(call, { reprocessOfProcessed: wasAlreadyProcessed }),
             first_contact_channel: 'call',
             twilio_call_sid: call.twilio_call_sid,
             call_duration_seconds: call.duration_seconds,
@@ -10282,7 +10319,7 @@ const CallRecordingProcessor = {
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
-                  first_contact_at: new Date(),
+                  first_contact_at: leadFirstContactAt(call, { reprocessOfProcessed: wasAlreadyProcessed }),
                   first_contact_channel: 'call',
                   twilio_call_sid: call.twilio_call_sid,
                   call_duration_seconds: call.duration_seconds,
@@ -10347,7 +10384,7 @@ const CallRecordingProcessor = {
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
-                  first_contact_at: new Date(),
+                  first_contact_at: leadFirstContactAt(call, { reprocessOfProcessed: wasAlreadyProcessed }),
                   first_contact_channel: 'call',
                   twilio_call_sid: call.twilio_call_sid,
                   call_duration_seconds: call.duration_seconds,
@@ -15166,6 +15203,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  leadFirstContactAt,
   composeLeadAddress,
   analyzeLeadAddress,
   leadAddressCompareKey,

@@ -6327,6 +6327,36 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Call-processing stall watchdog — every 7 min, ring an admin bell for any
+  // recorded call still without a terminal processing state past the grace
+  // window: a
+  // wedged claim, a dead processor, or a provider outage otherwise costs
+  // leads silently (2026-08-31: an 18-minute wedge on a hot lead; one row
+  // stuck in 'processing' since 07-10 with no alarm anywhere).
+  // Dark behind GATE_CALL_PROCESSING_STALL_WATCHDOG.
+  // See server/services/call-processing-stall-watchdog.js.
+  // =========================================================================
+  // Every 7 minutes, and 7 for a reason: a crash-reclaim loop only LOOKS
+  // stalled during the tail of each reclaim cycle, and the processor sweep
+  // that refreshes the claim runs '*/5'. Any 5-minute cadence here would
+  // phase-lock to it and observe the claim at the same age forever — a
+  // looping call could evade the watchdog indefinitely (codex r11 P1). A
+  // period coprime with 5 walks the phase through every offset, so the
+  // sampling lands inside a stale window within a few cycles. Each tick is
+  // one bounded, dedupe-filtered scan, and a no-op when the gate is off.
+  cron.schedule('*/7 * * * *', async () => {
+    try {
+      const { runCallProcessingStallWatchdog } = require('./call-processing-stall-watchdog');
+      const result = await runCallProcessingStallWatchdog();
+      if (!result.skipped && (result.stalled > 0 || result.alerted > 0)) {
+        logger.warn(`[call-stall-watchdog] scanned=${result.scanned} stalled=${result.stalled} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-processing stall watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Call booking-miss watchdog — every 30 min (offset from the ingest
   // watchdog), ring an admin bell for any call whose V2 extraction confirmed
   // a concrete appointment slot that never became a scheduled_services row
