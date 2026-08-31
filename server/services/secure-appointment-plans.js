@@ -324,6 +324,25 @@ async function settledSetupClaimForInvoice(database, invoiceId) {
   return (await database('setup_fee_claims').where({ invoice_id: invoiceId }).first('id', 'scheduled_service_id', 'amount')) || null;
 }
 
+// Settlement evidence when the acceptance was WON BY ANOTHER SESSION (codex
+// #3591 r65 P1): markEstimateManuallyAccepted short-circuits with
+// alreadyAccepted and no conversion, so the booking must resolve the
+// winner's prepay invoice through the estimate's term and read its claim.
+async function settledSetupClaimForEstimate(database, estimateId) {
+  if (!estimateId) return null;
+  const term = await database('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('prepay_invoice_id');
+  return settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
+}
+
+// The positive booking-time stamp on the visit's series anchor, or null —
+// the completion rail collects a stamped setup on its own, so a staff page
+// about that setup must be disclosure-only (codex #3591 r65 P1).
+async function stampedSetupForVisit(database, visit) {
+  const row = await loadAuthoritativeSetupVisit(database, visit);
+  if (!row) return null;
+  return frozenAnchorSetupStamp(await loadSeriesAnchor(database, row));
+}
+
 // Anchor a claim the prepay mint ledgered before its series existed
 // (anchor-less, keyed to the invoice) onto the series that was booked for
 // it, so a later refund of that prepay restores the stamp there instead of
@@ -1129,6 +1148,8 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 module.exports = {
   recordSetupFeeClaimForInvoice,
   settledSetupClaimForInvoice,
+  settledSetupClaimForEstimate,
+  stampedSetupForVisit,
   anchorSetupFeeClaim,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,

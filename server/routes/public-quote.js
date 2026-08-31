@@ -1668,7 +1668,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // complete and mint it. A fully-cancelled wizard series would
           // otherwise waive this customer's setup fee on every future plan
           // forever (Codex #3489 follow-up).
-          const queued = await q('scheduled_services as claim')
+          const consumableClaimProbe = () => q('scheduled_services as claim')
             .where('claim.customer_id', customerId)
             .whereNotNull('claim.pending_setup_fee')
             .whereNot('claim.pending_setup_fee', 0)
@@ -1702,14 +1702,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                     // cannot mint it (Codex #3500).
                     .whereIn('child.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
                 });
-            })
-            .first('claim.id', 'claim.source_estimate_id');
-          feeAlreadyQueued = !!queued;
+            });
+          feeAlreadyQueued = !!(await consumableClaimProbe().first('claim.id'));
           // Provenance for the per-series rodent setup: the claim counts
           // against THIS quote only when its series was booked from this
           // draft (source_estimate_id) — the post-booking /calculate refresh
-          // this decision serializes with — never from another series.
-          queuedForThisDraft = !!queued && !!draftEstimateId && String(queued.source_estimate_id || '') === String(draftEstimateId);
+          // this decision serializes with — never from another series. Its
+          // OWN probe (codex #3591 r65 P1): with several live rodent claims
+          // the account-wide `.first()` is unordered and may not be this
+          // draft's even when one exists.
+          queuedForThisDraft = !!draftEstimateId
+            && !!(await consumableClaimProbe().where('claim.source_estimate_id', draftEstimateId).first('claim.id'));
         }
         // Persist the WAIVER too, not just the fee: a waived draft carries
         // amount 0, and shouldIncludeWaveGuardSetupFeeForRecurring consumes

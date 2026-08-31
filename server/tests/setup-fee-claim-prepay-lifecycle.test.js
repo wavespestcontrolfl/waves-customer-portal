@@ -127,6 +127,28 @@ describe('retireDirectSetupClaimForPrepay — the mint side', () => {
   });
 });
 
+describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P1)', () => {
+  const { settledSetupClaimForInvoice, settledSetupClaimForEstimate, stampedSetupForVisit, anchorSetupFeeClaim } = plans;
+  test('settledSetupClaimForInvoice / ForEstimate read the immutable ledger; the estimate path resolves through the winning term', async () => {
+    const claimRow = { id: 'claim-1', scheduled_service_id: null, amount: '99.00' };
+    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow }), 'inv-prepay')).toEqual(claimRow);
+    expect(await settledSetupClaimForInvoice(conn({ claim: claimRow }), null)).toBeNull();
+    expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: { prepay_invoice_id: 'inv-prepay' } }), 'est-1')).toEqual(claimRow);
+    // No term for the estimate (standard accept won the race) = no settlement.
+    expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: null }), 'est-1')).toBeNull();
+  });
+  test('anchorSetupFeeClaim fills only an EMPTY anchor; stampedSetupForVisit reads the positive anchor stamp', async () => {
+    const c = conn({ updateResult: 1 });
+    expect(await anchorSetupFeeClaim(c, { claimId: 'claim-1', anchorId: 'svc-parent' })).toBe(true);
+    expect(c.writes).toEqual([expect.objectContaining({ table: 'setup_fee_claims', op: 'update', where: { id: 'claim-1' }, whereNull: 'scheduled_service_id', patch: { scheduled_service_id: 'svc-parent' } })]);
+    expect(await anchorSetupFeeClaim(conn(), { claimId: null, anchorId: 'svc-parent' })).toBe(false);
+    const stamped = conn({ scheduledService: { id: 'svc-parent', customer_id: 'cust-1', recurring_parent_id: null, pending_setup_fee: '99.00', service_type: 'Rodent Bait Stations', service_id: null } });
+    expect(await stampedSetupForVisit(stamped, { id: 'svc-parent' })).toBe(99);
+    const bare = conn({ scheduledService: { id: 'svc-parent', customer_id: 'cust-1', recurring_parent_id: null, pending_setup_fee: null, service_type: 'Rodent Bait Stations', service_id: null } });
+    expect(await stampedSetupForVisit(bare, { id: 'svc-parent' })).toBeNull();
+  });
+});
+
 describe('retirePrepayOnBookSetupClaim — the Customer 360 / prepay-on-book mint (codex #3591 r36 P1)', () => {
   const visit = { id: 'svc-child', customer_id: 'cust-1', recurring_parent_id: 'svc-parent', source_estimate_id: null };
   let owedSpy;
@@ -443,8 +465,13 @@ describe('source contracts — where the lifecycle is wired', () => {
     // is anchored to the booked series.
     // Ledger reads/writes go through the service (the route never touches
     // setup_fee_claims itself — same rule the switch route's contract pins).
-    expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\)[\s\S]*?quote\.kind === 'rodent_bait_setup' && quote\.waived && !\(Number\(quote\.amount\) > 0\)/);
-    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(!settled\) \{[\s\S]*?return;\s+\}\s+const retired = await db\('scheduled_services'\)/);
+    // A race-lost acceptance (alreadyAccepted, no conversion) resolves the
+    // WINNER's claim through the estimate's term; the waiver is the estimate's
+    // DISCLOSED figure (engine result), not the wizard-only setupFeeQuote
+    // (codex #3591 r65 P1). A disclosed-but-unbilled setup keeps the stamp,
+    // aligned to the disclosed figure.
+    expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?acceptResult\?\.alreadyAccepted\s+\? await settledSetupClaimForEstimate\(db, linkedEstimateId\)\s+: await settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\);[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+return disclosed > 0 \? \{ disclosed \} : \{ waived: 'estimate_disclosed_no_setup' \};/);
+    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}\s+const retired = await db\('scheduled_services'\)/);
     expect(adminSchedule).toMatch(/if \(settled\.claim && !settled\.claim\.scheduled_service_id\) \{[\s\S]*?await anchorSetupFeeClaim\(db, \{ claimId: settled\.claim\.id, anchorId: svc\.id \}\);/);
     expect(adminSchedule.includes("('setup_fee_claims')")).toBe(false);
     expect(adminSchedule).toMatch(/const retired = await db\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);

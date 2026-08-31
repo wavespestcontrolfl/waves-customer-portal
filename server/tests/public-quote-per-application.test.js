@@ -482,8 +482,11 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     const fs = require('fs');
     const path = require('path');
     const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-    expect(publicQuote).toMatch(/\.first\('claim\.id', 'claim\.source_estimate_id'\);\s+feeAlreadyQueued = !!queued;/);
-    expect(publicQuote).toMatch(/queuedForThisDraft = !!queued && !!draftEstimateId && String\(queued\.source_estimate_id \|\| ''\) === String\(draftEstimateId\);/);
+    // The draft-provenance probe is its OWN query, never a comparison against
+    // one arbitrary account-wide `.first()` (codex #3591 r65 P1).
+    expect(publicQuote).toMatch(/const consumableClaimProbe = \(\) => q\('scheduled_services as claim'\)/);
+    expect(publicQuote).toMatch(/feeAlreadyQueued = !!\(await consumableClaimProbe\(\)\.first\('claim\.id'\)\);/);
+    expect(publicQuote).toMatch(/queuedForThisDraft = !!draftEstimateId\s+&& !!\(await consumableClaimProbe\(\)\.where\('claim\.source_estimate_id', draftEstimateId\)\.first\('claim\.id'\)\);/);
     expect(publicQuote).toMatch(/decideSetupFeeQuote\(q, existingEst \? existingEst\.id : null\)/);
     const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
     expect(booking).toMatch(/\.modify\(\(qb\) => \{ if \(rodentSetupQuote\) qb\.where\('claim\.source_estimate_id', freshPricingEst\.id\); \}\)/);

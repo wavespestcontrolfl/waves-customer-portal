@@ -356,6 +356,27 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     }
   });
 
+  test('a STAMPED commercial bait series pages disclosure-only — the completion rail bills the stamp, so staff must not invoice it too (codex #3591 r65 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const keySpy = jest.spyOn(plans, 'authoritativeServiceKey').mockResolvedValue('commercial_rodent_bait');
+    const feeSpy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    const stampSpy = jest.spyOn(plans, 'stampedSetupForVisit').mockResolvedValue(99);
+    try {
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.reason).toBe('commercial_rodent_setup_staff_review');
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('disclose to customer'), expect.stringContaining('do NOT create a separate setup invoice'), expect.anything());
+      // Unstamped: manual billing is still the ask.
+      mockNotifyAdmin.mockClear();
+      stampSpy.mockResolvedValueOnce(null);
+      await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('needs manual billing'), expect.anything(), expect.anything());
+    } finally {
+      keySpy.mockRestore();
+      feeSpy.mockRestore();
+      stampSpy.mockRestore();
+    }
+  });
+
   test('no obligation (0) → saved-card auto-secure proceeds, no scheduled_services stamp', async () => {
     const plans = require('../services/secure-appointment-plans');
     const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);

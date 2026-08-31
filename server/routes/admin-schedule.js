@@ -5457,22 +5457,45 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // the prepay mint ledgered against the acceptance's invoice, or the
       // estimate's explicit rodent-setup waiver (the quote disclosed no
       // setup, so a live stamp would charge one the customer never saw).
+      // An acceptance WON BY ANOTHER SESSION (alreadyAccepted, no conversion)
+      // resolves the winner's prepay claim through the estimate's term (codex
+      // #3591 r65 P1). The waiver is the estimate's DISCLOSED setup figure
+      // (frozenRodentBaitSetupAmount — engine result + persisted zero
+      // decision), not the wizard-only setupFeeQuote: an admin estimate
+      // with rodent bait beside another qualifying family omits the setup
+      // line and persists no quote object (codex #3591 r65 P1).
       const rodentSetupSettledByAcceptance = async (acceptResult) => {
-        const { settledSetupClaimForInvoice } = require('../services/secure-appointment-plans');
-        const claim = await settledSetupClaimForInvoice(db, acceptResult?.conversion?.draftInvoiceId || null);
+        const { settledSetupClaimForInvoice, settledSetupClaimForEstimate } = require('../services/secure-appointment-plans');
+        const claim = acceptResult?.alreadyAccepted
+          ? await settledSetupClaimForEstimate(db, linkedEstimateId)
+          : await settledSetupClaimForInvoice(db, acceptResult?.conversion?.draftInvoiceId || null);
         if (claim) return { claim };
-        let data = linkedEstimate?.estimate_data;
-        if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
-        const quote = data?.setupFeeQuote;
-        if (quote && quote.kind === 'rodent_bait_setup' && quote.waived && !(Number(quote.amount) > 0)) return { waived: quote.waived };
-        return null;
+        const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+        const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
+        return disclosed > 0 ? { disclosed } : { waived: 'estimate_disclosed_no_setup' };
       };
       const retireRodentSetupStampAfterAcceptance = async (acceptResult) => {
         if (!(directRodentSetupStamp > 0)) return;
         try {
           const settled = await rodentSetupSettledByAcceptance(acceptResult);
-          if (!settled) {
-            logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the estimate acceptance billed no setup — first completion collects it`);
+          if (settled.disclosed) {
+            // Standard verbal win: nothing billed the setup, so the stamp
+            // stays for the first completion — at the figure the estimate
+            // DISCLOSED, never the live constant the booking priced.
+            if (Math.round(settled.disclosed * 100) !== Math.round(directRodentSetupStamp * 100)) {
+              const aligned = await db('scheduled_services')
+                .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
+                .update({ pending_setup_fee: settled.disclosed, updated_at: new Date() });
+              if (Number(aligned) === 1) {
+                logger.info(`[schedule] rodent setup stamp on ${svc.id} aligned to the estimate's disclosed $${settled.disclosed} (booking priced $${directRodentSetupStamp})`);
+                directRodentSetupStamp = settled.disclosed;
+              } else {
+                logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} could not be aligned to the estimate's disclosed $${settled.disclosed} (stamp changed under us) — reconcile before the first completion bills it`);
+                bookingWarnings.push('The estimate disclosed a different bait-station setup than the booking stamped — check the pending setup fee on the new series before its first completion.');
+              }
+            } else {
+              logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the estimate acceptance billed no setup — first completion collects it`);
+            }
             return;
           }
           const retired = await db('scheduled_services')
