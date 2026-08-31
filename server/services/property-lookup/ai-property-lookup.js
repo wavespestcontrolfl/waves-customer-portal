@@ -1097,6 +1097,24 @@ function buildCadastralRecord(parcel, address) {
     // per-unit commercial pricers read this). Bounded: a runaway aggregation
     // must not claim thousands of units off a bad layer response.
     record.unitCount = coerceInt(parcel.residentialUnits, 2, 2000) || 1;
+    // Explicit authoritative evidence for the county aggregate (pre-push
+    // codex P1): the merge only treats an EXPLICIT unitCount evidence entry
+    // as real (the truthy-1 seed must never become evidence), and this
+    // assignment happens after the record's evidence was built — without
+    // the entry, an AI listing count would be the merge's only candidate
+    // and could overwrite the county aggregate.
+    if (record.unitCount > 1) {
+      record._fieldEvidence = record._fieldEvidence || {};
+      record._fieldEvidence.unitCount = [{
+        field: 'unitCount',
+        value: record.unitCount,
+        provider,
+        url: null,
+        sourceType: 'county',
+        sourceQuality: SOURCE_TYPE_WEIGHTS.county,
+        providerConfidence: 'high',
+      }];
+    }
   }
   return record;
 }

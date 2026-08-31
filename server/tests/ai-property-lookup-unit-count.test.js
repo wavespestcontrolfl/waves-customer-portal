@@ -70,4 +70,25 @@ describe('shapeAsPropertyRecord unitCount', () => {
     // Merged records carry the OBJECT evidence shape.
     expect(mergedReal._fieldEvidence?.unitCount).toMatchObject({ value: 48 });
   });
+
+  test('a county aggregate count outranks a web listing count in the merge (codex P1)', () => {
+    // The aggregate cadastral path stamps its count AFTER evidence build —
+    // it carries an explicit authoritative entry so a listing's 200 cannot
+    // overwrite the county's 48.
+    const county = {
+      ..._private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: null, source: null }, ADDRESS, 'manatee_pao'),
+      _source: 'county',
+      unitCount: 48,
+      _fieldEvidence: {
+        unitCount: [{
+          field: 'unitCount', value: 48, provider: 'manatee_pao', url: null,
+          sourceType: 'county', sourceQuality: 100, providerConfidence: 'high',
+        }],
+      },
+    };
+    const listing = _private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: 200 }, ADDRESS, 'gemini');
+    const merged = _private.mergePropertyRecords([county, listing], ADDRESS);
+    expect(merged.unitCount).toBe(48);
+    expect(merged._fieldEvidence?.unitCount).toMatchObject({ value: 48, sourceType: 'county' });
+  });
 });
