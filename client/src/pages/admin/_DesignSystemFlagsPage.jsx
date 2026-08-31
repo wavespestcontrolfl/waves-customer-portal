@@ -321,7 +321,7 @@ function VisualServiceNotesSettingsCard({ settings, saving, message, onChange })
       <CardBody>
         {" "}
         <div className="grid gap-4 md:grid-cols-2">
-          <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4">
+          <div className="flex items-start justify-between gap-4 rounded-md border border-zinc-200 bg-white p-4">
             <div>
               <div className="text-14 font-medium text-ink-primary">
                 Enabled globally
@@ -338,7 +338,7 @@ function VisualServiceNotesSettingsCard({ settings, saving, message, onChange })
               aria-label="Enable Visual Service Notes globally"
             />
           </div>
-          <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-200 bg-white p-4">
+          <div className="flex items-start justify-between gap-4 rounded-md border border-zinc-200 bg-white p-4">
             <div>
               <div className="text-14 font-medium text-ink-primary">
                 Required

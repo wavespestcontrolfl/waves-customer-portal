@@ -13,7 +13,7 @@ export default function StaleVisitsCard({ data }) {
   const total = Number(data?.total || visits.length);
 
   return (
-    <Card className="mb-4 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
+    <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <CardTitle>Stale Visits</CardTitle>
