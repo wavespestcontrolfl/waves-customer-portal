@@ -1226,6 +1226,14 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     // Overwrite the embedded result so the stored blob and the persisted
     // columns agree — blob/column divergence is exactly the bug class this fixes.
     estimateData.result = result.serverResult;
+    // The RAW server engine result rides along with its mapped twin: the
+    // send-time pricing audit enriches mapped lines from engineResult
+    // (commercial costs.total, installation costs, cadence), and leaving
+    // the client-supplied / previous-revision container behind fed a
+    // server-priced audit stale cost metadata (GH codex P1 on #3628).
+    if (result.rawEngineResult && typeof result.rawEngineResult === 'object') {
+      estimateData.engineResult = result.rawEngineResult;
+    }
     // Stamp the priced pest curve into the replayable engineInputs: replay
     // sites treat UNSTAMPED saved inputs as legacy v1, so every new save must
     // carry the version it was actually priced with or a stored-inputs replay
