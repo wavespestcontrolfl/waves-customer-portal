@@ -2203,6 +2203,18 @@ async function cancelAppointment(input) {
   // trigger the follow-up re-park hook for a treatment that already
   // happened. Idempotent on an already-cancelled row; every other terminal
   // state is an error, matching rescheduleAppointment above.
+  if (String(appt.status) === 'cancelled' && input._cancellation_fingerprint) {
+    // Authorization-bound confirm (W0B) meeting an already-cancelled visit:
+    // another surface cancelled it after the card was shown and ran its
+    // own follow-through. The approved effect set ("cancel a scheduled
+    // visit, charge X, void Y") no longer exists — never replay money
+    // rails under that approval. Refuse; the operator re-asks.
+    return {
+      error: 'This visit was already cancelled after the card was shown — nothing was charged or voided by this confirmation. Ask again if anything remains to do.',
+      preview_changed: true,
+      already_cancelled: true,
+    };
+  }
   if (String(appt.status) === 'cancelled') {
     // Retry of an already-committed cancellation: the post-commit re-park
     // hook may have failed transiently on the first attempt, and this early
