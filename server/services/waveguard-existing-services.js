@@ -451,11 +451,16 @@ async function resolveCustomerQualifyingEvidence(database, {
   // planGate): the owner's waiver rule is "any OTHER qualifying recurring
   // service", so a not-yet-enrolled customer's active plan still waives the
   // $99. The TIER purpose keeps the plan gate below.
-  out.setupWaiverKeys = clean(await load(database, customerId, { planGate: false }));
+  // STRICT throughout (codex #3591 r75 P1): the default loader converts a
+  // failed membership/catalog read into [] — an empty tier list and a
+  // label-only waiver — so the callers' 503/catch refusal paths (estimate
+  // save, /calculate-estimate) would never run and an existing customer
+  // could be priced without their tier or with a spurious $99 setup.
+  out.setupWaiverKeys = clean(await load(database, customerId, { planGate: false, strict: true }));
   if (!out.groupedEstimate) {
-    out.tierKeys = clean(await load(database, customerId));
+    out.tierKeys = clean(await load(database, customerId, { strict: true }));
   } else if (out.perPropertyStreetScope) {
-    out.tierKeys = clean(await load(database, customerId, { streetScope: out.perPropertyStreetScope }));
+    out.tierKeys = clean(await load(database, customerId, { streetScope: out.perPropertyStreetScope, strict: true }));
   }
   return out;
 }

@@ -5360,9 +5360,27 @@ const InvoiceService = {
           stampedAmount = Math.round(Number(stampedRoots[0].pending_setup_fee) * 100) / 100;
         }
       }
-      if (!(stampedAmount > 0)) return null;
-      logger.warn(`[invoice] revived prepay ${prepayInvoiceId}: setup line missing/renamed — retiring the restored $${stampedAmount.toFixed(2)} stamp on series ${anchorId} from claim provenance`);
-      amount = stampedAmount;
+      // No stamp either (codex #3591 r75 P1): a refund on a series with no
+      // billable visits minted a marker-keyed replacement draft and consumed
+      // the claim instead of stamping — the live replacement is the
+      // surviving provenance. Fall back to its line amount and continue so
+      // the marker sweep below voids it and the claim is re-ledgered;
+      // otherwise the revived prepay and the replacement both collect.
+      if (!(stampedAmount > 0)) {
+        const markerRebill = await conn("invoices")
+          .where("notes", "like", `%${rodentSetupRebillMarker(prepayInvoiceId)}%`)
+          .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+          .first("id", "line_items");
+        let rbLines = markerRebill?.line_items;
+        if (typeof rbLines === "string") { try { rbLines = JSON.parse(rbLines); } catch { rbLines = []; } }
+        const rbAmount = Math.round(Number(rbLines?.[0]?.amount ?? rbLines?.[0]?.unit_price) * 100) / 100;
+        if (!(rbAmount > 0)) return null;
+        logger.warn(`[invoice] revived prepay ${prepayInvoiceId}: setup line missing/renamed and no stamp — retiring the live $${rbAmount.toFixed(2)} replacement draft from its rebill marker`);
+        amount = rbAmount;
+      } else {
+        logger.warn(`[invoice] revived prepay ${prepayInvoiceId}: setup line missing/renamed — retiring the restored $${stampedAmount.toFixed(2)} stamp on series ${anchorId} from claim provenance`);
+        amount = stampedAmount;
+      }
     }
     // (sibling-completion retire happens after anchor resolution below)
     // The marker sweep runs regardless of an anchor (codex #3591 r47 P1):

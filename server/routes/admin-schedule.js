@@ -5437,13 +5437,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
           if (disclosed > 0) {
             const settledClaim = await plans.settledSetupClaimForEstimate(trx, linkedEstimateId);
+            // Serialized with a concurrent void/refund (codex #3591 r75 P1):
+            // the settled read above is unlocked, so a reversal can turn the
+            // claim's invoice terminal between it and the anchor — leaving
+            // this series with neither a stamp nor a collectible invoice.
+            // Lock the claim's INVOICE row (the reversal transaction updates
+            // it, so the loser waits), then re-verify liveness under the
+            // lock; a claim whose invoice went terminal is an open
+            // obligation and the booking stamps the disclosed figure below.
+            let liveClaim = null;
             if (settledClaim) {
+              await trx('invoices').where({ id: settledClaim.invoice_id }).forUpdate().first('id');
+              liveClaim = await plans.settledSetupClaimForInvoice(trx, settledClaim.invoice_id);
+            }
+            if (liveClaim) {
               // The invoice-mode/standard accept billed the setup before
               // this series existed — anchor its claim to the root being
               // booked (codex #3591 r72 P1) so a later void/refund of that
               // invoice restores onto THIS series instead of paging.
-              if (!settledClaim.scheduled_service_id) {
-                await plans.anchorSetupFeeClaim(trx, { claimId: settledClaim.id, anchorId: svc.id });
+              if (!liveClaim.scheduled_service_id) {
+                await plans.anchorSetupFeeClaim(trx, { claimId: liveClaim.id, anchorId: svc.id });
               }
             } else if (!(await plans.estimateSetupCarriedElsewhere(trx, linkedEstimateId, svc.id))) {
               await trx('scheduled_services')

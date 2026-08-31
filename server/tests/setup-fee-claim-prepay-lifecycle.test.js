@@ -590,7 +590,10 @@ describe('source contracts — where the lifecycle is wired', () => {
     // A PREVIOUSLY accepted estimate booked afterward stamps its DISCLOSED
     // figure unless settled (term claim) or carried by another of its
     // series (codex #3591 r66 P1) — the standard Mark Won never billed it.
-    expect(adminSchedule).toMatch(/\} else if \(isRecurring && linkedEstimateId\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const settledClaim = await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\);\s+if \(settledClaim\) \{[\s\S]*?if \(!settledClaim\.scheduled_service_id\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: settledClaim\.id, anchorId: svc\.id \}\);\s+\}\s+\} else if \(!\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
+    // r75: the settled claim is re-verified under the claim invoice's row
+    // lock before anchoring — a reversal that won makes the booking stamp
+    // the disclosed figure instead of anchoring a dead claim.
+    expect(adminSchedule).toMatch(/\} else if \(isRecurring && linkedEstimateId\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const settledClaim = await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\);[\s\S]*?if \(settledClaim\) \{\s+await trx\('invoices'\)\.where\(\{ id: settledClaim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await plans\.settledSetupClaimForInvoice\(trx, settledClaim\.invoice_id\);\s+\}\s+if \(liveClaim\) \{[\s\S]*?if \(!liveClaim\.scheduled_service_id\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: liveClaim\.id, anchorId: svc\.id \}\);\s+\}\s+\} else if \(!\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
     // …and BOTH acceptance-success paths (main accept and the overlap-race
     // standard downgrade) retire it, CAS'd on the exact stamped amount.
     expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(acceptResult\);/);
@@ -845,13 +848,18 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     ],
   };
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [] } = {}) {
+  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [], markerRebill = null } = {}) {
     const c = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp } });
     const inner = c;
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        q.first = async () => invoiceRow;
+        // The r75 marker probe is a 3-arg where('notes', 'like', …) —
+        // route it to the markerRebill fixture, everything else to the row.
+        let notesProbe = false;
+        const origWhere = q.where;
+        q.where = (...args) => { if (args[0] === 'notes') { notesProbe = true; return q; } return origWhere(args[0]); };
+        q.first = async () => (notesProbe ? markerRebill : invoiceRow);
         q.select = async () => rebills;
       }
       return q;
@@ -878,10 +886,29 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     await expect(InvoiceService.retireRodentSetupObligationForRevivedPrepay(busy, 'inv-prepay'))
       .rejects.toThrow(/completion mid-claim/);
     expect(busy.writes.filter((w) => w.op === 'update')).toEqual([]);
-    // No setup line AND no restored stamp = genuinely no setup → no-op.
-    const noSetup = revivalConn({ stamp: null, invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Annual Prepay', amount: 486.4 }] } });
+    // No setup line, no restored stamp, AND no live marker rebill =
+    // genuinely no setup → no-op (marker probe added codex #3591 r75 P1).
+    const noSetup = revivalConn({ stamp: null, invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Annual Prepay', amount: 486.4 }] }, markerRebill: null });
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(noSetup, 'inv-prepay')).toBeNull();
     expect(noSetup.writes).toEqual([]);
+  });
+
+  test('a RENAMED line with no stamp still retires via the live marker rebill — the dead-series restore left only the replacement (codex #3591 r75 P1)', async () => {
+    const liveRebill = { id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null, line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
+    const c = revivalConn({
+      stamp: null,
+      invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Rodent program setup (edited)', amount: 99 }] },
+      markerRebill: liveRebill,
+      rebills: [liveRebill],
+    });
+    const out = await InvoiceService.retireRodentSetupObligationForRevivedPrepay(c, 'inv-prepay');
+    expect(out).toMatchObject({ amount: 99, retired: false });
+    // The replacement is voided by the marker sweep and the claim re-ledgered
+    // for the revived prepay — never both collectible.
+    expect(c.writes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'invoices', op: 'update', patch: expect.objectContaining({ status: 'void' }) }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: expect.objectContaining({ invoice_id: 'inv-prepay', amount: 99 }) }),
+    ]));
   });
 
   test('a RENAMED setup line still retires the restored stamp — the stamp is the surviving claim provenance (codex #3591 r71 P1)', async () => {

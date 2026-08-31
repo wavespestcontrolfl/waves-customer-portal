@@ -337,7 +337,7 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount,
 // claim proves the fee was billed). Read-only.
 async function settledSetupClaimForInvoice(database, invoiceId) {
   if (!invoiceId) return null;
-  const claim = await database('setup_fee_claims').where({ invoice_id: invoiceId }).first('id', 'scheduled_service_id', 'amount');
+  const claim = await database('setup_fee_claims').where({ invoice_id: invoiceId }).first('id', 'scheduled_service_id', 'amount', 'invoice_id');
   if (!claim) return null;
   // Only a LIVE/PAID invoice settles (codex #3591 r68/r69 P1): a prepay
   // voided or refunded — before its series existed, or between the accept
@@ -471,8 +471,13 @@ async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }
       .first('id', 'invoice_id', 'amount');
     if (!claim) continue;
     // Live-invoice rule (codex #3591 r68/r69 P1): a voided/refunded prepay's
-    // claim is an open obligation for recovery, never a settlement.
-    const invoice = await database('invoices').where({ id: claim.invoice_id }).first('status');
+    // claim is an open obligation for recovery, never a settlement. Read
+    // FOR UPDATE (codex #3591 r75 P1, same race as the estimate-claim
+    // anchor): an in-flight reversal holds this invoice row, so the booking
+    // waits and then sees the committed terminal status instead of
+    // anchoring a claim whose prepay just died — which would leave the new
+    // series with neither a stamp nor a collectible invoice.
+    const invoice = await database('invoices').where({ id: claim.invoice_id }).forUpdate().first('status');
     if (!invoice || TERMINAL_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) continue;
     return claim;
   }

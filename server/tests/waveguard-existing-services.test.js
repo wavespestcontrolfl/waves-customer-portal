@@ -73,6 +73,11 @@ describe('strict mode — a failed membership read is UNKNOWN, never "no plan" (
     await expect(isActivePlanCustomer(failingDb, 'c1', { strict: true })).rejects.toThrow('db down');
     await expect(loadExistingRecurringQualifyingRows(failingDb, 'c1', { strict: true })).rejects.toThrow('db down');
     await expect(loadExistingQualifyingServiceKeys(failingDb, 'c1', { strict: true })).rejects.toThrow('db down');
+    // The shared evidence resolver is strict THROUGHOUT (codex #3591 r75
+    // P1): a failed read must reach the callers' 503/refusal paths, never
+    // degrade to an empty tier list or a label-only waiver.
+    const { resolveCustomerQualifyingEvidence } = require('../services/waveguard-existing-services');
+    await expect(resolveCustomerQualifyingEvidence(failingDb, { customerId: 'c1' })).rejects.toThrow('db down');
   });
 });
 
@@ -226,14 +231,14 @@ describe('resolveCustomerQualifyingEvidence (codex #3591 r34 P1) — tier per pr
     expect(loadKeys).not.toHaveBeenCalled();
   });
 
-  test('same property (or no address): waiver reads UNGATED (planGate: false), tier keeps the plan gate (codex #3591 r73 P1)', async () => {
+  test('same property (or no address): waiver reads UNGATED (planGate: false) and STRICT, tier keeps the plan gate and is STRICT too (codex #3591 r73/r75 P1)', async () => {
     const out = await resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: 'c1', address: '100 Main St, Parrish, FL 34219', loadKeys });
     expect(out.groupedEstimate).toBe(false);
     expect(out.tierKeys).toEqual(['pest_control', 'mosquito']);
     expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
     expect(loadKeys).toHaveBeenCalledTimes(2);
-    expect(loadKeys.mock.calls[0][2]).toEqual({ planGate: false });
-    expect(loadKeys.mock.calls[1][2]).toBeUndefined();
+    expect(loadKeys.mock.calls[0][2]).toEqual({ planGate: false, strict: true });
+    expect(loadKeys.mock.calls[1][2]).toEqual({ strict: true });
   });
 
   test('a NON-primary street flips to per-property scope: tier from the street-scoped lookup, waiver from the account', async () => {
@@ -243,7 +248,7 @@ describe('resolveCustomerQualifyingEvidence (codex #3591 r34 P1) — tier per pr
     expect(out.tierKeys).toEqual(['mosquito']);
     expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
     expect(loadKeys).toHaveBeenCalledTimes(2);
-    expect(loadKeys.mock.calls[1][2]).toEqual({ streetScope: out.perPropertyStreetScope });
+    expect(loadKeys.mock.calls[1][2]).toEqual({ streetScope: out.perPropertyStreetScope, strict: true });
   });
 
   test('an explicit group anchor on the primary street keeps the account-wide waiver while scoping the tier', async () => {

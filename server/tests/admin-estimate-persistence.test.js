@@ -964,7 +964,7 @@ describe('admin estimate persistence', () => {
     // is qualifying families, not plan membership); the second is the
     // street-scoped one — tier evidence, which keeps the plan gate.
     expect(mockQualifyingLookup.mock.calls[0][1]).toBe('cust-member');
-    expect(mockQualifyingLookup.mock.calls[0][2]).toEqual({ planGate: false });
+    expect(mockQualifyingLookup.mock.calls[0][2]).toEqual({ planGate: false, strict: true });
     expect(mockQualifyingLookup.mock.calls[1][2]).toMatchObject({ streetScope: expect.objectContaining({ estimateStreet: expect.any(String) }) });
     // Persisted for replay: the account-wide waiver list; NO property tier
     // list (nothing qualifies at this property → standalone tier).
