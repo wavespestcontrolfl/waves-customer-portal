@@ -1888,11 +1888,17 @@ function hasAffiliateQueryParam(u) {
 // host + path (www-stripped, lowercased, trailing-slash-normalized) — the
 // part of a retailer URL that identifies the PRODUCT; query/fragment are
 // tracking and ordering noise.
+// DNS-normalized host: lowercase, trailing dot stripped (amzn.to. resolves
+// like amzn.to), leading www. dropped.
+function normalizeAffiliateHost(hostname) {
+  return String(hostname || '').toLowerCase().replace(/\.+$/, '').replace(/^www\./, '');
+}
+
 function affiliateUrlIdentity(rawUrl) {
   try {
     const u = new URL(String(rawUrl || ''));
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    const host = normalizeAffiliateHost(u.hostname);
     const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
     return `${host}${path}`;
   } catch { return null; }
@@ -1903,7 +1909,7 @@ function affiliateUrlIdentity(rawUrl) {
 function urlIsAffiliate(u, registryIdentities) {
   const identity = affiliateUrlIdentity(u.href);
   if (identity && registryIdentities.has(identity)) return true;
-  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  const host = normalizeAffiliateHost(u.hostname);
   if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
   // Any Amazon marketplace (amazon.com / .co.uk / .de …) carrying an
   // associate parameter (parity with the astro guard + registry validator).

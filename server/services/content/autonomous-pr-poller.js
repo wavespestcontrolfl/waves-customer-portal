@@ -1550,23 +1550,27 @@ async function maybeAutoMerge(run, pr) {
       // refresh that PRESERVES affiliate links also parks at affiliate_review
       // (every affiliate-bearing draft does during the pilot), so the same
       // approval stamp is required before auto-merge. The belt inspects the
-      // ACTUAL refresh target file at the head (publisher resolver).
-      const aff = affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha);
-      if (!aff.ok) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-        return { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
-      }
-      // The head fetch above was more async work — an operator
-      // dismiss/requeue landing during it must still block the merge.
-      if (!(await queueRowStillParked(run))) {
-        logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the affiliate belt (operator action)`);
-        return { pending: true, reason: 'queue_row_moved_during_gating' };
-      }
-      // Same last-step guard as the blog path (3.9): the base tip must still
-      // be the one the body-image check hashed after this path's own async
-      // work.
-      if (await baseMovedSinceBodyImageCheck()) return { pending: true, reason: 'base_moved_during_gating' };
-      mergeRes = await doMerge();
+      // ACTUAL refresh target file at the head (publisher resolver). The
+      // guards and the merge run under the same advisory lock + FOR UPDATE
+      // queue row as the blog path so nothing can land between them.
+      let withheld = null;
+      const { withTopicMergeLock } = require('./topic-targeting-gate');
+      mergeRes = await withTopicMergeLock(db, async (trx) => {
+        const aff = affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha);
+        if (!aff.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
+          withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+          return null;
+        }
+        if (!(await queueRowStillParkedLocked(run, trx))) {
+          logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the affiliate belt (operator action)`);
+          withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
+          return null;
+        }
+        if (await baseMovedSinceBodyImageCheck()) { withheld = { pending: true, reason: 'base_moved_during_gating' }; return null; }
+        return doMerge();
+      });
+      if (withheld) return withheld;
     }
   } catch (err) {
     if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
