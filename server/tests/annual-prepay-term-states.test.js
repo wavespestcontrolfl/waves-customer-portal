@@ -141,6 +141,22 @@ function walkSyntax(text, start, cb) {
   }
 }
 
+// Last `;` before idx that is real syntax (not inside a string/comment),
+// memoized per source text.
+const semicolonCache = new WeakMap();
+function lastSyntacticSemicolonBefore(src, idx) {
+  let key = semicolonCache.get(semicolonCache);
+  if (!key || key.src !== src) {
+    const positions = [];
+    walkSyntax(src, 0, (ch, i) => { if (ch === ';') positions.push(i); return true; });
+    key = { src, positions };
+    semicolonCache.set(semicolonCache, key);
+  }
+  let last = -1;
+  for (const pos of key.positions) { if (pos >= idx) break; last = pos; }
+  return last;
+}
+
 function chainAfter(src, start) {
   let depth = 0;
   let end = src.length;
@@ -278,13 +294,14 @@ function statusWriteSites(src) {
     // The mutation may PRECEDE the table call (`db.insert({…}).into('t')`):
     // include the statement text before the match, back to the previous
     // statement boundary.
-    const stmtStart = Math.max(src.lastIndexOf(';', m.index), src.lastIndexOf('\n\n', m.index)) + 1;
+    const stmtStart = Math.max(lastSyntacticSemicolonBefore(src, m.index), src.lastIndexOf('\n\n', m.index)) + 1;
     const before = src.slice(stmtStart, m.index);
     const whole = before + m[0] + after;
     scanChain(whole, m.index, chainGuards(whole));
   }
   // Split builders: `const q = db('annual_prepay_terms'); … q.update({...});`
-  const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]\\)`, 'g');
+  // (an `await`ed declaration is a RESULT row, never a builder — excluded.)
+  const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*[\\w$.]+\\(['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]\\)`, 'g');
   for (const m of src.matchAll(splitRe)) {
     const restStart = m.index + m[0].length;
     const rest = src.slice(restStart);
@@ -422,6 +439,9 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     // Mutation BEFORE the table call (.into / .from forms).
     expect(statusWriteExpressions("await db.insert({ status: 'refunded' }).into('annual_prepay_terms');"))
       .toEqual(["'refunded'"]);
+    // …even with a ';' inside an earlier string literal.
+    expect(statusWriteExpressions("await db.insert({ status: 'refunded', note: ';' }).into('annual_prepay_terms');"))
+      .toEqual(["'refunded'"]);
     // A Col-suffixed but UNsanctioned identifier still fails closed.
     expect(statusWriteExpressions("const statusCol = 'status';\nawait db('annual_prepay_terms').update({ [statusCol]: 'refunded' });"))
       .toEqual(['<computed identifier key statusCol>']);
@@ -496,8 +516,23 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // could write this table's status invisibly — fail closed unless the
       // file is on the audited allowlist above.
       let dynamicSites = 0;
+      // Direct chains plus SPLIT dynamic builders (`const q = trx(x); … q.update()`),
+      // whose later chains within the declaring function are scanned too.
+      const dynamicChains = [];
       for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
-        const chain = chainAfter(src, m.index + m[0].length);
+        dynamicChains.push({ index: m.index, via: m[1], chain: chainAfter(src, m.index + m[0].length) });
+      }
+      for (const d of src.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+        const restStart = d.index + d[0].length;
+        const rest = src.slice(restStart);
+        const scopeEnd = rest.search(/\n\}\n/);
+        const scope = scopeEnd === -1 ? rest : rest.slice(0, scopeEnd);
+        for (const w of scope.matchAll(new RegExp(`(?<![.\\w$])${d[1]}\\s*\\.`, 'g'))) {
+          dynamicChains.push({ index: restStart + w.index, via: `${d[1]}=${d[2]}`, chain: chainAfter(scope, w.index) });
+        }
+      }
+      for (const m of dynamicChains.map((c) => ({ index: c.index, 1: c.via, chain: c.chain }))) {
+        const { chain } = m;
         const mut = chain.match(/\.(?:update|insert|merge)\s*\(/);
         if (!mut) continue;
         dynamicSites += 1;
@@ -688,9 +723,9 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     }
     // Each numbered move's From / To / code site, pinned as data — these
     // mirror the 12 pinned write sites (+ the seeder-vs-sweep pair in move 2).
-    const st = (list) => list.map((s) => `\`${s}\``);
+    const st = (list) => list;
     const expectedRows = {
-      1: { from: ['*(birth)*'], to: st(['payment_pending', 'active', 'cancelled']), where: 'createTermForAnnualPrepay' },
+      1: { from: [], fromText: '*(birth)*', to: st(['payment_pending', 'active', 'cancelled']), where: 'createTermForAnnualPrepay' },
       2: { from: st(['payment_pending']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       3: { from: st(['active', 'renewal_pending']), to: st(['renewal_pending']), where: "recordDecision('contacted')" },
       4: { from: st(['active']), to: st(['renewal_pending']), where: 'sendCustomerTermNotice' },
@@ -702,12 +737,15 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       10: { from: st(['active', 'renewal_pending']), to: st(['payment_pending']), where: 'suspendActiveTermsForDisputedInvoice' },
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
-      13: { from: ['*any*'], to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      13: { from: [], fromText: '*any*', to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
     };
+    const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
       const e = expectedRows[r.n];
-      for (const f of e.from) expect(r.from).toContain(f);
-      for (const t of e.to) expect(r.to).toContain(t);
+      // Exact state SETS — adding a CHECK-valid state to a cell fails.
+      expect(states(r.from)).toEqual([...e.from].sort());
+      expect(states(r.to)).toEqual([...e.to].sort());
+      if (e.fromText) expect(r.from).toContain(e.fromText);
       expect(r.where).toContain(e.where);
     }
     const guardFrag = {
