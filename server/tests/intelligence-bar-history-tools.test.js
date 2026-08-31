@@ -88,6 +88,10 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
       { id: 'pa-2', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify', status: 'confirmed', result: JSON.stringify({ error: 'Twilio 21610' }), created_at: '2026-08-30T01:00:31Z', consumed_at: '2026-08-30T01:02:01Z' },
       // Same exchange: expired → never_ran
       { id: 'pa-3', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify again', status: 'expired', result: null, created_at: '2026-08-30T01:00:32Z', consumed_at: null },
+      // Same exchange: confirmed but the tool BLOCKED without an error key → failed (never executed)
+      { id: 'pa-4', thread_id: T1, thread_turn_seq: 2, tool_name: 'create_pending_estimate', summary: 'Draft', status: 'confirmed', result: JSON.stringify({ success: false, blocked: true, reason: 'duplicate' }), created_at: '2026-08-30T01:00:33Z', consumed_at: '2026-08-30T01:02:03Z' },
+      // Same exchange: confirmed, result recorded but empty object → unknown (not claimed executed)
+      { id: 'pa-5', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'x', status: 'confirmed', result: 'not-json', created_at: '2026-08-30T01:00:34Z', consumed_at: '2026-08-30T01:02:04Z' },
       // A LATER exchange in the same thread (assistant seq 4) → must NOT be attributed
       { id: 'pa-9', thread_id: T1, thread_turn_seq: 4, tool_name: 'create_customer', summary: 'Unrelated', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:10:00Z', consumed_at: '2026-08-30T01:10:05Z' },
     ],
@@ -100,7 +104,7 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
   expect(hit.thread_title).toBe('acct-1042 reschedule');
   expect(hit.paired_turn).toEqual({ role: 'user', content: 'move acct-1042 to thursday', truncated: false });
   expect(hit.receipts.map((x) => [x.id, x.outcome])).toEqual([
-    ['pa-1', 'executed'], ['pa-2', 'failed'], ['pa-3', 'never_ran'],
+    ['pa-1', 'executed'], ['pa-2', 'failed'], ['pa-3', 'never_ran'], ['pa-4', 'failed'], ['pa-5', 'unknown'],
   ]);
   expect(hit.receipts.find((x) => x.id === 'pa-9')).toBeUndefined();
 

@@ -197,7 +197,13 @@ function receiptOutcome(row) {
     try { result = JSON.parse(result); } catch { return 'unknown'; }
   }
   if (result === null || result === undefined) return 'unknown';
-  if (typeof result === 'object' && (result.error || result.failed === true)) return 'failed';
+  // Write tools signal a non-run three ways: { error }, { failed: true },
+  // or { success: false, blocked: true } (e.g. duplicate-blocked estimate
+  // drafts) — none of those wrote anything.
+  if (typeof result === 'object'
+    && (result.error || result.failed === true || result.success === false || result.blocked === true)) {
+    return 'failed';
+  }
   return 'executed';
 }
 
