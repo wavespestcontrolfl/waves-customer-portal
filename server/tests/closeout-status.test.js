@@ -127,7 +127,7 @@ describe('closeout-status: contract shape', () => {
     const { facts, contradictions } = deriveCloseoutFacts(closedOutInputs());
     expect(states(facts)).toEqual({
       completion: 'done', application: 'done', photos: 'not_required', report: 'done', reportDelivery: 'done',
-      invoice: 'done', invoiceDelivery: 'done', comms: 'done', followUp: 'not_required',
+      invoice: 'done', invoiceDelivery: 'done', comms: 'done', followUp: 'not_required', license: 'not_required',
     });
     expect(contradictions).toEqual([]);
     expect(summarizeCloseout(facts, contradictions)).toEqual({ open: [], failed: [], unknown: [], contradictions: [], unevaluated: [], closedOut: true });
@@ -591,6 +591,33 @@ describe('closeout-status: Agent D findings', () => {
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { payer_email: { ok: true } } }) }).facts.reportDelivery.state).toBe('failed');
   });
 
+  test('frozen visitOutcome inspection_only / customer_declined → invoice + application not_required (nothing performed)', () => {
+    for (const outcome of ['inspection_only', 'customer_declined']) {
+      const { facts } = deriveCloseoutFacts(closedOutInputs({
+        liveInvoice: null, activeApplicationCount: 0, retractedApplicationCount: 0,
+        record: { ...closedOutInputs().record, structured_notes: { visitOutcome: outcome, completionSmsStatus: 'sent', backfillMintRequired: true, backfillMintAmountCents: 9900 } },
+      }));
+      expect(facts.invoice).toMatchObject({ state: 'not_required', reason: `visit_outcome_${outcome}`, ruleSource: 'frozen_record' });
+      expect(facts.application).toMatchObject({ state: 'not_required', reason: `visit_outcome_${outcome}` });
+    }
+    // A performed outcome leaves the normal rules in force.
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, record: { ...closedOutInputs().record, structured_notes: { visitOutcome: 'completed', completionSmsStatus: 'sent' } } })).facts.invoice.state).toBe('pending');
+  });
+
+  test('license fact: catalog requirement vs technician license, expiry at visit date, category match', () => {
+    const req = baseRequirements({ requiresLicense: true, licenseCategory: 'Lawn & Ornamental' });
+    const tech = (o) => ({ id: 'tech-1', fl_applicator_license: 'JF123456', license_expiry: '2027-01-01', license_categories: ['Lawn & Ornamental', 'General Household Pest'], ...o });
+    const run = (o) => deriveCloseoutFacts(closedOutInputs({ requirements: req, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: tech(), ...o })).facts.license;
+    expect(run({})).toMatchObject({ state: 'done', reason: 'technician_licensed', asOf: 'current_technician_row' });
+    expect(run({ technician: tech({ license_expiry: '2026-08-01' }) })).toMatchObject({ state: 'failed', reason: 'technician_license_expired_at_visit' });
+    expect(run({ technician: tech({ license_categories: '["Termite"]' }) })).toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch' });
+    expect(run({ technician: tech({ license_categories: null }) })).toMatchObject({ state: 'unknown', reason: 'technician_license_categories_unrecorded' });
+    expect(run({ technician: tech({ fl_applicator_license: null }) })).toMatchObject({ state: 'pending', reason: 'technician_license_missing' });
+    expect(run({ technician: null, technicianLookupFailed: true })).toMatchObject({ state: 'unknown', reason: 'technicians_lookup_failed' });
+    expect(run({ technician: null })).toMatchObject({ state: 'pending', reason: 'no_technician_on_visit' });
+    expect(deriveCloseoutFacts(closedOutInputs()).facts.license).toMatchObject({ state: 'not_required', reason: 'catalog_no_license_required' });
+  });
+
   test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {
     const rec = (status, extra = {}) => ({ ...closedOutInputs().record, structured_notes: { completionSmsStatus: status, ...extra } });
     expect(deriveCloseoutFacts(closedOutInputs({ record: rec('sending') })).facts.comms).toMatchObject({ state: 'pending', reason: 'completion_sms_sending' });
@@ -790,6 +817,7 @@ describe('closeout-status: loader against a fake knex', () => {
     project_photos: [],
     visit_billing_dispositions: [],
     receipt_delivery_jobs: [],
+    technicians: [],
   });
 
   beforeEach(() => {

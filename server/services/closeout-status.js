@@ -19,7 +19,7 @@
  *   getCloseoutStatus(serviceId) -> {
  *     serviceId, asOf, visit, record, packet, requirements, billing,
  *     facts: { completion, application, photos, report, reportDelivery,
- *              invoice, invoiceDelivery, comms, followUp },
+ *              invoice, invoiceDelivery, comms, followUp, license },
  *     contradictions: [...], unavailable: [...]
  *   }
  *
@@ -77,8 +77,11 @@ const { typedFollowupObligationForCompletedSource } = require('./typed-followup-
 const FACT_STATES = Object.freeze(['not_required', 'pending', 'done', 'failed', 'unknown']);
 const FACT_NAMES = Object.freeze([
   'completion', 'application', 'photos', 'report', 'reportDelivery',
-  'invoice', 'invoiceDelivery', 'comms', 'followUp',
+  'invoice', 'invoiceDelivery', 'comms', 'followUp', 'license',
 ]);
+// Frozen structured_notes.visitOutcome values that mean NOTHING was applied
+// (admin-dispatch.js visitPerformed): no bill, no application log owed.
+const NON_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined']);
 
 // Visit statuses that mean "the tech reported it done" (job-status.js is the
 // sole writer; 'incomplete' is a service_records status, not a visit status).
@@ -189,7 +192,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   const customerId = visit.customer_id || null;
 
   const [
-    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe,
+    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe, technicianProbe,
   ] = await Promise.all([
     probe('customers', unavailable, () => (customerId
       ? knex('customers').where({ id: customerId }).first(
@@ -221,6 +224,9 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     probe('service_visits members', unavailable, () => (visit.visit_id
       ? knex('scheduled_services').where({ visit_id: visit.visit_id }).select('id')
       : [])),
+    probe('technicians', unavailable, () => (visit.technician_id
+      ? knex('technicians').where({ id: visit.technician_id }).first('id', 'fl_applicator_license', 'license_expiry', 'license_categories')
+      : null)),
   ]);
 
   inputs.customer = customerProbe.value || null;
@@ -234,6 +240,9 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.packetMemberIds = Array.isArray(membersProbe.value)
     ? membersProbe.value.map((r) => r.id)
     : (membersProbe.error ? null : []);
+  inputs.technician = technicianProbe.value || null;
+  inputs.technicianLookupFailed = Boolean(technicianProbe.error);
+
   const record = inputs.record;
   const recordId = record?.id || null;
 
@@ -416,6 +425,8 @@ function deriveCloseoutFacts(inputs) {
   const visitInactive = Boolean(visit && INACTIVE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()));
   const isBackfill = notes.backfill === true;
   const recordIncomplete = record?.status === 'incomplete';
+  const visitOutcome = notes.visitOutcome ? String(notes.visitOutcome).toLowerCase() : null;
+  const visitPerformed = !(visitOutcome && NON_PERFORMED_OUTCOMES.has(visitOutcome));
   const project = inputs.project || null;
   const projectBacked = Boolean(project) || record?.completion_source === 'project_completion' || inputs.projectLookupFailed === true;
   const frozenPosture = notes.typedReportDelivery ? String(notes.typedReportDelivery) : null;
@@ -476,6 +487,7 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) application = awaiting();
   else if (!requirements) application = fact('unknown', 'requirements_unavailable');
   else if (!requirements.requiresApplicationLog) application = fact('not_required', 'catalog_no_application_log', { ruleSource: 'catalog', requirementsSource: requirements.source });
+  else if (!visitPerformed) application = fact('not_required', `visit_outcome_${visitOutcome}`, { ruleSource: 'frozen_record', visitOutcome });
   else if (inputs.activeApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed');
   else if (inputs.activeApplicationCount > 0) application = fact('done', 'active_application_rows', { activeCount: inputs.activeApplicationCount, retractedCount: inputs.retractedApplicationCount ?? 0 });
   else if (requirements.source === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: requirements.source });
@@ -651,6 +663,8 @@ function deriveCloseoutFacts(inputs) {
       ruleSource: 'billing_disposition', dispositionId: inputs.disposition.id, decidedAt: isoOrNull(inputs.disposition.created_at),
       dispositionReason: inputs.disposition.reason ? String(inputs.disposition.reason).slice(0, 120) : null,
     });
+  } else if (!visitPerformed) {
+    invoice = fact('not_required', `visit_outcome_${visitOutcome}`, { ruleSource: 'frozen_record', visitOutcome });
   } else if (notes.backfillMintRequired === true) {
     // The completion FROZE a required-mint posture (+ amount) on the record
     // because billing fields are mutable — a later lane change must not
@@ -753,6 +767,32 @@ function deriveCloseoutFacts(inputs) {
     });
   }
 
+  // ---- 10. technician license -----------------------------------------------------------
+  let license;
+  const tech = inputs.technician || null;
+  if (!completed) license = awaiting();
+  else if (!requirements) license = fact('unknown', 'requirements_unavailable');
+  else if (requirements.requiresLicense !== true) license = fact('not_required', 'catalog_no_license_required', { ruleSource: 'catalog', requirementsSource: requirements.source });
+  else if (inputs.technicianLookupFailed) license = fact('unknown', 'technicians_lookup_failed', { requiredCategory: requirements.licenseCategory || null });
+  else if (!visit?.technician_id || !tech) license = fact('pending', 'no_technician_on_visit', { requiredCategory: requirements.licenseCategory || null });
+  else {
+    let cats = tech.license_categories;
+    if (typeof cats === 'string') { try { cats = JSON.parse(cats); } catch { cats = null; } }
+    const categories = Array.isArray(cats) ? cats.map((c) => String(c).trim().toLowerCase()).filter(Boolean) : [];
+    const required = requirements.licenseCategory ? String(requirements.licenseCategory).trim().toLowerCase() : null;
+    const visitDay = visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null;
+    const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
+    const evidence = {
+      technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
+      categories, asOf: 'current_technician_row',
+    };
+    if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
+    else if (expiry && visitDay && expiry < visitDay) license = fact('failed', 'technician_license_expired_at_visit', evidence);
+    else if (required && categories.length && !categories.includes(required)) license = fact('failed', 'technician_license_category_mismatch', evidence);
+    else if (required && !categories.length) license = fact('unknown', 'technician_license_categories_unrecorded', evidence);
+    else license = fact('done', 'technician_licensed', evidence);
+  }
+
   // ---- packet (grouped stop) ---------------------------------------------------------------
   let packet = null;
   if (visit?.visit_id) {
@@ -768,7 +808,7 @@ function deriveCloseoutFacts(inputs) {
 
   return {
     facts: {
-      completion, application, photos, report, reportDelivery, invoice, invoiceDelivery, comms, followUp,
+      completion, application, photos, report, reportDelivery, invoice, invoiceDelivery, comms, followUp, license,
     },
     contradictions,
     packet,
@@ -851,6 +891,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
     record: record ? {
       id: record.id,
       status: record.status || null,
+      visitOutcome: parseJsonObjectSafe(record.structured_notes).visitOutcome || null,
       completionSource: record.completion_source || null,
       backfill: parseJsonObjectSafe(record.structured_notes).backfill === true,
       posture: derived.posture,
