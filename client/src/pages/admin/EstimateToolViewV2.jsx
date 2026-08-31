@@ -3260,14 +3260,6 @@ export default function EstimateToolViewV2({
       enrichedProfile?.storiesSource === "default" && !form._storiesEdited;
     if (String(form.stories || "").trim() !== "" && !storiesIsUntouchedDefault)
       fields.stories = Number(form.stories);
-    // Unit count ships ONLY when the operator typed it — never a lookup
-    // value re-persisted as "tech verified" (same contract as stories). A
-    // verified count outranks even the county aggregate server-side, so
-    // this is the correction path for a false AI multi-unit result.
-    const unitCountNumber = Number(form.unitCount);
-    if (form._unitCountEdited && String(form.unitCount || "").trim() !== ""
-        && Number.isInteger(unitCountNumber) && unitCountNumber >= 1)
-      fields.unitCount = unitCountNumber;
     if (!form.address || !Object.keys(fields).length) return;
     setVerifySaveState("saving");
     try {
@@ -3281,7 +3273,40 @@ export default function EstimateToolViewV2({
     } catch {
       setVerifySaveState("error");
     }
-  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, form.unitCount, form._unitCountEdited, enrichedProfile]);
+  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
+
+  // Unit-count corrections have their OWN save action (pre-push codex P0
+  // r5): the shared sqft/lot/stories save would also bless every populated
+  // lookup dimension as tech-verified — correcting a wrong count must not
+  // permanently verify whole-building sqft it rode in with. It also needs
+  // to exist when NO fieldVerify flag rendered the shared button (a
+  // confident-but-wrong listing count produces no flag).
+  const [unitSaveState, setUnitSaveState] = useState("");
+  useEffect(() => {
+    setUnitSaveState("");
+  }, [form.address, form.unitCount]);
+  const unitCountNumber = Number(form.unitCount);
+  const unitCountSavable =
+    form._unitCountEdited &&
+    String(form.unitCount || "").trim() !== "" &&
+    Number.isInteger(unitCountNumber) &&
+    unitCountNumber >= 1;
+  const saveVerifiedUnitCount = useCallback(async () => {
+    const n = Number(form.unitCount);
+    if (!form.address || !Number.isInteger(n) || n < 1) return;
+    setUnitSaveState("saving");
+    try {
+      const r = await fetch("/api/admin/estimator/property-lookup/verify", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ address: form.address, fields: { unitCount: n } }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setUnitSaveState("saved");
+    } catch {
+      setUnitSaveState("error");
+    }
+  }, [form.address, form.unitCount]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
@@ -6230,6 +6255,22 @@ export default function EstimateToolViewV2({
                   single condo unit read as the whole building) when saved as
                   verified.
                 </div>
+                {unitCountSavable && (
+                  <button
+                    type="button"
+                    onClick={saveVerifiedUnitCount}
+                    disabled={unitSaveState === "saving" || unitSaveState === "saved"}
+                    className="mt-1 text-12 underline text-zinc-900 disabled:no-underline disabled:text-zinc-500"
+                  >
+                    {unitSaveState === "saving"
+                      ? "Saving verified count…"
+                      : unitSaveState === "saved"
+                        ? "Verified count saved — future lookups will use it"
+                        : unitSaveState === "error"
+                          ? "Save failed — tap to retry"
+                          : "Save unit count as field-verified"}
+                  </button>
+                )}
               </FieldV2>
               {(form.svcTs || form.svcInjection) && (
                 <>

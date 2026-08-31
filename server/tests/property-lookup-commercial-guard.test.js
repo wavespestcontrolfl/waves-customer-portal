@@ -678,6 +678,23 @@ describe('unit-type parcel-scale lot verify flag', () => {
     }
   });
 
+  test('a verified 1 with a STALE parcel aggregate 48 keeps the wrong-scope warning (pre-push codex P0 r5)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '20 Example Condo Way Unit 3, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 1,
+      _source: 'hybrid',
+      _parcel: { residentialUnits: 48 },
+      _fieldEvidence: {
+        propertyType: { value: 'Condominium', sourceType: 'county' },
+        unitCount: { value: 1, sourceType: 'verified', fieldVerify: false },
+      },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
   test('a web-sourced unit count on an authoritative-type hybrid cannot exempt the flag (codex P1 r8)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '15 Example Condo Way Unit 5, Testville, FL 00000',

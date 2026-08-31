@@ -3308,8 +3308,15 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   const unitLotTrustedUnitCount = unitLotSignalRc && unitLotCountAuthoritative
     ? Number(trustedUnitCount(unitLotSignalRc))
     : NaN;
-  const smallSharedParcel = (Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
-    || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2);
+  // A technician's verified count settles this alone — the stale parcel
+  // aggregate must not keep exempting the wrong-scope warning after a
+  // 48→1 on-site correction (pre-push codex P0 r5; same contract as
+  // detectCategory / masterUnitCount / the enriched profile).
+  const unitLotVerifiedCount = verifiedUnitCountOf(rc);
+  const smallSharedParcel = unitLotVerifiedCount != null
+    ? unitLotVerifiedCount >= 2
+    : ((Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
+      || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2));
   // Condo identity via the estimator's OWN predicate (isCondoRecord —
   // propertyType OR county land-use text, aggregated excluded), so an
   // "Office Condominium" land use behind a normalized 'Commercial' type is
