@@ -39,6 +39,7 @@ jest.mock('../models/db', () => {
       where: jest.fn(() => builder),
       orderBy: jest.fn(() => builder),
       first: jest.fn(async () => state.priorCase),
+      select: jest.fn(async () => (state.priorCase ? [state.priorCase] : [])),
       update: jest.fn(async (patch) => { state.updates.push(patch); return 1; }),
     };
     return builder;
@@ -147,7 +148,15 @@ test('an executor coded failure returns its code and sends no confirmation', asy
 });
 
 test('same accepted template inside 24h returns the original receipt, no re-execution', async () => {
-  state.priorCase = { id: 'case-old', snapshot: { accept_receipt: { reference: 'OLDREF', actionType: 'hold', summary: 'S', effects: [], confirmationChannels: ['sms'] } } };
+  state.priorCase = {
+    id: 'case-old',
+    resolution_action: JSON.stringify({ type: 'hold', holdMaxDays: 180 }),
+    scope: JSON.stringify(['lawn_care']),
+    snapshot: {
+      accept_key: JSON.stringify({ t: 'away_hold', r: 'away', f: [], p: {} }),
+      accept_receipt: { reference: 'OLDREF', actionType: 'hold', summary: 'S', effects: [], confirmationChannels: ['sms'] },
+    },
+  };
   const res = await accept({ reasonCode: 'away', templateId: 'away_hold' });
   expect(res.status).toBe(200);
   expect(res.body.deduped).toBe(true);

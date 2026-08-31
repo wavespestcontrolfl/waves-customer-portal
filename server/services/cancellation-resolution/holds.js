@@ -92,6 +92,22 @@ async function startAwayMode({ customerId, caseId, until = null }) {
   return { until: untilYmd, untilDisplay: displayDate(untilYmd) };
 }
 
+async function revertMoves(customerId, moved) {
+  if (!moved || !moved.length) return;
+  const SmartRebooker = require('../rebooker');
+  for (const done of [...moved].reverse()) {
+    try {
+      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', {});
+    } catch (revertErr) {
+      logger.error(`[holds] revert of visit ${done.id} failed: ${revertErr.message}`);
+      const { notifyAdmin } = require('../notification-service');
+      await notifyAdmin('service', 'Plan hold aborted: visit needs a manual move back', `Visit ${done.id} was moved to ${done.to} for a hold that then failed — move it back to ${done.from}.`, {
+        bell: true, dedupeKey: `plan_hold_revert_failed:${done.id}`, metadata: { kind: 'plan_hold_revert_failed', customerId, visitId: done.id },
+      }).catch(() => {});
+    }
+  }
+}
+
 async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 180 }) {
   if (!HOLDABLE_FAMILIES.includes(familyKey)) throw codedError('hold_family_invalid', 'That service cannot be held');
   const today = etDateString();
@@ -134,49 +150,47 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
         moved.push({ id: visit.id, from, to, window: { start: visit.window_start || null, end: visit.window_end || null } });
       } catch (err) {
         logger.error(`[holds] visit ${visit.id} did not move for a ${familyKey} hold: ${err.message}`);
-        for (const done of moved.reverse()) {
-          try {
-            await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', {});
-          } catch (revertErr) {
-            logger.error(`[holds] revert of visit ${done.id} failed: ${revertErr.message}`);
-            const { notifyAdmin } = require('../notification-service');
-            await notifyAdmin('service', 'Plan hold aborted: visit needs a manual move back', `Visit ${done.id} was moved to ${done.to} for a hold that then failed — move it back to ${done.from}.`, {
-              bell: true, dedupeKey: `plan_hold_revert_failed:${done.id}`, metadata: { kind: 'plan_hold_revert_failed', customerId, visitId: done.id },
-            }).catch(() => {});
-          }
-        }
+        await revertMoves(customerId, moved);
         throw codedError('hold_visits_unmovable', 'One of the upcoming visits could not be moved — call our office and we will set the hold up by hand');
       }
     }
   }
 
-  const [hold] = await db('plan_holds').insert({
-    customer_id: customerId,
-    cancellation_case_id: caseId || null,
-    family_key: familyKey,
-    starts_on: today,
-    resume_on: resume,
-    held_monthly_rate: heldRate,
-    status: 'active',
-  }).returning(['id']);
-  const holdId = hold?.id || hold;
-
-  await db('plan_holds').where({ id: holdId }).update({ moved_visits: JSON.stringify({ moved }), updated_at: new Date() });
-
-  // Suspend the component + protect the tier, in one transaction.
-  await db.transaction(async (trx) => {
-    if (monthlyLane) {
-      await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey })
-        .update({ monthly_rate: 0, source: 'plan_hold', effective_at: new Date(), updated_at: new Date() });
-      const rows = await trx('customer_plan_rates').where({ customer_id: customerId }).select('monthly_rate');
-      const scalar = Math.round(rows.reduce((s, r) => s + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
-      await trx('customers').where({ id: customerId }).update({ monthly_rate: scalar, updated_at: new Date() });
-    }
-    const protectedUntil = customer?.tier_protected_until && String(customer.tier_protected_until).slice(0, 10) > resume
-      ? customer.tier_protected_until
-      : resume;
-    await trx('customers').where({ id: customerId }).update({ tier_protected_until: protectedUntil, updated_at: new Date() });
-  });
+  // Hold + billing suspension + tier protection land ATOMICALLY (codex
+  // P0): if any write fails, the transaction rolls back and every moved
+  // visit is compensated back to its original date before the error
+  // reaches the customer.
+  let holdId = null;
+  try {
+    await db.transaction(async (trx) => {
+      const [hold] = await trx('plan_holds').insert({
+        customer_id: customerId,
+        cancellation_case_id: caseId || null,
+        family_key: familyKey,
+        starts_on: today,
+        resume_on: resume,
+        held_monthly_rate: heldRate,
+        moved_visits: JSON.stringify({ moved }),
+        status: 'active',
+      }).returning(['id']);
+      holdId = hold?.id || hold;
+      if (heldRate != null) {
+        await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey })
+          .update({ monthly_rate: 0, source: 'plan_hold', effective_at: new Date(), updated_at: new Date() });
+        const rows = await trx('customer_plan_rates').where({ customer_id: customerId }).select('monthly_rate');
+        const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
+        await trx('customers').where({ id: customerId }).update({ monthly_rate: scalar, updated_at: new Date() });
+      }
+      const protectedUntil = customer?.tier_protected_until && String(customer.tier_protected_until).slice(0, 10) > resume
+        ? customer.tier_protected_until
+        : resume;
+      await trx('customers').where({ id: customerId }).update({ tier_protected_until: protectedUntil, updated_at: new Date() });
+    });
+  } catch (err) {
+    logger.error(`[holds] hold write failed for ${customerId}/${familyKey} — compensating moved visits: ${err.message}`);
+    await revertMoves(customerId, moved);
+    throw codedError('hold_setup_failed', 'We could not set the hold up — nothing changed. Call our office and we will do it by hand');
+  }
 
   try {
     await db('customer_interactions').insert({
@@ -245,6 +259,19 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   const toResume = await db('plan_holds').where({ status: 'active' }).where('resume_on', '<=', today).select('*');
   for (const hold of toResume) {
     try {
+      // The 7-day text IS the consent step (ruling C-4): billing never
+      // restarts before a reminder was ACCEPTED for delivery (codex P0).
+      // The remind branch above keeps retrying daily; a hold overdue with
+      // no deliverable reminder parks for the office instead.
+      if (!hold.reminder_sent_at) {
+        if (String(hold.resume_on).slice(0, 10) < today) {
+          const { notifyAdmin } = require('../notification-service');
+          await notifyAdmin('service', 'Plan hold cannot auto-resume: restart text undeliverable', `Hold ${hold.id} (${hold.family_key}) reached its resume date with no delivered reminder — contact the customer and resume by hand.`, {
+            bell: true, dedupeKey: `plan_hold_resume_blocked:${hold.id}`, metadata: { kind: 'plan_hold_resume_blocked', holdId: hold.id, customerId: hold.customer_id },
+          }).catch(() => {});
+        }
+        continue;
+      }
       // A hold whose plan was cancelled or reconfigured in the meantime is
       // OBSOLETE (codex r1 P2): resuming would text a false restart and
       // overwrite the current component with the stale pre-hold rate.

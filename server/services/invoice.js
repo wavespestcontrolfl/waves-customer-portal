@@ -2033,15 +2033,35 @@ const InvoiceService = {
       // a lookup problem never blocks the invoice; consumption is CAS'd in
       // the mint transaction.
       try {
-        const retention = await this.buildRetentionOfferLineForMint({
-          customerId: sr.customer_id,
-          scheduledServiceId: sr.scheduled_service_id || null,
-          lineItems,
-          database: conn,
-        });
-        if (retention) {
-          lineItems = [...lineItems, retention.lineItem];
-          retentionOfferApplication = retention;
+        // Reserve the offer slot with a CAS UPDATE inside the SAME mint
+        // transaction BEFORE the line exists (codex P0): a concurrent mint
+        // that loses the race reserves nothing and adds no line, so the
+        // charge count and the $75 cap can never be exceeded. A rolled-back
+        // mint reverts the reservation with it.
+        if (conn) {
+          const retention = await this.buildRetentionOfferLineForMint({
+            customerId: sr.customer_id,
+            scheduledServiceId: sr.scheduled_service_id || null,
+            lineItems,
+            database: conn,
+          });
+          if (retention) {
+            const reserved = await conn("retention_offers")
+              .where({ id: retention.offerId, status: "granted", charges_applied: retention.expectedChargesApplied })
+              .where(function notExpired() {
+                this.whereNull("expires_at").orWhere("expires_at", ">", new Date());
+              })
+              .update({
+                charges_applied: retention.expectedChargesApplied + 1,
+                amount_applied: conn.raw("amount_applied + ?", [retention.amount]),
+                ...(retention.exhaustsOffer ? { status: "exhausted" } : {}),
+                updated_at: new Date(),
+              });
+            if (reserved) {
+              lineItems = [...lineItems, retention.lineItem];
+              retentionOfferApplication = retention;
+            }
+          }
         }
       } catch (retentionErr) {
         logger.warn(`[invoice] retention-offer check failed for customer ${sr.customer_id}: ${retentionErr.message}`);
@@ -2099,32 +2119,20 @@ const InvoiceService = {
     // visit lock, the latter two inside buildParams), then adopt any
     // non-terminal invoice that landed — the caller's reuse filters ran
     // before this transaction and cannot have seen it.
-    // CAS-consume inside the SAME transaction as the mint: the line and the
-    // ledger move together. A lost CAS (concurrent mint spent the offer)
-    // cannot unwind a created invoice — it parks a money-review task instead.
+    // The slot was RESERVED in buildParams (same trx); after the invoice
+    // row exists, stamp its id on the offer. A failure throws inside the
+    // transaction so the mint AND the reservation roll back together —
+    // there is no path where a discount line commits unconsumed.
     const settleRetention = async (created, dbh) => {
       if (!retentionOfferApplication || !created || !created.id) return;
-      const { consumeRetentionOffer } = require("./cancellation-resolution/retention-offer");
-      const okc = await consumeRetentionOffer({
-        offerId: retentionOfferApplication.offerId,
-        expectedChargesApplied: retentionOfferApplication.expectedChargesApplied,
-        amount: retentionOfferApplication.amount,
-        invoiceId: created.id,
-        exhaustsOffer: retentionOfferApplication.exhaustsOffer,
-      }, dbh || db);
-      if (!okc) {
-        logger.error(`[invoice] retention-offer consume lost the CAS for invoice ${created.id} (offer ${retentionOfferApplication.offerId}) — money review`);
-        try {
-          const { notifyAdmin } = require("./notification-service");
-          await notifyAdmin("billing", "Retention discount needs review", `Invoice ${created.id} carries a retention line whose offer could not be consumed (concurrent charge). Verify the discount.`, {
-            bell: true,
-            dedupeKey: `retention_consume_review:${created.id}`,
-            metadata: { kind: "retention_consume_review", invoiceId: created.id, offerId: retentionOfferApplication.offerId },
-          });
-        } catch (notifyErr) {
-          logger.error(`[invoice] retention review alert failed: ${notifyErr.message}`);
-        }
-      }
+      const conn = dbh || db;
+      const updated = await conn("retention_offers")
+        .where({ id: retentionOfferApplication.offerId })
+        .update({
+          applied_invoice_ids: conn.raw("applied_invoice_ids || ?::jsonb", [JSON.stringify([created.id])]),
+          updated_at: new Date(),
+        });
+      if (!updated) throw new Error(`retention offer ${retentionOfferApplication.offerId} vanished before invoice ${created.id} could be stamped`);
     };
 
     const adoptUnderMintLock = async (trx) => {

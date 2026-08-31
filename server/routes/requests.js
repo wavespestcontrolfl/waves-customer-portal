@@ -298,11 +298,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       let retryOutcome = null;
       try {
         const recoveredScope = await committedScopeFor(priorCancellation.id);
+        // Fail closed exactly like the dedupe branch: an unrecoverable
+        // scope must never widen into a whole-account churn (codex P0).
+        if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
         const retry = await processCancellationRequest({
           customerId: req.customer.id,
           reason: `Portal cancellation request ${priorCancellation.id}`,
           requestId: priorCancellation.id,
-          families: recoveredScope === null ? [] : recoveredScope,
+          families: recoveredScope,
         });
         retryOutcome = retry;
         logger.info(
@@ -915,15 +918,26 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
     const { isAcceptableAction, executeAcceptedAction } = require('../services/cancellation-resolution/actions');
 
     // Double-tap / crash-retry idempotency (codex r1 P1): a prior accepted
-    // case for this template inside 24h is REUSED — with a receipt it just
-    // returns; without one (crash after execute, before the stash) the
-    // action re-runs under the SAME case id, so executor dedupe keys and
-    // the per-case grant guard hold.
-    const priorCase = await db('cancellation_cases')
+    // case is REUSED only when it was the SAME accept — template, reason,
+    // requested scope, and params (codex P1: a different family, resume
+    // date, or preference must execute, not replay the old receipt). With
+    // a receipt it returns; without one the action re-runs under the SAME
+    // case id, so executor dedupe keys and the per-case grant guard hold.
+    const acceptKey = JSON.stringify({
+      t: value.templateId,
+      r: value.reasonCode,
+      f: [...families].sort(),
+      p: value.params || {},
+    });
+    const priorCandidates = await db('cancellation_cases')
       .where({ customer_id: req.customer.id, resolution_template_id: value.templateId, resolution_outcome: 'accepted' })
       .where('created_at', '>=', new Date(Date.now() - 24 * 3600 * 1000))
       .orderBy('created_at', 'desc')
-      .first('*');
+      .select('*');
+    const priorCase = (priorCandidates || []).find((row) => {
+      const snap = typeof row.snapshot === 'string' ? JSON.parse(row.snapshot) : (row.snapshot || {});
+      return snap.accept_key === acceptKey;
+    }) || null;
     if (priorCase) {
       const receipt = priorCase.snapshot && priorCase.snapshot.accept_receipt;
       if (receipt) return res.json({ ok: true, deduped: true, receipt });
@@ -977,7 +991,7 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
         reasonText: null,
         resolution,
         resolutionOutcome: 'accepted',
-        snapshot: { accepted_at: new Date().toISOString(), accepted_params: value.params || {} },
+        snapshot: { accepted_at: new Date().toISOString(), accepted_params: value.params || {}, accept_key: acceptKey },
         // An accepted resolution IS final — committed, or the ledger's
         // grant guard rejects the very offer the card promised (codex r1 P1).
         processed: true,

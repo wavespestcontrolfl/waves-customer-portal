@@ -66,7 +66,7 @@ function compilePropertyAlerts({
   // Away Mode (cancel-flow C2): dated exterior-only, independent of the
   // persistent service-preference toggle.
   const awayUntil = prefs?.away_mode_until ? String(prefs.away_mode_until).slice(0, 10) : null;
-  const awayActive = awayUntil && awayUntil >= new Date().toISOString().slice(0, 10);
+  const awayActive = awayUntil && awayUntil >= require('../utils/datetime-et').etDateString();
   if (awayActive && /pest/i.test(normalizedServiceType)) {
     alerts.push({ type: 'service_pref', text: `AWAY MODE — exterior only until ${awayUntil}, nobody home` });
   }
