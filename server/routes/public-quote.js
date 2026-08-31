@@ -1765,6 +1765,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // left the mirrored draft cadence-less, so a palm-only handoff
             // could never resolve a series plan (codex #3504 r3).
             appsPerYear: item.appsPerYear ?? null,
+            // The engine emits BOTH a textual cadence (frequency:
+            // 'monthly') and the authoritative numeric visitsPerYear —
+            // the fallback below let the text shadow the number, so the
+            // audit guessed the 4-visit default and costed monthly pest
+            // at a third of its real COGS (GH codex P1).
+            visitsPerYear: item.visitsPerYear ?? null,
             frequency: item.frequency ?? item.visitsPerYear ?? null,
             // Recurring foam carries an operator-chosen cadence + tier labor
             // duration; keep them so the accept/render/booking paths present the

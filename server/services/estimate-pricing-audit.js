@@ -152,7 +152,12 @@ function money(value) {
 function dimensionsFrom(data, resultOverride) {
   // engineInput (singular) is the quote wizard's NORMALIZED, actually-
   // priced input — clamped/trusted values that outrank the raw shapes.
-  const inputs = data?.engineInput || data?.inputs || data?.engineInputs || {};
+  // Automated lead drafts persist their normalized priced input ONLY at
+  // automation.draftEstimateAutomation.engineInput, and their compact
+  // engineResult has no property object — without this path every
+  // auto-sent lead estimate audited at zero square feet (GH codex P1).
+  const inputs = data?.engineInput || data?.inputs || data?.engineInputs
+    || data?.automation?.draftEstimateAutomation?.engineInput || {};
   const result = resultOverride || data?.result || data?.engineResult || {};
   const property = result.property || {};
   // Nullish-aware pick: a MEASURED 0 is authoritative (computeTurfArea
@@ -189,6 +194,21 @@ function dimensionsFrom(data, resultOverride) {
   const positiveBed = bedCandidates.map(Number).find((v) => Number.isFinite(v) && v > 0);
   const bedArea = positiveBed ?? pick(...bedCandidates);
   return { homeSqFt, lotSqFt, lawnSqFt, bedArea };
+}
+
+// The pricing engine's textual cadence tokens (normalizePestFrequency
+// emits monthly/bimonthly/quarterly; proposals add annual) → visits per
+// year, for persisted rows whose numeric count was shadowed by the text.
+const CADENCE_OCCURRENCES = {
+  monthly: 12,
+  bimonthly: 6,
+  bi_monthly: 6,
+  every_other_month: 6,
+  quarterly: 4,
+  annual: 1,
+};
+function cadenceOccurrences(value) {
+  return CADENCE_OCCURRENCES[String(value || '').toLowerCase().trim()];
 }
 
 function keyFromName(name) {
@@ -322,7 +342,8 @@ function quoteProvenanceFrom(estimate, data, result) {
       selectedServices: data?.engineRequest?.selectedServices ?? null,
       // engineInput (singular) is the quote wizard's normalized, actually-
       // priced input — preferred over the raw shapes when present.
-      inputs: data?.engineInput ?? data?.inputs ?? data?.engineInputs ?? null,
+      inputs: data?.engineInput ?? data?.inputs ?? data?.engineInputs
+        ?? data?.automation?.draftEstimateAutomation?.engineInput ?? null,
       // Quote-wizard rows keep their price-bearing selection at top-level
       // estimate_data.services with none of the above (GH codex P2).
       services: data?.services ?? null,
@@ -613,7 +634,8 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // Priced witnesses include per-application-only rows (perApp/perVisit
     // × a real visit count) — codex pre-push P1.
     const perUnitWitness = pickNum(item.perTreatment, item.perApp, item.perVisit);
-    const perUnitVisits = pickNum(item.visitsPerYear, item.visits, item.appsPerYear, item.frequency);
+    const perUnitVisits = pickNum(item.visitsPerYear, item.visits, item.appsPerYear, item.frequency)
+      ?? cadenceOccurrences(item.frequency ?? item.cadence);
     const hasPerUnitWitness = perUnitWitness !== undefined && Number.isFinite(perUnitVisits) && perUnitVisits > 0;
     const hasBaseWitness = pickNum(item.monthlyAfterDiscount, item.monthly, item.manualFinalAnnual, item.annualAfterDiscount, item.annual,
       item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) !== undefined
@@ -676,7 +698,12 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // public-quote projection's `frequency` can itself be numeric.
     const visitsPerYear = [item.visitsPerYear, item.visits, item.appsPerYear, item.frequency]
       .map(num)
-      .find((v) => Number.isFinite(v) && v > 0);
+      .find((v) => Number.isFinite(v) && v > 0)
+      // Already-persisted wizard rows can carry cadence only as TEXT
+      // (frequency: 'monthly' shadowed the numeric count in the
+      // projection) — translate the engine's cadence tokens instead of
+      // falling back to the 4-visit pest default (GH codex P1).
+      ?? cadenceOccurrences(item.frequency ?? item.cadence);
     // Raw mosquito lines carry their station/dunk add-ons — without the
     // mosquitoCogs overrides their per-visit COGS misses the hardware
     // (GH codex P1; mirrors normalizeRecurringLines' mosquito branch).
@@ -931,8 +958,20 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       commercial_mosquito: 'mosquito',
       commercial_termite_bait: 'termite_bait',
       commercial_rodent_bait: 'rodent_bait',
+      // Termite SPECIALTY twins (GH codex P1): the mapped normalizer only
+      // has names ("Recurring Termite Foam Service", "Termite Bond") and
+      // keyFromName lands them on termite_bait, while the raw rows keep
+      // their canonical engine ids — same charge, two spellings again.
+      foam_recurring: 'termite_bait',
+      termite_station_rental: 'termite_bait',
+      termite_bond: 'termite_bait',
     };
-    const priceKey = (l) => `${DEDUPE_FAMILY[l.serviceKey] || l.serviceKey}|${l.cadence}`;
+    const priceKey = (l) => {
+      const key = String(l.serviceKey || '');
+      // termite_bond persists with its term baked in (termite_bond_5yr).
+      const family = DEDUPE_FAMILY[key] || (key.startsWith('termite_bond') ? 'termite_bait' : key);
+      return `${family}|${l.cadence}`;
+    };
     const remember = (l) => {
       const key = priceKey(l);
       if (!covered.has(key)) covered.set(key, []);

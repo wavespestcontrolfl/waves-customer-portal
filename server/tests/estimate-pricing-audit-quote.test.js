@@ -458,6 +458,46 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.find((l) => l.serviceKey === 'bed_bug')).toMatchObject({ cadence: 'one_time', price: 500 });
   });
 
+  test('termite specialty twins dedupe: name-mapped bait row consumes the raw specialty id', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-foam', status: 'sent', monthly_total: '92.33', annual_total: '1108.00', onetime_total: null,
+      estimate_data: {
+        result: { recurring: { services: [{ name: 'Recurring Termite Foam Service', mo: 92.33, annualAfterDiscount: 1108 }] } },
+        engineResult: {
+          lineItems: [{ service: 'foam_recurring', name: 'Recurring Termite Foam Service', monthly: 92.33, annual: 1108, costs: { total: 240 } }],
+        },
+      },
+    });
+    // One charge, two spellings — the raw specialty row is consumed, and
+    // its authoritative cost transfers instead of bait inventory COGS.
+    const foamRows = audit.lines.filter((l) => /foam/i.test(l.label));
+    expect(foamRows).toHaveLength(1);
+    expect(foamRows[0].cogs.estimatedCost).toBe(240);
+  });
+
+  test('automated-lead engineInput feeds dimensions and frozen request inputs', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-lead', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      estimate_data: {
+        automation: { draftEstimateAutomation: { engineInput: { homeSqFt: 2400, lotSqFt: 9000 } } },
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, visitsPerYear: 4 }] },
+      },
+    });
+    expect(audit.quote.request.inputs).toMatchObject({ homeSqFt: 2400, lotSqFt: 9000 });
+  });
+
+  test('textual cadence translates to a visit count instead of the 4-visit default', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-cadence', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 60, annual: 720, frequency: 'monthly' }],
+        },
+      },
+    });
+    expect(audit.lines.find((l) => l.serviceKey === 'pest_control').cogs.visitsPerYear).toBe(12);
+  });
+
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-xfer', status: 'sent', monthly_total: '400.00', annual_total: '4800.00', onetime_total: null,
