@@ -58,6 +58,22 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
 jest.mock('../services/sms-auto-send', () => ({
   hasActiveAutoSendClaim: jest.fn(async () => false),
+  isRealProviderSend: jest.fn((r) => !!r?.providerMessageId),
+}));
+// The inline review claim boundary: the route must verify + claim BEFORE the
+// provider call and abort on any validation miss (fail closed — the tokenized
+// review page carries customer data).
+jest.mock('../services/review-request', () => ({
+  claimInlineForSend: jest.fn(async () => true),
+  releaseInlineClaim: jest.fn(async () => {}),
+  markInlineDelivered: jest.fn(async () => {}),
+  cancelInlineIfPending: jest.fn(async () => true),
+}));
+jest.mock('../services/short-url', () => ({
+  shortenOrPassthrough: jest.fn(async (url) => url),
+  existingShortUrlFor: jest.fn(async () => null),
+  createTrackedShortLink: jest.fn(async (url) => ({ code: null, shortUrl: url })),
+  invoiceShortCodePrefix: jest.fn(() => 'wpc'),
 }));
 // Controllable gates: the auto-send interlock (claim check + reservation row)
 // is gated on smsAutoSend, OFF by default so the manual send path is unchanged
@@ -361,6 +377,107 @@ describe('admin communications SMS route', () => {
           adminUserId: 'admin-1',
         }),
       }));
+    });
+  });
+
+  test('review link for a different customer aborts the send (fail closed)', async () => {
+    const ReviewService = require('../services/review-request');
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+        });
+      } else if (table === 'customers') {
+        // Owner phone does NOT match the recipient below.
+        first.mockResolvedValue({ id: 'cust-A', phone: '+19998887777' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a lost review claim aborts the send before the provider call', async () => {
+    const ReviewService = require('../services/review-request');
+    ReviewService.claimInlineForSend.mockResolvedValueOnce(false);
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a fully validated review claim sends and marks the row delivered', async () => {
+    const ReviewService = require('../services/review-request');
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1');
     });
   });
 

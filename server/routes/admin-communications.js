@@ -403,11 +403,13 @@ router.post('/sms', async (req, res, next) => {
     // tabs or operators can both reach here holding this id before either's
     // post-send mark lands; the conditional claim lets exactly one through
     // and rejects the loser here, so at most one ask ever texts the
-    // customer. Claimed only when the send would actually carry the ask
-    // (real inline row, recipient owns it, link still in the body) — a
-    // deleted link or mismatched recipient proceeds unclaimed exactly as
-    // before, and the post-send mark keys off the claim. FAIL CLOSED on a
-    // lookup error: sending without the claim could double-text the ask.
+    // customer. FAIL CLOSED on EVERY validation miss: a supplied
+    // reviewRequestId that doesn't verify completely (real inline row, its
+    // link in this body, the recipient owning it, the claim won) aborts the
+    // send — the tokenized review page carries customer/service data, so a
+    // mismatched recipient must never receive it, and an unverifiable state
+    // must never send untracked. Only a request with NO reviewRequestId
+    // sends unclaimed.
     if (reviewRequestId) {
       const abortUnsent = async (status, error) => {
         await clearManualReservation();
@@ -422,20 +424,28 @@ router.post('/sms', async (req, res, next) => {
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
           .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
-        if (rr && rr.triggered_by === 'auto_inline') {
-          const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
-          const { existingShortUrlFor } = require('../services/short-url');
-          const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
-          const linkInBody = [short, rr.token]
-            .filter(Boolean)
-            .some((frag) => cleanBody.includes(String(frag).replace(/^https?:\/\//, '')));
-          if (linkInBody && owner && normalizePhoneLast10(owner.phone) === normalizePhoneLast10(to)) {
-            if (!(await ReviewService.claimInlineForSend(rr.id))) {
-              return abortUnsent(409, 'This review link was already sent or canceled — remove it from the message and re-insert if still needed.');
-            }
-            claimedReviewRequestId = rr.id;
-          }
+        if (!rr || rr.triggered_by !== 'auto_inline') {
+          return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
+        const { existingShortUrlFor } = require('../services/short-url');
+        const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
+        const linkInBody = [short, rr.token]
+          .filter(Boolean)
+          .some((frag) => cleanBody.includes(String(frag).replace(/^https?:\/\//, '')));
+        if (!linkInBody) {
+          // The client forgets the tracked entry when the operator deletes
+          // the line — an id arriving without its link is an anomaly, not a
+          // flow.
+          return abortUnsent(409, 'The review link is no longer in the message — remove the review request and try again.');
+        }
+        const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
+        if (!owner || normalizePhoneLast10(owner.phone) !== normalizePhoneLast10(to)) {
+          return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
+        }
+        if (!(await ReviewService.claimInlineForSend(rr.id))) {
+          return abortUnsent(409, 'This review link was already sent or canceled — remove it from the message and re-insert if still needed.');
+        }
+        claimedReviewRequestId = rr.id;
       } catch (claimErr) {
         logger.warn(`[communications] inline review pre-send claim failed — aborting send (requestId=${reviewRequestId}): ${claimErr.message}`);
         return abortUnsent(503, 'Could not verify the inserted review link — try again in a moment.');

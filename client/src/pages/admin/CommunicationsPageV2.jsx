@@ -1127,6 +1127,30 @@ function SmsTab() {
       });
       return;
     }
+    // SYNCHRONOUS bearer-link check at the send boundary: the recipient-
+    // change strip runs in an effect (and defers while `sending`), so a
+    // recipient edit followed immediately by Send can race it and transmit
+    // the PREVIOUS customer's tokenized pay/estimate/review URL. Re-verify
+    // every tracked link still in the body against the current recipient
+    // right now; any mismatch refuses the send — the effect strips the
+    // stale line as soon as it runs.
+    {
+      const trimmedTo = toNumber.trim();
+      const recipientKey = trimmedTo ? smsThreadKey(trimmedTo) : "";
+      const staleLink = Object.values(insertedCustomerLinks).some(
+        (entry) =>
+          msgBody.includes(entry.url) &&
+          (entry.recipientKey !== recipientKey ||
+            (selectedCustomerId || null) !== entry.customerId),
+      );
+      if (staleLink) {
+        setSendResult({
+          ok: false,
+          text: "A customer link in this message was minted for a different recipient — remove it and re-insert before sending.",
+        });
+        return;
+      }
+    }
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);
