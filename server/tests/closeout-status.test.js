@@ -473,8 +473,8 @@ describe('closeout-status: Agent D findings', () => {
       delivery: null,
     });
     const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'not_sent', ...o });
-    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'payment_hold' }) }).facts.reportDelivery)
-      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'payment_hold' });
+    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'held' }) }).facts.reportDelivery)
+      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'held' });
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'failed' }) }).facts.reportDelivery.state).toBe('failed');
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'legacy_sent' }) }).facts.reportDelivery.state).toBe('done');
     expect(deriveCloseoutFacts({ ...base, project: proj({ report_token: null }) }).facts.report)
@@ -507,6 +507,33 @@ describe('closeout-status: Agent D findings', () => {
   test('active rows = 0 but the retracted-row lookup failed → unknown (cannot tell empty from all-retracted)', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ activeApplicationCount: 0, retractedApplicationCount: null }));
     expect(facts.application).toMatchObject({ state: 'unknown', reason: 'application_history_lookup_failed' });
+  });
+
+  test('frozen backfillMintRequired posture overrides a now-covered lane AND the backfill not_required shortcut', () => {
+    const member = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'monthly_membership', waveguard_tier: 'Silver', monthly_rate: 89, autopay_enabled: true },
+      lane: { mode: 'monthly_membership', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null }, liveInvoice: null,
+      record: { ...closedOutInputs().record, structured_notes: { backfill: true, backfillMintRequired: true, backfillMintAmountCents: 12000, completionSmsStatus: 'sent' } },
+    });
+    const { facts } = deriveCloseoutFacts(member);
+    expect(facts.invoice).toMatchObject({ state: 'pending', reason: 'frozen_required_mint_not_minted', amount: 120, ruleSource: 'frozen_record', livePrediction: 'covered_membership' });
+  });
+
+  test('project report payment hold wins over delivery_status sent; partial honors the channel ledger; released + sent is done', () => {
+    const base = closedOutInputs({
+      record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: { completionSmsStatus: 'sent' } },
+      delivery: null,
+    });
+    const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'sent', ...o });
+    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'held' }) }).facts.reportDelivery)
+      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'held' });
+    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'releasing' }) }).facts.reportDelivery.state).toBe('pending');
+    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'released' }) }).facts.reportDelivery.state).toBe('done');
+    expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: true }, sms: { ok: false } } }) }).facts.reportDelivery)
+      .toMatchObject({ state: 'done', reason: 'project_delivery_partial', channelOk: { email: true, sms: false } });
+    expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: false }, sms: { ok: false } } }) }).facts.reportDelivery)
+      .toMatchObject({ state: 'failed', reason: 'project_delivery_partial_no_channel' });
   });
 
   test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {

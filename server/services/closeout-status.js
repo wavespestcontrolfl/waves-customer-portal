@@ -502,12 +502,26 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) reportDelivery = awaiting();
   else if (projectBacked) {
     const ds = project ? String(project.delivery_status || 'not_sent').toLowerCase() : null;
-    const evidence = { projectId: project?.id || null, deliveryStatus: ds, lastDeliveryAt: isoOrNull(project?.last_delivery_at), reportHoldStatus: project?.report_hold_status || null, source: 'projects.delivery_status' };
+    const hold = project?.report_hold_status ? String(project.report_hold_status).toLowerCase() : null;
+    const channels = parseJsonObjectSafe(project?.delivery_channels);
+    const channelOk = Object.fromEntries(Object.entries(channels).map(([k, v]) => [k, v?.ok === true]));
+    const anyChannelOk = Object.values(channelOk).some(Boolean);
+    const evidence = {
+      projectId: project?.id || null, deliveryStatus: ds, lastDeliveryAt: isoOrNull(project?.last_delivery_at),
+      reportHoldStatus: hold, channelOk, source: 'projects.delivery_status',
+    };
     if (report.state !== 'done') reportDelivery = fact(report.state === 'unknown' ? 'unknown' : 'pending', 'report_not_published', evidence);
+    // Payment hold FIRST: the combined payer-invoice send stamps
+    // delivery_status 'sent' while the report itself is still held.
+    else if (hold === 'held' || hold === 'releasing') reportDelivery = fact('pending', 'project_report_on_hold', evidence);
     else if (ds === 'sent' || ds === 'legacy_sent') reportDelivery = fact('done', `project_delivery_${ds}`, evidence);
+    // 'partial' = at least one channel reached the customer (done) OR the
+    // required channel failed (WDO email-only) — the channel ledger decides.
+    else if (ds === 'partial') reportDelivery = anyChannelOk
+      ? fact('done', 'project_delivery_partial', evidence)
+      : fact('failed', 'project_delivery_partial_no_channel', evidence);
     else if (ds === 'failed') reportDelivery = fact('failed', 'project_delivery_failed', evidence);
     else if (ds === 'sending') reportDelivery = fact('pending', 'project_delivery_sending', evidence);
-    else if (project?.report_hold_status) reportDelivery = fact('pending', 'project_report_on_hold', evidence);
     else reportDelivery = fact('pending', 'project_report_not_sent', evidence);
   } else if (report.state === 'not_required') reportDelivery = fact('not_required', report.reason, { ruleSource: report.ruleSource || 'frozen_record', posture });
   else if (posture === 'internal_only') reportDelivery = fact('not_required', 'frozen_posture_internal_only', { ruleSource: 'frozen_record', posture, audience: 'internal' });
@@ -575,6 +589,15 @@ function deriveCloseoutFacts(inputs) {
         detail: `invoice ${live.id} exists but the lane predicts ${expectation.kind} (${expectation.why}); lane prediction only — an estimate-first invoice attached before completion can be legitimate`,
       });
     }
+  } else if (notes.backfillMintRequired === true) {
+    // The completion FROZE a required-mint posture (+ amount) on the record
+    // because billing fields are mutable — a later lane change must not
+    // read an owed invoice as not_required (pre-push codex r5).
+    const cents = notes.backfillMintAmountCents;
+    invoice = fact('pending', 'frozen_required_mint_not_minted', {
+      ruleSource: 'frozen_record', amount: Number.isInteger(cents) && cents > 0 ? cents / 100 : null,
+      livePrediction: expectation?.kind || null,
+    });
   } else if (billingInputsFailed.length) {
     // Any billing input that could not be read (autopay, visit-month dues,
     // bill-to payer, annual coverage) would otherwise be coerced to a
