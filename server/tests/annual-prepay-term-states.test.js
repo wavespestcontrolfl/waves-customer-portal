@@ -5,9 +5,9 @@
  * Three things must stay in lockstep — the DB CHECK (which names exist), the
  * code (which names are actually written, and the transition functions'
  * guards), and the doc (which moves are allowed). This test fails when any
- * one drifts without the others: a new status literal written to
- * annual_prepay_terms, a CHECK edit, a recordDecision guard loosened, or a
- * doc that stops listing a stage.
+ * one drifts without the others: a new status write to annual_prepay_terms
+ * anywhere under server/ or ops/, a CHECK edit, a transition guard loosened,
+ * or a doc that stops listing a stage.
  *
  * It deliberately does NOT restructure annual-prepay-renewals.js — the guard
  * reads the module as-is.
@@ -41,17 +41,26 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 const MIGRATION = 'server/models/migrations/20260614000001_annual_prepay_terms_checks.js';
 const DOC = 'docs/annual-prepay-term-states.md';
-// Every file that UPDATEs or INSERTs annual_prepay_terms.status with a literal.
-const WRITER_FILES = [
-  'server/services/annual-prepay-renewals.js',
-  'server/routes/admin-invoices.js',
-];
+const TABLE = 'annual_prepay_terms';
 
 // The state machine as documented. Changing these lists means changing the
 // doc (and, for WRITTEN, the code) in the same PR.
 const WRITTEN_STATUSES = ['payment_pending', 'active', 'renewal_pending', 'cancelled', 'renewed', 'switch_plan'];
 const LEGACY_ONLY_STATUSES = ['canceled', 'refunded']; // in the CHECK, never written
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
+
+// Non-literal `status:` expressions the scanner accepts, each one a pass-
+// through of a value that is itself CHECK-valid: a constant pinned below, the
+// output of invoiceTermStatus / statusAfterDecision, or the row's own status
+// being carried/restored. Anything else is an undocumented write.
+const KNOWN_STATUS_EXPRESSIONS = {
+  PAYMENT_PENDING_STATUS: ['payment_pending'],
+  nextStatus: WRITTEN_STATUSES,               // invoiceTermStatus(...) result
+  'statusAfterDecision(action)': WRITTEN_STATUSES,
+  previousStatus: WRITTEN_STATUSES,           // sendCustomerTermNotice release
+  'term.status': WRITTEN_STATUSES,            // carried through (ternary else)
+  'existing.status': WRITTEN_STATUSES,        // createTerm keeps decided status
+};
 
 function migrationCheckStatuses() {
   const src = read(MIGRATION);
@@ -60,20 +69,87 @@ function migrationCheckStatuses() {
   return [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
 }
 
-// Collect `status: '<literal>'` inside every `.update({...})` / `.insert({...})`
-// that follows a `('annual_prepay_terms')` builder call, before the chain
-// terminates. Variable-valued statuses (e.g. PAYMENT_PENDING_STATUS) are
-// resolved separately below.
-function literalStatusWrites(src) {
+// Every production .js file under server/ and ops/ that names the table.
+// Tests and migrations are excluded (migrations are the CHECK side, tests
+// are not writers).
+function writerCandidateFiles() {
   const out = [];
-  const re = /\(['"]annual_prepay_terms['"]\)([\s\S]*?)(?:;|\n\s*\n)/g;
-  for (const m of src.matchAll(re)) {
-    const chain = m[1];
-    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*\{([\s\S]*?)\}\s*\)/g)) {
-      for (const s of w[1].matchAll(/\bstatus:\s*'([a-z_]+)'/g)) out.push(s[1]);
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (ent.name === 'node_modules' || ent.name === 'tests' || ent.name === 'migrations' || ent.name === '__tests__') continue;
+        walk(full);
+      } else if (ent.name.endsWith('.js') && !ent.name.endsWith('.test.js')) {
+        if (fs.readFileSync(full, 'utf8').includes(TABLE)) out.push(path.relative(ROOT, full));
+      }
+    }
+  };
+  walk(path.join(ROOT, 'server'));
+  walk(path.join(ROOT, 'ops'));
+  return out.sort();
+}
+
+// For one source file: every `status:` expression written through an
+// `.update(...)` / `.insert(...)` on a builder chain that started with
+// `('annual_prepay_terms')`. `.update(identifier)` resolves the identifier
+// to a `const identifier = { ... }` object in the same file.
+// The builder chain runs from `('annual_prepay_terms')` to the first `;` at
+// paren/brace depth zero — a `;` inside a `.where(function () { …; })`
+// callback does not end it.
+function chainAfter(src, start) {
+  let depth = 0;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === '(' || ch === '{' || ch === '[') depth += 1;
+    else if (ch === ')' || ch === '}' || ch === ']') depth -= 1;
+    else if (ch === ';' && depth <= 0) return src.slice(start, i);
+  }
+  return src.slice(start);
+}
+
+function statusWriteExpressions(src) {
+  const out = [];
+  const chainRe = new RegExp(`\\(['"]${TABLE}['"]\\)`, 'g');
+  // Value runs to the next `, key:` or the end of the object body — a ternary
+  // (`a ? 'x' : b`) has no comma, so it survives whole.
+  const objectStatuses = (body) => {
+    for (const s of body.matchAll(/\bstatus:\s*((?:[^,\n]|,(?!\s*[\w[\]]+\s*:))+)/g)) {
+      out.push(s[1].replace(/,\s*$/, '').trim());
+    }
+  };
+  for (const m of src.matchAll(chainRe)) {
+    const chain = chainAfter(src, m.index + m[0].length);
+    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*\{([\s\S]*?)\}\s*\)/g)) objectStatuses(w[1]);
+    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
+      // Nearest `const <id> = {` BEFORE this chain (the same name is declared
+      // more than once in the module, e.g. recordDecision's two `update`s).
+      const before = src.slice(0, m.index);
+      const declStart = before.lastIndexOf(`const ${w[1]} = {`);
+      if (declStart === -1) { out.push(`<unresolved object ${w[1]}>`); continue; }
+      const body = src.slice(declStart).match(/\{([\s\S]*?)\};/);
+      if (!body) { out.push(`<unresolved object ${w[1]}>`); continue; }
+      objectStatuses(body[1]);
     }
   }
   return out;
+}
+
+// Resolve one written expression to the set of statuses it can produce, or
+// null when it is not something this guard understands.
+function resolveStatusExpression(expr) {
+  // A ternary produces only its two branches; the condition is a comparison,
+  // not a written value. Nested ternaries are not used in this codebase.
+  const q = expr.indexOf('?');
+  const branches = q === -1 ? [expr] : expr.slice(q + 1).split(':');
+  const set = new Set();
+  for (let branch of branches) {
+    branch = branch.trim();
+    if (/^'[a-z_]+'$/.test(branch)) { set.add(branch.slice(1, -1)); continue; }
+    if (KNOWN_STATUS_EXPRESSIONS[branch]) { KNOWN_STATUS_EXPRESSIONS[branch].forEach((s) => set.add(s)); continue; }
+    return null; // a value source this guard does not know — document it and add it above
+  }
+  return set.size ? [...set] : null;
 }
 
 describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
@@ -82,26 +158,62 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(inCheck).toEqual([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES].sort());
   });
 
-  test('every status literal written to annual_prepay_terms is a documented written stage; legacy names are never written', () => {
-    const seen = new Set();
-    for (const rel of WRITER_FILES) {
-      for (const s of literalStatusWrites(read(rel))) seen.add(s);
+  test('every status written to annual_prepay_terms anywhere in server/ or ops/ resolves to a documented written stage', () => {
+    const files = writerCandidateFiles();
+    // Sanity: discovery actually found the known writers.
+    expect(files).toEqual(expect.arrayContaining([
+      'server/services/annual-prepay-renewals.js',
+      'server/routes/admin-invoices.js',
+    ]));
+
+    const writes = [];
+    for (const rel of files) {
+      for (const expr of statusWriteExpressions(read(rel))) writes.push({ file: rel, expr });
     }
-    // Sanity: the scan actually found the known write sites (a regex that
-    // silently matched nothing would make this test vacuous).
-    expect(seen.has('active')).toBe(true);
-    expect(seen.has('cancelled')).toBe(true);
-    expect(seen.has('payment_pending')).toBe(true);
-    for (const s of seen) {
+    // Sanity: the scanner found the known write shapes (a regex that silently
+    // matched nothing would make this test vacuous).
+    const exprs = writes.map((w) => w.expr);
+    expect(exprs).toEqual(expect.arrayContaining([
+      "'active'",
+      "'cancelled'",
+      "'payment_pending'",
+      'PAYMENT_PENDING_STATUS',                                   // dispute demotion object
+      "term.status === 'active' ? 'renewal_pending' : term.status", // notice claim
+      'previousStatus',                                           // notice release
+      'statusAfterDecision(action)',                              // recordDecision
+      'existing.renewal_decision ? existing.status : nextStatus', // createTerm re-run
+    ]));
+
+    const unresolved = [];
+    const produced = new Set();
+    for (const w of writes) {
+      const resolved = resolveStatusExpression(w.expr);
+      if (!resolved) { unresolved.push(`${w.file}: status: ${w.expr}`); continue; }
+      resolved.forEach((s) => produced.add(s));
+    }
+    expect(unresolved).toEqual([]); // a new write shape must be added to KNOWN_STATUS_EXPRESSIONS + the doc
+    for (const s of produced) {
       expect(WRITTEN_STATUSES).toContain(s);
       expect(LEGACY_ONLY_STATUSES).not.toContain(s);
     }
+    // Only two files write the status today. A third writer is a new move
+    // and belongs in the doc's "Where" column.
+    const writerFiles = [...new Set(writes.map((w) => w.file))].sort();
+    expect(writerFiles).toEqual([
+      'server/routes/admin-invoices.js',
+      'server/services/annual-prepay-renewals.js',
+    ]);
   });
 
-  test('the doc names every stage in the CHECK and every read-side grouping constant', () => {
+  test('the doc names every stage in the CHECK, every write site, and the read-side grouping constants', () => {
     const doc = read(DOC);
     for (const s of migrationCheckStatuses()) {
       expect(doc).toMatch(new RegExp(`\\| \`${s}\` \\|`)); // a row in the Stages table
+    }
+    for (const fn of ['createTermForAnnualPrepay', 'syncTermForInvoicePayment', 'activatePaidPendingTerms',
+      'recordDecision', 'sendCustomerTermNotice', 'suspendActiveTermsForDisputedInvoice',
+      'DELETE /:id/annual-prepay', 'POST /:id/reverse-prepaid']) {
+      expect(doc).toContain(fn);
     }
     expect(doc).toContain("ACTIVE_STATUSES = ['active', 'renewal_pending']");
     expect(doc).toContain("DECIDED_COVERED_STATUSES = ['renewed', 'switch_plan']");
@@ -127,6 +239,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
   describe('recordDecision — the operator moves out of active / renewal_pending', () => {
     let chain;
     beforeEach(() => {
+      jest.clearAllMocks();
       db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
       chain = {
         where: jest.fn().mockReturnThis(),
@@ -165,6 +278,99 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     test('a decided term (guard miss) returns null instead of moving', async () => {
       chain.returning.mockResolvedValue([]);
       await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action: 'renew' })).resolves.toBeNull();
+    });
+  });
+
+  describe('sendCustomerTermNotice — automated active → renewal_pending claim, rolled back on failed delivery', () => {
+    // Minimal knex-builder stand-in: chainable, resolves `first` / `returning`.
+    function query({ first, returning, rows = [] } = {}) {
+      const q = {};
+      ['whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereBetween', 'whereNotIn', 'orderBy',
+        'select', 'forUpdate', 'leftJoin', 'whereRaw', 'orWhere', 'orWhereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; });
+      q.update = jest.fn(() => q);
+      q.first = jest.fn(async () => first);
+      q.returning = jest.fn(async () => returning || []);
+      q.columnInfo = jest.fn(async () => ({}));
+      q.catch = jest.fn(() => Promise.resolve());
+      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      return q;
+    }
+
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      notice_30_sent_at: null,
+      notice_30_claimed_at: null,
+      renewal_decision: null,
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+      db.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
+      db.transaction = jest.fn(async (cb) => cb(db));
+      _private.resetCachesForTests();
+    });
+
+    test('claim flips active → renewal_pending under the ACTIVE_STATUSES + undecided + unsent + unclaimed guard, and a missing customer releases it back to the previous status', async () => {
+      const refreshQuery = query({ returning: [{ ...term, last_scheduled_service_id: null, last_scheduled_service_date: null }] });
+      const claimQuery = query({ returning: [{ ...term, status: 'renewal_pending', notice_30_claimed_at: new Date() }] });
+      const releaseQuery = query();
+      const queues = {
+        scheduled_services: [query({ first: null }), query()],
+        annual_prepay_terms: [refreshQuery, claimQuery, releaseQuery],
+        customers: [query({ first: null })], // → customer_not_found → releaseClaim
+      };
+      db.mockImplementation((table) => {
+        const q = queues[table];
+        if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
+        return q.shift();
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 30))
+        .resolves.toMatchObject({ sent: false, reason: 'customer_not_found' });
+
+      // Move 4: the claim.
+      expect(claimQuery.where).toHaveBeenCalledWith({ id: 'term-1' });
+      expect(claimQuery.whereIn).toHaveBeenCalledWith('status', ACTIVE_STATUSES);
+      expect(claimQuery.whereNull).toHaveBeenCalledWith('renewal_decision');
+      expect(claimQuery.whereNull).toHaveBeenCalledWith('notice_30_sent_at');
+      expect(claimQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'renewal_pending',
+        notice_30_claimed_at: expect.any(Date),
+      }));
+
+      // Move 5: the rollback restores the pre-claim status, still guarded on undecided + unsent.
+      expect(releaseQuery.where).toHaveBeenCalledWith({ id: 'term-1' });
+      expect(releaseQuery.whereNull).toHaveBeenCalledWith('renewal_decision');
+      expect(releaseQuery.whereNull).toHaveBeenCalledWith('notice_30_sent_at');
+      expect(releaseQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'active',
+        notice_30_claimed_at: null,
+      }));
+    });
+
+    test('a term already in renewal_pending keeps that status through the claim (no move)', async () => {
+      const pendingTerm = { ...term, status: 'renewal_pending' };
+      const refreshQuery = query({ returning: [{ ...pendingTerm, last_scheduled_service_id: null, last_scheduled_service_date: null }] });
+      const claimQuery = query({ returning: [] }); // guard miss → already_claimed; we only care about the payload
+      const queues = {
+        scheduled_services: [query({ first: null }), query()],
+        annual_prepay_terms: [refreshQuery, claimQuery],
+      };
+      db.mockImplementation((table) => {
+        const q = queues[table];
+        if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
+        return q.shift();
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(pendingTerm, 30))
+        .resolves.toMatchObject({ sent: false, reason: 'already_claimed' });
+      expect(claimQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewal_pending' }));
     });
   });
 });
