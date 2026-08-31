@@ -71,7 +71,11 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.orderBy = () => q;
     q.select = async () => {
       if (table === 'scheduled_services') return rootsForCoverage || [];
-      if (table === 'setup_fee_claims') return q._where && 'estimate_id' in q._where ? claimsByEstimate : [];
+      if (table === 'setup_fee_claims') {
+        if (q._where && 'estimate_id' in q._where) return claimsByEstimate;
+        if (q._where && 'scheduled_service_id' in q._where) return siblingClaim ? [siblingClaim] : [];
+        return [];
+      }
       return [];
     };
     q.insert = (row) => {
@@ -87,6 +91,17 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
 }
 
 describe('retireDirectSetupClaimForPrepay — the mint side', () => {
+  test('a LIVE sibling claim on the anchor (completion won under the lock gap) conflicts instead of double-recording; a terminal sibling does not (codex #3591 r72 P1)', async () => {
+    const sibling = { id: 'claim-comp', invoice_id: 'inv-completion' };
+    const raced = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: null }, siblingClaim: sibling, invoice: { status: 'sent' } });
+    await expect(retireDirectSetupClaimForPrepay(raced, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 99 }))
+      .rejects.toMatchObject({ switchConflict: true });
+    expect(raced.writes).toEqual([]);
+    const terminalSibling = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: '99.00' }, siblingClaim: sibling, invoice: { status: 'void' } });
+    expect(await retireDirectSetupClaimForPrepay(terminalSibling, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 99 }))
+      .toEqual({ recorded: true, retired: true });
+  });
+
   test('a POSITIVE claim: ledger the fee against the prepay, then retire the stamp by exact-value CAS', async () => {
     const trx = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: '99.00' } });
     const out = await retireDirectSetupClaimForPrepay(trx, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 99 });
@@ -520,7 +535,7 @@ describe('source contracts — where the lifecycle is wired', () => {
     // A PREVIOUSLY accepted estimate booked afterward stamps its DISCLOSED
     // figure unless settled (term claim) or carried by another of its
     // series (codex #3591 r66 P1) — the standard Mark Won never billed it.
-    expect(adminSchedule).toMatch(/\} else if \(isRecurring && linkedEstimateId\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+if \(disclosed > 0\s+&& !\(await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\)\)\s+&& !\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
+    expect(adminSchedule).toMatch(/\} else if \(isRecurring && linkedEstimateId\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const settledClaim = await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\);\s+if \(settledClaim\) \{[\s\S]*?if \(!settledClaim\.scheduled_service_id\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: settledClaim\.id, anchorId: svc\.id \}\);\s+\}\s+\} else if \(!\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
     // …and BOTH acceptance-success paths (main accept and the overlap-race
     // standard downgrade) retire it, CAS'd on the exact stamped amount.
     expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(acceptResult\);/);
@@ -553,6 +568,18 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+
+  test('booking waiver read strict · Auto Pay page-load keeps the disclosure page · renewal defaults are coverage-only (codex #3591 r72 P1)', () => {
+    const bookingSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(bookingSrc).toMatch(/loadExistingQualifyingServiceKeys\(sp, custId, \{ strict: true \}\)/);
+    const cardRequest = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-card-request.js'), 'utf8');
+    expect(cardRequest).toMatch(/let rodentSetupOwedHere = false;[\s\S]*?resolveDirectRodentSetupObligation\(db, \{ id: request\.scheduled_service_id \}\)[\s\S]*?rodentSetupOwedHere = true;[\s\S]*?if \(customerRow && !rodentSetupOwedHere && await customerOnAutopay\(customerRow\)\) \{/);
+    const adminCustomers = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    expect(adminCustomers).toMatch(/leftJoin\('setup_fee_claims as sfc', 'apt\.prepay_invoice_id', 'sfc\.invoice_id'\)/);
+    expect(adminCustomers).toMatch(/prepaySetupFeeAmount: term\.prepay_setup_fee_amount != null \? Number\(term\.prepay_setup_fee_amount\) : null,/);
+    const c360 = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'components', 'admin', 'Customer360ProfileV2.jsx'), 'utf8');
+    expect(c360).toMatch(/const setupShare = Number\(term\.prepaySetupFeeAmount\) \|\| 0;\s+const coverage = Math\.round\(\(subtotal - setupShare\) \* 100\) \/ 100;\s+if \(coverage > 0\) return coverage;/);
+  });
 
   test('wizard waiver lookup is strict; renewals seed prices from the immutable claim first (codex #3591 r71 P1)', () => {
     const publicQuoteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
@@ -597,7 +624,7 @@ describe('source contracts — where the lifecycle is wired', () => {
   test('booking re-reads the canonical qualifying families under the stamp lock and waives on any OTHER family (codex #3591 r37 P1)', () => {
     const at = booking.indexOf("const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';");
     const queued = booking.indexOf('const queuedElsewhere = await sp(', at);
-    const reload = booking.indexOf('loadExistingQualifyingServiceKeys(sp, custId)', at);
+    const reload = booking.indexOf("loadExistingQualifyingServiceKeys(sp, custId, { strict: true })", at);
     expect(at).toBeGreaterThan(-1);
     expect(reload).toBeGreaterThan(at);
     expect(reload).toBeLessThan(queued);

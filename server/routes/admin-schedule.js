@@ -5382,14 +5382,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (plans.isRodentBaitProgramKey(await plans.authoritativeServiceKey(trx, svc))) {
           const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
           const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
-          if (disclosed > 0
-            && !(await plans.settledSetupClaimForEstimate(trx, linkedEstimateId))
-            && !(await plans.estimateSetupCarriedElsewhere(trx, linkedEstimateId, svc.id))) {
-            await trx('scheduled_services')
-              .where({ id: svc.id })
-              .whereNull('pending_setup_fee')
-              .update({ pending_setup_fee: disclosed, updated_at: new Date() });
-            logger.info(`[schedule] rodent bait setup ($${disclosed}, disclosed on accepted estimate ${linkedEstimateId}) stamped on booking ${svc.id} — billed at first completion`);
+          if (disclosed > 0) {
+            const settledClaim = await plans.settledSetupClaimForEstimate(trx, linkedEstimateId);
+            if (settledClaim) {
+              // The invoice-mode/standard accept billed the setup before
+              // this series existed — anchor its claim to the root being
+              // booked (codex #3591 r72 P1) so a later void/refund of that
+              // invoice restores onto THIS series instead of paging.
+              if (!settledClaim.scheduled_service_id) {
+                await plans.anchorSetupFeeClaim(trx, { claimId: settledClaim.id, anchorId: svc.id });
+              }
+            } else if (!(await plans.estimateSetupCarriedElsewhere(trx, linkedEstimateId, svc.id))) {
+              await trx('scheduled_services')
+                .where({ id: svc.id })
+                .whereNull('pending_setup_fee')
+                .update({ pending_setup_fee: disclosed, updated_at: new Date() });
+              logger.info(`[schedule] rodent bait setup ($${disclosed}, disclosed on accepted estimate ${linkedEstimateId}) stamped on booking ${svc.id} — billed at first completion`);
+            }
           }
         }
       }

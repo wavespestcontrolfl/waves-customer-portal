@@ -1448,6 +1448,9 @@ function mapAnnualPrepayTerm(term) {
     prepayInvoiceStatus: term.prepay_invoice_status,
     prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
     prepayInvoiceSubtotal: term.prepay_invoice_subtotal != null ? Number(term.prepay_invoice_subtotal) : null,
+    // One-time setup share inside that subtotal (immutable claim ledger) —
+    // renewal defaults subtract it (codex #3591 r72 P1).
+    prepaySetupFeeAmount: term.prepay_setup_fee_amount != null ? Number(term.prepay_setup_fee_amount) : null,
     planLabel: term.plan_label,
     monthlyRate: term.monthly_rate != null ? Number(term.monthly_rate) : null,
     prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
@@ -2986,6 +2989,10 @@ router.get('/:id', async (req, res, next) => {
       .then((exists) => exists
         ? db('annual_prepay_terms as apt')
           .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
+          // The immutable one-time setup share riding the prepay invoice
+          // (codex #3591 r72 P1): renewals default from the pre-tax
+          // subtotal, and the $99 setup inside it is NOT renewal coverage.
+          .leftJoin('setup_fee_claims as sfc', 'apt.prepay_invoice_id', 'sfc.invoice_id')
           .leftJoin('scheduled_services as ss', 'apt.last_scheduled_service_id', 'ss.id')
           .where('apt.customer_id', c.id)
           .select(
@@ -2994,6 +3001,7 @@ router.get('/:id', async (req, res, next) => {
             'inv.status as prepay_invoice_status',
             'inv.total as prepay_invoice_total',
             'inv.subtotal as prepay_invoice_subtotal',
+            'sfc.amount as prepay_setup_fee_amount',
             'ss.service_type as last_scheduled_service_type',
           )
           .orderBy('apt.term_end', 'desc')

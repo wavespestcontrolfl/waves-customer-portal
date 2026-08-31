@@ -2970,7 +2970,10 @@ async function createSelfBooking(payload = {}) {
                 // rule may waive; the accept-side probes take the same posture).
                 if (rodentSetupQuote) {
                   const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
-                  const otherFamilies = (await loadExistingQualifyingServiceKeys(sp, custId) || [])
+                  // strict (codex #3591 r72 P1): the default mode converts a
+                  // failed read to [] — the throw this comment promises
+                  // never happened, and the booking stamped a waived $99.
+                  const otherFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true }) || [])
                     .filter((key) => key !== 'rodent_bait');
                   if (otherFamilies.length > 0) {
                     await retireOrWaiveDraft('existing_member');

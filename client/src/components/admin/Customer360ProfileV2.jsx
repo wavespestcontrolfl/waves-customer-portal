@@ -392,7 +392,17 @@ function deriveAnnualPrepayServiceOptions(customer, activeTerm = null, prepaidPl
 function annualPrepayPretaxBase(term) {
   if (!term) return 0;
   const subtotal = Number(term.prepayInvoiceSubtotal);
-  if (subtotal > 0) return subtotal;
+  if (subtotal > 0) {
+    // The first prepay's one-time bait-station setup rides its invoice
+    // subtotal but is NOT renewal coverage (codex #3591 r72 P1) — the
+    // renewal default must be coverage-only or it silently re-charges the
+    // $99 as unlabeled recurring money. The share comes from the immutable
+    // claim ledger via the term payload.
+    const setupShare = Number(term.prepaySetupFeeAmount) || 0;
+    const coverage = Math.round((subtotal - setupShare) * 100) / 100;
+    if (coverage > 0) return coverage;
+    return subtotal;
+  }
   return Number(term.prepayAmount) || 0;
 }
 

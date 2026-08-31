@@ -589,7 +589,27 @@ async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amoun
     err.switchConflict = true;
     throw err;
   }
-  if (fee > 0) await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee });
+  // A completion can WIN between the caller's derivation and this lock
+  // (codex #3591 r72 P1): it clears the stamp and writes its own live
+  // claim, so a bare stamp read sees neither positive nor negative and
+  // this would record a SECOND collectible setup on the prepay. Under the
+  // lock, a live sibling claim on the anchor means the setup is already
+  // consumed — conflict, the caller re-derives.
+  if (fee > 0) {
+    const siblingClaims = await trx('setup_fee_claims')
+      .where({ scheduled_service_id: anchorId })
+      .whereNot({ invoice_id: invoiceId })
+      .select('id', 'invoice_id');
+    for (const sibling of siblingClaims || []) {
+      const siblingInvoice = await trx('invoices').where({ id: sibling.invoice_id }).first('status');
+      if (siblingInvoice && !TERMINAL_INVOICE_STATUSES.includes(String(siblingInvoice.status || '').toLowerCase())) {
+        const err = new Error('The bait-station setup was just billed by a completion on this series — refresh and retry');
+        err.switchConflict = true;
+        throw err;
+      }
+    }
+    await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee });
+  }
   let retired = 0;
   if (stamp != null && stamp > 0) {
     retired = await trx('scheduled_services')

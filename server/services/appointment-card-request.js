@@ -1786,7 +1786,24 @@ async function loadSecureCardPageData(token) {
   try {
     const { customerOnAutopay } = require('./autopay-eligibility');
     const customerRow = await db('customers').where({ id: request.customer_id }).first();
-    if (customerRow && await customerOnAutopay(customerRow)) {
+    // The same owed-setup guard the funnel's autopay exemption runs (codex
+    // #3591 r72 P1): Auto Pay covers the CHARGES, not the DISCLOSURE — a
+    // direct rodent series owing its setup must reach the plan page so
+    // accepted_setup_fee/pending_setup_fee get stamped; marking the request
+    // satisfied here would complete with only the application billed. A
+    // failed probe keeps the page (rendering it is recoverable; a silently
+    // forgone $99 is not).
+    let rodentSetupOwedHere = false;
+    if (customerRow) {
+      try {
+        const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+        rodentSetupOwedHere = (await resolveDirectRodentSetupObligation(db, { id: request.scheduled_service_id })) > 0;
+      } catch (probeErr) {
+        logger.warn(`[appt-card-request] rodent setup probe failed on page load for request ${request.id} — keeping the disclosure page: ${probeErr.message}`);
+        rodentSetupOwedHere = true;
+      }
+    }
+    if (customerRow && !rodentSetupOwedHere && await customerOnAutopay(customerRow)) {
       // Already enrolled with a chargeable method — heal and show secured,
       // carrying the frozen completion cap (pre-push r2 P1), MONOTONIC-DOWN
       // (Codex #3153 r6 P1): never overwrite the sticky 0 sentinel or
