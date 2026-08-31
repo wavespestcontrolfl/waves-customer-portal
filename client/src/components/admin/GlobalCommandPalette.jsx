@@ -518,6 +518,7 @@ function GlobalCommandPalette(_props, ref) {
       if (!q || loading || attachmentsLoadingRef.current) return;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
+      setShowThreads(false); // a query from the History view shows its answer
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
