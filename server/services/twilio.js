@@ -245,6 +245,35 @@ const TwilioService = {
   // =========================================================================
 
   /**
+   * Provider-side reconciliation: did an outbound message to `to` carrying
+   * `bodyFragment` (case-insensitive) reach Twilio after `sentAfter`? Used
+   * where the local sms_log cannot be trusted as proof of absence (a
+   * post-accept log insert failure is swallowed by sendSMS). Answers
+   * { found } when the provider could be consulted, { unavailable: true }
+   * when it could not (no creds, API error) — callers must treat that as
+   * "unknown", never as "not sent".
+   */
+  async findOutboundMessageSince({ to, sentAfter, bodyFragment, limit = 50 }) {
+    const twilioClient = getClient();
+    if (!twilioClient || !to) return { unavailable: true };
+    try {
+      const messages = await twilioClient.messages.list({
+        to,
+        dateSentAfter: sentAfter ? new Date(sentAfter) : undefined,
+        limit,
+      });
+      const frag = String(bodyFragment || "").toLowerCase();
+      const found = messages.some(
+        (m) => m.direction !== "inbound" && String(m.body || "").toLowerCase().includes(frag),
+      );
+      return { found };
+    } catch (err) {
+      logger.warn(`[twilio] outbound message reconcile failed: ${err.message}`);
+      return { unavailable: true };
+    }
+  },
+
+  /**
    * Send a verification code via SMS for phone-based login
    */
   async sendVerificationCode(phone) {

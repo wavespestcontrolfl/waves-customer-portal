@@ -554,8 +554,9 @@ router.post('/sms', async (req, res, next) => {
     // suppressed send reports sent:true with nothing actually delivered, and
     // marking then would silently drop the ask); a suppressed send hands the
     // claim back instead. Fail-soft: bookkeeping never breaks a send that
-    // already happened — a stranded 'sending' claim self-expires after 10
-    // minutes (claimInlineForSend's stale-reclaim window).
+    // already happened — a stranded 'sending' claim is reconciled by
+    // claimInlineForSend on the next attempt (repaired to sent from the
+    // outbound log, or released once the provider confirms nothing left).
     if (claimedReviewRequestId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');

@@ -1807,13 +1807,15 @@ const ReviewService = {
    * orphaned by a crash between the claim and the post-send mark is
    * RECONCILED against the outbound log after 10 minutes: a
    * delivered-but-unmarked ask (provider send succeeded, the delivered
-   * stamp failed) is repaired to "sent". A stale claim with NO log
-   * evidence is NEVER handed back — twilio.js deliberately swallows a
-   * post-accept sms_log insert failure, so a missing row cannot prove the
-   * send didn't happen, and re-texting a solicitation is the one
-   * unacceptable outcome. The row stays 'sending' (it is unscheduled, so
-   * it can never auto-send) and createInline keeps reusing it, so no
-   * second token is ever minted around the block.
+   * stamp failed) is repaired to "sent". A stale claim with no LOCAL
+   * evidence is not handed back on that alone — twilio.js deliberately
+   * swallows a post-accept sms_log insert failure, so a missing row cannot
+   * prove the send didn't happen — the PROVIDER is asked instead: a
+   * matching message there repairs the stamp, a positive "none" proves a
+   * pre-provider crash and releases the claim, and an unreachable provider
+   * leaves the row 'sending' (unscheduled, so it can never auto-send, and
+   * createInline keeps reusing it so no second token mints around the
+   * block). Re-texting a solicitation is the one unacceptable outcome.
    */
   async claimInlineForSend(requestId) {
     if (!requestId) return false;
@@ -1830,7 +1832,7 @@ const ReviewService = {
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
       .where("updated_at", "<", staleBefore)
-      .first("id", "token");
+      .first("id", "token", "customer_id", "updated_at");
     if (!row) return false;
 
     // Any outbound sms_log row carrying this ask's link (long token or its
@@ -1862,9 +1864,34 @@ const ReviewService = {
       }
     }
 
-    // No evidence is NOT proof of no send (twilio.js swallows a post-accept
-    // sms_log insert failure) — fail closed: the claim is never handed back.
-    return false;
+    // No local evidence is NOT proof of no send (twilio.js swallows a
+    // post-accept sms_log insert failure). Ask the PROVIDER: a message to
+    // the customer carrying this link after the claim means it went out —
+    // repair the stamp; the provider positively confirming none = a
+    // pre-provider crash, and the claim is safely handed back so the
+    // customer's review sends aren't blocked forever. Provider unreachable
+    // = unknown → stay blocked (fail closed).
+    const owner = await db("customers").where({ id: row.customer_id }).first("phone");
+    const to = owner?.phone ? toE164(owner.phone) || owner.phone : null;
+    const TwilioService = require("./twilio");
+    for (const frag of frags) {
+      const provider = await TwilioService.findOutboundMessageSince({
+        to,
+        sentAfter: row.updated_at,
+        bodyFragment: frag,
+      });
+      if (provider.unavailable) return false;
+      if (provider.found) {
+        await this.markInlineDelivered(requestId);
+        return false;
+      }
+    }
+    const reclaimed = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("updated_at", "<", staleBefore)
+      .update({ updated_at: new Date() });
+    return reclaimed > 0;
   },
 
   /**

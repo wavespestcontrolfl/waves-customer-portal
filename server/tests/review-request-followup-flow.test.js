@@ -19,6 +19,10 @@ jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
   existingShortUrlFor: jest.fn().mockResolvedValue(null),
 }));
+// Provider-side reconcile for stale inline claims (claimInlineForSend).
+jest.mock('../services/twilio', () => ({
+  findOutboundMessageSince: jest.fn(async () => ({ unavailable: true })),
+}));
 // Manual create() runs under the per-customer advisory lock; with the db mock
 // there is no pool so the real runExclusive would fail closed (skipped:
 // no_connection). The lock's own behavior is covered by its suite — here it
@@ -602,22 +606,56 @@ describe('review request follow-up flow', () => {
     expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
-  test('a stale claim with no log evidence stays blocked — absence is not proof of no send', async () => {
+  // A stale claim with NO local log evidence is decided by the PROVIDER —
+  // twilio.js swallows post-accept sms_log insert failures, so a missing
+  // local row proves nothing on its own.
+  function wireStaleClaimNoLocalEvidence() {
     const rrQuery = chain();
     const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
     rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
-    rrQuery.first.mockResolvedValueOnce({ id: 'rr-inline', token: 'tok-64chars' });
-    smsLogQuery.first.mockResolvedValue(undefined); // no log row — but twilio.js
-    // swallows post-accept sms_log insert failures, so this proves nothing
+    rrQuery.first.mockResolvedValueOnce({
+      id: 'rr-inline', token: 'tok-64chars', customer_id: 'cust-1', updated_at: new Date('2026-06-03T13:00:00.000Z'),
+    });
+    smsLogQuery.first.mockResolvedValue(undefined);
+    const customersQuery = chain({ first: jest.fn().mockResolvedValue({ phone: '+19415550123' }) });
     db.mockImplementation((table) => {
       if (table === 'review_requests') return rrQuery;
       if (table === 'sms_log') return smsLogQuery;
+      if (table === 'customers') return customersQuery;
       throw new Error(`Unexpected table query: ${table}`);
     });
+    return { rrQuery };
+  }
+
+  test('stale claim, provider unreachable → stays blocked (unknown is not "not sent")', async () => {
+    const { findOutboundMessageSince } = require('../services/twilio');
+    findOutboundMessageSince.mockResolvedValueOnce({ unavailable: true });
+    const { rrQuery } = wireStaleClaimNoLocalEvidence();
 
     expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
-    // ONE update (the missed pending claim) — never a reclaim, never a repair.
-    expect(rrQuery.update).toHaveBeenCalledTimes(1);
+    expect(rrQuery.update).toHaveBeenCalledTimes(1); // only the missed pending claim
+  });
+
+  test('stale claim, provider has the message → repaired to sent, not reclaimed', async () => {
+    const { findOutboundMessageSince } = require('../services/twilio');
+    findOutboundMessageSince.mockResolvedValueOnce({ found: true });
+    const { rrQuery } = wireStaleClaimNoLocalEvidence();
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+    expect(findOutboundMessageSince).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550123', bodyFragment: 'tok-64chars',
+    }));
+    expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+  });
+
+  test('stale claim, provider confirms nothing left → pre-provider crash, claim released', async () => {
+    const { findOutboundMessageSince } = require('../services/twilio');
+    findOutboundMessageSince.mockResolvedValueOnce({ found: false });
+    const { rrQuery } = wireStaleClaimNoLocalEvidence();
+    rrQuery.update.mockResolvedValueOnce(1); // the reclaim
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
+    expect(rrQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
   test('reviewSmsAllowedNow refuses an exclusive email channel and fails closed on a prefs read failure', async () => {
