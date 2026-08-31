@@ -303,23 +303,28 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.projectLookupFailed = Boolean(projectProbe.error);
   const projectId = inputs.project?.id || null;
 
-  // License identity: for a project-backed visit the license belongs to the
-  // applicator who performed and signed the project (created_by_tech_id —
-  // resolveProjectApplicator's authority), not the scheduled assignee.
-  const licenseTechId = inputs.project?.created_by_tech_id || visit.technician_id || null;
-  const technicianProbe = await probe('technicians', unavailable, () => (licenseTechId
-    ? knex('technicians').where({ id: licenseTechId }).first('id', 'fl_applicator_license', 'license_expiry', 'license_categories')
-    : null));
+  // License identity — resolveProjectApplicator precedence: an EXPLICIT
+  // findings.applicator_fdacs_id is authoritative (the person who signed);
+  // created_by_tech_id fills blanks; the scheduled assignee only applies to
+  // non-project visits.
+  const projectFindings = inputs.project ? parseJsonObjectSafe(inputs.project.findings) : {};
+  const findingsApplicatorId = projectFindings.applicator_fdacs_id ? String(projectFindings.applicator_fdacs_id).trim() : null;
+  let technicianProbe = { value: null };
+  if (findingsApplicatorId) {
+    inputs.applicatorFindingsId = findingsApplicatorId;
+    inputs.licenseTechSource = 'project_findings_applicator';
+    technicianProbe = await probe('technicians (by applicator id)', unavailable, () => knex('technicians')
+      .where({ fl_applicator_license: findingsApplicatorId })
+      .first('id', 'fl_applicator_license', 'license_expiry', 'license_categories'));
+  } else {
+    const licenseTechId = inputs.project?.created_by_tech_id || visit.technician_id || null;
+    inputs.licenseTechSource = inputs.project?.created_by_tech_id ? 'project_applicator' : 'scheduled_technician';
+    technicianProbe = await probe('technicians', unavailable, () => (licenseTechId
+      ? knex('technicians').where({ id: licenseTechId }).first('id', 'fl_applicator_license', 'license_expiry', 'license_categories')
+      : null));
+  }
   inputs.technician = technicianProbe.value || null;
   inputs.technicianLookupFailed = Boolean(technicianProbe.error);
-  inputs.licenseTechSource = inputs.project?.created_by_tech_id ? 'project_applicator' : 'scheduled_technician';
-  if (!inputs.technician && inputs.project) {
-    // Legacy projects: applicator identity may live only in findings JSON.
-    const findings = parseJsonObjectSafe(inputs.project.findings);
-    if (findings.applicator_fdacs_id) {
-      inputs.applicatorFindingsId = String(findings.applicator_fdacs_id);
-    }
-  }
 
   const [
     activeAppsProbe, retractedAppsProbe, photosProbe, deliveryProbe, liveInvoiceProbe, terminalInvoiceProbe,
@@ -739,7 +744,7 @@ function deriveCloseoutFacts(inputs) {
   else if (notesEmailStatus === 'sent') reportDelivery = fact('done', 'delivery_sent_per_record_notes', { posture: reportPosture, sentAt: isoOrNull(tokenNotes.serviceReportV1EmailSentAt) });
   else if (notesEmailStatus === 'failed') reportDelivery = fact('failed', 'delivery_exhausted_per_record_notes', { posture: reportPosture, lastError: scrubErrorText(tokenNotes.serviceReportV1EmailError) });
   else if (notesEmailStatus === 'skipped') {
-    const skip = classifyDeliverySkip(notes.serviceReportV1EmailError);
+    const skip = classifyDeliverySkip(tokenNotes.serviceReportV1EmailError);
     reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), posture: reportPosture, lastError: scrubErrorText(tokenNotes.serviceReportV1EmailError) });
   }
   else if (notesEmailStatus === 'queued' || notesEmailStatus === 'sending') reportDelivery = fact('pending', `delivery_${notesEmailStatus}`, { posture: reportPosture });
@@ -974,9 +979,11 @@ function deriveCloseoutFacts(inputs) {
   else if (requirements.requiresLicense !== true) license = fact('not_required', 'catalog_no_license_required', { ruleSource: 'catalog', requirementsSource: requirements.source });
   else if (inputs.technicianLookupFailed) license = fact('unknown', 'technicians_lookup_failed', { requiredCategory: requirements.licenseCategory || null });
   else if (!tech && inputs.applicatorFindingsId) {
-    // Legacy project: the applicator's FDACS id lives only in findings JSON —
-    // identity recorded, expiry/categories unknowable from here.
-    license = fact('done', 'project_applicator_on_findings', { applicatorFdacsId: inputs.applicatorFindingsId, expiryUnrecorded: true, source: 'project_findings' });
+    // The signer's FDACS id exists only in findings JSON — with a required
+    // category the verdict is unverifiable from here, never a green.
+    license = requirements.licenseCategory
+      ? fact('unknown', 'applicator_category_unverifiable', { applicatorFdacsId: inputs.applicatorFindingsId, requiredCategory: requirements.licenseCategory, source: 'project_findings' })
+      : fact('done', 'project_applicator_on_findings', { applicatorFdacsId: inputs.applicatorFindingsId, expiryUnrecorded: true, source: 'project_findings' });
   } else if (!tech) license = fact('pending', 'no_technician_on_visit', { requiredCategory: requirements.licenseCategory || null });
   else {
     let cats = tech.license_categories;

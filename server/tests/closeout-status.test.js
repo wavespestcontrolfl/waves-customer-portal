@@ -573,9 +573,14 @@ describe('closeout-status: comms + follow-up', () => {
     expect(nonPerf.facts.application).toMatchObject({ state: 'done', reason: 'applications_despite_non_performed_outcome' });
     expect(nonPerf.contradictions.map((c) => c.code)).toContain('applications_on_non_performed_visit');
     const findingsOnly = deriveCloseoutFacts(closedOutInputs({
-      requirements: baseRequirements({ requiresLicense: true }), technician: null, applicatorFindingsId: 'JE362022',
+      requirements: baseRequirements({ requiresLicense: true, licenseCategory: null }), technician: null, applicatorFindingsId: 'JE362022',
     }));
     expect(findingsOnly.facts.license).toMatchObject({ state: 'done', reason: 'project_applicator_on_findings', applicatorFdacsId: 'JE362022' });
+    // A required category cannot be proven from a findings-only id (codex r21).
+    const findingsWithCategory = deriveCloseoutFacts(closedOutInputs({
+      requirements: baseRequirements({ requiresLicense: true, licenseCategory: 'WDO' }), technician: null, applicatorFindingsId: 'JE362022',
+    }));
+    expect(findingsWithCategory.facts.license).toMatchObject({ state: 'unknown', reason: 'applicator_category_unverifiable' });
     // Mirror fallback reads the TOKEN record's notes, not the primary's.
     const rec1 = { ...closedOutInputs().record, id: 'rec-new', report_view_token: null, report_generated_at: null, structured_notes: { completionSmsStatus: 'sent' } };
     const rec2 = { ...closedOutInputs().record, id: 'rec-old', structured_notes: { serviceReportV1EmailStatus: 'sent', serviceReportV1EmailSentAt: '2026-08-30T18:06:00Z' } };
