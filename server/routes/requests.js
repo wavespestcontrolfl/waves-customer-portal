@@ -29,7 +29,11 @@ function etDisplayDate(value) {
 // `effectiveDate` is the ET calendar date the cancellation took effect —
 // the ORIGINAL request's date on retries, so a next-day retry never says
 // "as of today".
-function cancellationOutcome(result, confirmation, effectiveAt) {
+// `confirmationChannels` (additive) lists EVERY channel that accepted —
+// a customer-initiated cancel sends both, and the portal copy must name
+// only what was actually accepted (codex pre-push P1: "text and email"
+// on an sms-only outcome).
+function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
   let effectiveDate = null;
   try {
     const at = effectiveAt ? new Date(effectiveAt) : new Date();
@@ -41,6 +45,7 @@ function cancellationOutcome(result, confirmation, effectiveAt) {
     processed: !!(result && result.ok && result.churned),
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
+    confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
     effectiveDate,
   };
 }
@@ -708,7 +713,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             cancellation: cancellationOutcome(
               cancellationResult,
               confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-              request.created_at
+              request.created_at,
+              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
             ),
           }
         : {}),

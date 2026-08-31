@@ -189,7 +189,7 @@ describe('POST /api/requests cancellation guard', () => {
     sendCancellationReceived.mockResolvedValueOnce({ ok: true });
     res = await postCancellation(baseUrl);
     body = await res.json();
-    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, visitsPulled: 1, confirmation: 'email' }));
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, visitsPulled: 1, confirmation: 'email', confirmationChannels: ['email'] }));
 
     // Customer-initiated ⇒ BOTH channels (owner ruling 2026-08-31): a
     // delivered text does not suppress the email; 'sms' stays the reported
@@ -201,7 +201,7 @@ describe('POST /api/requests cancellation guard', () => {
     sendCancellationReceived.mockResolvedValueOnce({ ok: true });
     res = await postCancellation(baseUrl);
     body = await res.json();
-    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, confirmation: 'sms' }));
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, confirmation: 'sms', confirmationChannels: ['sms', 'email'] }));
     expect(sendCancellationReceived).toHaveBeenCalledTimes(1);
   }));
 

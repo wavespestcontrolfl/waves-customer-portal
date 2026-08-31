@@ -9882,6 +9882,9 @@ function MyPlanTab({ customer, focusService }) {
   // is already closed; false = the office is finishing it by hand.
   const [cancelProcessed, setCancelProcessed] = useState(false);
   const [cancelConfirmation, setCancelConfirmation] = useState(null);
+  // Channels the server actually ACCEPTED the confirmation on (additive
+  // `confirmationChannels`); the copy below names exactly those, never more.
+  const [cancelConfirmationChannels, setCancelConfirmationChannels] = useState([]);
   // ET calendar date the server reports the cancel took effect (YYYY-MM-DD);
   // on a retry this is the ORIGINAL request's date, never "today".
   const [cancelEffectiveDate, setCancelEffectiveDate] = useState(null);
@@ -10804,6 +10807,7 @@ function MyPlanTab({ customer, focusService }) {
                         });
                         setCancelProcessed(result?.cancellation?.processed === true);
                         setCancelConfirmation(['sms', 'email'].includes(result?.cancellation?.confirmation) ? result.cancellation.confirmation : null);
+                        setCancelConfirmationChannels(Array.isArray(result?.cancellation?.confirmationChannels) ? result.cancellation.confirmationChannels.filter((c) => ['sms', 'email'].includes(c)) : []);
                         setCancelEffectiveDate(/^\d{4}-\d{2}-\d{2}$/.test(result?.cancellation?.effectiveDate || '') ? result.cancellation.effectiveDate : null);
                         setCancelSubmitted(true);
                         setShowCancelForm(false);
@@ -10825,7 +10829,7 @@ function MyPlanTab({ customer, focusService }) {
             {cancelSubmitted && (
               <div style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
                 {cancelProcessed
-                  ? `Your plan is cancelled${cancelEffectiveDate ? ` as of ${(() => { const [y, m, d] = cancelEffectiveDate.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); })()}` : ''}. Upcoming visits are off the calendar and autopay is off. Nothing more is charged for future service; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${cancelConfirmation === 'sms' ? ' A confirmation text and email are on the way.' : cancelConfirmation === 'email' ? ' A confirmation email is on its way.' : ' Keep this screen as your confirmation.'} Changed your mind? Call (941) 297-5749 and we will put it back.`
+                  ? `Your plan is cancelled${cancelEffectiveDate ? ` as of ${(() => { const [y, m, d] = cancelEffectiveDate.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); })()}` : ''}. Upcoming visits are off the calendar and autopay is off. Nothing more is charged for future service; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${cancelConfirmationChannels.includes('sms') && cancelConfirmationChannels.includes('email') ? ' A confirmation text and email are on the way.' : cancelConfirmation === 'sms' ? ' A confirmation text is on its way.' : cancelConfirmation === 'email' ? ' A confirmation email is on its way.' : ' Keep this screen as your confirmation.'} Changed your mind? Call (941) 297-5749 and we will put it back.`
                   : 'We received your cancellation and are closing out your plan by hand. You will hear from us within 1 business day to confirm exactly what has stopped.'}
               </div>
             )}
