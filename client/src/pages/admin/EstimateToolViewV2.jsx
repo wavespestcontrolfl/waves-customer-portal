@@ -2914,7 +2914,10 @@ export default function EstimateToolViewV2({
         ...(key === "preslabVolume" && !f._preslabJobContextEdited
           ? { preslabJobContext: String(val || "NONE").toUpperCase() === "NONE" ? "standalone" : "builderBatch" }
           : {}),
-        ...(key === "address" ? { measuredTurfSf: "" } : {}),
+        // Typing a NEW address immediately invalidates the previous
+        // address's unit count — the save-before-lookup path could
+        // otherwise permanently verify A's count against B (codex P1 r7).
+        ...(key === "address" ? { measuredTurfSf: "", unitCount: "", _unitCountEdited: false } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
         ...(key === "unitCount" ? { _unitCountEdited: true } : {}),

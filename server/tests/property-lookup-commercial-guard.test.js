@@ -527,6 +527,33 @@ describe('buildEnrichedProfile end-to-end', () => {
     expect(profile.fieldEvidence.propertyType.value).toBe('Multifamily');
   });
 
+  test('a verified count corrects the parcel signal the public-quote guard reads (codex P1 r7)', () => {
+    const base = {
+      formattedAddress: '30 Example Duplex Ct, Testville, FL 00000',
+      propertyType: 'Single Family',
+      squareFootage: 2200,
+      lotSize: 9000,
+      _source: 'county',
+      _parcel: { county: 'Sarasota', parcelId: 'X1', residentialUnits: 48 },
+    };
+    // Stale county 48, tech verified 1: the emitted parcel signal follows
+    // the correction, so a unit-suffixed quote is no longer forced into
+    // the site-confirmed path.
+    const corrected = buildEnrichedProfile({
+      ...base,
+      unitCount: 1,
+      _fieldEvidence: { unitCount: { value: 1, sourceType: 'verified', fieldVerify: false } },
+    }, {}, 27.26, -82.51);
+    expect(corrected.parcel.residentialUnits).toBe(1);
+    // unitOnMultiUnitParcelForcesSiteQuote (routes/public-quote.js, covered
+    // by its own suite) takes max(unitCount, parcel.residentialUnits) —
+    // assert the corrected signal keeps that max at 1 so the guard cannot
+    // fire, and the stale signal keeps 48 so it still does.
+    expect(Math.max(Number(corrected.unitCount) || 0, Number(corrected.parcel.residentialUnits) || 0)).toBe(1);
+    const stale = buildEnrichedProfile({ ...base, unitCount: 1 }, {}, 27.26, -82.51);
+    expect(stale.parcel.residentialUnits).toBe(48);
+  });
+
   test('county-backed commercial profile is unchanged', () => {
     const profile = buildEnrichedProfile(countyCommercialRecord(), {}, 27.26, -82.51);
     expect(profile.category).toBe('COMMERCIAL');

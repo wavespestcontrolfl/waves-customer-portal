@@ -2134,7 +2134,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       // unit-suffix guard needs the attested count for the 2–4-unit parcels
       // detectCategory now classifies residential — without it a "Unit B"
       // lead at a duplex would price off the whole building's sqft.
-      residentialUnits: Number(rc._parcel.residentialUnits) || null,
+      // A technician's verified count corrects THIS signal too (codex P1
+      // r7): unitOnMultiUnitParcelForcesSiteQuote maxes it with the
+      // top-level count, so a stale county 48 would keep forcing every
+      // unit-address quote into the site-confirmed path after a verified
+      // 48→1 correction. (verifiedUnitCountOf is null on aggregated
+      // records, so association parcels keep their aggregate figure.)
+      residentialUnits: verifiedUnitCountOf(rc) ?? (Number(rc._parcel.residentialUnits) || null),
       source: 'fdor_cadastral',
     } : null,
 
