@@ -45,6 +45,10 @@ import {
 } from '../ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import VisualNotesReviewSection from './VisualNotesReviewSection';
+// Pure display helpers shared with the tech Visit Brief (style-free by
+// design) — the drawer renders the same estimate-source lines and brief
+// facts in V2 zinc.
+import { fmtMoney, quotedLineLabel, quotedTermsLabel } from '../../pages/tech/visitBrief';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -75,6 +79,114 @@ function Field({ label, children }) {
       </div>
       <div className="text-14 text-ink-primary">{children}</div>
     </div>
+  );
+}
+
+// The visit's quoted terms + access facts, fetched from the same
+// per-visit endpoints the tech Visit Brief uses (the job id IS the
+// scheduled service id). Display-only and fail-soft: either endpoint
+// missing just hides its section. "Amount due today" deliberately does
+// NOT render here — the billing-lane prediction rides the schedule day
+// payload only, and the drawer must not re-derive money.
+const CODE_LABELS = [
+  ['neighborhoodGate', 'Neighborhood gate'],
+  ['propertyGate', 'Property gate'],
+  ['garage', 'Garage'],
+  ['lockbox', 'Lockbox'],
+];
+
+function VisitExtras({ extras }) {
+  if (!extras) return null;
+  const estimate = extras.estimate;
+  const brief = extras.brief || null;
+  // The generic visit brief carries access/last_visit itself; the WDO
+  // brief does not — its facts block (when the gate serves one) does.
+  const servedVisitBrief = brief && brief.type !== 'wdo_inspection' ? brief.brief : null;
+  // Live facts WIN over the cached brief's copies — the brief is a
+  // sweep-time snapshot; a code changed or a visit completed since then
+  // must show fresh.
+  const access = brief?.facts?.access || servedVisitBrief?.access || null;
+  const lastVisit = brief?.facts?.last_visit || servedVisitBrief?.last_visit || null;
+  const deposit = estimate?.linked ? estimate.deposit : null;
+  const codeRows = access
+    ? CODE_LABELS.map(([key, label]) => (access.codes?.[key] ? [label, access.codes[key]] : null)).filter(Boolean)
+    : [];
+  const accessRows = access
+    ? [
+      access.pets ? ['Pets', access.pets] : null,
+      access.chemicalSensitivities ? ['Chemical sensitivity', access.chemicalSensitivities] : null,
+      access.parkingNotes ? ['Parking', access.parkingNotes] : null,
+      access.accessNotes ? ['Access', access.accessNotes] : null,
+      access.specialInstructions ? ['Instructions', access.specialInstructions] : null,
+    ].filter(Boolean)
+    : [];
+  const products = Array.isArray(lastVisit?.products)
+    ? lastVisit.products.map((p) => p?.name).filter(Boolean)
+    : [];
+  return (
+    <>
+      {estimate?.linked && (
+        <Field label={`Quoted${estimate.estimateSlug ? ` · ${estimate.estimateSlug}` : ''}`}>
+          {(estimate.lines || []).map((line, i) => {
+            const priceLabel = quotedLineLabel(line);
+            return (
+              <div key={i}>
+                {line.estimateLabel || line.name || 'Service'}
+                {priceLabel ? <span className="text-ink-secondary"> — {priceLabel}</span> : null}
+              </div>
+            );
+          })}
+          {/* Honest framing (owner ruling 2026-08-02): unit-aware terms
+              when the lines prove their units — never a blended
+              monthly+one-time headline number. */}
+          {quotedTermsLabel(estimate) && (
+            <div className="font-medium">{quotedTermsLabel(estimate)}</div>
+          )}
+          {deposit?.payerBilled && (
+            <div className="text-ink-secondary">Bills to payer — do not collect from the homeowner</div>
+          )}
+          {Number(deposit?.paid) > 0 && (
+            <div className="text-ink-secondary">
+              Deposit paid {fmtMoney(deposit.paid)}
+              {Number(deposit.creditRemaining) > 0 ? ` · ${fmtMoney(deposit.creditRemaining)} credit remaining` : ''}
+            </div>
+          )}
+          {deposit?.required && !(Number(deposit?.paid) > 0) && (
+            <div className="text-ink-secondary">
+              Deposit required{Number(deposit.policyAmount) > 0 ? ` (${fmtMoney(deposit.policyAmount)})` : ''}
+            </div>
+          )}
+        </Field>
+      )}
+      {(codeRows.length > 0 || accessRows.length > 0) && (
+        <Field label="Access">
+          {codeRows.map(([label, code]) => (
+            <div key={label}>
+              <span className="text-ink-secondary">{label}: </span>
+              <span className="font-medium">{code}</span>
+            </div>
+          ))}
+          {accessRows.map(([label, value]) => (
+            <div key={label}>
+              <span className="text-ink-secondary">{label}: </span>{value}
+            </div>
+          ))}
+        </Field>
+      )}
+      {lastVisit && (lastVisit.date || products.length > 0) && (
+        <Field label="Last Visit">
+          {lastVisit.date && (
+            <div>
+              {String(lastVisit.date).slice(0, 10)}
+              {lastVisit.type ? ` · ${lastVisit.type}` : ''}
+            </div>
+          )}
+          {products.length > 0 && (
+            <div className="text-ink-secondary">Products: {products.join(', ')}</div>
+          )}
+        </Field>
+      )}
+    </>
   );
 }
 
@@ -194,6 +306,32 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     // jobId deliberately excluded — re-running on jobId change is
     // covered by the effect above and would cause double-fetches.
   }, [refetchSignal]);
+
+  // Quoted terms + brief facts for the open job — the job id is the
+  // scheduled service id, so the tech Visit Brief's per-visit endpoints
+  // apply directly. Fail-soft: a missing/404 answer hides the section.
+  const [visitExtras, setVisitExtras] = useState(null);
+  useEffect(() => {
+    setVisitExtras(null);
+    if (!jobId) return undefined;
+    let cancelled = false;
+    (async () => {
+      const soft = async (path) => {
+        try {
+          const res = await fetch(`${API_BASE}/admin/schedule/${jobId}/${path}`, {
+            headers: adminAuthHeaders(),
+          });
+          if (!res.ok) return null;
+          return await res.json();
+        } catch {
+          return null;
+        }
+      };
+      const [estimate, brief] = await Promise.all([soft('estimate-source'), soft('visit-brief')]);
+      if (!cancelled) setVisitExtras({ estimate, brief });
+    })();
+    return () => { cancelled = true; };
+  }, [jobId]);
 
   // Fetch active techs once on first open. The list rarely changes
   // mid-session, so caching it across opens is fine. The current
@@ -421,6 +559,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
             </Field>
             <Field label="Notes (customer-facing)">{job.notes}</Field>
             <Field label="Internal Notes">{job.internal_notes}</Field>
+            <VisitExtras extras={visitExtras} />
             {visualServiceNotesEnabled && (
               <VisualNotesReviewSection jobId={job.id} />
             )}
