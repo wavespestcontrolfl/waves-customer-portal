@@ -5399,15 +5399,29 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // bills the setup itself), so the exemption is deferred until the
       // acceptance actually lands instead of assumed up front.
       if (isRecurring && (!linkedEstimateId || acceptEstimateOnBook)) {
-        const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
-        const owedSetup = await resolveDirectRodentSetupObligation(trx, { id: svc.id });
+        const plans = require('../services/secure-appointment-plans');
+        const owedSetup = await plans.resolveDirectRodentSetupObligation(trx, { id: svc.id });
         if (owedSetup > 0) {
-          await trx('scheduled_services')
-            .where({ id: svc.id })
-            .whereNull('pending_setup_fee')
-            .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
-          directRodentSetupStamp = owedSetup;
-          logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on booking ${svc.id} — billed at first completion unless estimate acceptance bills it`);
+          // A Customer 360 coverage-only prepay already billed this setup
+          // before any series existed (codex #3591 r73 P1): its claim sits
+          // anchor-less on the live prepay invoice. This booking IS the
+          // covered series — anchor the claim to it (so a later refund
+          // restores here) instead of stamping a second collectible setup.
+          // The mint takes the same customer-row lock this transaction
+          // holds, so the claim is either committed and visible here or the
+          // mint waits and sees this root.
+          const coverageClaim = await plans.liveAnchorlessCoverageSetupClaim(trx, { customerId, rootId: svc.id });
+          if (coverageClaim) {
+            await plans.anchorSetupFeeClaim(trx, { claimId: coverageClaim.id, anchorId: svc.id });
+            logger.info(`[schedule] rodent bait setup already billed on prepay invoice ${coverageClaim.invoice_id} — claim anchored to booking ${svc.id}, no stamp`);
+          } else {
+            await trx('scheduled_services')
+              .where({ id: svc.id })
+              .whereNull('pending_setup_fee')
+              .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
+            directRodentSetupStamp = owedSetup;
+            logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on booking ${svc.id} — billed at first completion unless estimate acceptance bills it`);
+          }
         }
       } else if (isRecurring && linkedEstimateId) {
         // A PREVIOUSLY accepted estimate booked afterward (codex #3591 r66

@@ -70,6 +70,21 @@ function makeReviseDatabase({
       };
       return leadChain;
     }
+    if (table === 'scheduled_services') {
+      // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
+      // (planGate: false): it reaches the live rows even for a non-member
+      // customer, so the fake must serve an empty account instead of
+      // throwing (a real lookup failure here 503s the save by design).
+      const rowsChain = {
+        where: () => rowsChain,
+        whereNotIn: () => rowsChain,
+        whereNull: () => rowsChain,
+        columnInfo: async () => ({ is_recurring: {} }),
+        select: async () => [],
+        first: async () => null,
+      };
+      return rowsChain;
+    }
     if (table !== 'estimates') {
       // Any side lookup (prior qualifying services, pricing sync) is
       // best-effort in the pipeline — throwing here proves the fallback path.

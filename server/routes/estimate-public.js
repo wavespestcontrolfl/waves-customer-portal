@@ -8282,7 +8282,10 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
         // membership/catalog read as "no plan" → [] — indistinguishable from
         // a genuinely lapsed waiver — which would reprice a member's quote
         // with the $99 instead of taking the quote-required path below.
-        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true }) || [];
+        // planGate: false (codex #3591 r73 P1): the waiver's validity is
+        // decided by live qualifying families, not the membership stamp —
+        // the same ungated read the grant side uses.
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
         setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
       } catch (probeErr) {
         // Validity UNKNOWN (codex #3591 r41 P1): neither keep the waiver

@@ -42,7 +42,7 @@ const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePr
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null, invoice = null, claimsByEstimate = [] } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null, invoice = null, claimsByEstimate = [], prepayTermsList = null } = {}) {
   if (liveVisitProbe === undefined) liveVisitProbe = scheduledService;
   const writes = [];
   const trx = (table) => {
@@ -52,6 +52,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.orWhere = () => q;
     q.orWhereNotNull = () => q;
     q.whereNull = (col) => { q._whereNull = col; return q; };
+    q.whereNotNull = () => q;
     q.forUpdate = () => q;
     q.first = async () => {
       if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : scheduledService;
@@ -71,6 +72,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.orderBy = () => q;
     q.select = async () => {
       if (table === 'scheduled_services') return rootsForCoverage || [];
+      if (table === 'annual_prepay_terms') return prepayTermsList || [];
       if (table === 'setup_fee_claims') {
         if (q._where && 'estimate_id' in q._where) return claimsByEstimate;
         if (q._where && 'scheduled_service_id' in q._where) return siblingClaim ? [siblingClaim] : [];
@@ -472,6 +474,51 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
       .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/no longer owed/) });
   });
 
+  test('the mint locks the CUSTOMER ROW before the probe + insert — serialized with the booking creators (codex #3591 r73 P1)', () => {
+    // Behavior can't race in a unit test; the contract is the lock's
+    // presence and ORDER: customers FOR UPDATE, then the coverage probe,
+    // then the anchor-less insert — all inside retireCoverageOnlySetupClaim.
+    const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    const fnAt = plansSrc.indexOf('async function retireCoverageOnlySetupClaim');
+    const lockAt = plansSrc.indexOf("await trx('customers').where({ id: customerId }).forUpdate().first('id');", fnAt);
+    const probeAt = plansSrc.indexOf('findDirectRodentSetupObligationForCoverage(trx, { customerId, coverageServiceType })', fnAt);
+    const insertAt = plansSrc.indexOf('recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee })', fnAt);
+    expect(fnAt).toBeGreaterThan(-1);
+    expect(lockAt).toBeGreaterThan(fnAt);
+    expect(lockAt).toBeLessThan(probeAt);
+    expect(probeAt).toBeLessThan(insertAt);
+  });
+
+  describe('liveAnchorlessCoverageSetupClaim — a booking consumes the coverage-only prepay claim instead of stamping (codex #3591 r73 P1)', () => {
+    const { liveAnchorlessCoverageSetupClaim } = plans;
+    const term = { prepay_invoice_id: 'inv-prepay', coverage_service_type: 'Rodent Bait Stations' };
+    const claimRow = { id: 'claim-1', invoice_id: 'inv-prepay', amount: 99 };
+    const root = { id: 'root-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null, recurring_parent_id: null, pending_setup_fee: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' };
+
+    test('a live term-backed anchor-less claim matching the root\'s coverage is returned', async () => {
+      const c = conn({ scheduledService: root, prepayTermsList: [term], claim: claimRow, invoice: { status: 'sent' } });
+      expect(await liveAnchorlessCoverageSetupClaim(c, { customerId: 'cust-1', rootId: 'root-rb' })).toEqual(claimRow);
+    });
+
+    test('a terminal prepay invoice keeps its claim as an OPEN obligation — never consumed by a booking', async () => {
+      const c = conn({ scheduledService: root, prepayTermsList: [term], claim: claimRow, invoice: { status: 'refunded' } });
+      expect(await liveAnchorlessCoverageSetupClaim(c, { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+    });
+
+    test('coverage naming another family, a non-rodent root, or no claim → null', async () => {
+      const pestTerm = { prepay_invoice_id: 'inv-prepay', coverage_service_type: 'Quarterly Pest Control' };
+      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: root, prepayTermsList: [pestTerm], claim: claimRow, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      const pestRootRow = { ...root, service_type: 'Quarterly Pest Control' };
+      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: pestRootRow, prepayTermsList: [term], claim: claimRow, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: root, prepayTermsList: [term], claim: null, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+    });
+
+    test('the direct booking branch anchors the claim instead of stamping (source contract)', () => {
+      const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+      expect(adminSchedule).toMatch(/const coverageClaim = await plans\.liveAnchorlessCoverageSetupClaim\(trx, \{ customerId, rootId: svc\.id \}\);\s+if \(coverageClaim\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: coverageClaim\.id, anchorId: svc\.id \}\);[\s\S]*?\} else \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: owedSetup, updated_at: new Date\(\) \}\);/);
+    });
+  });
+
   test('a COMPLETED root with live children is still the series (no second setup); a dead completed root is not; a stale-labeled LINKED bait root matches by catalog (codex #3591 r42 P1)', async () => {
     mockQualifyingKeys = async () => ['rodent_bait'];
     // Estimate-origin root whose first visit completed, children live → accept decided → null.
@@ -529,7 +576,7 @@ describe('source contracts — where the lifecycle is wired', () => {
     // appointment standing when the attach loses a race or accept throws — so
     // accept-on-book series stamp too, and only an ALREADY-ACCEPTED linked
     // estimate (its accept billed the setup decision) skips.
-    expect(adminSchedule).toMatch(/if \(isRecurring && \(!linkedEstimateId \|\| acceptEstimateOnBook\)\) \{\s+const \{ resolveDirectRodentSetupObligation \} = require\('\.\.\/services\/secure-appointment-plans'\);/);
+    expect(adminSchedule).toMatch(/if \(isRecurring && \(!linkedEstimateId \|\| acceptEstimateOnBook\)\) \{\s+const plans = require\('\.\.\/services\/secure-appointment-plans'\);\s+const owedSetup = await plans\.resolveDirectRodentSetupObligation\(trx, \{ id: svc\.id \}\);/);
     // The stamp is recorded for the post-commit acceptance to retire…
     expect(adminSchedule).toMatch(/directRodentSetupStamp = owedSetup;/);
     // A PREVIOUSLY accepted estimate booked afterward stamps its DISCLOSED
@@ -569,9 +616,24 @@ describe('source contracts — where the lifecycle is wired', () => {
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
 
+  test('every account-wide root scan retains terminal roots with live children via the shared predicate; the migration rollback consults the admin audit key (codex #3591 r73 P1/P2)', () => {
+    // The revival, reinstatement, and reversal anchor lookups must never
+    // drop a cancelled root that still has a live child by raw status —
+    // seriesCanStillConsume is the single liveness rule.
+    expect(invoice).not.toMatch(/whereNotIn\("status", \["cancelled", "canceled", "skipped", "no_show"\]\)/);
+    expect((invoice.match(/if \(!\(await seriesCanStillConsume\(conn, root\)\)\) continue;/g) || []).length).toBe(5);
+    // down() restores the discount-rule flags only when the LATEST audit
+    // under EITHER key (migration-owned or the admin endpoint's
+    // discount_rules:rodent_bait) is this migration's up() — an operator's
+    // later toggle-and-restore is their decision, not the migration's.
+    const migrationSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260829000040_rodent_bait_bracket_realignment.js'), 'utf8');
+    expect(migrationSrc).toMatch(/whereIn\('config_key', \['service_discount_rules\.rodent_bait', 'discount_rules:rodent_bait'\]\)/);
+    expect(migrationSrc).toMatch(/if \(migrationOwnsRuleCycle && ruleAudit\?\.old_value && rule && rule\.tier_qualifier === true && rule\.exclude_from_pct_discount === false\) \{/);
+  });
+
   test('booking waiver read strict · Auto Pay page-load keeps the disclosure page · renewal defaults are coverage-only (codex #3591 r72 P1)', () => {
     const bookingSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
-    expect(bookingSrc).toMatch(/loadExistingQualifyingServiceKeys\(sp, custId, \{ strict: true \}\)/);
+    expect(bookingSrc).toMatch(/loadExistingQualifyingServiceKeys\(sp, custId, \{ strict: true, planGate: false \}\)/);
     const cardRequest = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-card-request.js'), 'utf8');
     expect(cardRequest).toMatch(/let rodentSetupOwedHere = false;[\s\S]*?resolveDirectRodentSetupObligation\(db, \{ id: request\.scheduled_service_id \}\)[\s\S]*?rodentSetupOwedHere = true;[\s\S]*?if \(customerRow && !rodentSetupOwedHere && await customerOnAutopay\(customerRow\)\) \{/);
     const adminCustomers = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
@@ -583,7 +645,7 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   test('wizard waiver lookup is strict; renewals seed prices from the immutable claim first (codex #3591 r71 P1)', () => {
     const publicQuoteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-    expect(publicQuoteSrc).toMatch(/loadExistingQualifyingServiceKeys\(db, existingForWaiver\.id, \{ strict: true \}\)/);
+    expect(publicQuoteSrc).toMatch(/loadExistingQualifyingServiceKeys\(db, existingForWaiver\.id, \{ strict: true, planGate: false \}\)/);
     const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
     expect(renewals).toMatch(/conn\('setup_fee_claims'\)\.where\(\{ invoice_id: term\.prepay_invoice_id \}\)\.first\('amount'\);[\s\S]*?if \(!\(setupTotal > 0\)\) \{[\s\S]*?\/\\bsetup\\b\/i/);
   });
@@ -599,7 +661,7 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   test('direct resolvers read the waiver STRICTLY; the reversal restores from the claim anchor; both anchor-less prepay restore searches use the consumable-series predicate (codex #3591 r69 P1)', () => {
     const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
-    expect((plansSrc.match(/loadExistingQualifyingServiceKeys\(database, (row\.customer_id|customerId), \{ strict: true \}\)/g) || []).length).toBe(2);
+    expect((plansSrc.match(/loadExistingQualifyingServiceKeys\(database, (row\.customer_id|customerId), \{ strict: true, planGate: false \}\)/g) || []).length).toBe(2);
     expect(invoice).toMatch(/first\("id", "amount", "scheduled_service_id"\);[\s\S]*?let anchorId = claimRecord\?\.scheduled_service_id \|\| null;\s+if \(!anchorId && invoiceRow\.scheduled_service_id\) \{/);
     const locked = invoice.slice(invoice.indexOf('async _restoreRetiredSetupFeeClaimLocked'), invoice.indexOf('const parent = await conn("scheduled_services")', invoice.indexOf('async _restoreRetiredSetupFeeClaimLocked')));
     expect(locked).not.toMatch(/whereNotIn\("status", \["cancelled", "canceled"\]\)/);
@@ -610,7 +672,7 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   test('public accept: strict waiver re-check, setup in both commercial prepay tax blends, and a ledgered claim on the standard invoice (codex #3591 r68 P1)', () => {
     const estimatePublic = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
-    expect(estimatePublic).toMatch(/loadExistingQualifyingServiceKeys\(db, estimate\.customer_id, \{ strict: true \}\) \|\| \[\];\s+setupWaiverStale = /);
+    expect(estimatePublic).toMatch(/loadExistingQualifyingServiceKeys\(db, estimate\.customer_id, \{ strict: true, planGate: false \}\) \|\| \[\];\s+setupWaiverStale = /);
     expect(estimatePublic).toMatch(/resolveCommercialPrepayTaxRate\(recurring, \{\s+prepayDiscountApplied: prepayResolved\.discount > 0,\s+baseRate: opts\.prepayBaseRate,\s+taxableOneTimeAmount: rodentSetupDueToday,\s+\}\)/);
     expect(estimatePublic).toMatch(/resolveCommercialPrepayTaxRate\(recurringSvcList, \{ prepayDiscountApplied: resolved\.discount > 0, baseRate: prepayDisplayBaseRate, taxableOneTimeAmount: acknowledgedRodentSetup \}\)/);
     expect(estimatePublic).toMatch(/invoiceIdResult = inv\.id;[\s\S]*?if \(acceptedRodentSetupAmount > 0\) \{[\s\S]*?await plans\.recordSetupFeeClaimForInvoice\(trx, \{\s+invoiceId: inv\.id,\s+anchorId: acceptRodentRoot \? acceptRodentRoot\.id : null,\s+amount: acceptedRodentSetupAmount,\s+estimateId: estimate\.id,\s+\}\);/);
@@ -624,7 +686,7 @@ describe('source contracts — where the lifecycle is wired', () => {
   test('booking re-reads the canonical qualifying families under the stamp lock and waives on any OTHER family (codex #3591 r37 P1)', () => {
     const at = booking.indexOf("const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';");
     const queued = booking.indexOf('const queuedElsewhere = await sp(', at);
-    const reload = booking.indexOf("loadExistingQualifyingServiceKeys(sp, custId, { strict: true })", at);
+    const reload = booking.indexOf("loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false })", at);
     expect(at).toBeGreaterThan(-1);
     expect(reload).toBeGreaterThan(at);
     expect(reload).toBeLessThan(queued);

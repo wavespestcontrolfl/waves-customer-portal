@@ -91,6 +91,21 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
     expect(rows).toEqual([]);
   });
 
+  test('planGate: false qualifies on the LIVE rows without the membership stamp — the rodent setup-waiver read (codex #3591 r73 P1)', async () => {
+    // The owner's waiver rule is "any OTHER qualifying recurring service",
+    // not plan membership: a qualifying row whose tier stamp has not landed
+    // yet (booking enrolls after resolving the setup, or auto-enroll is
+    // gated off) must still waive the $99.
+    const db = fakeDb({ customer: { id: 'c1', waveguard_tier: null }, scheduledRows: [pestRow] });
+    expect(await loadExistingRecurringQualifyingRows(db, 'c1', { planGate: false })).toHaveLength(1);
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1', { planGate: false })).toEqual(['pest_control']);
+    // An inactive customer stays excluded either way (the row loader's own guard).
+    const inactive = fakeDb({ customer: { id: 'c1', waveguard_tier: null, active: false }, scheduledRows: [pestRow] });
+    expect(await loadExistingRecurringQualifyingRows(inactive, 'c1', { planGate: false })).toEqual([]);
+    // TIER derivation always keeps the gate.
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual([]);
+  });
+
   test('authoritative qualifying keys expand combined plan components', async () => {
     const db = fakeDb({
       customer: { id: 'c1', waveguard_tier: 'Silver' },
@@ -211,13 +226,14 @@ describe('resolveCustomerQualifyingEvidence (codex #3591 r34 P1) — tier per pr
     expect(loadKeys).not.toHaveBeenCalled();
   });
 
-  test('same property (or no address): ONE account-wide lookup serves both lists', async () => {
+  test('same property (or no address): waiver reads UNGATED (planGate: false), tier keeps the plan gate (codex #3591 r73 P1)', async () => {
     const out = await resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: 'c1', address: '100 Main St, Parrish, FL 34219', loadKeys });
     expect(out.groupedEstimate).toBe(false);
     expect(out.tierKeys).toEqual(['pest_control', 'mosquito']);
     expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
-    expect(loadKeys).toHaveBeenCalledTimes(1);
-    expect(loadKeys.mock.calls[0][2]).toBeUndefined();
+    expect(loadKeys).toHaveBeenCalledTimes(2);
+    expect(loadKeys.mock.calls[0][2]).toEqual({ planGate: false });
+    expect(loadKeys.mock.calls[1][2]).toBeUndefined();
   });
 
   test('a NON-primary street flips to per-property scope: tier from the street-scoped lookup, waiver from the account', async () => {

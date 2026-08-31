@@ -346,8 +346,21 @@ exports.down = async function down(knex) {
       .where({ config_key: 'service_discount_rules.rodent_bait', changed_by: MIGRATION_TAG, reason: UP_REASON })
       .orderBy('id', 'desc')
       .first();
+    // Current-cycle ownership across BOTH audit keys (codex #3591 r73 P2):
+    // the admin endpoint records rule edits under discount_rules:rodent_bait,
+    // not this migration's key — an operator who toggled the flags after
+    // up() and deliberately restored them leaves the values matching, so the
+    // value guard alone would let down() undo their latest decision. The
+    // LATEST entry under either key must be this migration's up().
+    const latestRuleAudit = await knex('pricing_config_audit')
+      .whereIn('config_key', ['service_discount_rules.rodent_bait', 'discount_rules:rodent_bait'])
+      .orderBy('id', 'desc')
+      .first('id', 'changed_by', 'reason');
+    const migrationOwnsRuleCycle = latestRuleAudit
+      && latestRuleAudit.changed_by === MIGRATION_TAG
+      && latestRuleAudit.reason === UP_REASON;
     const rule = await knex('service_discount_rules').where({ service_key: 'rodent_bait' }).first();
-    if (ruleAudit?.old_value && rule && rule.tier_qualifier === true && rule.exclude_from_pct_discount === false) {
+    if (migrationOwnsRuleCycle && ruleAudit?.old_value && rule && rule.tier_qualifier === true && rule.exclude_from_pct_discount === false) {
       let snapshot = null;
       try { snapshot = JSON.parse(ruleAudit.old_value); } catch { snapshot = null; }
       if (snapshot && typeof snapshot === 'object') {

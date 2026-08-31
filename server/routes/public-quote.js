@@ -1404,8 +1404,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // membership/catalog read into [] — this catch's 503 would never run
         // and /calculate would price and persist a $99 the customer's other
         // service waives.
+        // planGate: false (codex #3591 r73 P1): the waiver counts live
+        // qualifying families whether or not the tier stamp landed.
         engineInput.setupWaiverPriorQualifyingServices = existingForWaiver
-          ? await require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys(db, existingForWaiver.id, { strict: true })
+          ? await require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys(db, existingForWaiver.id, { strict: true, planGate: false })
           : [];
       } catch (lookupErr) {
         logger.error(`[public-quote] rodent setup-waiver account lookup failed: ${lookupErr.message}`);

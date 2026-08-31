@@ -5178,13 +5178,17 @@ const InvoiceService = {
       if (root && require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) anchorId = root.id;
     }
     if (!anchorId) {
+      // Shared liveness predicate, not a status filter (codex #3591 r73
+      // P1): a cancelled root with a live child can still consume the
+      // restored stamp — the same rule every carried-setup probe uses.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
       const roots = await conn("scheduled_services")
         .where({ customer_id: invoiceRow.customer_id })
         .whereNull("recurring_parent_id")
-        .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
-        .select("id", "service_type", "service_id");
+        .select("id", "service_type", "service_id", "status");
       const baitRoots = [];
       for (const root of roots || []) {
+        if (!(await seriesCanStillConsume(conn, root))) continue;
         if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
       }
       // A UNIQUE match only (codex #3591 r51 local P0): a customer with
@@ -5307,12 +5311,18 @@ const InvoiceService = {
     }
     let accountBaitRoots = [];
     if (!anchorId) {
+      // Liveness via the shared predicate, not a status filter (codex #3591
+      // r73 P1): a cancelled root whose child can still complete is still
+      // the series that carries/collected the setup — dropping it by status
+      // would re-ledger the claim anchor-less while its restored stamp
+      // stays collectible.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
       const roots = await conn("scheduled_services")
         .where({ customer_id: invoiceRow.customer_id })
         .whereNull("recurring_parent_id")
-        .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
-        .select("id", "service_type", "service_id", "pending_setup_fee");
+        .select("id", "service_type", "service_id", "pending_setup_fee", "status");
       for (const root of roots || []) {
+        if (!(await seriesCanStillConsume(conn, root))) continue;
         if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) accountBaitRoots.push(root);
       }
       // A UNIQUE match only (codex #3591 r51 local P0): a customer with
@@ -5506,13 +5516,17 @@ const InvoiceService = {
       if (root && require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) anchorId = root.id;
     }
     if (!anchorId) {
+      // Shared liveness predicate, not a status filter (codex #3591 r73
+      // P1): a cancelled root with a live child can still consume — same
+      // rule as the revival lookup above.
+      const { seriesCanStillConsume } = require("./secure-appointment-plans");
       const roots = await conn("scheduled_services")
         .where({ customer_id: invoiceRow.customer_id })
         .whereNull("recurring_parent_id")
-        .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
-        .select("id", "service_type", "service_id");
+        .select("id", "service_type", "service_id", "status");
       const baitRoots = [];
       for (const root of roots || []) {
+        if (!(await seriesCanStillConsume(conn, root))) continue;
         if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
       }
       // A UNIQUE match only (codex #3591 r51 local P0): a customer with

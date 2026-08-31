@@ -285,6 +285,14 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
+// opts.planGate: false skips the membership-stamp gate (isActivePlanCustomer)
+// and qualifies on the LIVE rows alone. The rodent SETUP-WAIVER reads pass
+// this (codex #3591 r73 P1): the owner rule is "any OTHER qualifying
+// recurring service on the account", not plan membership — a customer whose
+// qualifying row is active but whose tier/monthly-rate stamp has not landed
+// yet (direct admin booking enrolls AFTER resolving the setup, or auto-enroll
+// is gated off) must not be stamped a $99 the rule waives. TIER derivation
+// always keeps the gate.
 // opts.catalogFieldsByRowId: a caller that ALSO classifies rows by catalog
 // identity (the spend panel) passes its already-loaded map — including a
 // null from a failed load — so qualification and that caller's own
@@ -292,8 +300,8 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // #3359 r4: two sequential loads meant one could transiently fail while the
 // other succeeded, splitting tier and spend onto different identities).
 // Omitted (every other caller), the loader fetches its own.
-async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId, strict = false } = {}) {
-  if (!(await isActivePlanCustomer(database, customerId, { strict }))) return [];
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId, strict = false, planGate = true } = {}) {
+  if (planGate && !(await isActivePlanCustomer(database, customerId, { strict }))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('autoWaveguardTierEnroll')) {
@@ -388,8 +396,8 @@ function qualifyingKeysFromRows(rows = []) {
 // address, then the customer's primary street; a row that still can't be
 // located is EXCLUDED (counting an unlocatable plan toward another property's
 // tier would hand out an unearned discount).
-async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null, strict = false } = {}) {
-  const rows = await loadExistingRecurringQualifyingRows(database, customerId, { strict });
+async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null, strict = false, planGate = true } = {}) {
+  const rows = await loadExistingRecurringQualifyingRows(database, customerId, { strict, planGate });
   return qualifyingKeysFromRows(await filterRowsToStreet(database, rows, streetScope));
 }
 
@@ -438,10 +446,14 @@ async function resolveCustomerQualifyingEvidence(database, {
     }
   }
   const clean = (keys) => (Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : []);
-  const accountKeys = clean(await load(database, customerId));
-  out.setupWaiverKeys = accountKeys;
+  // The WAIVER purpose reads live qualifying rows without the membership-
+  // stamp gate (codex #3591 r73 P1 — see loadExistingRecurringQualifyingRows
+  // planGate): the owner's waiver rule is "any OTHER qualifying recurring
+  // service", so a not-yet-enrolled customer's active plan still waives the
+  // $99. The TIER purpose keeps the plan gate below.
+  out.setupWaiverKeys = clean(await load(database, customerId, { planGate: false }));
   if (!out.groupedEstimate) {
-    out.tierKeys = accountKeys;
+    out.tierKeys = clean(await load(database, customerId));
   } else if (out.perPropertyStreetScope) {
     out.tierKeys = clean(await load(database, customerId, { streetScope: out.perPropertyStreetScope }));
   }

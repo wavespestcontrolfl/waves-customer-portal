@@ -27,6 +27,13 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
   let storedEstimate = estimate;
 
   const trx = (table) => ({
+    // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
+    // (planGate: false): it reaches the live rows even for a non-member
+    // customer, so the fake serves an empty account (a real lookup failure
+    // 503s the save by design).
+    columnInfo: async () => ({ is_recurring: {} }),
+    whereNotIn() { return this; },
+    select: async () => [],
     where(clause) {
       return {
         forUpdate() {
@@ -35,6 +42,13 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNull() {
           return this;
         },
+        where() {
+          return this;
+        },
+        whereNotIn() {
+          return this;
+        },
+        select: async () => [],
         first: async () => {
           if (table === 'leads' && clause.id === lead?.id) return lead;
           if (table === 'estimates' && clause.id === storedEstimate?.id) return storedEstimate;
@@ -945,10 +959,12 @@ describe('admin estimate persistence', () => {
 
     const estimateInsert = inserts.find((e) => e.table === 'estimates');
     const stored = JSON.parse(estimateInsert.row.estimate_data);
-    // The first lookup is the account-wide one (no scope) — waiver evidence;
-    // the second is the street-scoped one — tier evidence.
+    // The first lookup is the account-wide one — waiver evidence, UNGATED
+    // by the membership stamp (codex #3591 r73 P1: the owner's waiver rule
+    // is qualifying families, not plan membership); the second is the
+    // street-scoped one — tier evidence, which keeps the plan gate.
     expect(mockQualifyingLookup.mock.calls[0][1]).toBe('cust-member');
-    expect(mockQualifyingLookup.mock.calls[0][2]).toBeUndefined();
+    expect(mockQualifyingLookup.mock.calls[0][2]).toEqual({ planGate: false });
     expect(mockQualifyingLookup.mock.calls[1][2]).toMatchObject({ streetScope: expect.objectContaining({ estimateStreet: expect.any(String) }) });
     // Persisted for replay: the account-wide waiver list; NO property tier
     // list (nothing qualifies at this property → standalone tier).

@@ -289,8 +289,12 @@ async function directRodentSetupForRow(database, row) {
     // membership/catalog read as "no other family" and this resolver would
     // disclose or stamp a $99 the customer's other plan waives — a throw
     // reaches the callers' existing fail-closed handling instead.
+    // planGate: false (codex #3591 r73 P1): the waiver is "any OTHER
+    // qualifying family", not plan membership — a qualifying row whose
+    // tier stamp has not landed yet (booking enrolls AFTER this resolver)
+    // still waives.
     const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-    const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id, { strict: true }) || [])
+    const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id, { strict: true, planGate: false }) || [])
       .filter((key) => key !== 'rodent_bait');
     if (otherQualifiers.length > 0) return 0;
   }
@@ -431,6 +435,42 @@ async function anchorSetupFeeClaim(database, { claimId, anchorId }) {
   return Number(updated) === 1;
 }
 
+// A LIVE anchor-less claim a Customer 360 coverage-only prepay mint ledgered
+// for this customer's rodent coverage before any series existed (codex #3591
+// r73 P1): a direct admin booking of that coverage IS the covered series, so
+// it must consume this claim (anchor it) instead of stamping a second
+// collectible setup. Term-backed only — an estimate-keyed claim anchors via
+// the linked-estimate branch — and the live-invoice rule applies (a voided/
+// refunded prepay's claim is an open obligation, not a settlement). Returns
+// the claim row or null; lookup failures throw (the booking transaction
+// rolls back retryably).
+async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }) {
+  if (!customerId || !rootId) return null;
+  const root = await database('scheduled_services').where({ id: rootId }).first(...SETUP_VISIT_COLUMNS);
+  if (!root) return null;
+  const programKey = await authoritativeServiceKey(database, root);
+  if (!isRodentBaitProgramKey(programKey)) return null;
+  const terms = await database('annual_prepay_terms')
+    .where({ customer_id: customerId })
+    .whereNotNull('prepay_invoice_id')
+    .select('prepay_invoice_id', 'coverage_service_type');
+  for (const term of terms || []) {
+    if (recurringServiceKey({ name: term.coverage_service_type }) !== programKey) continue;
+    const claim = await database('setup_fee_claims')
+      .where({ invoice_id: term.prepay_invoice_id })
+      .whereNull('scheduled_service_id')
+      .whereNull('estimate_id')
+      .first('id', 'invoice_id', 'amount');
+    if (!claim) continue;
+    // Live-invoice rule (codex #3591 r68/r69 P1): a voided/refunded prepay's
+    // claim is an open obligation for recovery, never a settlement.
+    const invoice = await database('invoices').where({ id: claim.invoice_id }).first('status');
+    if (!invoice || TERMINAL_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) continue;
+    return claim;
+  }
+  return null;
+}
+
 // Customer 360 Annual Prepay dialog (codex #3591 r37 P1): the general mint
 // names only a coverage service type — no anchor, no setup. Omission must
 // not read as a waiver: derive the obligation from the customer's LIVE direct
@@ -513,7 +553,9 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   // from the term's coverage later.
   if (recurringServiceKey({ name: coverageServiceType }) !== 'rodent_bait') return null;
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, customerId, { strict: true }) || [])
+  // planGate: false (codex #3591 r73 P1) — waiver reads qualify on live
+  // rows, never the membership stamp.
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, customerId, { strict: true, planGate: false }) || [])
     .filter((key) => key !== 'rodent_bait');
   if (otherQualifiers.length > 0) return null;
   return { anchorId: null, amount: cents(Math.max(0, Number(RODENT.baitSetupFee) || 0)) };
@@ -528,6 +570,16 @@ async function retireCoverageOnlySetupClaim(trx, { customerId, coverageServiceTy
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!(fee > 0)) return { recorded: false, retired: false };
   const conflict = (message) => { const err = new Error(message); err.switchConflict = true; return err; };
+  // Serialize with the recurring-booking creators (codex #3591 r73 P1):
+  // admin-schedule locks the CUSTOMER ROW before inserting a series root, so
+  // this probe must wait behind an in-flight booking or it records an
+  // anchorless claim while an uncommitted root is being stamped — after both
+  // commit the setup is collectible twice. Lock order matches the secure
+  // funnel's (annual-prepay advisory first, customer row second); the
+  // booking transaction never takes the annual-prepay advisory lock, so no
+  // cycle. A booking that wins commits its root first and the probe below
+  // then refuses with the series-now-exists conflict.
+  await trx('customers').where({ id: customerId }).forUpdate().first('id');
   const owed = await module.exports.findDirectRodentSetupObligationForCoverage(trx, { customerId, coverageServiceType });
   if (!owed) throw conflict('The bait-station setup is no longer owed for this coverage — refresh and retry');
   if (owed.anchorId) throw conflict('A series now exists for this coverage — refresh so the setup is billed against it');
@@ -1273,6 +1325,7 @@ module.exports = {
   seriesCanStillConsume,
   stampedSetupForVisit,
   anchorSetupFeeClaim,
+  liveAnchorlessCoverageSetupClaim,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,
