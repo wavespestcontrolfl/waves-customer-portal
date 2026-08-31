@@ -408,9 +408,15 @@ async function triggerReviewRequest(input) {
   if (!customer) return { error: 'Customer not found' };
   if (!customer.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
   // W0B pinned recipient: the operator approved THIS phone on the card —
-  // enforce at the send boundary, not only at the route's pre-check.
-  if (input._pinned_phone && String(customer.phone) !== String(input._pinned_phone)) {
-    return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+  // resolved the way the centralized sender resolves it (service-contact
+  // SMS recipient, not the bare billing phone) and enforced here before
+  // ReviewService.create.
+  if (input._pinned_phone) {
+    const { getServiceContactSmsRecipient } = require('../customer-contact');
+    const target = getServiceContactSmsRecipient(customer);
+    if (String(target?.phone || '') !== String(input._pinned_phone)) {
+      return { error: 'The review-request recipient changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+    }
   }
 
   // Check if already sent recently. "Last 30 days" is a rolling DURATION, not a
@@ -561,4 +567,15 @@ async function getVelocityPipeline(days) {
 }
 
 
-module.exports = { REVIEW_TOOLS, executeReviewTool };
+// Same 30-day rolling cooldown triggerReviewRequest enforces — exposed so
+// the confirm card can refuse a request that would be suppressed instead of
+// promising a send (W0B).
+async function hasRecentReviewRequest(customerId) {
+  const recent = await db('review_requests')
+    .where({ customer_id: customerId })
+    .where('created_at', '>=', new Date(Date.now() - 30 * 86400000).toISOString())
+    .first('id');
+  return !!recent;
+}
+
+module.exports = { REVIEW_TOOLS, executeReviewTool, hasRecentReviewRequest };

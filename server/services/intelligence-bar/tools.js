@@ -1483,7 +1483,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
     updated_count: count,
     fields_updated: Object.keys(updates),
     ...bulkLaneStampResult(perRowLaneStampIds),
-    ...(errors.length ? { errors } : {}),
+    ...(errors.length ? {
+      errors,
+      // The confirm card renders `warning` — a partial bulk update must never
+      // read as a clean Done (W0B).
+      warning: `${errors.length} of ${count + errors.length} customers were NOT updated (${errors.length === 1 ? 'it' : 'they'} no longer resolved at commit); ${count} updated.`,
+    } : {}),
   };
 }
 
@@ -1892,6 +1897,7 @@ async function createAppointment(input) {
   //
   // Best-effort like the admin path: a registration failure must not fail
   // the already-committed insert (registerAppointment also self-alerts).
+  let reminderWarning = null;
   try {
     const AppointmentReminders = require('../appointment-reminders');
     await AppointmentReminders.registerAppointment(
@@ -1902,6 +1908,9 @@ async function createAppointment(input) {
     );
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
+    // Surfaced on the confirm card as a partial-failure warning (W0B): the
+    // booking stands, but the promised reminder rows did not register.
+    reminderWarning = 'Booked, but reminder registration failed — no 72h/24h reminder rows exist for this visit yet; the reminder sync/alert rail will retry or the office adds them manually.';
   }
 
   // Ids only — customer names/phones/addresses never go to logs (PII rule).
@@ -1909,6 +1918,7 @@ async function createAppointment(input) {
 
   return {
     success: true,
+    ...(reminderWarning ? { warning: reminderWarning } : {}),
     appointment_id: appointment.id,
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,

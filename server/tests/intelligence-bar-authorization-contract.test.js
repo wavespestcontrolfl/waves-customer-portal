@@ -219,6 +219,26 @@ test('tier/rate customer updates disclose the billing-lane stamp + owner notific
   expect(plain.effects.some((e) => /billing_mode stamped/.test(e.label))).toBe(false);
 });
 
+test('live reschedule discloses the field-workflow reset; scheduled one does not', () => {
+  const mk = (status) => buildContract({ toolName: 'reschedule_appointment', params: { appointment_id: 'ap1', new_date: '2026-09-04' }, displayParams: {}, preview: { pinned_appointment: { id: 'ap1', status, scheduled_date: '2026-09-02', service_type: 'Pest' } } });
+  expect(mk('en_route').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Ends the active field workflow: status en_route → confirmed/));
+  expect(mk('scheduled').effects.some((e) => /field workflow/.test(e.label))).toBe(false);
+});
+
+test('email change on update_customer discloses the DOI re-send and marks contact/irreversible', () => {
+  const c = buildContract({ toolName: 'update_customer', params: { customer_id: 'c9', updates: { email: 'x@example.test' } }, displayParams: { customer_id: 'c9', updates: { email: 'x@example.test' } } });
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/double-opt-in email is re-sent/));
+  expect(c.notifies_customer).toBe(true);
+  expect(c.irreversible).toBe(true);
+  const noEmail = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
+  expect(noEmail.notifies_customer).toBe(false);
+});
+
+test('bulk_update_customers card states skipped customers surface as a warning', () => {
+  const c = buildContract({ toolName: 'bulk_update_customers', params: { customer_ids: ['a', 'b'], updates: { city: 'Venice' } }, displayParams: { customer_ids: ['a', 'b'], updates: { city: 'Venice' } } });
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/skipped customer is reported as a warning/));
+});
+
 test('irreversibility is derived from outbound effects, not only the allowlist', () => {
   expect(buildContract({ toolName: 'move_stops_to_day', params: { notify_customers: true }, displayParams: { notify_customers: true } }).irreversible).toBe(true);
   expect(buildContract({ toolName: 'move_stops_to_day', params: {}, displayParams: { notify_customers: false } }).irreversible).toBe(false);

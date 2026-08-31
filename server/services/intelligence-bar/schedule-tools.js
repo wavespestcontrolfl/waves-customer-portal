@@ -960,6 +960,14 @@ async function swapTechAssignments(input) {
         [techA.name]: { current_count: aServices.length, after_swap: bServices.length },
         [techB.name]: { current_count: bServices.length, after_swap: aServices.length },
       },
+      // The exact stop sets being exchanged — counts alone can't pin the
+      // effect (one stop leaving and another joining each side keeps the
+      // counts equal). Ids + service/window let the confirm card and its
+      // fingerprint bind the actual targets (W0B).
+      stops: {
+        [techA.name]: aServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null })),
+        [techB.name]: bServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null })),
+      },
       note: `Would swap ${aServices.length} stop(s) from ${techA.name} with ${bServices.length} stop(s) from ${techB.name}. Re-call with confirmed:true to apply.`,
     };
   }

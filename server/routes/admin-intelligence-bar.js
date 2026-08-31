@@ -822,8 +822,23 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         : await resolveReviewRequestRecipient(params);
       if (!recipient) return { failed: true, modelResult: { error: 'No customer matches — nothing was proposed.' } };
       if (recipient.error) return { failed: true, modelResult: recipient };
-      if (!recipient.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
-      params._pinned_phone = recipient.phone;
+      // Review requests send to the SERVICE-CONTACT SMS recipient (the
+      // centralized sender's resolver), not necessarily customers.phone —
+      // pin the number that will actually receive it (codex r5 P1).
+      const pinPhone = toolUse.name === 'trigger_review_request'
+        ? require('../services/customer-contact').getServiceContactSmsRecipient(recipient).phone
+        : recipient.phone;
+      if (!pinPhone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
+      if (toolUse.name === 'trigger_review_request') {
+        // The executor suppresses requests inside the 30-day cooldown and
+        // returns already_sent without error — resolve that NOW so the card
+        // never promises a send that won't happen (codex r5 P2).
+        const { hasRecentReviewRequest } = require('../services/intelligence-bar/review-tools');
+        if (await hasRecentReviewRequest(recipient.id)) {
+          return { failed: true, modelResult: { error: 'A review request was already sent to this customer in the last 30 days — nothing was proposed.', already_sent: true } };
+        }
+      }
+      params._pinned_phone = pinPhone;
       // Canonicalize to the pinned row: the executor sends to THIS customer
       // id, never a fresh name/email match (codex P1 on #3648).
       params.customer_id = recipient.id;
@@ -832,7 +847,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         pinned_recipient: {
           customer_id: recipient.id,
           name: `${recipient.first_name || ''} ${recipient.last_name || ''}`.trim(),
-          phone_last4: String(recipient.phone).replace(/\D/g, '').slice(-4) || null,
+          phone_last4: String(pinPhone).replace(/\D/g, '').slice(-4) || null,
         },
       };
     }
@@ -2357,7 +2372,11 @@ router.post('/confirm-action', async (req, res, next) => {
         const r = action.tool_name === 'reply_via_sms'
           ? await resolveReplyViaSmsRecipient(execParams)
           : await resolveReviewRequestRecipient(execParams);
-        drifted = !r || r.error || String(r.phone || '') !== String(pinnedPhone);
+        const livePhone = !r || r.error ? null
+          : (action.tool_name === 'trigger_review_request'
+            ? require('../services/customer-contact').getServiceContactSmsRecipient(r).phone
+            : r.phone);
+        drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
       }
       if (!drifted && pinnedEmail) {
         const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');

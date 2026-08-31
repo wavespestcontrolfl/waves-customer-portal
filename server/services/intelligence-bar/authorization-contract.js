@@ -223,6 +223,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('operational', `Move ${a.service_type || 'visit'}${a.customer_name ? ` for ${a.customer_name}` : ''} (${a.status || 'scheduled'}) from ${from} → ${to}`, {
       before: from, after: to,
     });
+    // A LIVE visit (tech en route / on site) is more than a date move: the
+    // executor resets it to confirmed, releases tech/tracker state, and
+    // appends lifecycle history — the active field workflow ends.
+    if (a.status === 'en_route' || a.status === 'on_site') {
+      push('operational', `Ends the active field workflow: status ${a.status} → confirmed, technician/tracker state released, lifecycle history appended`, {
+        before: a.status, after: 'confirmed',
+      });
+    }
   }
   if (toolName === 'bulk_update_leads') {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
@@ -256,7 +264,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
     if (preview?.inspection_credit) push('billing', 'No open inspection credit is redeemed by this booking (verified again at commit)');
-    push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule); no confirmation text is sent now');
+    push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card); no confirmation text is sent now');
+  }
+  if (toolName === 'bulk_update_customers') {
+    push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
   }
   for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
   if (toolName === 'cancel_appointment' && preview?.cancellation) {
@@ -374,9 +385,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', require('../customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);
   }
 
+  // An email change may immediately re-send the newsletter double-opt-in
+  // confirmation to the customer (updateCustomer → resendPendingConfirmation
+  // when the fan-out finds a pending confirmation) — a customer-facing send.
+  const emailChangeMayContact = toolName === 'update_customer' && !!params?.updates?.email;
+  if (emailChangeMayContact) {
+    push('comms', 'If a newsletter confirmation is pending for this customer, the double-opt-in email is re-sent to the NEW address immediately');
+  }
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : CUSTOMER_CONTACT_TOOL_NAMES.has(toolName);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailChangeMayContact);
   if (notifiesCustomer) push('comms', 'Customer will be contacted');
 
   // Canonical order (kind, then label) so the contract — and therefore its
