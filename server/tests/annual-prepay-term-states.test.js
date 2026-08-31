@@ -102,7 +102,7 @@ function writerCandidateFiles() {
       if (ent.isDirectory()) {
         if (ent.name === 'node_modules' || ent.name === 'tests' || ent.name === 'migrations' || ent.name === '__tests__') continue;
         walk(full);
-      } else if (ent.name.endsWith('.js') && !ent.name.endsWith('.test.js')) {
+      } else if (/\.(?:js|cjs|mjs)$/.test(ent.name) && !/\.test\.(?:js|cjs|mjs)$/.test(ent.name)) {
         // Case-insensitive: raw SQL may name the table in uppercase.
         if (fs.readFileSync(full, 'utf8').toLowerCase().includes(TABLE)) out.push(path.relative(ROOT, full));
       }
@@ -272,7 +272,14 @@ function statusWriteSites(src) {
     }
   };
   for (const m of src.matchAll(chainRe)) {
-    scanChain(chainAfter(src, m.index + m[0].length), m.index);
+    const after = chainAfter(src, m.index + m[0].length);
+    // The mutation may PRECEDE the table call (`db.insert({…}).into('t')`):
+    // include the statement text before the match, back to the previous
+    // statement boundary.
+    const stmtStart = Math.max(src.lastIndexOf(';', m.index), src.lastIndexOf('\n\n', m.index)) + 1;
+    const before = src.slice(stmtStart, m.index);
+    const whole = before + m[0] + after;
+    scanChain(whole, m.index, chainGuards(whole));
   }
   // Split builders: `const q = db('annual_prepay_terms'); … q.update({...});`
   const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]\\)`, 'g');
@@ -410,6 +417,9 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     // Guards chained AFTER the mutation call are captured.
     expect(statusWriteSites("await db('annual_prepay_terms').update({ status: 'refunded' }).where({ id }).andWhereNot('x', 1);")[0].guards)
       .toEqual(['where({ id })', "andWhereNot('x', 1)"]);
+    // Mutation BEFORE the table call (.into / .from forms).
+    expect(statusWriteExpressions("await db.insert({ status: 'refunded' }).into('annual_prepay_terms');"))
+      .toEqual(["'refunded'"]);
     // A Col-suffixed but UNsanctioned identifier still fails closed.
     expect(statusWriteExpressions("const statusCol = 'status';\nawait db('annual_prepay_terms').update({ [statusCol]: 'refunded' });"))
       .toEqual(['<computed identifier key statusCol>']);
@@ -425,6 +435,14 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
   test('the DB CHECK is exactly the written stages plus the two legacy names', () => {
     const inCheck = migrationCheckStatuses().sort();
     expect(inCheck).toEqual([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES].sort());
+  });
+
+  test('the renewal_decision CHECK is exactly the three documented decisions', () => {
+    const src = read(MIGRATION);
+    const m = src.match(/const RENEWAL_DECISIONS = \[([\s\S]*?)\];/);
+    expect(m).not.toBeNull();
+    expect([...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort()).toEqual(['cancel', 'renew', 'switch_plan']);
+    expect(read(DOC)).toContain('one of `renew` / `cancel` /\n`switch_plan`, also CHECK-enforced');
   });
 
   test('the pinned migration is still the ONLY one defining the status CHECK (a later re-definition must update this suite + doc)', () => {
@@ -487,8 +505,19 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         }
         // Even audited dynamic writers must never name a status key in a
         // dynamically-tabled payload — that is how a future status write
-        // would sneak past the literal-table scan.
-        const args = chain.slice(mut.index);
+        // would sneak past the literal-table scan. Identifier payloads are
+        // resolved to their declaration (and fail closed if unresolvable).
+        let args = chain.slice(mut.index);
+        const ident = args.match(/^\.(?:update|insert|merge)\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/);
+        if (ident) {
+          const declStart = src.slice(0, m.index).lastIndexOf(`const ${ident[1]} = {`);
+          const body = declStart === -1 ? null : src.slice(declStart).match(/\{([\s\S]*?)\};/);
+          if (!body) { unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} with unresolvable payload ${ident[1]}`); continue; }
+          args = body[1];
+          if (new RegExp(`\\b${ident[1]}\\.status\\s*=|Object\\.assign\\(\\s*${ident[1]}\\b`).test(src)) {
+            unscannable.push(`${rel}: dynamic-table payload ${ident[1]} is mutated after init`);
+          }
+        }
         if (/(?:\b|['"])status['"]?\s*:/.test(args) || /\[\s*['"]status['"]\s*\]/.test(args)) {
           unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} carries a status key`);
         }
@@ -643,12 +672,36 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
 
   test('the doc moves table has 13 rows with CHECK-valid targets and each row names its documented guard', () => {
     const doc = read(DOC);
-    const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| .+ \| (.+?) \|$/gm)]
-      .map((m) => ({ n: Number(m[1]), to: m[3], guard: m[4] }));
+    const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \|$/gm)]
+      .map((m) => ({ n: Number(m[1]), from: m[2], to: m[3], trigger: m[4], where: m[5], guard: m[6] }));
     expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
     for (const r of rows) {
       for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
+    }
+    // Each numbered move's From / To / code site, pinned as data — these
+    // mirror the 12 pinned write sites (+ the seeder-vs-sweep pair in move 2).
+    const st = (list) => list.map((s) => `\`${s}\``);
+    const expectedRows = {
+      1: { from: ['*(birth)*'], to: st(['payment_pending', 'active', 'cancelled']), where: 'createTermForAnnualPrepay' },
+      2: { from: st(['payment_pending']), to: st(['active']), where: 'syncTermForInvoicePayment' },
+      3: { from: st(['active', 'renewal_pending']), to: st(['renewal_pending']), where: "recordDecision('contacted')" },
+      4: { from: st(['active']), to: st(['renewal_pending']), where: 'sendCustomerTermNotice' },
+      5: { from: st(['renewal_pending']), to: st(['active']), where: 'releaseClaim' },
+      6: { from: st(['active', 'renewal_pending']), to: st(['renewed']), where: "recordDecision('renew')" },
+      7: { from: st(['active', 'renewal_pending']), to: st(['switch_plan']), where: "recordDecision('switch_plan')" },
+      8: { from: st(['active', 'renewal_pending']), to: st(['cancelled']), where: "recordDecision('cancel')" },
+      9: { from: st(['payment_pending', 'active', 'renewal_pending']), to: st(['cancelled']), where: 'syncTermForInvoicePayment' },
+      10: { from: st(['active', 'renewal_pending']), to: st(['payment_pending']), where: 'suspendActiveTermsForDisputedInvoice' },
+      11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
+      12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
+      13: { from: ['*any*'], to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+    };
+    for (const r of rows) {
+      const e = expectedRows[r.n];
+      for (const f of e.from) expect(r.from).toContain(f);
+      for (const t of e.to) expect(r.to).toContain(t);
+      expect(r.where).toContain(e.where);
     }
     const guardFrag = {
       1: 'renewal_decision',
@@ -804,7 +857,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       const cutoff = claimQuery.orWhere.mock.calls.find((c) => c[0] === 'notice_30_claimed_at')[2];
       const ttlMs = Date.now() - cutoff.getTime();
       expect(ttlMs).toBeGreaterThanOrEqual(15 * 60 * 1000 - 5000);
-      expect(ttlMs).toBeLessThanOrEqual(15 * 60 * 1000 + 60000);
+      expect(ttlMs).toBeLessThanOrEqual(15 * 60 * 1000 + 5000); // execution-time tolerance only
       expect(claimQuery.update).toHaveBeenCalledWith(expect.objectContaining({
         status: 'renewal_pending',
         notice_30_claimed_at: expect.any(Date),
