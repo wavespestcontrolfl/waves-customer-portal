@@ -316,20 +316,24 @@ function isCockroachTypedReportType(type) {
 // re-service): with this gate on, a pest report with no technician trace
 // renders NO generated schematic — not the animated "Where we protected"
 // rings on the web, not the drawn "Where we treated" image in the PDF.
-// Dark by default; kill = unset. Read at call time (tests + flips).
+// Dark by default; kill = unset. Read at call time (tests + flips) through
+// the canonical gate parser; the registry entry in config/feature-gates.js
+// keeps it in standard gate status reporting.
 function pestTraceOrNothingGateOn() {
-  return process.env.GATE_PEST_TRACE_OR_NOTHING === 'true';
+  return require('../../config/feature-gates').gateEnvValue('GATE_PEST_TRACE_OR_NOTHING');
 }
 
 function pestReportV2PdfSignature(service = {}) {
-  if (process.env.PEST_REPORT_V2 !== 'true') return '';
   const line = service.service_line || detectServiceLine(service.service_type);
   if (line !== 'pest') return '';
   // '-ton1' rides EVERY pest-line key while trace-or-nothing is on: the
   // suppression changes what a pest PDF renders (the schematic fallback),
   // so cached documents re-render once on next view. Appended (not
-  // switched) so the two gates' four states all key distinctly.
+  // switched) so the gates' states all key distinctly — and computed
+  // INDEPENDENTLY of PEST_REPORT_V2 (codex P1): the schematic suppression
+  // applies to every pest PDF, V2 dashboard or not.
   const tonSuffix = pestTraceOrNothingGateOn() ? '-ton1' : '';
+  if (process.env.PEST_REPORT_V2 !== 'true') return tonSuffix;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter

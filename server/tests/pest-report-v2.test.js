@@ -201,6 +201,14 @@ describe('pestReportV2PdfSignature — PDF cache-key component', () => {
     expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c');
   });
 
+  test('-ton1 keys pest PDFs even with PEST_REPORT_V2 off — the suppression is V2-independent (codex P1)', () => {
+    delete process.env.PEST_REPORT_V2;
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1');
+    delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
+  });
+
   it('is empty when the gate is off, regardless of line', () => {
     delete process.env.PEST_REPORT_V2;
     expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
