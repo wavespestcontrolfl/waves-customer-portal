@@ -173,7 +173,7 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   // Pre-freeze records (completed before this shipped): re-derive from the
   // committed snapshot + live profile — the best available approximation.
   const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-  const profilePromise = resolveCompletionProfileForScheduledService(scheduledService, knex);
+  const profilePromise = resolveCompletionProfileForScheduledService(scheduledService, knex, { strict });
   const profile = strict ? await profilePromise : await profilePromise.catch(() => null);
   if (!profile) return null;
   const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;

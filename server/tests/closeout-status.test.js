@@ -130,7 +130,7 @@ describe('closeout-status: contract shape', () => {
       invoice: 'done', invoiceDelivery: 'done', comms: 'done', followUp: 'not_required',
     });
     expect(contradictions).toEqual([]);
-    expect(summarizeCloseout(facts)).toEqual({ open: [], failed: [], unknown: [], closedOut: true });
+    expect(summarizeCloseout(facts, contradictions)).toEqual({ open: [], failed: [], unknown: [], contradictions: [], closedOut: true });
   });
 });
 
@@ -328,6 +328,8 @@ describe('closeout-status: invoice + invoice delivery', () => {
     const { facts, contradictions } = deriveCloseoutFacts(member);
     expect(facts.invoice.state).toBe('done');
     expect(contradictions.map((c) => c.code)).toContain('invoice_on_covered_visit');
+    // The rollup never hides a contradiction behind all-green facts.
+    expect(summarizeCloseout(facts, contradictions)).toMatchObject({ open: [], contradictions: ['invoice_on_covered_visit'], closedOut: false });
   });
 
   test('per_visit priced visit with no invoice → pending expected_invoice_not_minted with the amount', () => {
@@ -347,6 +349,9 @@ describe('closeout-status: invoice + invoice delivery', () => {
 
   test('invoice lookup failed → unknown; no customer row → unknown (expectation unavailable)', () => {
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, liveInvoiceLookupFailed: true })).facts.invoice.state).toBe('unknown');
+    // A live row is NOT enough when the refunded-sibling probe failed (codex r3).
+    expect(deriveCloseoutFacts(closedOutInputs({ terminalInvoiceLookupFailed: true })).facts.invoice)
+      .toMatchObject({ state: 'unknown', reason: 'invoice_lookup_failed', failed: ['refunded'] });
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, customer: null, lane: null })).facts.invoice)
       .toMatchObject({ state: 'unknown', reason: 'billing_expectation_unavailable' });
   });

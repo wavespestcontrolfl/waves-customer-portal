@@ -546,7 +546,14 @@ function deriveCloseoutFacts(inputs) {
   const reconciled = reconcileLiveVsRefunded(inputs.liveInvoice, inputs.terminalInvoice, inputs.liveInvoice);
   const live = inputs.liveInvoice;
   if (!completed) invoice = awaiting({ expectation: expectation?.kind || null });
-  else if (reconciled.terminal) {
+  else if (inputs.liveInvoiceLookupFailed || inputs.terminalInvoiceLookupFailed) {
+    // Both probes must succeed before ANY verdict — a live row with an
+    // unread refunded sibling would otherwise read done when it must park.
+    invoice = fact('unknown', 'invoice_lookup_failed', {
+      failed: [inputs.liveInvoiceLookupFailed ? 'live' : null, inputs.terminalInvoiceLookupFailed ? 'refunded' : null].filter(Boolean),
+      expectation: expectation?.kind || null,
+    });
+  } else if (reconciled.terminal) {
     // ALWAYS parked while a refunded row exists beside a live one — even a
     // PAID live sibling (pre-push codex P0): a later refund.failed can
     // restore the refunded row to paid, leaving two paid invoices. Only a
@@ -566,8 +573,6 @@ function deriveCloseoutFacts(inputs) {
         detail: `invoice ${live.id} exists but the lane predicts ${expectation.kind} (${expectation.why}); lane prediction only — an estimate-first invoice attached before completion can be legitimate`,
       });
     }
-  } else if (inputs.liveInvoiceLookupFailed || inputs.terminalInvoiceLookupFailed) {
-    invoice = fact('unknown', 'invoice_lookup_failed', { expectation: expectation?.kind || null });
   } else if (billingInputsFailed.length) {
     // Any billing input that could not be read (autopay, visit-month dues,
     // bill-to payer, annual coverage) would otherwise be coerced to a
@@ -679,7 +684,7 @@ function deriveCloseoutFacts(inputs) {
 // which lookups were unavailable. Callers that need a single "attention"
 // signal read `open.length > 0 || unknown.length > 0` — the two are kept
 // apart on purpose so an outage never renders as a compliance gap.
-function summarizeCloseout(facts) {
+function summarizeCloseout(facts, contradictions = []) {
   const open = [];
   const failed = [];
   const unknown = [];
@@ -690,7 +695,13 @@ function summarizeCloseout(facts) {
     else if (f.state === 'failed') { open.push(name); failed.push(name); }
     else if (f.state === 'unknown') unknown.push(name);
   }
-  return { open, failed, unknown, closedOut: open.length === 0 && unknown.length === 0 };
+  const contradictionCodes = (contradictions || []).map((c) => c.code);
+  // A contradiction (record without completed visit, invoice on a covered
+  // visit, …) is an exception in its own right — never hidden by a rollup.
+  return {
+    open, failed, unknown, contradictions: contradictionCodes,
+    closedOut: open.length === 0 && unknown.length === 0 && contradictionCodes.length === 0,
+  };
 }
 
 async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}) {
@@ -744,7 +755,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
     } : null,
     billing: derived.billing,
     facts: derived.facts,
-    summary: summarizeCloseout(derived.facts),
+    summary: summarizeCloseout(derived.facts, derived.contradictions),
     contradictions: derived.contradictions,
     unavailable: inputs.unavailable,
   };
