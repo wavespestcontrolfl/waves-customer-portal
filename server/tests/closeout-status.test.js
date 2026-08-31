@@ -1,0 +1,682 @@
+/**
+ * Closeout status service — the ten-fact read-only contract.
+ *
+ * Two layers under test:
+ *  - deriveCloseoutFacts(inputs): pure. Every state (not_required / pending /
+ *    done / failed / unknown) per fact, the contradictions list, and the
+ *    "unknown is never rendered as missing" discipline.
+ *  - loadCloseoutInputs / getCloseoutStatus against a fake knex: one failing
+ *    table lands in `unavailable` + an `unknown` fact instead of throwing or
+ *    silently reading as "missing" (the command-center `.catch(() => [])`
+ *    bug this service exists to retire).
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/invoice', () => ({
+  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
+}));
+jest.mock('../services/autopay-eligibility', () => ({
+  customerOnAutopay: jest.fn(async (customer) => customer?.autopay_enabled === true),
+}));
+jest.mock('../services/typed-followup-obligation', () => ({
+  typedFollowupObligationForCompletedSource: jest.fn(async () => null),
+}));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  annualPrepayCoversVisit: jest.fn(async () => true),
+}));
+jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: false }, isEnabled: () => false }));
+jest.mock('../services/billing-lane', () => {
+  const actual = jest.requireActual('../services/billing-lane');
+  return { ...actual, monthlyDuesCollected: jest.fn(async () => false) };
+});
+// The catalog resolver reaches for the module-level db; give it a knex-shaped
+// stub that returns the catalog rows the test installs.
+const catalogRows = [];
+jest.mock('../services/service-closeout-requirements', () => {
+  const actual = jest.requireActual('../services/service-closeout-requirements');
+  return {
+    ...actual,
+    resolveCloseoutRequirementsForJobs: jest.fn(async (jobs) => {
+      const map = new Map();
+      for (const job of jobs) {
+        const row = catalogRows.find((r) => r.id === job.service_id) || {};
+        map.set(job.id, actual.normalizeRequirements(row, job.service_type));
+      }
+      return map;
+    }),
+  };
+});
+
+const {
+  deriveCloseoutFacts,
+  deriveBillingExpectation,
+  summarizeCloseout,
+  getCloseoutStatus,
+  FACT_STATES,
+  FACT_NAMES,
+} = require('../services/closeout-status');
+
+const NOW = new Date('2026-08-31T15:00:00Z');
+const SVC = 'svc-1';
+const REC = 'rec-1';
+
+function baseRequirements(overrides = {}) {
+  return {
+    serviceId: 'cat-pest', serviceName: 'Quarterly Pest Control', category: 'pest_control',
+    requiresServiceReport: true, requiresApplicationLog: true, requiredPhotoCount: 0,
+    requiresCustomerSignature: false, requiresCustomerNotice: true, requiresLicense: false,
+    licenseCategory: null, source: 'catalog_v2', ...overrides,
+  };
+}
+
+// A fully closed-out recurring pest visit for a per_visit customer.
+function closedOutInputs(overrides = {}) {
+  return {
+    serviceId: SVC,
+    now: NOW,
+    unavailable: [],
+    visit: {
+      id: SVC, customer_id: 'cust-1', status: 'completed', scheduled_date: '2026-08-30',
+      completed_at: '2026-08-30T18:00:00Z', service_type: 'Quarterly Pest Control', service_id: 'cat-pest',
+      is_callback: false, is_recurring: true, estimated_price: 120, prepaid_method: null, prepaid_amount: null,
+    },
+    customer: { id: 'cust-1', billing_mode: 'per_visit', waveguard_tier: null, monthly_rate: null, per_application_fee: null, autopay_enabled: false },
+    lane: { mode: 'per_visit', source: 'explicit' },
+    autopayActive: false,
+    duesCollectedThisMonth: false,
+    annualCoverageValidated: null,
+    completionAutopayChargeEnabled: false,
+    payerBilled: false,
+    record: {
+      id: REC, status: 'completed', completion_source: 'detailed_form',
+      report_view_token: 'a'.repeat(32), report_generated_at: '2026-08-30T18:05:00Z',
+      structured_notes: { completionSmsStatus: 'sent' }, field_flags: {},
+    },
+    attempt: { state: 'succeeded_other_key', serviceRecordId: REC },
+    requirements: baseRequirements(),
+    completedFormCount: 1,
+    activeApplicationCount: 2,
+    retractedApplicationCount: 0,
+    photoCount: 0,
+    delivery: { channel: 'email', status: 'sent', attempts: 1, max_attempts: 5, sent_at: '2026-08-30T18:06:00Z' },
+    liveInvoice: { id: 'inv-1', invoice_number: 'INV-1', status: 'sent', total: 120, sent_at: '2026-08-30T18:06:00Z', payer_id: null },
+    terminalInvoice: null,
+    followup: null,
+    followupChild: null,
+    packets: [],
+    packetMemberIds: [],
+    ...overrides,
+  };
+}
+
+function states(facts) {
+  return Object.fromEntries(FACT_NAMES.map((n) => [n, facts[n].state]));
+}
+
+describe('closeout-status: contract shape', () => {
+  test('every fact carries a legal state and a reason; nothing collapses to a boolean', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs());
+    for (const name of FACT_NAMES) {
+      expect(FACT_STATES).toContain(facts[name].state);
+      expect(typeof facts[name].reason).toBe('string');
+      expect(typeof facts[name]).not.toBe('boolean');
+    }
+  });
+
+  test('a fully closed-out visit reads done/not_required everywhere and summary.closedOut = true', () => {
+    const { facts, contradictions } = deriveCloseoutFacts(closedOutInputs());
+    expect(states(facts)).toEqual({
+      completion: 'done', application: 'done', photos: 'not_required', report: 'done', reportDelivery: 'done',
+      invoice: 'done', invoiceDelivery: 'done', comms: 'done', followUp: 'not_required',
+    });
+    expect(contradictions).toEqual([]);
+    expect(summarizeCloseout(facts)).toEqual({ open: [], failed: [], unknown: [], closedOut: true });
+  });
+});
+
+describe('closeout-status: completion fact', () => {
+  test('visit not yet completed → completion pending; every downstream fact waits (never "missing")', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, status: 'confirmed', completed_at: null },
+      record: null, attempt: { state: 'none' }, liveInvoice: null, delivery: null,
+    }));
+    expect(facts.completion).toMatchObject({ state: 'pending', reason: 'visit_not_completed' });
+    for (const name of FACT_NAMES.filter((n) => n !== 'completion')) {
+      expect(facts[name]).toMatchObject({ state: 'pending', reason: 'awaiting_completion' });
+    }
+  });
+
+  test('cancelled visit with no record → everything not_required (nothing is owed)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, status: 'cancelled' }, record: null, attempt: { state: 'none' }, liveInvoice: null, delivery: null,
+    }));
+    for (const name of FACT_NAMES) expect(facts[name].state).toBe('not_required');
+    expect(facts.completion.reason).toBe('visit_cancelled');
+  });
+
+  test('completed visit with NO service_records row → pending + contradiction', () => {
+    const { facts, contradictions } = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: { state: 'none' } }));
+    expect(facts.completion).toMatchObject({ state: 'pending', reason: 'completed_visit_without_record' });
+    expect(contradictions.map((c) => c.code)).toEqual(['completed_visit_without_record']);
+  });
+
+  test('record exists while the visit is still on_site → done + record_without_completed_visit contradiction', () => {
+    const { facts, contradictions } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, status: 'on_site' },
+    }));
+    expect(facts.completion.state).toBe('done');
+    expect(contradictions.map((c) => c.code)).toEqual(['record_without_completed_visit']);
+  });
+
+  test('claim in flight (running / resumable) → pending, not missing; failed claim → failed', () => {
+    const running = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: { state: 'running' }, visit: { ...closedOutInputs().visit, status: 'on_site' } }));
+    expect(running.facts.completion).toMatchObject({ state: 'pending', reason: 'completion_running' });
+    const resumable = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: { state: 'resumable' }, visit: { ...closedOutInputs().visit, status: 'on_site' } }));
+    expect(resumable.facts.completion.reason).toBe('completion_resumable');
+    const failed = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: { state: 'failed', error: 'boom' }, visit: { ...closedOutInputs().visit, status: 'on_site' } }));
+    expect(failed.facts.completion).toMatchObject({ state: 'failed', error: 'boom' });
+  });
+
+  test('record marked incomplete → pending', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: { ...closedOutInputs().record, status: 'incomplete' } }));
+    expect(facts.completion).toMatchObject({ state: 'pending', reason: 'record_marked_incomplete' });
+  });
+
+  test('service_records lookup failure → unknown, never pending', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: null, recordLookupFailed: true }));
+    expect(facts.completion).toMatchObject({ state: 'unknown', reason: 'service_records_lookup_failed' });
+  });
+});
+
+describe('closeout-status: application + photos', () => {
+  test('catalog says no application log → not_required with ruleSource catalog', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: baseRequirements({ requiresApplicationLog: false }), activeApplicationCount: 0 }));
+    expect(facts.application).toMatchObject({ state: 'not_required', ruleSource: 'catalog' });
+  });
+
+  test('all application rows retracted (recap correction) → failed, not done and not pending', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ activeApplicationCount: 0, retractedApplicationCount: 3 }));
+    expect(facts.application).toMatchObject({ state: 'failed', reason: 'all_application_rows_retracted', retractedCount: 3 });
+  });
+
+  test('no application rows at all on a required lane → pending', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ activeApplicationCount: 0, retractedApplicationCount: 0 }));
+    expect(facts.application.state).toBe('pending');
+  });
+
+  test('application lookup failed → unknown', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ activeApplicationCount: null }));
+    expect(facts.application.state).toBe('unknown');
+  });
+
+  test('photos: short → pending with counts; met → done; zero required → not_required; lookup failed → unknown', () => {
+    const req = baseRequirements({ requiredPhotoCount: 2 });
+    expect(deriveCloseoutFacts(closedOutInputs({ requirements: req, photoCount: 1 })).facts.photos)
+      .toMatchObject({ state: 'pending', required: 2, actual: 1 });
+    expect(deriveCloseoutFacts(closedOutInputs({ requirements: req, photoCount: 2 })).facts.photos.state).toBe('done');
+    expect(deriveCloseoutFacts(closedOutInputs({ photoCount: 0 })).facts.photos.state).toBe('not_required');
+    expect(deriveCloseoutFacts(closedOutInputs({ requirements: req, photoCount: null })).facts.photos.state).toBe('unknown');
+  });
+
+  test('requirements unavailable → application/photos unknown (catalog outage is not a compliance gap)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: null }));
+    expect(facts.application.state).toBe('unknown');
+    expect(facts.photos.state).toBe('unknown');
+  });
+});
+
+describe('closeout-status: report + report delivery', () => {
+  test('published report + sent delivery → done/done with evidence', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs());
+    expect(facts.report).toMatchObject({ state: 'done', hasToken: true, audience: 'customer', posture: 'auto_send' });
+    expect(facts.reportDelivery).toMatchObject({ state: 'done', status: 'sent', attempts: 1, maxAttempts: 5 });
+  });
+
+  test('frozen internal_only posture: report done for staff, delivery + comms not_required (designed state, not a gap)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, structured_notes: { typedReportDelivery: 'internal_only' } },
+      delivery: null,
+    }));
+    expect(facts.report).toMatchObject({ state: 'done', audience: 'internal' });
+    expect(facts.reportDelivery).toMatchObject({ state: 'not_required', reason: 'frozen_posture_internal_only', ruleSource: 'frozen_record' });
+    expect(facts.comms).toMatchObject({ state: 'not_required', reason: 'frozen_posture_internal_only' });
+  });
+
+  test('frozen disabled posture: no report artifact is owed at all', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, report_view_token: null, report_generated_at: null, structured_notes: { typedReportDelivery: 'disabled' } },
+      delivery: null,
+    }));
+    expect(facts.report).toMatchObject({ state: 'not_required', reason: 'frozen_posture_disabled' });
+    expect(facts.reportDelivery.state).toBe('not_required');
+  });
+
+  test('form submitted but never published → pending form_submitted_not_published; nothing at all → pending no_report_artifact', () => {
+    const noToken = { ...closedOutInputs().record, report_view_token: null, report_generated_at: null };
+    expect(deriveCloseoutFacts(closedOutInputs({ record: noToken, completedFormCount: 1, delivery: null })).facts.report)
+      .toMatchObject({ state: 'pending', reason: 'form_submitted_not_published' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: noToken, completedFormCount: 0, delivery: null })).facts.report)
+      .toMatchObject({ state: 'pending', reason: 'no_report_artifact' });
+  });
+
+  test('delivery queue: mid-ladder queued → pending; exhausted failed → failed; skipped → not_required; no row → pending not_enqueued', () => {
+    const queued = { channel: 'email', status: 'queued', attempts: 2, max_attempts: 5, next_attempt_at: '2026-08-31T16:00:00Z' };
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: queued })).facts.reportDelivery)
+      .toMatchObject({ state: 'pending', reason: 'delivery_queued', attempts: 2 });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'failed', attempts: 5, last_error: 'smtp 550' } })).facts.reportDelivery)
+      .toMatchObject({ state: 'failed', reason: 'delivery_exhausted', lastError: 'smtp 550' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped' } })).facts.reportDelivery)
+      .toMatchObject({ state: 'not_required', reason: 'delivery_skipped' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null })).facts.reportDelivery)
+      .toMatchObject({ state: 'pending', reason: 'not_enqueued' });
+  });
+
+  test('delivery lookup failed → unknown; catalog says no report → not_required', () => {
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, deliveryLookupFailed: true })).facts.reportDelivery.state).toBe('unknown');
+    const noReport = deriveCloseoutFacts(closedOutInputs({
+      requirements: baseRequirements({ requiresServiceReport: false }),
+      record: { ...closedOutInputs().record, report_view_token: null, report_generated_at: null }, delivery: null,
+    }));
+    expect(noReport.facts.report).toMatchObject({ state: 'not_required', reason: 'catalog_no_service_report' });
+    expect(noReport.facts.reportDelivery.state).toBe('not_required');
+  });
+});
+
+describe('closeout-status: invoice + invoice delivery', () => {
+  test('refunded invoice beside a live one → PARKED (pending, manual), never "invoiced"', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      terminalInvoice: { id: 'inv-refunded', status: 'refunded' },
+    }));
+    expect(facts.invoice).toMatchObject({
+      state: 'pending', reason: 'parked_manual_refunded_invoice', refundedInvoiceId: 'inv-refunded', liveBesideInvoiceId: 'inv-1',
+    });
+    expect(facts.invoiceDelivery.state).toBe('pending');
+  });
+
+  test('callback visit → invoice not_required (re-services are never priced)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, is_callback: true }, liveInvoice: null,
+    }));
+    expect(facts.invoice).toMatchObject({ state: 'not_required', reason: 'lane_no_charge', why: 'callback', ruleSource: 'visit_flag' });
+    expect(facts.invoiceDelivery.state).toBe('not_required');
+  });
+
+  test('always-free service type (estimate / re-service) → not_required', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, service_type: 'Pest Control Re-Service', is_callback: false }, liveInvoice: null,
+    }));
+    expect(facts.invoice).toMatchObject({ state: 'not_required', why: 'always_free_service_type' });
+  });
+
+  test('monthly member with active autopay on a recurring visit → covered_membership, not_required', () => {
+    const member = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'monthly_membership', waveguard_tier: 'Silver', monthly_rate: 89, autopay_enabled: true },
+      lane: { mode: 'monthly_membership', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null }, liveInvoice: null,
+    });
+    const { facts, billing } = deriveCloseoutFacts(member);
+    expect(facts.invoice).toMatchObject({ state: 'not_required', reason: 'lane_covered_membership', ruleSource: 'lane' });
+    expect(billing.expectation.kind).toBe('covered_membership');
+  });
+
+  test('invoice minted on a dues-covered visit → done BUT flagged as a contradiction (double-bill signal)', () => {
+    const member = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'monthly_membership', waveguard_tier: 'Silver', monthly_rate: 89, autopay_enabled: true },
+      lane: { mode: 'monthly_membership', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null },
+    });
+    const { facts, contradictions } = deriveCloseoutFacts(member);
+    expect(facts.invoice.state).toBe('done');
+    expect(contradictions.map((c) => c.code)).toContain('invoice_on_covered_visit');
+  });
+
+  test('per_visit priced visit with no invoice → pending expected_invoice_not_minted with the amount', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ liveInvoice: null }));
+    expect(facts.invoice).toMatchObject({ state: 'pending', reason: 'expected_invoice_not_minted', amount: 120 });
+  });
+
+  test('validated annual-prepay coverage → not_required covered_annual', () => {
+    const annual = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 100, autopay_enabled: false },
+      lane: { mode: 'annual_prepay', source: 'explicit' },
+      visit: { ...closedOutInputs().visit, prepaid_method: 'annual_prepay_invoice', estimated_price: null },
+      annualCoverageValidated: true, liveInvoice: null,
+    });
+    expect(deriveCloseoutFacts(annual).facts.invoice).toMatchObject({ state: 'not_required', reason: 'lane_covered_annual' });
+  });
+
+  test('invoice lookup failed → unknown; no customer row → unknown (expectation unavailable)', () => {
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, liveInvoiceLookupFailed: true })).facts.invoice.state).toBe('unknown');
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, customer: null, lane: null })).facts.invoice)
+      .toMatchObject({ state: 'unknown', reason: 'billing_expectation_unavailable' });
+  });
+
+  test('invoice delivery: draft held by the send window → pending deferred; paid → done; draft with no marker → pending', () => {
+    const draft = { id: 'inv-1', status: 'draft', total: 120, sent_at: null, sms_sent_at: null, payer_id: null };
+    expect(deriveCloseoutFacts(closedOutInputs({
+      liveInvoice: draft, record: { ...closedOutInputs().record, structured_notes: { completionSmsStatus: 'deferred' } },
+    })).facts.invoiceDelivery).toMatchObject({ state: 'pending', reason: 'deferred_send_window' });
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: { ...draft, status: 'paid' } })).facts.invoiceDelivery)
+      .toMatchObject({ state: 'done', reason: 'paid' });
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: draft })).facts.invoiceDelivery)
+      .toMatchObject({ state: 'pending', reason: 'invoice_draft_unsent' });
+  });
+
+  test('payer-billed invoice: sent → done payer_invoice_sent; unsent → pending', () => {
+    const payer = { id: 'inv-ap', status: 'draft', total: 300, sent_at: null, payer_id: 'payer-1' };
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: payer })).facts.invoiceDelivery)
+      .toMatchObject({ state: 'pending', reason: 'payer_invoice_unsent' });
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: { ...payer, sent_at: '2026-08-30T19:00:00Z' } })).facts.invoiceDelivery)
+      .toMatchObject({ state: 'done', reason: 'payer_invoice_sent' });
+  });
+});
+
+describe('closeout-status: comms + follow-up', () => {
+  test('completionSmsStatus sent → done; deferred → pending; failed → failed', () => {
+    const rec = (status) => ({ ...closedOutInputs().record, structured_notes: { completionSmsStatus: status } });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('sent') })).facts.comms.state).toBe('done');
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('deferred') })).facts.comms).toMatchObject({ state: 'pending', reason: 'deferred_send_window' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('failed') })).facts.comms.state).toBe('failed');
+  });
+
+  test('recap lane stamp counts as comms done', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, structured_notes: {}, recap_sms_sent_at: '2026-08-30T18:10:00Z', field_flags: { recap: true } },
+    }));
+    expect(facts.comms).toMatchObject({ state: 'done', reason: 'recap_sms_sent' });
+    expect(facts.completion.recapLane).toBe(true);
+  });
+
+  test('no comms marker: delivered report email counts; otherwise UNKNOWN, never pending', () => {
+    const bare = { ...closedOutInputs().record, structured_notes: {} };
+    expect(deriveCloseoutFacts(closedOutInputs({ record: bare })).facts.comms).toMatchObject({ state: 'done', reason: 'report_email_delivered' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: bare, delivery: null })).facts.comms)
+      .toMatchObject({ state: 'unknown', reason: 'no_comms_marker_on_record' });
+  });
+
+  test('backfill completion: invoice, comms, report (when absent) are not_required, sourced from the frozen record', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, structured_notes: { backfill: true }, report_view_token: null, report_generated_at: null },
+      completedFormCount: 0, delivery: null, liveInvoice: null,
+    }));
+    expect(facts.invoice).toMatchObject({ state: 'not_required', reason: 'backfill_completion', ruleSource: 'frozen_record' });
+    expect(facts.comms).toMatchObject({ state: 'not_required', reason: 'backfill_completion' });
+    expect(facts.report).toMatchObject({ state: 'not_required', reason: 'backfill_completion' });
+  });
+
+  test('follow-up: frozen required + live child → done; required + no child → pending; verdict not required → not_required; lookup failed → unknown', () => {
+    // typedFollowupVerdict names the window `days` (projectFollowupSuggestion).
+    const required = { suggestion: { required: true, days: 14, reason: 'knockdown' }, frozen: true, serviceRecordId: REC };
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: required, followupChild: { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-09-12' } })).facts.followUp)
+      .toMatchObject({ state: 'done', childServiceId: 'svc-2', childScheduledDate: '2026-09-12' });
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: required })).facts.followUp)
+      .toMatchObject({ state: 'pending', reason: 'followup_required_not_booked', windowDays: 14, verdictReason: 'knockdown' });
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: { suggestion: { required: false }, frozen: true } })).facts.followUp)
+      .toMatchObject({ state: 'not_required', reason: 'typed_verdict_not_required', frozen: true });
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: undefined })).facts.followUp.state).toBe('unknown');
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: required, followupChildLookupFailed: true })).facts.followUp.state).toBe('unknown');
+  });
+});
+
+describe('closeout-status: grouped stops + summary', () => {
+  test('a visit inside a service_visits group reports the packet, per-service facts stay per-service', () => {
+    const { packet } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, visit_id: 'grp-1' },
+      packets: [{ id: 'pk-1', status: 'processing' }], packetMemberIds: ['svc-1', 'svc-9'],
+    }));
+    expect(packet).toMatchObject({ visitId: 'grp-1', activePacket: true, memberServiceIds: ['svc-1', 'svc-9'], packetStatuses: ['processing'] });
+  });
+
+  test('summarizeCloseout keeps unknown separate from open so an outage never reads as a compliance gap', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ photoCount: null, requirements: baseRequirements({ requiredPhotoCount: 2 }), liveInvoice: null }));
+    const summary = summarizeCloseout(facts);
+    expect(summary.unknown).toEqual(['photos']);
+    expect(summary.open).toEqual(['invoice', 'invoiceDelivery']);
+    expect(summary.closedOut).toBe(false);
+  });
+
+  test('deriveBillingExpectation returns null without a customer/lane instead of guessing', () => {
+    expect(deriveBillingExpectation({ visit: closedOutInputs().visit, customer: null, lane: null })).toBeNull();
+  });
+});
+
+describe('closeout-status: Agent D findings', () => {
+  test('P0 project/WDO visit: report lives on projects.report_token, delivery on projects.delivery_status', () => {
+    const projectVisit = closedOutInputs({
+      visit: { ...closedOutInputs().visit, project_id: 'proj-1', service_type: 'WDO Inspection' },
+      record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: {} },
+      completedFormCount: 0, delivery: null,
+      project: { id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'sent', last_delivery_at: '2026-08-30T19:00:00Z' },
+    });
+    const { facts } = deriveCloseoutFacts(projectVisit);
+    expect(facts.report).toMatchObject({ state: 'done', reason: 'project_report_published', projectId: 'proj-1', source: 'projects.report_token' });
+    expect(facts.reportDelivery).toMatchObject({ state: 'done', reason: 'project_delivery_sent', deliveryStatus: 'sent' });
+    expect(facts.comms).toMatchObject({ state: 'done', reason: 'project_report_delivered' });
+  });
+
+  test('project report on payment hold → pending on_hold; failed delivery → failed; legacy_sent → done; no token → pending', () => {
+    const base = closedOutInputs({
+      visit: { ...closedOutInputs().visit, project_id: 'proj-1' },
+      record: { ...closedOutInputs().record, completion_source: 'project_completion', report_view_token: null, report_generated_at: null, structured_notes: {} },
+      delivery: null,
+    });
+    const proj = (o) => ({ id: 'proj-1', status: 'closed', report_token: 'c'.repeat(32), delivery_status: 'not_sent', ...o });
+    expect(deriveCloseoutFacts({ ...base, project: proj({ report_hold_status: 'payment_hold' }) }).facts.reportDelivery)
+      .toMatchObject({ state: 'pending', reason: 'project_report_on_hold', reportHoldStatus: 'payment_hold' });
+    expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'failed' }) }).facts.reportDelivery.state).toBe('failed');
+    expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'legacy_sent' }) }).facts.reportDelivery.state).toBe('done');
+    expect(deriveCloseoutFacts({ ...base, project: proj({ report_token: null }) }).facts.report)
+      .toMatchObject({ state: 'pending', reason: 'project_closed_without_report' });
+    expect(deriveCloseoutFacts({ ...base, project: null, projectLookupFailed: true }).facts.report.state).toBe('unknown');
+  });
+
+  test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {
+    const rec = (status, extra = {}) => ({ ...closedOutInputs().record, structured_notes: { completionSmsStatus: status, ...extra } });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('sending') })).facts.comms).toMatchObject({ state: 'pending', reason: 'completion_sms_sending' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('blocked') })).facts.comms).toMatchObject({ state: 'not_required', reason: 'completion_sms_blocked_consent', ruleSource: 'consent' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('skipped_recap_sms_already_sent') })).facts.comms).toMatchObject({ state: 'done', reason: 'recap_sms_sent' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec('sent', { sentSmsAt: '2026-08-30T18:07:00Z' }) })).facts.comms.deliveredAt).toBe('2026-08-30T18:07:00.000Z');
+  });
+
+  test('report delivery with no queue row falls back to the record-notes mirror: disabled → kill_switch not_required, sent → done, failed → failed', () => {
+    const rec = (status, extra = {}) => ({ ...closedOutInputs().record, structured_notes: { completionSmsStatus: 'sent', serviceReportV1EmailStatus: status, ...extra } });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: rec('disabled') })).facts.reportDelivery)
+      .toMatchObject({ state: 'not_required', reason: 'report_email_kill_switch', ruleSource: 'kill_switch' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: rec('sent', { serviceReportV1EmailSentAt: '2026-08-30T18:06:00Z' }) })).facts.reportDelivery)
+      .toMatchObject({ state: 'done', sentAt: '2026-08-30T18:06:00.000Z' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: rec('failed', { serviceReportV1EmailError: 'bounce for jane@example.com' }) })).facts.reportDelivery)
+      .toMatchObject({ state: 'failed', lastError: 'bounce for [email]' });
+  });
+
+  test('non-V1 template with no delivery row → unknown (not a gap); recap-lane SMS counts as report delivery', () => {
+    const typed = { ...closedOutInputs().record, report_template_version: 'wdo_typed_v2', structured_notes: { completionSmsStatus: 'sent' } };
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: typed })).facts.reportDelivery)
+      .toMatchObject({ state: 'unknown', reason: 'no_delivery_row_for_template', templateVersion: 'wdo_typed_v2' });
+    const recap = { ...closedOutInputs().record, recap_sms_sent_at: '2026-08-30T18:10:00Z', structured_notes: {} };
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: recap })).facts.reportDelivery)
+      .toMatchObject({ state: 'done', reason: 'recap_sms_delivered' });
+  });
+
+  test('refunded sibling beside a PAID live invoice → done (office already collected), with the sibling noted', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      liveInvoice: { ...closedOutInputs().liveInvoice, status: 'paid' },
+      terminalInvoice: { id: 'inv-refunded', status: 'refunded' },
+    }));
+    expect(facts.invoice).toMatchObject({ state: 'done', reason: 'invoice_paid', refundedSiblingInvoiceId: 'inv-refunded' });
+  });
+
+  test('rescheduled visit is a phantom row → nothing owed', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      visit: { ...closedOutInputs().visit, status: 'rescheduled' }, record: null, attempt: { state: 'none' }, liveInvoice: null, delivery: null,
+    }));
+    expect(facts.completion).toMatchObject({ state: 'not_required', reason: 'visit_rescheduled' });
+    expect(facts.invoice.state).toBe('not_required');
+  });
+
+  test('record marked incomplete → completion pending, every downstream fact not_required (visit will be rescheduled)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: { ...closedOutInputs().record, status: 'incomplete' } }));
+    expect(facts.completion.state).toBe('pending');
+    for (const name of FACT_NAMES.filter((n) => n !== 'completion')) {
+      expect(facts[name]).toMatchObject({ state: 'not_required', reason: 'record_marked_incomplete' });
+    }
+  });
+
+  test('error text is scrubbed (emails, long tokens, long digit runs) before it leaves the service', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      delivery: { channel: 'email', status: 'failed', attempts: 5, max_attempts: 5, last_error: 'SMTP 550 for bob@example.com token ' + 'a'.repeat(32) + ' acct 12345678' },
+    }));
+    expect(facts.reportDelivery.lastError).toBe('SMTP 550 for [email] token [token] acct [digits]');
+    const failed = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: { state: 'failed', error: 'x jane@x.io' }, visit: { ...closedOutInputs().visit, status: 'on_site' } }));
+    expect(failed.facts.completion.error).toBe('x [email]');
+  });
+
+  test('billing expectation branches: prepaid out-of-band → not_required; per_application autopay → expected_auto_charge_not_minted', () => {
+    const prepaid = closedOutInputs({ visit: { ...closedOutInputs().visit, prepaid_method: 'cash', prepaid_amount: 120 }, liveInvoice: null });
+    expect(deriveCloseoutFacts(prepaid).facts.invoice).toMatchObject({ state: 'not_required', reason: 'lane_prepaid' });
+    const perApp = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'per_application', per_application_fee: 98, autopay_enabled: true },
+      lane: { mode: 'per_application', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null }, liveInvoice: null,
+    });
+    expect(deriveCloseoutFacts(perApp).facts.invoice).toMatchObject({ state: 'pending', reason: 'expected_auto_charge_not_minted', amount: 98 });
+  });
+});
+
+describe('service-closeout-requirements: strict mode', () => {
+  const actual = jest.requireActual('../services/service-closeout-requirements');
+  // Real knex fails at await time, not at builder time — mirror that.
+  const throwingKnex = () => {
+    const err = new Error('catalog offline');
+    const q = {
+      where() { return q; },
+      then(res, rej) { return Promise.reject(err).then(res, rej); },
+      catch(fn) { return Promise.reject(err).catch(fn); },
+    };
+    return { select: () => q };
+  };
+
+  test('default mode degrades a catalog failure to fallback inference (legacy behavior, unchanged)', async () => {
+    const map = await actual.resolveCloseoutRequirementsForJobs([{ id: 'j1', service_id: 'cat-1', service_type: 'Pest' }], { knex: throwingKnex });
+    expect(map.get('j1').source).toBe('fallback_inference');
+  });
+
+  test('strict mode propagates the failure so a status reader can say unknown instead of guessing', async () => {
+    await expect(actual.resolveCloseoutRequirementsForJobs([{ id: 'j1', service_id: 'cat-1', service_type: 'Pest' }], { knex: throwingKnex, strict: true }))
+      .rejects.toThrow('catalog offline');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Loader against a fake knex: table-keyed canned rows + a minimal where engine.
+// ---------------------------------------------------------------------------
+function makeFakeKnex(tables) {
+  return function knex(table) {
+    const source = tables[table];
+    if (source instanceof Error) throw source;
+    let rows = Array.isArray(source) ? [...source] : [];
+    const chain = {
+      where(criteria) {
+        if (criteria && typeof criteria === 'object') {
+          rows = rows.filter((r) => Object.entries(criteria).every(([k, v]) => r[k] === v));
+        }
+        return chain;
+      },
+      orWhere(criteria) {
+        const extra = (Array.isArray(source) ? source : []).filter((r) => Object.entries(criteria).every(([k, v]) => r[k] === v));
+        for (const r of extra) if (!rows.includes(r)) rows.push(r);
+        return chain;
+      },
+      whereIn(col, values) { rows = rows.filter((r) => values.includes(r[col])); return chain; },
+      whereNotIn(col, values) { rows = rows.filter((r) => !values.includes(r[col])); return chain; },
+      whereNull(col) { rows = rows.filter((r) => r[col] == null); return chain; },
+      whereNotNull(col) { rows = rows.filter((r) => r[col] != null); return chain; },
+      whereNot(col, v) { rows = rows.filter((r) => r[col] !== v); return chain; },
+      orderBy() { return chain; },
+      select() { return Promise.resolve(rows); },
+      count() { chain._count = true; return chain; },
+      first() { return Promise.resolve(chain._count ? { n: rows.length } : (rows[0] || null)); },
+      then(resolve, reject) { return Promise.resolve(rows).then(resolve, reject); },
+    };
+    // knex's where(fn) form used by the invoice-candidate lookups.
+    const origWhere = chain.where;
+    chain.where = (criteria) => {
+      if (typeof criteria === 'function') {
+        const collected = [];
+        criteria({ orWhere: (c) => { collected.push(c); }, where: (c) => { collected.push(c); } });
+        rows = rows.filter((r) => collected.some((c) => Object.entries(c).every(([k, v]) => r[k] === v)));
+        return chain;
+      }
+      return origWhere(criteria);
+    };
+    return chain;
+  };
+}
+
+describe('closeout-status: loader against a fake knex', () => {
+  const visitRow = {
+    id: SVC, customer_id: 'cust-1', status: 'completed', scheduled_date: '2026-08-30', completed_at: '2026-08-30T18:00:00Z',
+    service_type: 'Quarterly Pest Control', service_id: 'cat-pest', is_callback: false, is_recurring: true, estimated_price: 120,
+  };
+  const recordRow = {
+    id: REC, scheduled_service_id: SVC, status: 'completed', completion_source: 'detailed_form', created_at: '2026-08-30T18:01:00Z',
+    report_view_token: 'b'.repeat(32), report_generated_at: '2026-08-30T18:05:00Z', structured_notes: { completionSmsStatus: 'sent' },
+  };
+  const healthyTables = () => ({
+    scheduled_services: [visitRow],
+    customers: [{ id: 'cust-1', billing_mode: 'per_visit', autopay_enabled: false }],
+    service_records: [recordRow],
+    service_completion_attempts: [{ service_id: SVC, status: 'succeeded', service_record_id: REC, updated_at: '2026-08-30T18:01:00Z' }],
+    job_form_submissions: [{ scheduled_service_id: SVC, completed_at: '2026-08-30T18:00:30Z' }],
+    property_application_history: [{ service_record_id: REC, retracted_at: null }],
+    service_photos: [],
+    service_report_deliveries: [{ service_record_id: REC, channel: 'email', status: 'sent', attempts: 1, max_attempts: 5, sent_at: '2026-08-30T18:06:00Z' }],
+    invoices: [{ id: 'inv-1', service_record_id: REC, scheduled_service_id: SVC, status: 'sent', total: 120, sent_at: '2026-08-30T18:06:00Z', created_at: '2026-08-30T18:02:00Z' }],
+    payers: [],
+  });
+
+  beforeEach(() => {
+    catalogRows.length = 0;
+    catalogRows.push({
+      id: 'cat-pest', name: 'Quarterly Pest Control', category: 'pest_control', closeout_requirements_source: 'catalog_v2',
+      requires_service_report: true, requires_application_log: true, required_photo_count: 0,
+    });
+  });
+
+  test('healthy rows → fully closed out, no unavailable lookups', async () => {
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(healthyTables()), now: NOW });
+    expect(result.found).toBe(true);
+    expect(result.unavailable).toEqual([]);
+    expect(result.summary.closedOut).toBe(true);
+    expect(result.requirements.asOf).toBe('current_catalog');
+    expect(result.visit).toMatchObject({ status: 'completed', serviceType: 'Quarterly Pest Control', isCallback: false });
+    expect(result.record).toMatchObject({ id: REC, backfill: false, posture: 'auto_send' });
+  });
+
+  test('a failing table lands in `unavailable` and its fact reads unknown — the loader never throws and never says "missing"', async () => {
+    const tables = healthyTables();
+    tables.service_photos = new Error('relation "service_photos" does not exist');
+    catalogRows[0].required_photo_count = 2;
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(result.unavailable.map((u) => u.lookup)).toEqual(['service_photos']);
+    expect(result.facts.photos).toMatchObject({ state: 'unknown', reason: 'service_photos_lookup_failed', required: 2 });
+    expect(result.summary.unknown).toEqual(['photos']);
+    expect(result.summary.open).toEqual([]);
+  });
+
+  test('unknown service id → found:false, no facts fabricated', async () => {
+    const result = await getCloseoutStatus('nope', { knex: makeFakeKnex(healthyTables()), now: NOW });
+    expect(result).toMatchObject({ found: false, lookupFailed: false });
+    expect(result.facts).toBeUndefined();
+  });
+
+  test('scheduled_services lookup failure → found:false with lookupFailed:true (outage ≠ missing visit)', async () => {
+    const tables = healthyTables();
+    tables.scheduled_services = new Error('connection refused');
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(result).toMatchObject({ found: false, lookupFailed: true });
+  });
+
+  test('serviceId is required', async () => {
+    await expect(getCloseoutStatus(null)).rejects.toThrow(/serviceId/);
+  });
+});

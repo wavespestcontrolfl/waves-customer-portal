@@ -82,7 +82,11 @@ function normalizeRequirements(row = {}, serviceType = null) {
   };
 }
 
-async function resolveCloseoutRequirementsForJobs(jobs = []) {
+// `knex` lets a caller inside a transaction / test harness supply its own
+// handle; `strict` makes a catalog lookup failure PROPAGATE instead of
+// degrading every job to fallback inference — a status reader must be able
+// to tell "catalog unavailable" from "no catalog row" (closeout-status.js).
+async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict = false } = {}) {
   const serviceIds = [...new Set(jobs.map((job) => job.service_id).filter(Boolean))];
   const serviceNames = [...new Set(jobs
     .filter((job) => !job.service_id && job.service_type)
@@ -92,7 +96,7 @@ async function resolveCloseoutRequirementsForJobs(jobs = []) {
   const byId = new Map();
   const byName = new Map();
   if (serviceIds.length || serviceNames.length) {
-    const q = db('services').select(
+    const q = knex('services').select(
       'id',
       'name',
       'category',
@@ -112,7 +116,7 @@ async function resolveCloseoutRequirementsForJobs(jobs = []) {
         else qb.whereIn('name', serviceNames);
       }
     });
-    const rows = await q.catch(() => []);
+    const rows = strict ? await q : await q.catch(() => []);
     for (const row of rows) {
       byId.set(row.id, row);
       byName.set(String(row.name || '').trim().toLowerCase(), row);
