@@ -46,7 +46,16 @@ async function previewCancellationEffects(scheduledServiceId, { trx = null } = {
     const CardHolds = require('../estimate-card-holds');
     const hold = await CardHolds.cardHoldCancelPreview(scheduledServiceId);
     if (hold?.held) {
-      fee = { rail: 'card_hold', applies: !!hold.feeApplies, amount: hold.feeApplies ? (Number(hold.feeAmount) || null) : null, unresolved: false };
+      fee = {
+        rail: 'card_hold',
+        applies: !!hold.feeApplies,
+        amount: hold.feeApplies ? (Number(hold.feeAmount) || null) : null,
+        unresolved: false,
+        // The no-fee disposition depends on a feature gate the rail reads
+        // at execution — freeze it here so a gate flip during the pending
+        // window is drift, not a silent change of effect.
+        hold_disposition: hold.feeApplies ? null : (CardHolds.isParkOnCancelEnabled() ? 'parked' : 'released'),
+      };
     } else {
       const ApptCards = require('../appointment-card-request');
       const secure = await ApptCards.appointmentCardCancelPreview(scheduledServiceId);
@@ -103,7 +112,10 @@ function cancellationFingerprint(preview) {
   const a = preview?.appointment || {};
   const material = {
     appointment: [String(a.id || ''), String(a.scheduled_date || ''), a.service_type || null, a.status || null, a.technician_id ? String(a.technician_id) : null, a.customer_name || null],
-    fee: { rail: preview?.fee?.rail, applies: preview?.fee?.applies, amount: preview?.fee?.amount, unresolved: preview?.fee?.unresolved },
+    fee: {
+      rail: preview?.fee?.rail, applies: preview?.fee?.applies, amount: preview?.fee?.amount,
+      unresolved: preview?.fee?.unresolved, hold_disposition: preview?.fee?.hold_disposition ?? null,
+    },
     invoices: (preview?.invoices || []).map((i) => [String(i.id), i.status, i.total, i.credit_applied]),
   };
   return crypto.createHash('sha256').update(JSON.stringify(material)).digest('hex');

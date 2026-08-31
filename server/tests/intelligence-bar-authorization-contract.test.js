@@ -185,6 +185,62 @@ test('two-step previews surface their resolved facts as effects (capped) and fin
   expect(c2.preview_fingerprint).toBe(previewFingerprint(big));
 });
 
+test('schedule moves/cancels are NOT marked as contacting the customer; sends and bookings are', () => {
+  expect(buildContract({ toolName: 'reschedule_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+  expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+  expect(buildContract({ toolName: 'trigger_review_request', params: {}, displayParams: {} }).notifies_customer).toBe(true);
+  expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(true);
+});
+
+test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {
+  const price = buildContract({ toolName: 'run_price_lookup', params: { product: 'Termidor' }, displayParams: { product: 'Termidor' } });
+  expect(price.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/paid web-search/));
+  expect(price.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/price_approvals/));
+  const tax = buildContract({ toolName: 'run_tax_advisor', params: {}, displayParams: {} });
+  expect(tax.effects.length).toBeGreaterThanOrEqual(2);
+  expect(tax.effects.find((e) => e.kind === 'comms').label).toMatch(/internal alert, not a customer message/);
+});
+
+test('reschedule_appointment: pinned visit identity/state becomes a before/after effect and binds the hash', () => {
+  const pinned = { id: 'ap1', status: 'scheduled', scheduled_date: '2026-09-02', time_window: '8-10', technician_id: 't1', service_type: 'Quarterly Pest', customer_name: 'acct-3001' };
+  const c = buildContract({
+    toolName: 'reschedule_appointment',
+    params: { appointment_id: 'ap1', new_date: '2026-09-04', new_time_window: '10-12', _appointment_fingerprint: 'x' },
+    displayParams: { appointment_id: 'ap1', new_date: '2026-09-04', new_time_window: '10-12', appointment: 'Quarterly Pest — acct-3001 on 2026-09-02 8-10 (scheduled)' },
+    preview: { pinned_appointment: pinned },
+  });
+  expect(c.effects).toContainEqual({
+    kind: 'operational', label: 'Move Quarterly Pest for acct-3001 (scheduled) from 2026-09-02 8-10 → 2026-09-04 10-12', before: '2026-09-02 8-10', after: '2026-09-04 10-12',
+  });
+  expect(c.pinned_appointment).toEqual(pinned);
+  const moved = buildContract({ toolName: 'reschedule_appointment', params: { appointment_id: 'ap1', new_date: '2026-09-04' }, displayParams: {}, preview: { pinned_appointment: { ...pinned, scheduled_date: '2026-09-03' } } });
+  expect(contractHash(moved)).not.toBe(contractHash(c));
+});
+
+test('bulk_update_leads: full name list under more_effects and a fingerprint of every pinned id', () => {
+  const ids = ['l3', 'l1', 'l2'];
+  const c = buildContract({
+    toolName: 'bulk_update_leads',
+    params: { lead_ids: ids, current_status: 'new', new_status: 'lost' },
+    displayParams: { current_status: 'new', new_status: 'lost', leads_to_update: 3, sample: 'A, B, C' },
+    preview: { all_names: ['acct-1', 'acct-2', 'acct-3'] },
+  });
+  expect(c.more_effects.map((e) => e.label)).toEqual(['acct-1', 'acct-2', 'acct-3']);
+  expect(c.targets_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  const same = buildContract({ toolName: 'bulk_update_leads', params: { lead_ids: ['l1', 'l2', 'l3'], current_status: 'new', new_status: 'lost' }, displayParams: {}, preview: { all_names: ['acct-1', 'acct-2', 'acct-3'] } });
+  expect(same.targets_fingerprint).toBe(c.targets_fingerprint); // order-independent
+  const other = buildContract({ toolName: 'bulk_update_leads', params: { lead_ids: ['l1', 'l2', 'l9'], current_status: 'new', new_status: 'lost' }, displayParams: {}, preview: { all_names: ['acct-1', 'acct-2', 'acct-3'] } });
+  expect(other.targets_fingerprint).not.toBe(c.targets_fingerprint);
+  expect(contractHash(other)).not.toBe(contractHash(c));
+});
+
+test('cancellation: frozen hold disposition is stated, never a disjunction', () => {
+  const mk = (disp) => buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {}, preview: { cancellation: { appointment: {}, fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false, hold_disposition: disp }, invoices: [] } } });
+  expect(mk('parked').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/PARKED for the rebooked visit$/));
+  expect(mk('released').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/is RELEASED$/));
+  expect(contractHash(mk('parked'))).not.toBe(contractHash(mk('released')));
+});
+
 test('hash is order-independent and sensitive to any effect change', () => {
   const a = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { appointment_id: 'ap1', reason: 'rain' } });
   const b = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { reason: 'rain', appointment_id: 'ap1' } });

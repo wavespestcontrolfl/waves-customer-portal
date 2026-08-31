@@ -17,6 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
+const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
@@ -507,7 +508,77 @@ function operatorAdjustmentCardLine(adj) {
     + ` [reason: ${adj.requested.internal_reason}]`;
 }
 
+// ── W0B proposal-time pins for legacy-bare writes ──────────────────────
+// Each pin is resolved the same way the executor resolves it, shown on the
+// card, hashed into the contract, and re-resolved by /confirm-action —
+// drift ⇒ preview_changed, never a commit against a target the operator
+// didn't see.
+const TERMINAL_APPOINTMENT_STATUSES_FOR_PINS = ['completed', 'cancelled', 'no_show', 'skipped', 'rescheduled'];
+
+async function loadAppointmentPin(appointmentId) {
+  const a = await db('scheduled_services as ss')
+    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
+    .where('ss.id', appointmentId)
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.technician_id', 'ss.service_type', 'c.first_name', 'c.last_name');
+  if (!a) return null;
+  return {
+    id: a.id,
+    status: a.status,
+    scheduled_date: a.scheduled_date instanceof Date ? a.scheduled_date.toISOString().slice(0, 10) : String(a.scheduled_date || ''),
+    time_window: a.time_window || null,
+    technician_id: a.technician_id || null,
+    service_type: a.service_type || null,
+    customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim() || null,
+  };
+}
+
+function appointmentPinFingerprint(pin) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    String(pin.id), pin.status, pin.scheduled_date, pin.time_window, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
+  ])).digest('hex');
+}
+
+// Mirrors replyViaSms's own resolution order (email → customer_id → sender
+// address → typed name) so the pin is the recipient the executor would pick.
+async function resolveReplyViaSmsRecipient({ email_id, customer_name }) {
+  if (email_id) {
+    const email = await db('emails').where('id', String(email_id)).first('customer_id', 'from_address');
+    if (email?.customer_id) {
+      const c = await db('customers').where('id', email.customer_id).first('id', 'first_name', 'last_name', 'phone');
+      if (c) return c;
+    }
+    if (email?.from_address) {
+      const c = await db('customers').where('email', email.from_address).first('id', 'first_name', 'last_name', 'phone');
+      if (c) return c;
+    }
+  }
+  if (customer_name) return resolveCommsCustomer({ customer_name });
+  return null;
+}
+
+async function resolveReviewRequestRecipient({ customer_id, customer_name }) {
+  if (customer_id) return db('customers').where('id', String(customer_id)).first('id', 'first_name', 'last_name', 'phone');
+  if (customer_name) return resolveCommsCustomer({ customer_name });
+  return null;
+}
+
+function maskEmail(address) {
+  const [local, domain] = String(address).split('@');
+  if (!domain) return '***';
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
 function confirmationDisplayParams(toolName, params, preview) {
+  if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
+    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+  }
+  if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
+    return { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined };
+  }
+  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
+    const a = preview.pinned_appointment;
+    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
+  }
   if (toolName === 'send_sms' && preview?.pinned_recipient) {
     // The card must show WHO the confirmed send goes to — the pinned
     // identity resolved at proposal time, not a raw partial name that
@@ -658,6 +729,49 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params.technician_name = tech.name;
       preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
     }
+    if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
+      // Pin the visit being moved (W0B): the card must name the customer,
+      // service, and current date/window it is approving a move FROM, and
+      // /confirm-action refuses if the visit changed during the pending
+      // window (the executor's own read happens only after Confirm).
+      const pin = await loadAppointmentPin(String(params.appointment_id));
+      if (!pin) return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status))) {
+        return { failed: true, modelResult: { error: `This appointment is already ${pin.status} and can't be moved.` } };
+      }
+      params._appointment_fingerprint = appointmentPinFingerprint(pin);
+      preview = { ...preview, pinned_appointment: pin };
+    }
+    if (toolUse.name === 'trigger_review_request' || toolUse.name === 'reply_via_sms') {
+      // Same recipient pin send_sms has (codex P1 on #3648): resolve the
+      // human the message goes to NOW, show name + last4 on the card, and
+      // let /confirm-action refuse if the resolved phone drifts.
+      const recipient = toolUse.name === 'reply_via_sms'
+        ? await resolveReplyViaSmsRecipient(params)
+        : await resolveReviewRequestRecipient(params);
+      if (!recipient) return { failed: true, modelResult: { error: 'No customer matches — nothing was proposed.' } };
+      if (recipient.error) return { failed: true, modelResult: recipient };
+      if (!recipient.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
+      params._pinned_phone = recipient.phone;
+      preview = {
+        ...preview,
+        pinned_recipient: {
+          customer_id: recipient.id,
+          name: `${recipient.first_name || ''} ${recipient.last_name || ''}`.trim(),
+          phone_last4: String(recipient.phone).replace(/\D/g, '').slice(-4) || null,
+        },
+      };
+    }
+    if (toolUse.name === 'send_email_reply' && params.email_id) {
+      const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject');
+      if (!email) return { failed: true, modelResult: { error: 'Email not found — nothing was proposed.' } };
+      if (!email.from_address) return { failed: true, modelResult: { error: 'Email has no sender address to reply to.' } };
+      params._pinned_email = email.from_address;
+      preview = {
+        ...preview,
+        pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null },
+      };
+    }
     if (toolUse.name === 'cancel_appointment' && params.appointment_id) {
       // Cancelling runs the shared follow-through after commit: a late-
       // cancel fee may CHARGE the customer's card and open invoices get
@@ -712,7 +826,16 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       params.dry_run = false;
       params.lead_ids = matchedIds;
-      preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action };
+      // Every pinned lead's name for the card's "Show more" (the count and
+      // first ten alone can't distinguish two sets — codex P1 on #3648).
+      let allNames = [];
+      try {
+        const rows = await db('leads').whereIn('id', matchedIds).select('first_name', 'last_name');
+        allNames = rows.map((l) => `${l.first_name || ''} ${l.last_name || ''}`.trim()).filter(Boolean);
+      } catch (err) {
+        logger.warn(`[intelligence-bar] bulk lead name load failed: ${err.message}`);
+      }
+      preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action, all_names: allNames };
     }
     // create_pending_estimate with an operator price adjustment: the Confirm
     // card must show the engine anchor vs adjusted totals and any floor
@@ -2112,6 +2235,40 @@ router.post('/confirm-action', async (req, res, next) => {
         return res.status(409).json(result);
       }
     }
+    // W0B proposal-time pins for legacy-bare writes: re-resolve exactly as
+    // the proposal did and refuse on drift before anything is dispatched.
+    {
+      const pinnedPhone = execParams._pinned_phone;
+      const pinnedEmail = execParams._pinned_email;
+      const pinnedAppointment = execParams._appointment_fingerprint;
+      delete execParams._pinned_phone;
+      delete execParams._pinned_email;
+      delete execParams._appointment_fingerprint;
+      let drifted = false;
+      if (pinnedPhone) {
+        const r = action.tool_name === 'reply_via_sms'
+          ? await resolveReplyViaSmsRecipient(execParams)
+          : await resolveReviewRequestRecipient(execParams);
+        drifted = !r || r.error || String(r.phone || '') !== String(pinnedPhone);
+      }
+      if (!drifted && pinnedEmail) {
+        const email = await db('emails').where('id', String(execParams.email_id || '')).first('from_address');
+        drifted = !email || String(email.from_address || '') !== String(pinnedEmail);
+      }
+      if (!drifted && pinnedAppointment) {
+        const pin = await loadAppointmentPin(String(execParams.appointment_id || ''));
+        drifted = !pin || appointmentPinFingerprint(pin) !== pinnedAppointment;
+      }
+      if (drifted) {
+        const result = {
+          error: 'The target of this action changed after the card was shown. Ask again for a fresh confirmation card.',
+          preview_changed: true,
+        };
+        await PendingActions.recordResult(action.id, result);
+        return res.status(409).json(result);
+      }
+    }
+
     if (action.tool_name === 'cancel_appointment') {
       // Re-validate the frozen effect set (W0B): visit identity/state, fee
       // posture, and voidable-invoice set must still match what the card

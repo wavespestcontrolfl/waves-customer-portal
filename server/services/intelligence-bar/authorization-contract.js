@@ -57,18 +57,33 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'run_seo_pipeline',
 ]);
 
-// Tools whose commit contacts a customer (directly, or via the automations
-// that fire on schedule changes). move_stops_to_day is conditional on its
-// notify_customers param and handled explicitly.
+// Tools whose commit itself sends a customer a message. Schedule moves and
+// cancellations are deliberately NOT here: their executors only move/log
+// the row and run billing/tracker cleanup — no customer message is sent by
+// the confirm (reminder crons are separate, later, and their own effect).
+// move_stops_to_day is conditional on notify_customers and handled
+// explicitly.
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
   'send_email_reply',
   'trigger_review_request',
   'create_appointment',
-  'reschedule_appointment',
-  'cancel_appointment',
 ]);
+
+// Legacy-bare jobs with no mutation-free preview: what the launch does is
+// fixed and known, so the card states it explicitly (job launch, external
+// spend, variable writes, internal comms) instead of an empty effect list.
+const JOB_EFFECTS = {
+  run_price_lookup: [
+    ['operational', 'Launches the AI price-research job (paid web-search calls — external spend)'],
+    ['billing', 'Inserts a runtime-dependent set of price_approvals rows for the approval queue (nothing is approved or purchased by this action)'],
+  ],
+  run_tax_advisor: [
+    ['operational', 'Generates and stores a fresh AI tax-advisor report (15–30 s; paid model + search calls)'],
+    ['comms', 'Texts a summary to the admin phone — internal alert, not a customer message'],
+  ],
+};
 
 const BILLING_TOOL_NAMES = new Set([
   'request_instant_payout',
@@ -189,17 +204,32 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       before: preview.pinned_lead.current_status, after: params?.new_status,
     });
   }
-  if (toolName === 'send_sms' && preview?.pinned_recipient) {
-    push('comms', `Text ${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})`);
+  // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
+  // phone; send_email_reply pins the email the reply goes to).
+  if (preview?.pinned_recipient && (toolName === 'send_sms' || toolName === 'reply_via_sms' || toolName === 'trigger_review_request')) {
+    const verb = toolName === 'trigger_review_request' ? 'Send review request to' : 'Text';
+    push('comms', `${verb} ${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})`);
+  }
+  if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
+    push('comms', `Email reply to ${preview.pinned_recipient.email_masked || 'the sender'}${preview.pinned_recipient.subject ? ` — re: ${preview.pinned_recipient.subject}` : ''}`);
   }
   if (toolName === 'create_appointment' && preview?.pinned_technician) {
     push('operational', `Assigned to ${preview.pinned_technician.name}`);
+  }
+  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
+    const a = preview.pinned_appointment;
+    const from = `${a.scheduled_date || '?'}${a.time_window ? ` ${a.time_window}` : ''}`;
+    const to = `${params?.new_date || '?'}${params?.new_time_window ? ` ${params.new_time_window}` : ''}`;
+    push('operational', `Move ${a.service_type || 'visit'}${a.customer_name ? ` for ${a.customer_name}` : ''} (${a.status || 'scheduled'}) from ${from} → ${to}`, {
+      before: from, after: to,
+    });
   }
   if (toolName === 'bulk_update_leads') {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
       before: params?.current_status, after: params?.new_status,
     });
   }
+  for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
   if (toolName === 'cancel_appointment' && preview?.cancellation) {
     // The follow-through's money effects, from the rails' own previews.
     const c = preview.cancellation;
@@ -216,8 +246,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('billing', c.fee.unresolved
         ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified; unresolved outcomes go to office review)`
         : `Late-cancel fee of ${amt} will be charged to the card on file (a failed charge goes to office review, never silently dropped)`);
+    } else if (c.fee?.rail === 'card_hold') {
+      // Frozen disposition (pinned in the fingerprint), not a disjunction.
+      push('billing', c.fee.hold_disposition === 'parked'
+        ? 'No late-cancel fee (outside the fee window) — the card hold is PARKED for the rebooked visit'
+        : 'No late-cancel fee (outside the fee window) — the card hold is RELEASED');
     } else if (c.fee?.rail && c.fee.rail !== 'none') {
-      push('billing', 'No late-cancel fee (outside the fee window) — the card hold is released, or parked for the rebooked visit when park-on-cancel is on');
+      push('billing', 'No late-cancel fee (outside the fee window) — the appointment-card agreement is released');
     }
     for (const inv of c.invoices || []) {
       const total = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : '';
@@ -238,6 +273,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // more_effects (rendered under "Show more" on the card) and the whole
   // preview is hashed via preview_fingerprint.
   const moreEffects = [];
+  // Bulk lead update: the operator approves the ACTUAL pinned set — every
+  // name rides in full under "Show more", and the contract carries a
+  // fingerprint of the complete id list (two sets with the same count and
+  // first-ten names can never hash alike).
+  if (toolName === 'bulk_update_leads' && Array.isArray(preview?.all_names) && preview.all_names.length) {
+    for (const n of preview.all_names) moreEffects.push({ kind: 'customer', label: String(n) });
+    push('customer', `All ${preview.all_names.length} lead names are listed under "Show more"`);
+  }
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
@@ -312,6 +355,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     notifies_customer: notifiesCustomer,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
+    ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)
+      ? { targets_fingerprint: crypto.createHash('sha256').update(JSON.stringify([...params.lead_ids].map(String).sort())).digest('hex') }
+      : {}),
+    // Proposal-time pins the confirm re-checks (recipient phone/email,
+    // appointment state) also bind the hash so the card can't drift.
+    ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
+    ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
     // The card caps/truncates preview lines for presentation only — the
     // contract (and so its hash) still covers the COMPLETE resolved preview
     // through this fingerprint, so two plans that share a visible prefix

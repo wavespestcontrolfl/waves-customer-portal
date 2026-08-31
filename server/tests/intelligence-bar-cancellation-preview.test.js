@@ -27,7 +27,11 @@ jest.mock('../models/db', () => mockDb);
 
 const mockHoldPreview = jest.fn();
 const mockApptPreview = jest.fn();
-jest.mock('../services/estimate-card-holds', () => ({ cardHoldCancelPreview: (...a) => mockHoldPreview(...a) }));
+const mockParkOnCancel = jest.fn(() => false);
+jest.mock('../services/estimate-card-holds', () => ({
+  cardHoldCancelPreview: (...a) => mockHoldPreview(...a),
+  isParkOnCancelEnabled: () => mockParkOnCancel(),
+}));
 jest.mock('../services/appointment-card-request', () => ({ appointmentCardCancelPreview: (...a) => mockApptPreview(...a) }));
 jest.mock('../services/invoice', () => ({ CANCELLED_SERVICE_VOIDABLE_STATUSES: ['draft', 'scheduled', 'sent'] }));
 
@@ -41,10 +45,23 @@ test('card-hold rail: fee applies with amount; invoices listed', async () => {
   queue.push(APPT, [{ id: 'inv1', invoice_number: 'INV-1', status: 'sent', total: '120.00', credit_applied: '0' }]);
   mockHoldPreview.mockResolvedValue({ held: true, feeApplies: true, feeAmount: 49 });
   const p = await previewCancellationEffects('ap1');
-  expect(p.fee).toEqual({ rail: 'card_hold', applies: true, amount: 49, unresolved: false });
+  expect(p.fee).toEqual({ rail: 'card_hold', applies: true, amount: 49, unresolved: false, hold_disposition: null });
   expect(p.invoices).toEqual([{ id: 'inv1', invoice_number: 'INV-1', status: 'sent', total: 120, credit_applied: 0 }]);
   expect(p.appointment).toMatchObject({ id: 'ap1', status: 'scheduled', customer_name: 'acct 3001', technician_id: 't1' });
   expect(mockApptPreview).not.toHaveBeenCalled();
+});
+
+test('card-hold rail, no fee: the disposition is frozen from the park-on-cancel gate and fingerprinted', async () => {
+  queue.push(APPT, []);
+  mockHoldPreview.mockResolvedValue({ held: true, feeApplies: false });
+  mockParkOnCancel.mockReturnValue(true);
+  const parked = await previewCancellationEffects('ap1');
+  expect(parked.fee).toEqual({ rail: 'card_hold', applies: false, amount: null, unresolved: false, hold_disposition: 'parked' });
+  queue.push(APPT, []);
+  mockParkOnCancel.mockReturnValue(false);
+  const released = await previewCancellationEffects('ap1');
+  expect(released.fee.hold_disposition).toBe('released');
+  expect(cancellationFingerprint(parked)).not.toBe(cancellationFingerprint(released));
 });
 
 test('no hold → /secure appointment-card rail; its unresolved posture is disclosed as fee-may-apply', async () => {

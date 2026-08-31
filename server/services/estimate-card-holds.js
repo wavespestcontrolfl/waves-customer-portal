@@ -2058,6 +2058,9 @@ module.exports = {
   NO_SHOW_FEE_MAX_AGE_MS,
   findStickyLateReschedule,
   isStickyCancelWindowEnabled,
+  // Read by the IB cancellation preview so the card states the actual
+  // no-fee hold disposition (released vs parked) and pins it.
+  isParkOnCancelEnabled,
   sendNoShowFeeReceipt,
   _private: {
     cardHoldIntentMatchesEstimate,

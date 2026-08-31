@@ -401,3 +401,60 @@ describe('W0B two-step execution pin', () => {
     });
   });
 });
+
+describe('W0B proposal-time pins for legacy-bare writes', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'x', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+
+  test('trigger_review_request: recipient resolved at proposal, shown on the card, refused at confirm on phone drift', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'trigger_review_request', input: { customer_name: 'acct 1042' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'ask for a review', context: 'customers' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._pinned_phone).toBe('+19415550000');
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual('Send review request to acct 1042 (…0000)');
+      expect(stored.contract.pinned_recipient).toMatchObject({ name: 'acct 1042', phone_last4: '0000' });
+      expect(body.pendingActions[0].params.recipient).toBe('acct 1042 (…0000)');
+      expect(body.pendingActions[0].params._pinned_phone).toBeUndefined();
+    });
+
+    // Confirm: the customer's phone changed since the card → refuse.
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'trigger_review_request', params: { customer_name: 'acct 1042', _pinned_phone: '+19415550000' } },
+    });
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415559999' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).preview_changed).toBe(true);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('trigger_review_request: unchanged recipient executes with the pin stripped', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'trigger_review_request', params: { customer_name: 'acct 1042', _pinned_phone: '+19415550000' } },
+    });
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });
+    mockExecuteTool.mockResolvedValue({ success: true });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledWith('trigger_review_request', { customer_name: 'acct 1042' });
+    });
+  });
+});
