@@ -1,7 +1,17 @@
-jest.mock('../services/mrr-breakdown', () => ({ computeMrrBreakdown: jest.fn() }));
+jest.mock('../services/mrr-breakdown', () => ({
+  computeMrrBreakdown: jest.fn(),
+  // The population query is the REAL shared builder — the snapshot's whole
+  // contract is that its tier / per-customer rows come from the same
+  // population as the breakdown, so the tests assert against the real chain.
+  mrrPopulationQuery: jest.requireActual('../services/mrr-breakdown').mrrPopulationQuery,
+}));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getPaymentPendingCustomerIds: jest.fn(async () => new Set()),
+}));
 
 const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const {
   recordMrrSnapshot,
   recordCustomerMrrSnapshots,
@@ -20,10 +30,11 @@ function makeFakeDb({ tierRows = [], customerRows = [], capture = {}, custFail =
   function makeCustomers() {
     let grouped = false;
     const b = {
-      where: () => b,
+      where: (a) => { if (typeof a === 'function') a.call(b, b); return b; },
       whereNull: () => b,
       whereRaw: (sql) => { capture.whereRaw = sql; return b; },
       whereNotIn: (col, list) => { capture.tierExcluded = list; return b; },
+      orWhereIn: (col, ids) => { capture.pendingUnion = [col, ids]; return b; },
       modify: (fn) => { fn(b); return b; },
       select: () => b,
       groupBy: () => { grouped = true; return b; },
@@ -87,6 +98,14 @@ describe('tierBreakdown', () => {
     // Snapshot population = monthly LANE, not merely monthly_rate > 0 (#3140).
     expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
+
+  test('payment-pending prepay ids are unioned into the tier population (#3669 r1)', async () => {
+    const capture = {};
+    getPaymentPendingCustomerIds.mockResolvedValueOnce(new Set(['cust-pending-1']));
+    await tierBreakdown(makeFakeDb({ tierRows: [], capture }));
+    expect(capture.pendingUnion).toEqual(['c.id', ['cust-pending-1']]);
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
+  });
 });
 
 describe('customerRateRows', () => {
@@ -109,6 +128,13 @@ describe('customerRateRows', () => {
     expect(capture.tierExcluded).toEqual(INTERNAL_TEST_CUSTOMERS);
     // Snapshot population = monthly LANE, not merely monthly_rate > 0 (#3140).
     expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
+  });
+
+  test('payment-pending prepay ids are unioned into the per-customer population (#3669 r1)', async () => {
+    const capture = {};
+    getPaymentPendingCustomerIds.mockResolvedValueOnce(new Set(['cust-pending-1']));
+    await customerRateRows(makeFakeDb({ customerRows: [], capture }));
+    expect(capture.pendingUnion).toEqual(['c.id', ['cust-pending-1']]);
   });
 });
 

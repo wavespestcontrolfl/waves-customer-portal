@@ -1,28 +1,30 @@
-const { computeMrrBreakdown } = require('./mrr-breakdown');
+const { computeMrrBreakdown, mrrPopulationQuery } = require('./mrr-breakdown');
 const { etMonthStart, etDateString } = require('../utils/datetime-et');
-const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
-const { MONTHLY_LANE_SQL } = require('./billing-lane');
 const logger = require('./logger');
 
+// The payment-pending annual-prepay ids computeMrrBreakdown unions into its
+// population (those rows sit on billing_mode 'per_application' until the
+// prepay invoice is PAID, so the monthly-lane predicate alone would drop
+// them). The snapshot's tier / per-customer queries must union the SAME set
+// or the tiers stop reconciling to total_mrr (Codex #3669 r1 P1). Fail-soft
+// mirror of computeMrrBreakdown's own fetch.
+async function pendingPrepayIds(conn) {
+  const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
+  const set = await Promise.resolve()
+    .then(() => getPaymentPendingCustomerIds(etDateString(), conn))
+    .catch(() => new Set());
+  return [...set];
+}
+
 // By-tier MRR over the SAME population computeMrrBreakdown uses (active,
-// not-deleted, monthly_rate > 0, internal/test accounts excluded), so the
-// snapshot's tiers reconcile to its total AND match the live trend population.
+// not-deleted, monthly_rate > 0, monthly lane OR payment-pending prepay,
+// internal/test accounts excluded — mrrPopulationQuery is shared, not
+// re-implemented, so the two can't drift), so the snapshot's tiers reconcile
+// to its total AND match the live trend population.
 // db is lazy-required so this module (and its tests) load without knex.
 async function tierBreakdown(conn) {
   conn = conn || require('../models/db');
-  const rows = await conn('customers as c')
-    .where('c.active', true)
-    .whereNull('c.deleted_at')
-    .where('c.monthly_rate', '>', 0)
-    .whereRaw(MONTHLY_LANE_SQL)
-    .modify((qb) => {
-      if (INTERNAL_TEST_CUSTOMERS.length) {
-        qb.whereNotIn(
-          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
-          INTERNAL_TEST_CUSTOMERS,
-        );
-      }
-    })
+  const rows = await mrrPopulationQuery(conn, await pendingPrepayIds(conn))
     .select('c.waveguard_tier as waveguard_tier', conn.raw('SUM(c.monthly_rate) as mrr'), conn.raw('COUNT(*) as count'))
     .groupBy('c.waveguard_tier');
   return rows.map((r) => ({
@@ -39,19 +41,7 @@ async function tierBreakdown(conn) {
 // today's rate retroactively. db is lazy-required so this module loads without knex.
 async function customerRateRows(conn) {
   conn = conn || require('../models/db');
-  const rows = await conn('customers as c')
-    .where('c.active', true)
-    .whereNull('c.deleted_at')
-    .where('c.monthly_rate', '>', 0)
-    .whereRaw(MONTHLY_LANE_SQL)
-    .modify((qb) => {
-      if (INTERNAL_TEST_CUSTOMERS.length) {
-        qb.whereNotIn(
-          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
-          INTERNAL_TEST_CUSTOMERS,
-        );
-      }
-    })
+  const rows = await mrrPopulationQuery(conn, await pendingPrepayIds(conn))
     .select('c.id as customer_id', 'c.monthly_rate as monthly_rate', 'c.waveguard_tier as waveguard_tier');
   return rows.map((r) => ({
     customer_id: r.customer_id,

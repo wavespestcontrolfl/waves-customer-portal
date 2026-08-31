@@ -17,10 +17,13 @@ const {
 function makeFakeDb(rows) {
   const rawCalls = [];
   const builder = {
-    where: () => builder,
+    // .where(fn) grouped-callback form runs the callback against the builder
+    // (that's where the lane-or-pending union lives).
+    where: (a) => { if (typeof a === 'function') a.call(builder, builder); return builder; },
     whereNull: () => builder,
     whereRaw: (sql) => { rawCalls.push({ whereRaw: sql }); return builder; },
     whereNotIn: () => builder,
+    orWhereIn: (col, ids) => { rawCalls.push({ orWhereIn: [col, ids] }); return builder; },
     modify: (fn) => { fn(builder); return builder; },
     select: () => builder,
     then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
@@ -87,6 +90,29 @@ describe('computeMrrBreakdown', () => {
     const atRiskRaw = db._rawCalls.find(c => c.sql && c.sql.includes('at_risk'));
     expect(atRiskRaw.bindings).toEqual(['2026-06-19', '2026-06-19']);
     expect(getPaymentPendingCustomerIds).toHaveBeenCalledWith('2026-06-19', db);
+  });
+
+  test('payment-pending prepay ids are unioned INTO the population past the lane predicate (#3669 r1)', async () => {
+    // A payment_pending annual-prepay customer sits on billing_mode
+    // 'per_application' until the prepay invoice is paid, so MONTHLY_LANE_SQL
+    // alone would drop the row before the at-risk union ran.
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set(['cust-pending-1']));
+    const db = makeFakeDb([
+      { id: 'cust-mm-1', monthly_rate: '100', at_risk: false },
+      { id: 'cust-pending-1', monthly_rate: '80', at_risk: false },
+    ]);
+    const out = await computeMrrBreakdown(db, '2026-06-19');
+    // The pending id reaches the SQL population as an OR-union…
+    expect(db._rawCalls).toContainEqual({ orWhereIn: ['c.id', ['cust-pending-1']] });
+    // …and is still flagged at-risk by the JS union.
+    expect(out).toEqual({ total: 180, committed: 100, atRisk: 80, totalCount: 2, atRiskCount: 1 });
+  });
+
+  test('no pending prepay ids -> no OR-union widening the lane population', async () => {
+    getPaymentPendingCustomerIds.mockResolvedValue(new Set());
+    const db = makeFakeDb([]);
+    await computeMrrBreakdown(db, '2026-06-19');
+    expect(db._rawCalls.some((c) => c.orWhereIn)).toBe(false);
   });
 
   test('a prepay-helper failure fails soft (does not throw, no false at-risk)', async () => {
