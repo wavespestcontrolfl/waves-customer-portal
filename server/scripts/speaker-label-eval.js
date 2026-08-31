@@ -7,20 +7,23 @@
  * Two modes:
  *
  *   Score (default) — for every case in
- *   server/fixtures/call-extraction-eval/speaker-labels.json: rebuild the
- *   canonical raw diarized transcript from call_log.transcript_structured,
- *   verify its sha256 against the fixture (drift -> unscored), run the EXACT
- *   production relabel pass, and score word- and line-level speaker accuracy.
+ *   server/fixtures/call-extraction-eval/speaker-labels.json: rebuild the raw
+ *   diarized transcript from call_log.transcript_structured exactly as the
+ *   production normalizer renders it (checked against that normalizer at run
+ *   time), verify its sha256 against the fixture (drift -> unscored), run the
+ *   EXACT production relabel pass, and score word- and segment-level speaker
+ *   accuracy.
  *
  *     node server/scripts/speaker-label-eval.js [--json] [--floor=0.95]
  *
  *   Sheet (--sheet) — write a labeling sheet for candidate calls (numbered
- *   raw lines + a suggested label read off the stored production transcript
- *   + a paste-ready fixture stub) to a PRIVATE 0600 file (--out, default in
- *   the OS tmpdir). stdout never carries transcript text, so a run inside
- *   the Railway service cannot leak PII into logs. Read the file privately,
- *   verify every suggested label, paste ONLY the corrected stubs into the
- *   fixture, then delete the file.
+ *   raw segments + a suggested label read off the stored production
+ *   transcript + a paste-ready fixture stub) to a PRIVATE file created
+ *   exclusively with mode 0600 at an unpredictable tmp path (or --out, which
+ *   must not already exist). stdout never carries transcript text, so a run
+ *   inside the Railway service cannot leak PII into logs. Read the file
+ *   privately, verify every suggested label, paste ONLY the corrected stubs
+ *   into the fixture, then delete the file.
  *
  *     node server/scripts/speaker-label-eval.js --sheet [--days=60] [--limit=10] [--ids=a,b] [--out=path]
  *
@@ -32,10 +35,16 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', 'fixtures', 'call-extraction-eval', 'speaker-labels.json');
+const SCHEMA_VERSION = 'call-speaker-labels.v1';
 const SPEAKERS = new Set(['agent', 'caller']);
+// Exact key allowlist for a fixture case. Anything else (a note, a name, a
+// snippet) is rejected so PII cannot ride into the repo on an extra field.
+const CASE_KEYS = new Set(['id', 'call_log_id', 'labeled_at', 'labeled_by', 'transcript_sha256', 'segment_speakers']);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
@@ -46,7 +55,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     ids: [],
     floor: null,
     fixturePath: DEFAULT_FIXTURE_PATH,
-    out: path.join(require('os').tmpdir(), 'speaker-label-sheet.txt'),
+    out: null,
   };
   for (const arg of argv) {
     const [key, value] = arg.replace(/^--/, '').split('=');
@@ -63,51 +72,68 @@ function parseArgs(argv = process.argv.slice(2)) {
   return opts;
 }
 
-// ── Canonical raw transcript ────────────────────────────────────────────────
-// Deterministic rebuild of the pre-label diarized transcript from the stored
-// transcript_structured segments: one line per segment, "Speaker N: text"
-// with N assigned in first-appearance order and whitespace collapsed, so the
-// same stored row always yields byte-identical text (sha-pinnable). This is
-// the eval's replay input; production labeled the live provider payload, but
-// the stored segments carry the same words and raw speaker split.
+// ── Raw transcript rebuild ──────────────────────────────────────────────────
+// Renders the stored transcript_structured segments the way the production
+// normalizer (normalizeOpenAITranscript) renders the live provider payload:
+// one "Speaker N: <trimmed text>" entry per non-empty segment, N assigned in
+// first-appearance order, entries joined with "\n". Text is trimmed only —
+// embedded line breaks inside a segment are preserved, because that is what
+// the relabeler saw in production. Returns the per-segment renders (the unit
+// the answer key labels) plus the joined text; callers verify the joined text
+// against the production normalizer so the replay input is provably exact.
 function canonicalRawTranscript(structured) {
   const segments = structured?.segments;
   if (!Array.isArray(segments) || !segments.length) return null;
   const speakerNames = new Map();
-  const lines = [];
+  const renders = [];
   for (const seg of segments) {
-    const text = String(seg?.text || '').replace(/\s+/g, ' ').trim();
-    if (!text) continue;
-    const rawSpeaker = seg.speaker || seg.speaker_id || seg.speaker_label || null;
-    if (!rawSpeaker) {
-      lines.push(text);
+    const speaker = seg?.speaker || seg?.speaker_id || seg?.speaker_label;
+    const body = String(seg?.text || '').trim();
+    if (!body) continue;
+    if (!speaker) {
+      renders.push(body);
       continue;
     }
-    if (!speakerNames.has(rawSpeaker)) speakerNames.set(rawSpeaker, `Speaker ${speakerNames.size + 1}`);
-    lines.push(`${speakerNames.get(rawSpeaker)}: ${text}`);
+    if (!speakerNames.has(speaker)) speakerNames.set(speaker, `Speaker ${speakerNames.size + 1}`);
+    renders.push(`${speakerNames.get(speaker)}: ${body}`);
   }
-  return lines.length ? { text: lines.join('\n'), lines, distinctSpeakers: speakerNames.size } : null;
+  const text = renders.join('\n').trim();
+  return text ? { text, renders, distinctSpeakers: speakerNames.size } : null;
+}
+
+// Guard: the eval's rebuild must equal what production's normalizer produces
+// from the same segments. If the normalizer ever changes shape, fail loudly
+// rather than benchmark against an input the relabeler never saw.
+function assertMatchesProductionNormalizer(structured, canonical, normalize) {
+  const expected = normalize({ segments: structured.segments });
+  if (expected !== canonical.text) {
+    throw new Error('speaker-label-eval rebuild diverged from normalizeOpenAITranscript — update canonicalRawTranscript to match production');
+  }
 }
 
 function sha256(text) {
   return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
 }
 
-// Same shape as the production word-preservation guard's tokenizer: strip a
-// leading "<label>:" prefix, lowercase, keep [a-z0-9'] runs.
+// Same tokenizer shape as the production word-preservation guard, applied per
+// physical line on BOTH sides: strip a leading "<label>:" prefix, lowercase,
+// keep [a-z0-9'] runs.
 function lineTokens(line) {
   const content = String(line).replace(/^\s*[^:\n]{1,30}:\s*/, '');
   return content.toLowerCase().split(/[^a-z0-9']+/).filter(Boolean);
 }
 
-// Gold word stream: every token of raw line i carries line_speakers[i].
-function goldWordStream(rawLines, lineSpeakers) {
-  if (rawLines.length !== lineSpeakers.length) {
-    throw new Error(`line_speakers has ${lineSpeakers.length} entries but the canonical transcript has ${rawLines.length} lines`);
+// Gold word stream: every token of segment i (across all its physical lines)
+// carries segment_speakers[i].
+function goldWordStream(renders, segmentSpeakers) {
+  if (renders.length !== segmentSpeakers.length) {
+    throw new Error(`segment_speakers has ${segmentSpeakers.length} entries but the raw transcript has ${renders.length} segments`);
   }
   const words = [];
-  rawLines.forEach((line, i) => {
-    for (const tok of lineTokens(line)) words.push({ tok, speaker: lineSpeakers[i], line: i });
+  renders.forEach((render, i) => {
+    for (const line of render.split('\n')) {
+      for (const tok of lineTokens(line)) words.push({ tok, speaker: segmentSpeakers[i], segment: i });
+    }
   });
   return words;
 }
@@ -130,28 +156,28 @@ function modelWordStream(labeled) {
   return words;
 }
 
-// Word-level speaker accuracy plus per-raw-line majority accuracy. The word
+// Word-level speaker accuracy plus per-segment majority accuracy. The word
 // streams must be the same token sequence (the production guard enforces the
 // multiset; order deviations are rare and make positional credit meaningless,
 // so a sequence mismatch is unscored, never guessed at).
-function scoreLabeling(goldWords, modelWords, lineCount) {
+function scoreLabeling(goldWords, modelWords, segmentCount) {
   if (goldWords.length !== modelWords.length
     || goldWords.some((w, i) => w.tok !== modelWords[i].tok)) {
     return { status: 'word_sequence_mismatch' };
   }
   let correct = 0;
-  const perLine = Array.from({ length: lineCount }, () => ({ total: 0, correct: 0 }));
+  const perSegment = Array.from({ length: segmentCount }, () => ({ total: 0, correct: 0 }));
   goldWords.forEach((gold, i) => {
     const hit = modelWords[i].speaker === gold.speaker;
     if (hit) correct += 1;
-    perLine[gold.line].total += 1;
-    if (hit) perLine[gold.line].correct += 1;
+    perSegment[gold.segment].total += 1;
+    if (hit) perSegment[gold.segment].correct += 1;
   });
-  const misLines = [];
-  perLine.forEach((line, i) => {
+  const misSegments = [];
+  perSegment.forEach((seg, i) => {
     // Majority credit: a 50/50 split is a MISS — crediting ties would inflate
-    // line accuracy and could mis-rank label models.
-    if (line.total && line.correct / line.total <= 0.5) misLines.push(i);
+    // segment accuracy and could mis-rank label models.
+    if (seg.total && seg.correct / seg.total <= 0.5) misSegments.push(i);
   });
   const ratio = (num, den) => (den ? Number((num / den).toFixed(4)) : null);
   return {
@@ -159,34 +185,45 @@ function scoreLabeling(goldWords, modelWords, lineCount) {
     words: goldWords.length,
     correctWords: correct,
     wordAccuracy: ratio(correct, goldWords.length),
-    lines: lineCount,
-    correctLines: lineCount - misLines.length,
-    lineAccuracy: ratio(lineCount - misLines.length, lineCount),
-    misLines,
+    segments: segmentCount,
+    correctSegments: segmentCount - misSegments.length,
+    segmentAccuracy: ratio(segmentCount - misSegments.length, segmentCount),
+    misSegments,
   };
 }
 
 function loadFixture(fixturePath) {
   const doc = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-  if (doc.schemaVersion !== 'call-speaker-labels.v1') {
+  if (doc.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(`Unexpected speaker-label fixture schemaVersion: ${doc.schemaVersion}`);
   }
   if (!Array.isArray(doc.cases)) throw new Error('speaker-label fixture must contain a cases array');
+  const seen = new Set();
   for (const item of doc.cases) {
-    if (!item.call_log_id) throw new Error(`case ${item.id || '?'} is missing call_log_id`);
-    if (!/^[0-9a-f]{64}$/i.test(item.transcript_sha256 || '')) throw new Error(`case ${item.id} has an invalid transcript_sha256`);
-    if (!Array.isArray(item.line_speakers) || !item.line_speakers.length
-      || !item.line_speakers.every((s) => SPEAKERS.has(s))) {
-      throw new Error(`case ${item.id} line_speakers must be a non-empty array of "agent"/"caller"`);
+    const label = item?.id || '?';
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('speaker-label fixture case must be an object');
+    for (const key of Object.keys(item)) {
+      if (!CASE_KEYS.has(key)) throw new Error(`case ${label} has unsupported key "${key}" (allowed: ${[...CASE_KEYS].join(', ')})`);
+    }
+    if (!/^[a-z0-9-]+$/.test(String(item.id || ''))) throw new Error(`case ${label} id must be kebab-case`);
+    if (seen.has(item.id)) throw new Error(`duplicate case id ${item.id}`);
+    seen.add(item.id);
+    if (!UUID_RE.test(String(item.call_log_id || ''))) throw new Error(`case ${label} call_log_id must be a uuid`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(item.labeled_at || ''))) throw new Error(`case ${label} labeled_at must be YYYY-MM-DD`);
+    if (item.labeled_by !== 'owner') throw new Error(`case ${label} labeled_by must be "owner"`);
+    if (!/^[0-9a-f]{64}$/i.test(String(item.transcript_sha256 || ''))) throw new Error(`case ${label} has an invalid transcript_sha256`);
+    if (!Array.isArray(item.segment_speakers) || !item.segment_speakers.length
+      || !item.segment_speakers.every((s) => SPEAKERS.has(s))) {
+      throw new Error(`case ${label} segment_speakers must be a non-empty array of "agent"/"caller"`);
     }
   }
   return doc;
 }
 
+const CALL_COLUMNS = ['id', 'created_at', 'direction', 'from_phone', 'to_phone', 'transcription', 'transcript_structured'];
+
 async function loadCalls(db, ids) {
-  return db('call_log')
-    .select(['id', 'created_at', 'direction', 'from_phone', 'to_phone', 'transcription', 'transcript_structured'])
-    .whereIn('id', ids);
+  return db('call_log').select(CALL_COLUMNS).whereIn('id', ids);
 }
 
 function parseStructured(row) {
@@ -221,11 +258,13 @@ async function runScore(opts, deps) {
       results.push({ ...base, status: 'call_not_found' });
       continue;
     }
-    const canonical = canonicalRawTranscript(parseStructured(row));
+    const structured = parseStructured(row);
+    const canonical = canonicalRawTranscript(structured);
     if (!canonical) {
       results.push({ ...base, status: 'no_structured_transcript' });
       continue;
     }
+    assertMatchesProductionNormalizer(structured, canonical, deps.normalizeTranscript);
     if (sha256(canonical.text) !== item.transcript_sha256.toLowerCase()) {
       results.push({ ...base, status: 'transcript_drift' });
       continue;
@@ -244,15 +283,12 @@ async function runScore(opts, deps) {
       results.push({ ...base, status: 'labeling_failed' });
       continue;
     }
-    const gold = goldWordStream(canonical.lines, item.line_speakers);
-    results.push({ ...base, ...scoreLabeling(gold, modelWordStream(labeled), canonical.lines.length) });
+    const gold = goldWordStream(canonical.renders, item.segment_speakers);
+    results.push({ ...base, ...scoreLabeling(gold, modelWordStream(labeled), canonical.renders.length) });
   }
 
   const scored = results.filter((r) => r.status === 'scored');
-  const totalWords = scored.reduce((n, r) => n + r.words, 0);
-  const correctWords = scored.reduce((n, r) => n + r.correctWords, 0);
-  const totalLines = scored.reduce((n, r) => n + r.lines, 0);
-  const correctLines = scored.reduce((n, r) => n + r.correctLines, 0);
+  const sum = (key) => scored.reduce((n, r) => n + r[key], 0);
   const ratio = (num, den) => (den ? Number((num / den).toFixed(4)) : null);
   return {
     status: 'scored',
@@ -260,29 +296,31 @@ async function runScore(opts, deps) {
     cases: fixture.cases.length,
     scored: scored.length,
     unscored: results.filter((r) => r.status !== 'scored').map((r) => ({ caseId: r.caseId, status: r.status })),
-    wordAccuracy: ratio(correctWords, totalWords),
-    lineAccuracy: ratio(correctLines, totalLines),
+    wordAccuracy: ratio(sum('correctWords'), sum('words')),
+    segmentAccuracy: ratio(sum('correctSegments'), sum('segments')),
     results,
   };
 }
 
 // ── Sheet mode ──────────────────────────────────────────────────────────────
 // Suggested labels come from the STORED production transcription: align its
-// word stream to the raw stream and take each raw line's majority vote. A
+// word stream to the raw stream and take each segment's majority vote. A
 // suggestion is a starting point for the human pass, never ground truth.
-function suggestedLineSpeakers(rawLines, storedTranscription) {
+function suggestedSegmentSpeakers(renders, storedTranscription) {
   const gold = [];
-  rawLines.forEach((line, i) => {
-    for (const tok of lineTokens(line)) gold.push({ tok, line: i });
+  renders.forEach((render, i) => {
+    for (const line of render.split('\n')) {
+      for (const tok of lineTokens(line)) gold.push({ tok, segment: i });
+    }
   });
   const model = modelWordStream(storedTranscription);
   if (!gold.length || gold.length !== model.length || gold.some((w, i) => w.tok !== model[i].tok)) {
-    return rawLines.map(() => null);
+    return renders.map(() => null);
   }
-  const votes = rawLines.map(() => ({ agent: 0, caller: 0 }));
+  const votes = renders.map(() => ({ agent: 0, caller: 0 }));
   gold.forEach((word, i) => {
     const speaker = model[i].speaker;
-    if (speaker === 'agent' || speaker === 'caller') votes[word.line][speaker] += 1;
+    if (speaker === 'agent' || speaker === 'caller') votes[word.segment][speaker] += 1;
   });
   return votes.map((v) => (v.agent === v.caller ? null : (v.agent > v.caller ? 'agent' : 'caller')));
 }
@@ -294,12 +332,14 @@ function buildSheet(picked) {
   const out = [];
   out.push('SPEAKER LABELING SHEET — CONTAINS TRANSCRIPT TEXT (PII). Do not commit, paste into a PR, or store beyond the labeling pass; delete this file when done.');
   out.push('Verify EVERY suggested label against the text; suggestions come from the current model and are exactly what this eval is meant to test.');
-  out.push('When a line is half agent / half caller, label the majority speaker or drop the call from the set.\n');
+  out.push('When a segment is half agent / half caller, label the majority speaker or drop the call from the set.\n');
   for (const { row, canonical } of picked) {
-    out.push(`── call ${row.id} · ${String(row.created_at).slice(0, 10)} · direction=${row.direction || '?'} · ${canonical.lines.length} lines`);
-    const suggestions = suggestedLineSpeakers(canonical.lines, row.transcription);
-    canonical.lines.forEach((line, i) => {
-      out.push(`  [${String(i).padStart(3)}] (${suggestions[i] || 'UNKNOWN'}) ${line}`);
+    out.push(`── call ${row.id} · ${String(row.created_at).slice(0, 10)} · direction=${row.direction || '?'} · ${canonical.renders.length} segments`);
+    const suggestions = suggestedSegmentSpeakers(canonical.renders, row.transcription);
+    canonical.renders.forEach((render, i) => {
+      const [first, ...rest] = render.split('\n');
+      out.push(`  [${String(i).padStart(3)}] (${suggestions[i] || 'UNKNOWN'}) ${first}`);
+      for (const cont of rest) out.push(`        ${cont}`);
     });
     const stub = {
       id: `label-${String(row.id).slice(0, 8)}`,
@@ -307,12 +347,26 @@ function buildSheet(picked) {
       labeled_at: new Date().toISOString().slice(0, 10),
       labeled_by: 'owner',
       transcript_sha256: sha256(canonical.text),
-      line_speakers: suggestions.map((s) => s || 'VERIFY'),
+      segment_speakers: suggestions.map((s) => s || 'VERIFY'),
     };
     out.push(`  fixture stub (fix every VERIFY, confirm the rest):\n${JSON.stringify(stub, null, 2).replace(/^/gm, '  ')}\n`);
   }
   if (!picked.length) out.push('No candidate calls found (need transcript_structured with >=2 diarized speakers).');
   return out.join('\n');
+}
+
+// Exclusive create (O_CREAT|O_EXCL) with mode 0600: refuses an existing file
+// or symlink at the path, so a pre-planted target can never receive the PII
+// sheet with broader permissions. Default path is a fresh private mkdtemp.
+function writePrivateSheet(outPath, text) {
+  const target = outPath || path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'speaker-label-sheet-')), 'sheet.txt');
+  const fd = fs.openSync(target, 'wx', 0o600);
+  try {
+    fs.writeSync(fd, text);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return target;
 }
 
 async function runSheet(opts, deps) {
@@ -321,7 +375,7 @@ async function runSheet(opts, deps) {
     rows = await loadCalls(deps.db, opts.ids);
   } else {
     rows = await deps.db('call_log')
-      .select(['id', 'created_at', 'direction', 'from_phone', 'to_phone', 'transcription', 'transcript_structured'])
+      .select(CALL_COLUMNS)
       .whereNotNull('transcript_structured')
       .whereNotNull('transcription')
       .whereRaw('length(transcription) >= ?', [400])
@@ -332,25 +386,26 @@ async function runSheet(opts, deps) {
 
   const picked = [];
   for (const row of rows) {
-    const canonical = canonicalRawTranscript(parseStructured(row));
+    const structured = parseStructured(row);
+    const canonical = canonicalRawTranscript(structured);
     if (!canonical || canonical.distinctSpeakers < 2) continue;
+    assertMatchesProductionNormalizer(structured, canonical, deps.normalizeTranscript);
     picked.push({ row, canonical });
     if (picked.length >= opts.limit) break;
   }
 
-  // stdout stays PII-free (it may be captured in Railway logs); the sheet
-  // itself goes to a 0600 file for the private labeling pass.
-  fs.writeFileSync(opts.out, buildSheet(picked), { mode: 0o600 });
-  console.log(`Speaker labeling sheet: ${picked.length} candidate call(s) written to ${opts.out}`);
+  // stdout stays PII-free (it may be captured in Railway logs).
+  const written = writePrivateSheet(opts.out, buildSheet(picked));
+  console.log(`Speaker labeling sheet: ${picked.length} candidate call(s) written to ${written}`);
   console.log('The file contains transcript text (PII). Read it privately, paste ONLY the corrected fixture stubs into speaker-labels.json, then delete it.');
-  return { status: 'sheet', candidates: picked.length, out: opts.out };
+  return { status: 'sheet', candidates: picked.length, out: written };
 }
 
 async function main() {
   const opts = parseArgs();
   const db = require('../models/db');
-  const { labelTranscriptWithOpenAI } = require('../services/call-recording-processor');
-  const deps = { db, labelTranscript: labelTranscriptWithOpenAI };
+  const { labelTranscriptWithOpenAI, normalizeOpenAITranscript } = require('../services/call-recording-processor');
+  const deps = { db, labelTranscript: labelTranscriptWithOpenAI, normalizeTranscript: normalizeOpenAITranscript };
   try {
     if (opts.sheet) {
       await runSheet(opts, deps);
@@ -362,14 +417,15 @@ async function main() {
     } else if (summary.status === 'no_cases') {
       console.log(summary.message);
     } else {
+      const pct = (v) => (v === null ? 'n/a' : `${(v * 100).toFixed(1)}%`);
       console.log('\n-- Speaker label eval --\n');
       console.log(`Label model: ${summary.model}`);
       console.log(`Cases: ${summary.scored}/${summary.cases} scored`);
       for (const miss of summary.unscored) console.log(`  unscored: ${miss.caseId} (${miss.status})`);
-      console.log(`Word-level speaker accuracy: ${summary.wordAccuracy === null ? 'n/a' : `${(summary.wordAccuracy * 100).toFixed(1)}%`}`);
-      console.log(`Line-level speaker accuracy: ${summary.lineAccuracy === null ? 'n/a' : `${(summary.lineAccuracy * 100).toFixed(1)}%`}`);
+      console.log(`Word-level speaker accuracy: ${pct(summary.wordAccuracy)}`);
+      console.log(`Segment-level speaker accuracy: ${pct(summary.segmentAccuracy)}`);
       for (const r of summary.results.filter((x) => x.status === 'scored')) {
-        console.log(`  ${r.caseId.padEnd(20)} words ${r.correctWords}/${r.words} lines ${r.correctLines}/${r.lines}${r.misLines.length ? ` mislabeled_lines=[${r.misLines.join(', ')}]` : ''}`);
+        console.log(`  ${r.caseId.padEnd(20)} words ${r.correctWords}/${r.words} segments ${r.correctSegments}/${r.segments}${r.misSegments.length ? ` mislabeled_segments=[${r.misSegments.join(', ')}]` : ''}`);
       }
       console.log('');
     }
@@ -390,6 +446,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  CASE_KEYS,
+  assertMatchesProductionNormalizer,
   buildSheet,
   canonicalRawTranscript,
   goldWordStream,
@@ -401,5 +459,6 @@ module.exports = {
   runSheet,
   scoreLabeling,
   sha256,
-  suggestedLineSpeakers,
+  suggestedSegmentSpeakers,
+  writePrivateSheet,
 };

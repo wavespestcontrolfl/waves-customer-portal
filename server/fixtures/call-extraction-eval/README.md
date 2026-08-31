@@ -42,15 +42,19 @@ the bake-off scorecard (the 2026-07-18 bake-off only had pass/fail).
 ## Speaker labels (`speaker-labels.json`)
 
 Owner-labeled ground truth for the Agent/Caller relabel pass
-(`OPENAI_TRANSCRIPT_LABEL_MODEL`). Cases store a call id, a sha256 of the
-canonical raw diarized transcript (rebuilt from
-`call_log.transcript_structured`), and one `agent`/`caller` label per raw
-line — never transcript text or contact details.
+(`OPENAI_TRANSCRIPT_LABEL_MODEL`). A case is exactly `id`, `call_log_id`,
+`labeled_at`, `labeled_by: owner`, `transcript_sha256` (of the raw diarized
+transcript rebuilt from `call_log.transcript_structured` exactly as
+`normalizeOpenAITranscript` renders it — the script verifies this against the
+production function at run time), and `segment_speakers` — one
+`agent`/`caller` label per non-empty diarized segment. Any other key is
+rejected, so transcript text or contact details cannot enter the file.
 
 ```sh
-# 1. Write a labeling sheet to a private 0600 file (stdout stays PII-free,
-#    so Railway logs never see transcript text); default path is in the tmpdir
-node server/scripts/speaker-label-eval.js --sheet --out=/tmp/sheet.txt
+# 1. Write a labeling sheet to a private file (exclusive create, mode 0600,
+#    fresh mkdtemp path unless --out names a path that does not exist yet);
+#    stdout stays PII-free, so Railway logs never see transcript text
+node server/scripts/speaker-label-eval.js --sheet
 
 # 2. Read the sheet privately, verify every suggested label, paste the
 #    corrected stubs into speaker-labels.json, then DELETE the sheet file
