@@ -67,6 +67,14 @@ jest.mock('../services/review-request', () => ({
   claimInlineForSend: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),
   markInlineDelivered: jest.fn(async () => {}),
+  reviewSmsAllowedNow: jest.fn(async () => ({ allowed: true })),
+  checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
+}));
+// The send seam re-validates consent + gates + claim under the per-customer
+// review lock; with the bare db mock the real lock would fail closed
+// (skipped: no_connection), so run the body inline here.
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_key, fn) => fn()),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
@@ -443,6 +451,111 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(409);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a stale mint-time gate is re-run at the send seam — a cadence ask since mint blocks the send', async () => {
+    const ReviewService = require('../services/review-request');
+    ReviewService.checkUnscheduledAskGates.mockResolvedValueOnce({ allowed: false, outcome: 'cooldown' });
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/last 30 days/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an email-only review preference set after the mint refuses the SMS send', async () => {
+    const ReviewService = require('../services/review-request');
+    ReviewService.reviewSmsAllowedNow.mockResolvedValueOnce({ allowed: false, reason: 'email_only' });
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(ReviewService.checkUnscheduledAskGates).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the server link match is canonical — a host-case edit of the short URL still validates', async () => {
+    const ReviewService = require('../services/review-request');
+    const { existingShortUrlFor } = require('../services/short-url');
+    existingShortUrlFor.mockResolvedValueOnce('https://portal.wavespestcontrol.com/s/AbC123');
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM777' });
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-not-in-body',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          // Operator capitalized the host; the short code is the same link.
+          body: 'Review us: Portal.WavesPestControl.com/s/AbC123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
     });
   });
 

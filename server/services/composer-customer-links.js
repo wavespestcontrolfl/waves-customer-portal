@@ -273,6 +273,7 @@ async function buildReferralLink(customerId) {
 
 module.exports = {
   OPEN_ESTIMATE_STATUSES,
+  REVIEW_GATE_REASONS,
   buildReviewRequestLink,
   buildPayBalanceLink,
   buildLatestEstimateLink,

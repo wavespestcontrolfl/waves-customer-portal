@@ -620,6 +620,45 @@ describe('review request follow-up flow', () => {
     expect(rrQuery.update).toHaveBeenCalledTimes(1);
   });
 
+  test('reviewSmsAllowedNow refuses an exclusive email channel and fails closed on a prefs read failure', async () => {
+    const prefsQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    prefsQuery.first.mockResolvedValueOnce({ review_request: true, sms_enabled: true, review_request_channel: 'email' });
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'email_only' });
+
+    prefsQuery.first.mockResolvedValueOnce({ review_request: true, sms_enabled: true, review_request_channel: 'both' });
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: true });
+
+    prefsQuery.first.mockResolvedValueOnce(null); // no row — SMS consent is re-checked downstream
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: true });
+
+    prefsQuery.first.mockRejectedValueOnce(new Error('db down'));
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'prefs_unavailable' });
+  });
+
+  test('composer mint refuses an email-only review preference', async () => {
+    const insert = insertReturning({ id: 'rr-new', token: null });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }) });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue({ review_request: true, sms_enabled: true, review_request_channel: 'email' }) });
+      }
+      if (table === 'review_requests') {
+        return { ...chain({ first: jest.fn().mockResolvedValue(null) }), insert: insert.query.insert };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.createInline({ customerId: 'cust-1', armSafetyNet: false })).toBeNull();
+    expect(insert.query.insert).not.toHaveBeenCalled();
+  });
+
   test('releaseInlineClaim hands a claimed row back to pending', async () => {
     const updateQuery = chain();
     db.mockImplementation((table) => {

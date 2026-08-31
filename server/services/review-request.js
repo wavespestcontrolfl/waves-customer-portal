@@ -1660,17 +1660,11 @@ const ReviewService = {
     // as "skip the review suffix" so the completion SMS goes out clean.
     if (customer.has_left_google_review) return null;
 
-    try {
-      const prefs = await db("notification_prefs")
-        .where({ customer_id: customerId })
-        .first();
-      if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
-        return null;
+    const consent = await this.reviewSmsAllowedNow(customerId);
+    if (!consent.allowed) {
+      if (consent.reason === "prefs_unavailable") {
+        logger.warn(`[review] Inline request skipped; prefs lookup failed (customerId=${customerId})`);
       }
-    } catch (err) {
-      logger.warn(
-        `[review] Inline request skipped; prefs lookup failed (customerId=${customerId} errType=${err?.name || "Error"})`,
-      );
       return null;
     }
 
@@ -1871,6 +1865,29 @@ const ReviewService = {
     // No evidence is NOT proof of no send (twilio.js swallows a post-accept
     // sms_log insert failure) — fail closed: the claim is never handed back.
     return false;
+  },
+
+  /**
+   * Live SMS-review consent, shared by the inline mint and the composer
+   * send seam (mint-time prefs go stale while a draft sits open). Mirrors
+   * sendRequest's channel resolver: review requests off, SMS off, or an
+   * EXCLUSIVE 'email' channel preference all refuse an SMS ask. No prefs
+   * row = allowed (SMS consent is re-checked downstream in
+   * sendCustomerMessage). FAIL CLOSED on a prefs read failure — the
+   * composer's conversational send policy does not enforce review
+   * preferences, so an unverified state must not text.
+   */
+  async reviewSmsAllowedNow(customerId) {
+    let prefs;
+    try {
+      prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
+    } catch {
+      return { allowed: false, reason: "prefs_unavailable" };
+    }
+    if (prefs && prefs.review_request === false) return { allowed: false, reason: "review_off" };
+    if (prefs && prefs.sms_enabled === false) return { allowed: false, reason: "sms_off" };
+    if (prefs && prefs.review_request_channel === "email") return { allowed: false, reason: "email_only" };
+    return { allowed: true };
   },
 
   async releaseInlineClaim(requestId) {

@@ -429,9 +429,13 @@ router.post('/sms', async (req, res, next) => {
         }
         const { existingShortUrlFor } = require('../services/short-url');
         const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
+        // Canonical match (scheme-stripped, case-insensitive) — the client
+        // tracks links the same way, so a host-case edit of a still-live URL
+        // must not read here as "link gone" and 409 a valid send.
+        const bodyLower = cleanBody.toLowerCase();
         const linkInBody = [short, rr.token]
           .filter(Boolean)
-          .some((frag) => cleanBody.includes(String(frag).replace(/^https?:\/\//, '')));
+          .some((frag) => bodyLower.includes(String(frag).replace(/^https?:\/\//i, '').toLowerCase()));
         if (!linkInBody) {
           // The client forgets the tracked entry when the operator deletes
           // the line — an id arriving without its link is an anomaly, not a
@@ -442,7 +446,37 @@ router.post('/sms', async (req, res, next) => {
         if (!owner || normalizePhoneLast10(owner.phone) !== normalizePhoneLast10(to)) {
           return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
         }
-        if (!(await ReviewService.claimInlineForSend(rr.id))) {
+        // Live consent + the ask gates + the claim, serialized under the same
+        // per-customer review lock the mint runs under: a draft can sit open
+        // for hours, so the MINT-time gate is stale — a cadence or one-off
+        // ask may have delivered since (withdrawn unscheduled rows persist
+        // and are invisible to the other gates), and the customer may have
+        // switched review requests to email or off. Re-validate at the
+        // delivery seam so this send can't breach the cooldown/cap or text an
+        // email-only customer.
+        const { runExclusive } = require('../utils/cron-lock');
+        const seam = await runExclusive(
+          `review-send:${rr.customer_id}`,
+          async () => {
+            const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
+            if (!consent.allowed) return { consent };
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            if (!gate.allowed) return { gate };
+            return { claimed: await ReviewService.claimInlineForSend(rr.id) };
+          },
+          { recordHealth: false },
+        );
+        if (seam?.skipped) {
+          return abortUnsent(409, 'A review request to this customer is already being sent — try again in a moment.');
+        }
+        if (seam.consent) {
+          return abortUnsent(422, 'This customer no longer takes review requests by text — remove the review link before sending.');
+        }
+        if (seam.gate) {
+          const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
+          return abortUnsent(409, `${REVIEW_GATE_REASONS[seam.gate.outcome] || 'Review request blocked'} — remove the review link before sending.`);
+        }
+        if (!seam.claimed) {
           return abortUnsent(409, 'This review link was already sent or canceled — remove it from the message and re-insert if still needed.');
         }
         claimedReviewRequestId = rr.id;
