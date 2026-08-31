@@ -5931,6 +5931,15 @@ const CallRecordingProcessor = {
   // plus the same hallucination guard the live pipeline applies.
   transcribeRecording,
   isImplausibleTranscript,
+  // Re-used by the speaker-label eval (server/scripts/speaker-label-eval.js)
+  // so accuracy is measured through the EXACT production relabel pass —
+  // same prompt, model env, timeout, and word-preservation guard — and the
+  // eval's rebuilt replay input is checked against this exact normalizer.
+  labelTranscriptWithOpenAI,
+  normalizeOpenAITranscript,
+  // The resolved label model (OPENAI_TRANSCRIPT_LABEL_MODEL || OPENAI_MODEL ||
+  // default) so the eval attributes results to the model it actually ran.
+  OPENAI_TRANSCRIPT_LABEL_MODEL,
   /**
    * Process a call recording end-to-end.
    * Called from recording-status webhook or manually from admin.

@@ -39,6 +39,37 @@ Comparing models: point `CALL_EXTRACTION_PROVIDER` / `CALL_EXTRACTION_MODEL`
 at the challenger and run the manual command below — the per-field table is
 the bake-off scorecard (the 2026-07-18 bake-off only had pass/fail).
 
+## Speaker labels (`speaker-labels.json`)
+
+Owner-labeled ground truth for the Agent/Caller relabel pass
+(`OPENAI_TRANSCRIPT_LABEL_MODEL`). A case is exactly `id`, `call_log_id`,
+`labeled_at`, `labeled_by: owner`, `transcript_sha256` (of the raw diarized
+transcript rebuilt from `call_log.transcript_structured` exactly as
+`normalizeOpenAITranscript` renders it — the script verifies this against the
+production function at run time), and `segment_speakers` — one
+`agent`/`caller` label per non-empty diarized segment. Any other key is
+rejected, so transcript text or contact details cannot enter the file.
+
+```sh
+# 1. Write a labeling sheet to a private file (exclusive create, mode 0600,
+#    fresh mkdtemp path unless --out names a path that does not exist yet);
+#    stdout stays PII-free, so Railway logs never see transcript text
+node server/scripts/speaker-label-eval.js --sheet
+
+# 2. Read the sheet privately, verify every suggested label, paste the
+#    corrected stubs into speaker-labels.json, then DELETE the sheet file
+
+# 3. Score the production relabel pass (word- and line-level speaker accuracy)
+node server/scripts/speaker-label-eval.js
+
+# Challenger: OPENAI_TRANSCRIPT_LABEL_MODEL=<model> node server/scripts/speaker-label-eval.js
+```
+
+Suggested labels on the sheet come from the current model's stored output —
+they are the thing under test, so every line needs a human eye before it
+becomes gold. A re-transcribed call stops scoring (`transcript_drift`)
+rather than scoring against shifted lines.
+
 Run the scheduled eval path against production data from inside the Railway
 service:
 

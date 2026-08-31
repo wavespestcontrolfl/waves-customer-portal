@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "call-speaker-labels.v1",
+  "description": "Owner-labeled speaker ground truth for the Agent/Caller relabel pass. Schema, labeling procedure, and PII rules: server/fixtures/call-extraction-eval/README.md (Speaker labels).",
+  "cases": []
+}
