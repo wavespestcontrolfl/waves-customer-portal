@@ -361,12 +361,33 @@ describe('Action Inbox generators', () => {
     });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
     const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
-    expect(item).toMatchObject({ count: 2, heldThroughOutage: true, members: ['svc-a'], label: expect.stringContaining('3 open items') });
+    expect(item).toMatchObject({ count: 2, heldThroughOutage: true, label: expect.stringContaining('3 open items') });
+    expect(item.members).toBeUndefined(); // an outage snapshot never seeds membership-aware dismissal (codex r7)
+    // Yesterday's state row never becomes today's gap (codex r7).
+    __private.resetCloseoutCarry();
+    primeDb({
+      scheduled_services: [{ id: 'svc-a' }],
+      dashboard_alert_state: { alert_id: 'closeout_gaps_today', current_count: 2, last_label: 'old', last_seen_at: new Date(Date.now() - 2 * 86400000).toISOString() },
+    });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
     // No active state row (alert genuinely resolved earlier) → an outage does not invent one.
     __private.resetCloseoutCarry();
     primeDb({ scheduled_services: [{ id: 'svc-a' }], dashboard_alert_state: undefined });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+  });
+
+  test('closeout_sweep_incomplete: a day over the cap surfaces the unchecked count instead of a silent false-clean (codex r7)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    primeDb({ scheduled_services: Array.from({ length: 53 }, (_, i) => ({ id: `svc-${i}` })) });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map());
+    const { alerts } = await computeDashboardAlertsUncached();
+    // The query is capped at cap+1, so the generator sees 51 rows → overflow of 1 reported.
+    expect(alerts.find((a) => a.id === 'closeout_sweep_incomplete')).toMatchObject({ severity: 'warn', kind: 'alert', href: '/admin/dispatch' });
+    expect(loadCloseoutStatuses.mock.calls[0][0]).toHaveLength(50);
   });
 
   test('closeout_gaps_today: absent when every completed visit is closed out or there are none', async () => {

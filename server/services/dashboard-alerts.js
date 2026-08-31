@@ -378,11 +378,25 @@ async function computeDashboardAlertsUncached() {
   //     caller). `unknown` facts (lookup outages) and legitimate not_required
   //     rules never count as gaps; per-visit statuses are memoised 90s.
   try {
-    const completedToday = (await db('scheduled_services')
+    const completedRows = (await db('scheduled_services')
       .where({ scheduled_date: today, status: 'completed' })
       .orderBy('window_start', 'asc')
-      .limit(CLOSEOUT_SWEEP_CAP)
+      .limit(CLOSEOUT_SWEEP_CAP + 1)
       .select('id')) || [];
+    // cap+1 tells a full day from an overflowing one — overflow is surfaced,
+    // never a silent false-clean.
+    const sweepTruncated = completedRows.length > CLOSEOUT_SWEEP_CAP;
+    const completedToday = sweepTruncated ? completedRows.slice(0, CLOSEOUT_SWEEP_CAP) : completedRows;
+    if (sweepTruncated) {
+      alerts.push({
+        id: 'closeout_sweep_incomplete',
+        kind: 'alert',
+        severity: 'warn',
+        count: completedRows.length - CLOSEOUT_SWEEP_CAP,
+        label: `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — later visits unchecked`,
+        href: '/admin/dispatch',
+      });
+    }
     if (completedToday.length) {
       const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
       const carry = closeoutCarryFor(today);
@@ -414,14 +428,16 @@ async function computeDashboardAlertsUncached() {
           .where({ alert_id: 'closeout_gaps_today' })
           .first('current_count', 'last_label', 'last_seen_at')
           .catch(() => null);
-        const recent = held && held.last_seen_at && (Date.now() - new Date(held.last_seen_at).getTime()) < 24 * 60 * 60 * 1000;
-        if (recent) {
+        // Same ET service date only — yesterday's row never becomes today's gap.
+        const sameDay = held && held.last_seen_at && etDateString(new Date(held.last_seen_at)) === today;
+        if (sameDay) {
           alerts.push({
             id: 'closeout_gaps_today',
             kind: 'action',
             severity: 'warn',
             count: Number(held.current_count || 1),
-            members: queueMembers(unreadableIds),
+            // Deliberately NO members: an outage snapshot knows the count, not
+            // the set — it must not seed a membership-aware dismissal.
             label: held.last_label || `${Number(held.current_count || 1)} completed visit(s) today not closed out — closeout lookup temporarily unavailable`,
             href: '/admin/dispatch',
             heldThroughOutage: true,
