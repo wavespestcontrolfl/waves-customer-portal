@@ -262,6 +262,9 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   // machine-checkable PII classes — an email-shaped token, a phone-length
   // digit run — must still be reserved values wherever they appear.
   function assertDescriptiveStringClean(where, text) {
+    // Strings only — an object here would flatten to '[object Object]' and
+    // hide its nested values from every pattern below.
+    expect({ where, type: typeof text }).toEqual({ where, type: 'string' });
     for (const email of String(text).match(/[\w.+%-]+@[\w.-]+/g) || []) {
       expect({ where, email, reserved: /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email) })
         .toEqual({ where, email, reserved: true });

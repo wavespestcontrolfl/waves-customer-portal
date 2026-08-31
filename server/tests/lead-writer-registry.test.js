@@ -133,20 +133,39 @@ function scanSourceForDynamicTableInserts(src) {
   const code = blankCommentsAndStrings(src); // patterns run on CODE only …
   const seen = new Set();
   const sites = [];
+  // … but constant resolution reads the ORIGINAL source (the literal lives
+  // in a string). Only a MODULE-LEVEL `const` counts as resolution: `const`
+  // cannot be reassigned, and requiring column 0 keeps a like-named function
+  // parameter or block-scoped `let` from borrowing the module constant as
+  // proof (a `let` that is later reassigned proves nothing).
+  const isResolved = (expr) => new RegExp(
+    String.raw`^const\s+${escapeRe(expr.split('.')[0])}\s*=\s*${Q}[\w.]+${Q}`, 'm'
+  ).test(src);
+  const record = (index, expr) => {
+    const line = code.slice(0, index).split('\n').length;
+    if (seen.has(line)) return;
+    seen.add(line);
+    sites.push({ line, anchor: lines[line - 1].trim(), expr });
+  };
   for (const pattern of DYNAMIC_INSERT_PATTERNS) {
     pattern.lastIndex = 0;
     let m;
     while ((m = pattern.exec(code))) {
-      const root = m[1].split('.')[0];
-      // … but constant resolution needs the ORIGINAL source (the literal
-      // lives in a string).
-      const constRe = new RegExp(String.raw`\b(?:const|let|var)\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}`);
-      if (constRe.test(src)) continue; // resolved to a string literal
-      const line = code.slice(0, m.index).split('\n').length;
-      if (seen.has(line)) continue;
-      seen.add(line);
-      sites.push({ line, anchor: lines[line - 1].trim(), expr: m[1] });
+      if (!isResolved(m[1])) record(m.index, m[1]);
     }
+  }
+  // Stored builders over a dynamic table — `const target = db(table);
+  // await target.insert(row);` — the dynamic mirror of the alias pass.
+  const dynDeclRe = new RegExp(
+    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${DYN_EXPR}\s*\)`,
+    'g'
+  );
+  let decl;
+  while ((decl = dynDeclRe.exec(code))) {
+    if (isResolved(decl[2])) continue;
+    const useRe = new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g');
+    let use;
+    while ((use = useRe.exec(code))) record(use.index, decl[2]);
   }
   return sites;
 }
@@ -279,6 +298,18 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       "const TABLE = 'other_things';\nawait db(TABLE).insert({ a: 1 });"
     );
     expect(resolved).toEqual([]);
+  });
+
+  test('dynamic-table scan: stored builder over a dynamic table is flagged; a reassignable let is not proof', () => {
+    const stored = scanSourceForDynamicTableInserts(
+      'async function store(table, row) {\n  const target = db(table);\n  await target.insert(row);\n}'
+    );
+    expect(stored).toHaveLength(1);
+    expect(stored[0].expr).toBe('table');
+    const reassigned = scanSourceForDynamicTableInserts(
+      "let table = 'audit';\ntable = requestedTable;\nawait db(table).insert(row);"
+    );
+    expect(reassigned).toHaveLength(1);
   });
 });
 
@@ -435,6 +466,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       "routes/tech-lawn-diagnostic.js :: const [lead] = await trx('leads').insert({",
       "services/referral-engine.js :: const [lead] = await db('leads').insert({",
     ]);
+    const pendingKeys = new Set(pending.map(key));
+    // No key outside the frozen list may be pending (a new or rewritten
+    // writer brings its own justification)…
     expect(pending.map(key).filter((k) => !FROZEN_PENDING_KEYS.has(k))).toEqual([]);
+    // …and a site that adopts a resolver must DELETE its key from this list
+    // in the SAME PR — a deliberate, reviewed one-line edit that is the
+    // rollout ceremony, and which stops a later regression back to
+    // 'none' + PENDING_RULING_REASON from passing silently.
+    expect([...FROZEN_PENDING_KEYS].filter((k) => !pendingKeys.has(k))).toEqual([]);
   });
 });
