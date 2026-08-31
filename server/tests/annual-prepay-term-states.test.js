@@ -337,7 +337,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // is the merge/undo machinery re-pointing customer_id/bookkeeping columns
     // across many tables — audited 2026-08-31, it writes no status column on
     // this table. A new dynamic writer fails here until audited + listed.
-    const AUDITED_DYNAMIC_WRITERS = ['server/services/customer-dedupe.js'];
+    // name → exact count of dynamic-mutation sites at audit time. The count
+    // is a ratchet: ANY new dynamic mutation in the file (which could carry
+    // `payload.status` or `column === 'status'` invisibly to a textual scan)
+    // fails until the file is re-audited and the count updated.
+    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9 };
 
     const writes = [];
     const unscannable = [];
@@ -360,11 +364,13 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // A mutation through a DYNAMIC table expression (db(fn()), trx(cfg.x))
       // could write this table's status invisibly — fail closed unless the
       // file is on the audited allowlist above.
+      let dynamicSites = 0;
       for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
         const chain = chainAfter(src, m.index + m[0].length);
         const mut = chain.match(/\.(?:update|insert|merge)\s*\(/);
         if (!mut) continue;
-        if (!AUDITED_DYNAMIC_WRITERS.includes(rel)) {
+        dynamicSites += 1;
+        if (!(rel in AUDITED_DYNAMIC_WRITERS)) {
           unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} — audit it and extend AUDITED_DYNAMIC_WRITERS`);
           continue;
         }
@@ -375,6 +381,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         if (/(?:\b|['"])status['"]?\s*:/.test(args) || /\[\s*['"]status['"]\s*\]/.test(args)) {
           unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} carries a status key`);
         }
+      }
+      if (rel in AUDITED_DYNAMIC_WRITERS && dynamicSites !== AUDITED_DYNAMIC_WRITERS[rel]) {
+        // A payload.status / column === 'status' inside a NEW dynamic site is
+        // invisible to a textual scan — the count ratchet forces a re-audit.
+        unscannable.push(`${rel}: ${dynamicSites} dynamic-mutation sites (audited: ${AUDITED_DYNAMIC_WRITERS[rel]}) — re-audit and update the count`);
       }
     }
     expect(unscannable).toEqual([]);
