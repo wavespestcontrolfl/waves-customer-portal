@@ -838,8 +838,14 @@ function normalizeProposalLines(estimate) {
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
   let result = data.result || data.engineResult || {};
-  let rawLines = data.proposal?.enabled === true
-    ? normalizeProposalLines(estimate)
+  // Branch on the OUTCOME, not the raw flag: a stored {enabled:true}
+  // whose canonical normalization yields no itemization (synthesized/
+  // disabled fallback) must fall through to the engine lines instead of
+  // freezing an empty audit (codex pre-push P1).
+  const proposalLines = data.proposal?.enabled === true ? normalizeProposalLines(estimate) : [];
+  const proposalAuthoritative = proposalLines.length > 0;
+  let rawLines = proposalAuthoritative
+    ? proposalLines
     : [
       ...normalizeRecurringLines(result),
       ...normalizeOneTimeLines(result),
@@ -871,7 +877,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const initialFeeOverride = emitInitialFee && Number.isFinite(frozenSetupAmount) && frozenSetupAmount > 0
     ? frozenSetupAmount
     : null;
-  if (data.proposal?.enabled !== true) {
+  if (!proposalAuthoritative) {
     // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
     // additional priced rows only in (engine)result.lineItems — merge and
     // dedupe by service+cadence so no priced line is silently omitted

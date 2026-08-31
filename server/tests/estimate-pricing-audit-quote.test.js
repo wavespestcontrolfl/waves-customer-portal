@@ -291,6 +291,17 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.proposal).toEqual(proposal);
   });
 
+  test('an enabled-but-empty proposal falls through to the engine lines', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-empty-prop', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      estimate_data: {
+        proposal: { enabled: true, buildings: [] },
+        result: { recurring: { services: [{ name: 'Pest Control', mo: 55 }] } },
+      },
+    });
+    expect(audit.lines.find((l) => l.serviceKey === 'pest_control')).toMatchObject({ price: 660 });
+  });
+
   test('net row witnesses beat the generic tier discount; hybrid installation splits out', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-net', status: 'sent', monthly_total: '100.00', annual_total: '1200.00', onetime_total: '350.00',
