@@ -254,6 +254,9 @@ const COMBINED_SERVICE_ROUTES = [
     primaryKey: 'pest_control',
     companionKey: 'termite_bait',
     catalogServiceKey: 'pest_termite_bait_quarterly',
+    // TRUE two-program route — retired under GATE_SEPARATE_COMBO_VISITS
+    // (owner 2026-08-31): the pair schedules as two standalone visits.
+    retiredBySeparateVisits: true,
     // Exact catalog name (renamed 20260825000010) — the visit label and the
     // catalog row must agree for name-fallback resolution and invoice parity.
     name: 'Quarterly Pest + Termite Bait Station Service',
@@ -302,6 +305,8 @@ const COMBINED_SERVICE_ROUTES = [
     primaryKey: 'lawn_care',
     companionKey: 'tree_shrub',
     catalogServiceKey: 'lawn_tree_shrub_combo',
+    // TRUE two-program route — retired under GATE_SEPARATE_COMBO_VISITS.
+    retiredBySeparateVisits: true,
     // Exact catalog name (renamed 20260825000010).
     name: 'Lawn + Tree & Shrub Service',
     // Pattern equality is NOT enough here: the bimonthly bucket spans 6–11
@@ -519,7 +524,57 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
   const supplements = Array.isArray(supplementalCompanions) ? supplementalCompanions : [];
   const acceptPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(acceptFrequency);
   const combos = [];
+  // Companion lines of retired routes, rewritten to their standalone
+  // catalog identity (see the retiredBySeparateVisits branch below).
+  const standaloneRewrites = [];
+  // Read at CALL time (a Railway flip applies to the next accept, no
+  // deploy-order coupling): with GATE_SEPARATE_COMBO_VISITS the TRUE
+  // two-program routes (pest+termite bait, lawn+T&S) are retired — both
+  // lines simply stay in `remaining` and schedule as their own catalog
+  // visits, which visit groups can put on one stop. Termite bait never
+  // rides as a supplement (supplementalCompanionLines emits rodent bait
+  // only), so nothing is orphaned by skipping. The bait+BOND routes are a
+  // rider on one visit, not two programs, and keep combining either way.
+  const separateComboVisits = process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
   for (const route of COMBINED_SERVICE_ROUTES) {
+    if (route.retiredBySeparateVisits && separateComboVisits) {
+      // The pest+termite route's companion could combine WITHOUT explicit
+      // counts (companionDefaultPattern carried quarterly), and standalone
+      // termite seeding requires exactly 4 visits — so a sparse bait line
+      // left in `remaining` would schedule a lone visit with no series
+      // (and, on a reserved accept, nothing at all). Route it through the
+      // STANDALONE pipeline instead (the rodent-bait precedent): both
+      // accept branches schedule and seed standalone units, anchored
+      // same-trip on reserved accepts. Only a clean quarterly-or-count-less
+      // bait line rewrites; conflicted/invalid/mismatched lines keep their
+      // pre-existing per-line semantics. Lawn+T&S needs no rewrite: a T&S
+      // line seeds per-line via the allowlist (explicit visits), and the
+      // reserved branch promotes it like lawn/palm below.
+      if (route.companionKey === 'termite_bait') {
+        const companionIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
+        const hasPrimary = remaining.some((svc) => recurringServiceKey(svc) === route.primaryKey);
+        if (companionIdx !== -1 && hasPrimary) {
+          const companion = remaining[companionIdx];
+          const visits = visitsPerYearForRecurringService(companion);
+          const cadence = explicitServiceCadence(companion);
+          const clean = !visitCountFieldsConflict(companion) && !visitCountFieldsInvalid(companion)
+            && (visits == null || visits === 4)
+            && (!cadence || cadence === route.companionDefaultPattern);
+          if (clean) {
+            remaining.splice(companionIdx, 1);
+            standaloneRewrites.push({
+              catalogServiceKey: 'termite_bait',
+              service: {
+                name: 'Termite Bait Station Service',
+                frequency: cadence || route.companionDefaultPattern,
+                visitsPerYear: 4,
+              },
+            });
+          }
+        }
+      }
+      continue;
+    }
     const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
     if (primaryIdx === -1) continue;
     // Companion may live in recurring.services OR ride as a supplement.
@@ -641,7 +696,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
   // server-priced supplement (never in `remaining` at all). The catalog
   // identity replaces the raw line name so the scheduled row resolves the
   // typed profile instead of the generic fallback.
-  const standalone = [];
+  const standalone = [...standaloneRewrites];
   const consumedSupplementKeys = new Set(
     combos.flatMap((combo) => combo.combinedFrom.map((line) => recurringServiceKey(line))),
   );
@@ -2709,6 +2764,15 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
 // public accepts 409 it as retired_lawn_cadence_selection) so it has no
 // entry. Shared by identity linking, the reserved promotion, and the lock
 // pre-pass so the three can never disagree.
+// Tree & Shrub cadence → catalog key (reserved-accept promotion under
+// GATE_SEPARATE_COMBO_VISITS; mirrors supportsConverterFollowUpSeeding's
+// T&S visit rules).
+const TREE_SHRUB_CADENCE_CATALOG_KEYS = {
+  every_6_weeks: 'tree_shrub_6week',
+  bimonthly: 'tree_shrub_program',
+  quarterly: 'tree_shrub_quarterly',
+};
+
 const LAWN_CADENCE_CATALOG_KEYS = {
   bimonthly: 'lawn_care_recurring',
   every_6_weeks: 'lawn_care_6week',
@@ -4373,16 +4437,20 @@ const EstimateConverter = {
               // termite/mosquito promotions above. Mirrors the promotion's
               // own name/pattern/key derivations exactly.
               const fam = seedingFamilyKey(svc);
-              if (fam === 'lawn_care' || fam === 'palm_injection') {
+              const treeShrubPromotable = fam === 'tree_shrub'
+                && process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
+              if (fam === 'lawn_care' || fam === 'palm_injection' || treeShrubPromotable) {
                 const svcName = svc.name || svc.serviceName || svc.service_name
-                  || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+                  || (fam === 'lawn_care' ? 'Lawn Care' : fam === 'tree_shrub' ? 'Tree & Shrub' : 'Palm Injection');
                 const pattern = converterFollowUpSeedingPattern(
                   svc, { service_type: svcName }, inferredFrequencyKey,
                 );
                 if (pattern) {
                   await addUnit(
                     svcName,
-                    (fam === 'palm_injection' && isPalmInjectionFamily(svc)) ? 'palm_injection_semiannual' : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
+                    (fam === 'palm_injection' && isPalmInjectionFamily(svc)) ? 'palm_injection_semiannual'
+                      : fam === 'tree_shrub' ? (TREE_SHRUB_CADENCE_CATALOG_KEYS[pattern] || null)
+                        : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
                   );
                 }
               }
@@ -4526,18 +4594,26 @@ const EstimateConverter = {
         // billed program must schedule. The pattern gate reuses the
         // allowlist end-to-end, so a legacy line that would not seed does
         // not promote either (office scheduling keeps its semantics).
+        // Tree & Shrub promotes ONLY under GATE_SEPARATE_COMBO_VISITS
+        // (codex P0 on the route retirement): with the lawn+T&S combined
+        // route retired, a reserved lawn accept leaves the sold T&S line in
+        // `remaining` — billed but never scheduled without a promotion. The
+        // same pattern gate applies, so a legacy line that would not seed
+        // does not promote either.
+        const promotableFamilies = ['lawn_care', 'palm_injection',
+          ...(process.env.GATE_SEPARATE_COMBO_VISITS === 'true' ? ['tree_shrub'] : [])];
         const promotedLawnPalmUnits = (remaining || [])
           .filter((line) => {
             const fam = seedingFamilyKey(line);
-            if (fam !== 'lawn_care' && fam !== 'palm_injection') return false;
+            if (!promotableFamilies.includes(fam)) return false;
             const lineName = line.name || line.serviceName || line.service_name
-              || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+              || (fam === 'lawn_care' ? 'Lawn Care' : fam === 'tree_shrub' ? 'Tree & Shrub' : 'Palm Injection');
             return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
           })
           .map((line) => {
             const fam = seedingFamilyKey(line);
             const lineName = line.name || line.serviceName || line.service_name
-              || (fam === 'lawn_care' ? 'Lawn Care' : 'Palm Injection');
+              || (fam === 'lawn_care' ? 'Lawn Care' : fam === 'tree_shrub' ? 'Tree & Shrub' : 'Palm Injection');
             const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
             return {
               // Normalized name ON the unit (same rule as the mosquito
@@ -4549,8 +4625,11 @@ const EstimateConverter = {
               service: { ...line, name: lineName, frequency: line.frequency || pattern },
               catalogServiceKey: (fam === 'palm_injection' && isPalmInjectionFamily(line))
                 ? 'palm_injection_semiannual'
-                : (fam === 'palm_injection' ? null : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null)),
-              noteKind: fam === 'palm_injection' ? 'palm injection program' : 'lawn program',
+                : fam === 'palm_injection' ? null
+                  : fam === 'tree_shrub' ? (TREE_SHRUB_CADENCE_CATALOG_KEYS[pattern] || null)
+                    : (LAWN_CADENCE_CATALOG_KEYS[pattern] || null),
+              noteKind: fam === 'palm_injection' ? 'palm injection program'
+                : fam === 'tree_shrub' ? 'tree & shrub program' : 'lawn program',
             };
           });
         // Catalog identities of the reserved rows (codex r20 P1): an

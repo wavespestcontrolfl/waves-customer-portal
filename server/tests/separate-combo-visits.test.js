@@ -1,0 +1,110 @@
+/**
+ * GATE_SEPARATE_COMBO_VISITS — the two TRUE two-program combined routes
+ * (pest+termite bait, lawn+T&S) retire; the bait+BOND rider routes keep
+ * combining; gate off is byte-identical to today. The catalog-row
+ * archive deliberately ships LATER (the permanent-flip data pass) — a
+ * dark-shipped migration would break the gate-off rollback contract.
+ */
+const {
+  combineRecurringServicesForScheduling,
+  recurringServiceKey,
+} = require('../services/estimate-converter');
+
+afterEach(() => { delete process.env.GATE_SEPARATE_COMBO_VISITS; });
+
+describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS', () => {
+  test('pest + termite bait: no combined row — the bait rewrites to a STANDALONE catalog unit', () => {
+    // Standalone (not `remaining`): the standalone pipeline schedules and
+    // seeds on BOTH accept branches (rodent-bait precedent), and standalone
+    // termite seeding requires exactly 4 visits — which the retired route's
+    // companionDefaultPattern semantics supply for a sparse legacy line.
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ]);
+    expect(combos).toEqual([]);
+    expect(standalone).toEqual([{
+      catalogServiceKey: 'termite_bait',
+      service: { name: 'Termite Bait Station Service', frequency: 'quarterly', visitsPerYear: 4 },
+    }]);
+    expect(remaining.map((l) => recurringServiceKey(l))).toEqual(['pest_control']);
+  });
+
+  test('a COUNT-LESS bait companion (companionDefaultPattern shape) still rewrites with visitsPerYear 4', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { standalone, remaining } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System' }, // no cadence, no count
+    ]);
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].service.visitsPerYear).toBe(4);
+    expect(remaining).toHaveLength(1);
+  });
+
+  test('a mismatched-cadence or conflicted bait line keeps its pre-existing per-line semantics', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const mismatched = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'monthly' },
+    ]);
+    expect(mismatched.standalone).toEqual([]);
+    expect(mismatched.remaining).toHaveLength(2);
+    const conflicted = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4, appsPerYear: 6 },
+    ]);
+    expect(conflicted.standalone).toEqual([]);
+    expect(conflicted.remaining).toHaveLength(2);
+  });
+
+  test('a bait line with NO pest primary is untouched (nothing was retired for it)', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { standalone, remaining } = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System' },
+    ]);
+    expect(standalone).toEqual([]);
+    expect(remaining).toHaveLength(1);
+  });
+
+  test('lawn + tree & shrub schedule as TWO standalone lines', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', frequency: 'bimonthly', appsPerYear: 6 },
+      { name: 'Tree & Shrub Care Program', frequency: 'bimonthly', visitsPerYear: 6 },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('termite bait + BOND still combines — the bond is a rider, not a second program', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { combos, remaining } = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr', frequency: 'quarterly' },
+    ]);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)');
+    expect(remaining).toEqual([]);
+  });
+
+  test('the reserved-accept surfaces carry the tree & shrub promotion under the gate (source guard)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    // Promotion filter and lock pre-pass both include tree_shrub only under
+    // the gate, and both resolve the T&S cadence→catalog map.
+    expect(src).toContain("...(process.env.GATE_SEPARATE_COMBO_VISITS === 'true' ? ['tree_shrub'] : [])");
+    expect(src.match(/TREE_SHRUB_CADENCE_CATALOG_KEYS\[pattern\]/g)).toHaveLength(2);
+    expect(src).toContain("fam === 'tree_shrub'\n                && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'");
+  });
+
+  test('gate off: the two-program routes still combine exactly as before', () => {
+    const { combos } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ]);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station Service');
+  });
+});
