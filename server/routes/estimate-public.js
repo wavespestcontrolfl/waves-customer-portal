@@ -12855,7 +12855,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (annualPrepaySelected && acceptSmsPhone && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)) {
+        } else if (
+          annualPrepaySelected && acceptSmsPhone
+          && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
+          // Payer-billed accepts (pre-push Codex P1): the invoice routes to
+          // the payer's AP and sendViaSMSAndEmail suppresses the homeowner
+          // text — promising THEM an invoice would be false.
+          && !(prepayAutoCharge?.status === 'skipped' && prepayAutoCharge?.reason === 'payer_billed')
+          // The template names a WaveGuard tier ("Your {tier} WaveGuard
+          // plan"); lawn/commercial-only prepay has none (pre-push Codex
+          // P1) — never invent "Bronze". Those accepts keep the onboarding
+          // email + the invoice's own SMS + email.
+          && !!String(estimate.waveguard_tier || '').trim()
+        ) {
           // Revived 2026-08-31 (owner ruling) — this branch was unreachable
           // from #1520 (2026-06-03) until now. Sends alongside the prepay
           // invoice's own SMS + email below; no phone ⇒ nothing to send.
@@ -12881,7 +12893,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'estimate_accepted_annual_prepay',
             {
               first_name: firstName,
-              waveguard_tier: estimate.waveguard_tier || 'Bronze',
+              waveguard_tier: String(estimate.waveguard_tier).trim(),
               amount_text: amountText,
             },
             { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
