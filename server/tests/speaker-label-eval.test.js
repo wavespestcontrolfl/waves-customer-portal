@@ -2,11 +2,13 @@ const fs = require('fs');
 const path = require('path');
 
 const {
+  buildSheet,
   canonicalRawTranscript,
   goldWordStream,
   loadFixture,
   modelWordStream,
   runScore,
+  runSheet,
   scoreLabeling,
   sha256,
   suggestedLineSpeakers,
@@ -80,6 +82,48 @@ describe('speaker label eval', () => {
     // Different words (dropped token) -> unscored, never positional guessing.
     const dropped = reflowed.replace(' ants', '');
     expect(scoreLabeling(gold, modelWordStream(dropped), 3)).toEqual({ status: 'word_sequence_mismatch' });
+  });
+
+  test('a 50/50 word split on a line is a miss, never credit', () => {
+    const lines = ['Speaker 1: hello world'];
+    const gold = goldWordStream(lines, ['caller']);
+    // Model splits the two words across both speakers -> exact tie.
+    const tied = 'Caller: hello\nAgent: world';
+    const score = scoreLabeling(gold, modelWordStream(tied), 1);
+    expect(score.misLines).toEqual([0]);
+    expect(score.lineAccuracy).toBe(0);
+  });
+
+  test('buildSheet renders lines + stub; runSheet stdout stays PII-free (sheet goes to a file)', async () => {
+    const built = canonical();
+    const row = {
+      id: 'call-9',
+      created_at: '2026-08-30',
+      direction: 'inbound',
+      transcription: built.lines.map((l) => l.replace('Speaker 1:', 'Agent:').replace('Speaker 2:', 'Caller:')).join('\n'),
+    };
+    const sheet = buildSheet([{ row, canonical: built }]);
+    expect(sheet).toContain('CONTAINS TRANSCRIPT TEXT (PII)');
+    expect(sheet).toContain('[  0] (agent) Speaker 1:');
+    expect(sheet).toContain(`"transcript_sha256": "${sha256(built.text)}"`);
+
+    const out = path.join(__dirname, 'fixtures', 'tmp-speaker-sheet.txt');
+    const logged = [];
+    const spy = jest.spyOn(console, 'log').mockImplementation((line) => logged.push(String(line)));
+    try {
+      const db = () => ({
+        select: () => ({
+          whereIn: async () => [{ ...row, transcript_structured: JSON.stringify(SEGMENTS) }],
+        }),
+      });
+      await runSheet({ ids: ['call-9'], limit: 10, out }, { db });
+      // stdout may be captured in Railway logs — no transcript words allowed.
+      expect(logged.join('\n')).not.toMatch(/ants|kitchen|scheduled/i);
+      expect(fs.readFileSync(out, 'utf8')).toContain('ants in the kitchen');
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(out, { force: true });
+    }
   });
 
   test('gold stream refuses a label array that does not match the transcript lines', () => {

@@ -48,10 +48,12 @@ canonical raw diarized transcript (rebuilt from
 line — never transcript text or contact details.
 
 ```sh
-# 1. Print a labeling sheet (PII on screen — run privately, never commit output)
-node server/scripts/speaker-label-eval.js --sheet
+# 1. Write a labeling sheet to a private 0600 file (stdout stays PII-free,
+#    so Railway logs never see transcript text); default path is in the tmpdir
+node server/scripts/speaker-label-eval.js --sheet --out=/tmp/sheet.txt
 
-# 2. Verify every suggested label, paste the corrected stubs into speaker-labels.json
+# 2. Read the sheet privately, verify every suggested label, paste the
+#    corrected stubs into speaker-labels.json, then DELETE the sheet file
 
 # 3. Score the production relabel pass (word- and line-level speaker accuracy)
 node server/scripts/speaker-label-eval.js

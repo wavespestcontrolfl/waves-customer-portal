@@ -14,14 +14,15 @@
  *
  *     node server/scripts/speaker-label-eval.js [--json] [--floor=0.95]
  *
- *   Sheet (--sheet) — print a labeling sheet for candidate calls (numbered
- *   raw lines + a suggested label read off the stored production transcript)
- *   plus a paste-ready fixture stub. The sheet prints transcript text (PII):
- *   run it privately inside the Railway service and NEVER commit the output.
- *   Only the stub (call id, sha, per-line labels) belongs in the fixture,
- *   after every suggested label has been verified by a human.
+ *   Sheet (--sheet) — write a labeling sheet for candidate calls (numbered
+ *   raw lines + a suggested label read off the stored production transcript
+ *   + a paste-ready fixture stub) to a PRIVATE 0600 file (--out, default in
+ *   the OS tmpdir). stdout never carries transcript text, so a run inside
+ *   the Railway service cannot leak PII into logs. Read the file privately,
+ *   verify every suggested label, paste ONLY the corrected stubs into the
+ *   fixture, then delete the file.
  *
- *     node server/scripts/speaker-label-eval.js --sheet [--days=60] [--limit=10] [--ids=a,b]
+ *     node server/scripts/speaker-label-eval.js --sheet [--days=60] [--limit=10] [--ids=a,b] [--out=path]
  *
  * Needs DATABASE_URL; score mode also needs OPENAI_API_KEY.
  * Exit codes: 0 = ok; 1 = a case errored or accuracy fell below --floor;
@@ -45,6 +46,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     ids: [],
     floor: null,
     fixturePath: DEFAULT_FIXTURE_PATH,
+    out: path.join(require('os').tmpdir(), 'speaker-label-sheet.txt'),
   };
   for (const arg of argv) {
     const [key, value] = arg.replace(/^--/, '').split('=');
@@ -55,6 +57,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (key === 'ids') opts.ids = String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
     else if (key === 'floor') opts.floor = Number(value);
     else if (key === 'fixture') opts.fixturePath = path.resolve(process.cwd(), value);
+    else if (key === 'out') opts.out = path.resolve(process.cwd(), value);
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return opts;
@@ -146,7 +149,9 @@ function scoreLabeling(goldWords, modelWords, lineCount) {
   });
   const misLines = [];
   perLine.forEach((line, i) => {
-    if (line.total && line.correct / line.total < 0.5) misLines.push(i);
+    // Majority credit: a 50/50 split is a MISS — crediting ties would inflate
+    // line accuracy and could mis-rank label models.
+    if (line.total && line.correct / line.total <= 0.5) misLines.push(i);
   });
   const ratio = (num, den) => (den ? Number((num / den).toFixed(4)) : null);
   return {
@@ -282,6 +287,34 @@ function suggestedLineSpeakers(rawLines, storedTranscription) {
   return votes.map((v) => (v.agent === v.caller ? null : (v.agent > v.caller ? 'agent' : 'caller')));
 }
 
+// Pure renderer for the labeling sheet. The returned text contains transcript
+// content (PII) — it is written to a private file, never to stdout, so a run
+// inside the Railway service cannot persist customer text into plain-text logs.
+function buildSheet(picked) {
+  const out = [];
+  out.push('SPEAKER LABELING SHEET — CONTAINS TRANSCRIPT TEXT (PII). Do not commit, paste into a PR, or store beyond the labeling pass; delete this file when done.');
+  out.push('Verify EVERY suggested label against the text; suggestions come from the current model and are exactly what this eval is meant to test.');
+  out.push('When a line is half agent / half caller, label the majority speaker or drop the call from the set.\n');
+  for (const { row, canonical } of picked) {
+    out.push(`── call ${row.id} · ${String(row.created_at).slice(0, 10)} · direction=${row.direction || '?'} · ${canonical.lines.length} lines`);
+    const suggestions = suggestedLineSpeakers(canonical.lines, row.transcription);
+    canonical.lines.forEach((line, i) => {
+      out.push(`  [${String(i).padStart(3)}] (${suggestions[i] || 'UNKNOWN'}) ${line}`);
+    });
+    const stub = {
+      id: `label-${String(row.id).slice(0, 8)}`,
+      call_log_id: row.id,
+      labeled_at: new Date().toISOString().slice(0, 10),
+      labeled_by: 'owner',
+      transcript_sha256: sha256(canonical.text),
+      line_speakers: suggestions.map((s) => s || 'VERIFY'),
+    };
+    out.push(`  fixture stub (fix every VERIFY, confirm the rest):\n${JSON.stringify(stub, null, 2).replace(/^/gm, '  ')}\n`);
+  }
+  if (!picked.length) out.push('No candidate calls found (need transcript_structured with >=2 diarized speakers).');
+  return out.join('\n');
+}
+
 async function runSheet(opts, deps) {
   let rows;
   if (opts.ids.length) {
@@ -305,28 +338,12 @@ async function runSheet(opts, deps) {
     if (picked.length >= opts.limit) break;
   }
 
-  console.log('SPEAKER LABELING SHEET — CONTAINS TRANSCRIPT TEXT (PII). Do not commit, paste into a PR, or store outside this terminal.');
-  console.log('Verify EVERY suggested label against the text; suggestions come from the current model and are exactly what this eval is meant to test.');
-  console.log('When a line is half agent / half caller, label the majority speaker or drop the call from the set.\n');
-
-  for (const { row, canonical } of picked) {
-    console.log(`── call ${row.id} · ${String(row.created_at).slice(0, 10)} · direction=${row.direction || '?'} · ${canonical.lines.length} lines`);
-    const suggestions = suggestedLineSpeakers(canonical.lines, row.transcription);
-    canonical.lines.forEach((line, i) => {
-      console.log(`  [${String(i).padStart(3)}] (${suggestions[i] || 'UNKNOWN'}) ${line}`);
-    });
-    const stub = {
-      id: `label-${String(row.id).slice(0, 8)}`,
-      call_log_id: row.id,
-      labeled_at: new Date().toISOString().slice(0, 10),
-      labeled_by: 'owner',
-      transcript_sha256: sha256(canonical.text),
-      line_speakers: suggestions.map((s) => s || 'VERIFY'),
-    };
-    console.log(`  fixture stub (fix every VERIFY, confirm the rest):\n${JSON.stringify(stub, null, 2).replace(/^/gm, '  ')}\n`);
-  }
-  if (!picked.length) console.log('No candidate calls found (need transcript_structured with >=2 diarized speakers).');
-  return { status: 'sheet', candidates: picked.length };
+  // stdout stays PII-free (it may be captured in Railway logs); the sheet
+  // itself goes to a 0600 file for the private labeling pass.
+  fs.writeFileSync(opts.out, buildSheet(picked), { mode: 0o600 });
+  console.log(`Speaker labeling sheet: ${picked.length} candidate call(s) written to ${opts.out}`);
+  console.log('The file contains transcript text (PII). Read it privately, paste ONLY the corrected fixture stubs into speaker-labels.json, then delete it.');
+  return { status: 'sheet', candidates: picked.length, out: opts.out };
 }
 
 async function main() {
@@ -373,6 +390,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildSheet,
   canonicalRawTranscript,
   goldWordStream,
   lineTokens,
@@ -380,6 +398,7 @@ module.exports = {
   modelWordStream,
   parseArgs,
   runScore,
+  runSheet,
   scoreLabeling,
   sha256,
   suggestedLineSpeakers,
