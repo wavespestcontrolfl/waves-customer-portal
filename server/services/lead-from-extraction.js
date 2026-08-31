@@ -48,6 +48,7 @@ const logger = require('./logger');
 const { mergeLeadExtractedData, shouldRefreshLeadSummary } = require('../utils/lead-extracted-data-merge');
 const { properCase } = require('../utils/name-case');
 const { composeServiceInterest } = require('../utils/lead-service-interest');
+const { leadContactCompleteness } = require('../utils/lead-contact-completeness');
 
 const isEmpty = (v) => v === null || v === undefined || v === '';
 
@@ -805,8 +806,22 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     // carried the same defect; both now share the rule). Demotion stays a
     // human act via leads.disqualification_reason.
     if (extracted.lead_quality) {
-      leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality)
-        || current?.is_qualified === true;
+      // Retention is not a free pass: qualification also has to still have its
+      // EVIDENCE. Staff can clear an invalid email or address without touching
+      // is_qualified (admin-leads.js permits that update shape), and reading
+      // the stored boolean alone kept such a lead qualified — and eligible for
+      // the Google Ads qualified-lead upload — with the contact info that
+      // earned it gone (codex #3675 P1). Same gate the recorded-call writer
+      // applies, judged against the MERGED record so a follow-up that restates
+      // nothing cannot un-qualify a complete lead.
+      const contact = leadContactCompleteness({
+        first_name: leadUpdates.first_name ?? current?.first_name,
+        last_name: leadUpdates.last_name ?? current?.last_name,
+        service_address: leadUpdates.address ?? current?.address,
+        email: leadUpdates.email ?? current?.email,
+      });
+      leadUpdates.is_qualified = contact.complete
+        && (['hot', 'warm'].includes(extracted.lead_quality) || current?.is_qualified === true);
     }
     if (language) leadUpdates.preferred_language = language;
     // Only (re)link a customer when one was unambiguously resolved — never

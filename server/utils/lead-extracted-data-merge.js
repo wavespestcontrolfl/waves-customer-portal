@@ -80,8 +80,30 @@ function parseLeadExtractedData(value) {
 // then mislead multi-property estimate handling.
 function propertyStreetKey(entry) {
   if (!entry || typeof entry !== 'object') return null;
-  const line = String(entry.address_line1 || entry.address || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const raw = String(entry.address_line1 || entry.address || '').trim();
+  if (!raw) return null;
+  // Peel any unit written INTO the street line so "100 Main St Apt 4" and
+  // "100 Main St" + address_line2 "Apt 4" key the same street; the unit then
+  // decides identity separately, in propertyUnitKey below.
+  const { splitStreetLineUnit } = require('./address-normalizer');
+  const street = splitStreetLineUnit(raw).street || raw;
+  const line = street.trim().toLowerCase().replace(/\s+/g, ' ');
   return line || null;
+}
+
+// The unit is part of a property's IDENTITY, not a detail of it: two units at
+// one street address are two service addresses, and merging them overwrites
+// the first — dropping a real address and sending estimating or dispatch to
+// the wrong door. Read from address_line2, falling back to a unit embedded in
+// the street line, through the shared address-normalizer so "#4", "Apt 4" and
+// "Unit 4" are one key.
+function propertyUnitKey(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit } = require('./address-normalizer');
+  const explicit = String(entry.address_line2 || entry.unit || '').trim();
+  const embedded = explicit ? '' : (splitStreetLineUnit(String(entry.address_line1 || entry.address || '')).unit || '');
+  const unit = explicit || embedded;
+  return unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
 }
 
 function propertyZip(entry) {
@@ -105,6 +127,16 @@ function sameProperty(a, b) {
   const keyB = propertyStreetKey(b);
   if (!keyA || !keyB) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
   if (keyA !== keyB) return false;
+  // Units decide before location does. Different units are different
+  // properties however well the zip corroborates, and a unit on only ONE
+  // side is ambiguous — the same stance this function already takes on a
+  // one-sided zip or city, and the safe one when the cost of guessing wrong
+  // is losing a service address.
+  const unitA = propertyUnitKey(a);
+  const unitB = propertyUnitKey(b);
+  if (unitA || unitB) {
+    if (unitA !== unitB) return false;
+  }
   const zipA = propertyZip(a);
   const zipB = propertyZip(b);
   if (zipA && zipB) return zipA === zipB;
@@ -148,21 +180,49 @@ function unionAdditionalProperties(prior, next) {
   return out;
 }
 
+// A concern is compared WHOLE, never as a substring. Substring containment
+// silently ate real reports: "no termites were observed" contains "termites",
+// so a later call reporting termites was treated as a restatement and the
+// negation was all that survived — the newly reported pest vanished from the
+// information estimating and dispatch work from. Concerns are split on the
+// separator this function itself writes and matched as complete normalized
+// segments, so only a genuine restatement is dropped.
+function concernSegments(text) {
+  return String(text || '')
+    .split(PAIN_POINTS_SEPARATOR)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+// Case, spacing and trailing punctuation don't make a concern new.
+function concernKey(segment) {
+  return String(segment || '')
+    .toLowerCase()
+    .replace(/[.!;,]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Keep the problem the caller first described and add anything genuinely new.
-// A restatement (already present, case-insensitively) is dropped rather than
-// duplicated, and the field is bounded so a caller who rings ten times cannot
-// grow the column without limit.
+// The field is bounded so a caller who rings ten times cannot grow the column
+// without limit.
 function accumulatePainPoints(prior, next) {
   const priorText = typeof prior === 'string' ? prior.trim() : '';
   const nextText = typeof next === 'string' ? next.trim() : '';
   if (!nextText) return priorText || null;
   if (!priorText) return nextText;
-  if (priorText.toLowerCase().includes(nextText.toLowerCase())) return priorText;
-  // The reverse containment makes the merge IDEMPOTENT: the under-lock pass
-  // re-merges an already-accumulated payload over the locked row, and without
-  // this the shared prefix would be appended to itself.
-  if (nextText.toLowerCase().includes(priorText.toLowerCase())) return nextText;
-  return `${priorText}${PAIN_POINTS_SEPARATOR}${nextText}`;
+  const seen = new Set(concernSegments(priorText).map(concernKey));
+  // Segment-wise matching is what keeps the merge IDEMPOTENT: the under-lock
+  // pass re-merges an already-accumulated payload over the locked row, and
+  // every one of its segments is already present.
+  const additions = concernSegments(nextText).filter((segment) => {
+    const key = concernKey(segment);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!additions.length) return priorText;
+  return [priorText, ...additions].join(PAIN_POINTS_SEPARATOR);
 }
 
 /**

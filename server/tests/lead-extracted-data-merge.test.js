@@ -334,3 +334,108 @@ describe('structured collections survive across multiple calls', () => {
     expect(afterCall2.secondary_contact.first_name).toBe('Pat');
   });
 });
+
+// ── codex #3675 round 2 ────────────────────────────────────────────────
+describe('units are part of a property\'s identity', () => {
+  const RK = RECOMPUTED;
+
+  it('two units at one street address stay two properties', () => {
+    // Merging them overwrote the first unit with the second: a real service
+    // address disappears and dispatch is sent to the wrong door.
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 4', zip: '34202' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 9', zip: '34202' }],
+    }, RK);
+    expect(afterCall2.additional_properties).toHaveLength(2);
+    expect(afterCall2.additional_properties.map((p) => p.address_line2)).toEqual(['Apt 4', 'Apt 9']);
+  });
+
+  it('the same unit written differently is still one property', () => {
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: '#4', zip: '34202', notes: 'gate code at the rear' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 4', zip: '34202', property_type: 'condo' }],
+    }, RK);
+    expect(afterCall2.additional_properties).toHaveLength(1);
+    expect(afterCall2.additional_properties[0].notes).toBe('gate code at the rear');
+    expect(afterCall2.additional_properties[0].property_type).toBe('condo');
+  });
+
+  it('a unit written into the street line matches the same unit in line 2', () => {
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First St Apt 4', zip: '34202', notes: 'gate code at the rear' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 4', zip: '34202', property_type: 'condo' }],
+    }, RK);
+    expect(afterCall2.additional_properties).toHaveLength(1);
+    expect(afterCall2.additional_properties[0].notes).toBe('gate code at the rear');
+  });
+
+  it('a unit on only one side is ambiguous and never merges', () => {
+    // Same stance the function already takes on a one-sided zip or city: the
+    // cost of guessing wrong is losing a service address.
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First St', zip: '34202' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 4', zip: '34202' }],
+    }, RK);
+    expect(afterCall2.additional_properties).toHaveLength(2);
+  });
+});
+
+describe('concerns are compared whole, never as substrings', () => {
+  const RK = RECOMPUTED;
+
+  it('a newly reported pest survives an earlier NEGATED mention of it', () => {
+    // "no termites were observed" contains "termites", so substring
+    // containment treated the real report as a restatement and kept only the
+    // negation — the pest vanished from what estimating and dispatch see.
+    const afterCall1 = mergeLeadExtractedData({}, { pain_points: 'No termites were observed during the last service.' }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, { pain_points: 'Termites' }, RK);
+    expect(afterCall2.pain_points).toContain('No termites were observed');
+    expect(afterCall2.pain_points).toMatch(/·\s*Termites$/);
+  });
+
+  it('a genuine restatement is still dropped', () => {
+    const afterCall1 = mergeLeadExtractedData({}, { pain_points: 'Ants in the kitchen' }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, { pain_points: 'ants in the kitchen.' }, RK);
+    expect(afterCall2.pain_points).toBe('Ants in the kitchen');
+  });
+
+  it('re-merging an accumulated value is idempotent', () => {
+    // The under-lock pass re-merges its own accumulated payload over the
+    // locked row; every segment is already present, so nothing is appended.
+    const first = mergeLeadExtractedData({}, { pain_points: 'Ants in the kitchen' }, RK);
+    const second = mergeLeadExtractedData(first, { pain_points: 'Wasps on the lanai' }, RK);
+    const reMerged = mergeLeadExtractedData(second, { pain_points: second.pain_points }, RK);
+    expect(reMerged.pain_points).toBe(second.pain_points);
+  });
+});
+
+describe('both lead writers share one contact-completeness gate', () => {
+  const { leadContactCompleteness } = require('../utils/lead-contact-completeness');
+
+  it('a lead missing any qualifying contact field is incomplete', () => {
+    const complete = { first_name: 'PersonA', last_name: 'Sample', service_address: '100 First St', email: 'p@example.com' };
+    expect(leadContactCompleteness(complete).complete).toBe(true);
+    for (const field of Object.keys(complete)) {
+      const result = leadContactCompleteness({ ...complete, [field]: '' });
+      expect(result.complete).toBe(false);
+      expect(result.missing).toContain(field);
+    }
+  });
+
+  it('the voice-agent writer gates retention on that evidence, not the stored flag', () => {
+    // Staff can clear an invalid email without touching is_qualified, and
+    // reading the boolean alone kept the lead qualified — and eligible for
+    // the Google Ads qualified-lead upload — with its evidence gone.
+    const source = require('fs').readFileSync(require.resolve('../services/lead-from-extraction'), 'utf8');
+    expect(source).toContain('leadContactCompleteness');
+    expect(source).toMatch(/is_qualified = contact\.complete/);
+  });
+});

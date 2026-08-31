@@ -1874,18 +1874,12 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
 // email. Phone is implicit (caller ID). Evaluate against the MERGED record
 // (this call's extraction OR what a prior call already stored), so a follow-up
 // call that restates nothing doesn't un-qualify an already-complete lead.
-const QUALIFYING_CONTACT_FIELDS = ['first_name', 'last_name', 'service_address', 'email'];
-const QUALIFYING_CONTACT_LABELS = {
-  first_name: 'first name',
-  last_name: 'last name',
-  service_address: 'service address',
-  email: 'email',
-};
-function leadContactCompleteness(fields = {}) {
-  const present = (v) => !!String(v == null ? '' : v).trim();
-  const missing = QUALIFYING_CONTACT_FIELDS.filter((key) => !present(fields[key]));
-  return { complete: missing.length === 0, missing };
-}
+// Extracted to the shared util so the voice-agent writer applies the SAME
+// gate (codex #3675 P1) — never re-inline or duplicate it.
+const {
+  QUALIFYING_CONTACT_LABELS,
+  leadContactCompleteness,
+} = require('../utils/lead-contact-completeness');
 
 // A real new-sales prospect we can still work even though the customer upsert
 // was skipped — almost always because the caller never stated a name (the
