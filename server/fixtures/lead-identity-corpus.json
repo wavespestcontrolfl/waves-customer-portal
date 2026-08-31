@@ -1,0 +1,171 @@
+{
+  "$comment": "SYNTHETIC identity corpus for #3137 groundwork. Every record is invented: 555-01xx phones, example.com emails, fake street names. Verdicts mirror the call path's identity contract (findReusableCallLead phone arm + email arm, extractedNameMatchesCustomer). Never add a real customer.",
+  "cases": [
+    {
+      "id": "phone-format-plus1-vs-dashes",
+      "a": { "first_name": "Marisol", "last_name": "Quintero", "phone": "+15415550101", "email": "marisol.q@example.com" },
+      "b": { "first_name": "Marisol", "last_name": "Quintero", "phone": "541-555-0101", "email": "marisol.q@example.com" },
+      "expected": "same",
+      "rationale": "Same NANP number; toE164 collapses +1 / dashes / bare digits to one key."
+    },
+    {
+      "id": "phone-format-parens-spaces-leading-1",
+      "a": { "first_name": "Desmond", "last_name": "Achterberg", "phone": "1 (541) 555 0102" },
+      "b": { "first_name": "Desmond", "last_name": "Achterberg", "phone": "5415550102" },
+      "expected": "same",
+      "rationale": "Leading 1 + parens + spaces vs bare 10 digits normalize to the same E.164."
+    },
+    {
+      "id": "email-case-and-whitespace",
+      "a": { "first_name": "Priyanka", "last_name": "Vellore", "email": "  Priyanka.Vellore@Example.com " },
+      "b": { "first_name": "priyanka", "last_name": "Vellore", "email": "priyanka.vellore@example.com" },
+      "expected": "same",
+      "rationale": "No phone → email arm; normalizeEmail trims + lowercases, and first names corroborate exactly."
+    },
+    {
+      "id": "nickname-bill-william-same-phone",
+      "a": { "first_name": "Bill", "last_name": "Fairweather", "phone": "541-555-0103" },
+      "b": { "first_name": "William", "last_name": "Fairweather", "phone": "+15415550103" },
+      "expected": "same",
+      "rationale": "Phone key matches and Bill/William are in the same NICKNAME_GROUPS entry; surname agrees.",
+      "checks": { "firstNameVariant": true }
+    },
+    {
+      "id": "nickname-liz-elizabeth-same-phone",
+      "a": { "first_name": "Liz", "last_name": "Okonkwo-Reyes", "phone": "(541) 555-0104" },
+      "b": { "first_name": "Elizabeth", "last_name": "Okonkwo Reyes", "phone": "541.555.0104" },
+      "expected": "same",
+      "rationale": "Liz/Elizabeth nickname group; normalizeNamePart strips the hyphen so the surnames compare equal.",
+      "checks": { "firstNameVariant": true }
+    },
+    {
+      "id": "nickname-on-email-arm-is-not-enough",
+      "a": { "first_name": "Bob", "last_name": "Tremontaine", "email": "rtremontaine@example.com" },
+      "b": { "first_name": "Robert", "last_name": "Tremontaine", "email": "rtremontaine@example.com" },
+      "expected": "different",
+      "rationale": "Email arm requires EXACT first-name corroboration (spoken email is weak identity); nickname tolerance is phone-arm only, so this fails closed to a fresh row.",
+      "checks": { "firstNameVariant": true }
+    },
+    {
+      "id": "trailing-punctuation-and-whitespace-in-name",
+      "a": { "first_name": " Dario. ", "last_name": "Sandoval-Ibsen ", "phone": "541-555-0105" },
+      "b": { "first_name": "Dario", "last_name": "Sandoval Ibsen", "phone": "541-555-0105" },
+      "expected": "same",
+      "rationale": "normalizeNamePart lowercases and strips every non-alphanumeric, so punctuation and spacing never split a person."
+    },
+    {
+      "id": "unit-suffixed-address-vs-bare-same-person",
+      "a": { "first_name": "Ngozi", "last_name": "Halvorsen", "phone": "541-555-0106", "address": "412 Fictional Palm Way" },
+      "b": { "first_name": "Ngozi", "last_name": "Halvorsen", "phone": "+1 541 555 0106", "address": "412 Fictional Palm Way Unit 4" },
+      "expected": "same",
+      "rationale": "One person, one property: phone + name agree; the unit suffix is an address detail, not an identity split (splitStreetLineUnit yields the same street line).",
+      "checks": { "sameStreet": true }
+    },
+    {
+      "id": "unit-suffixed-address-hash-spelling",
+      "a": { "first_name": "Tobias", "last_name": "Wren-Castellanos", "phone": "541-555-0107", "address": "88 Imaginary Cove Blvd #12" },
+      "b": { "first_name": "Tobias", "last_name": "Wren Castellanos", "phone": "5415550107", "address": "88 Imaginary Cove Blvd, Apt 12" },
+      "expected": "same",
+      "rationale": "'#12' and ', Apt 12' are two spellings of the same unit line; street line and identity keys agree.",
+      "checks": { "sameStreet": true }
+    },
+    {
+      "id": "same-last-name-different-first-same-phone",
+      "a": { "first_name": "Harriet", "last_name": "Pemberly", "phone": "541-555-0108" },
+      "b": { "first_name": "Cornelius", "last_name": "Pemberly", "phone": "541-555-0108" },
+      "expected": "different",
+      "rationale": "Shared household line, two people: first names conflict (not a nickname pair) → the #3627 rule mints a fresh lead."
+    },
+    {
+      "id": "shared-office-phone-different-names",
+      "a": { "first_name": "Yusuf", "last_name": "Adebayo-Lindqvist", "phone": "541-555-0109", "email": "office@example.com" },
+      "b": { "first_name": "Renata", "last_name": "Szczepanik", "phone": "541-555-0109", "email": "office@example.com" },
+      "expected": "different",
+      "rationale": "Office line + shared inbox, different callers: name conflict wins over both phone and email matches."
+    },
+    {
+      "id": "shared-phone-nickname-different-surname",
+      "a": { "first_name": "Mike", "last_name": "Ostrowski", "phone": "541-555-0110" },
+      "b": { "first_name": "Michael", "last_name": "Delacroix-Ostrowski", "phone": "541-555-0110" },
+      "expected": "different",
+      "rationale": "Nickname match is not enough when BOTH surnames are known and disagree — surname agreement is still enforced on the phone arm."
+    },
+    {
+      "id": "shared-phone-one-side-nameless-shell",
+      "a": { "first_name": null, "last_name": null, "phone": "541-555-0111" },
+      "b": { "first_name": "Anneliese", "last_name": "Brightwater", "phone": "+15415550111" },
+      "expected": "same",
+      "rationale": "A missing name on either side is compatible (shells stay reusable): phone match alone resolves."
+    },
+    {
+      "id": "typo-email-domain-no-phone",
+      "a": { "first_name": "Ravindra", "last_name": "Moorcroft", "email": "ravi.moorcroft@example.com" },
+      "b": { "first_name": "Ravindra", "last_name": "Moorcroft", "email": "ravi.moorcroft@exmaple.com" },
+      "expected": "different",
+      "rationale": "Typo'd domain is a different email key and there is no phone to fall back on — fail closed; a human would merge later."
+    },
+    {
+      "id": "typo-email-domain-but-phone-matches",
+      "a": { "first_name": "Ravindra", "last_name": "Moorcroft", "phone": "541-555-0112", "email": "ravi.moorcroft@example.com" },
+      "b": { "first_name": "Ravindra", "last_name": "Moorcroft", "phone": "(541) 555-0112", "email": "ravi.moorcroft@exmaple.com" },
+      "expected": "same",
+      "rationale": "Phone is the sole identity key when present: the typo'd email is never consulted, and the names agree."
+    },
+    {
+      "id": "different-phone-same-email-different-people",
+      "a": { "first_name": "Gunnar", "last_name": "Vasquez-Thorne", "phone": "541-555-0113", "email": "thornehousehold@example.com" },
+      "b": { "first_name": "Ingrid", "last_name": "Vasquez-Thorne", "phone": "541-555-0114", "email": "thornehousehold@example.com" },
+      "expected": "different",
+      "rationale": "Both have phones and they differ: the phone arm never consults email, so a shared family inbox does not merge two people."
+    },
+    {
+      "id": "different-phone-same-email-same-name",
+      "a": { "first_name": "Beatrix", "last_name": "Lindgren-Amato", "phone": "541-555-0115", "email": "beatrix.la@example.com" },
+      "b": { "first_name": "Beatrix", "last_name": "Lindgren-Amato", "phone": "541-555-0116", "email": "beatrix.la@example.com" },
+      "expected": "different",
+      "rationale": "Probably one person with two numbers, but the production contract is phone-keyed when a phone exists — recorded as DIFFERENT so the corpus documents the known gap rather than pretending it is solved."
+    },
+    {
+      "id": "email-arm-missing-first-name-fails-closed",
+      "a": { "first_name": null, "last_name": null, "email": "shared.inbox@example.com" },
+      "b": { "first_name": "Oluwaseun", "last_name": "Ferreira", "email": "shared.inbox@example.com" },
+      "expected": "different",
+      "rationale": "Email arm needs POSITIVE corroboration — a nameless capture on a matching email mints a fresh row instead of adopting someone's lead."
+    },
+    {
+      "id": "email-arm-last-name-conflict",
+      "a": { "first_name": "Sofia", "last_name": "Marchetti", "email": "sofia@example.com" },
+      "b": { "first_name": "Sofia", "last_name": "Nakagawa", "email": "sofia@example.com" },
+      "expected": "different",
+      "rationale": "Same first name, same inbox, conflicting surnames → two people (roommates sharing an address inbox)."
+    },
+    {
+      "id": "email-arm-blank-last-name-compatible",
+      "a": { "first_name": "Sofia", "last_name": "", "email": "sofia.marchetti@example.com" },
+      "b": { "first_name": "SOFIA", "last_name": "Marchetti", "email": "Sofia.Marchetti@example.com" },
+      "expected": "same",
+      "rationale": "Blank surname never conflicts; first names match case-insensitively; emails normalize equal."
+    },
+    {
+      "id": "garbage-phone-falls-to-email-arm",
+      "a": { "first_name": "Emeka", "last_name": "Sorensen", "phone": "anonymous", "email": "emeka.s@example.com" },
+      "b": { "first_name": "Emeka", "last_name": "Sorensen", "phone": "call me", "email": "emeka.s@example.com" },
+      "expected": "same",
+      "rationale": "Non-phone caller-ID sentinels are not usable keys (isLikelyE164 false); identity falls through to the email arm with exact name corroboration."
+    },
+    {
+      "id": "no-shared-key-at-all",
+      "a": { "first_name": "Petra", "last_name": "Havlicek", "phone": "541-555-0117", "email": "petra.h@example.com" },
+      "b": { "first_name": "Petra", "last_name": "Havlicek", "phone": "541-555-0118", "email": "p.havlicek@example.com" },
+      "expected": "different",
+      "rationale": "Name alone is never an identity key — a common name across two contact sets stays two leads."
+    },
+    {
+      "id": "invalid-email-never-a-key",
+      "a": { "first_name": "Lucian", "last_name": "Abernathy", "email": "unknown" },
+      "b": { "first_name": "Lucian", "last_name": "Abernathy", "email": "unknown" },
+      "expected": "different",
+      "rationale": "A malformed capture like 'unknown' must not reuse another lead storing the same garbage (PR #3275 P1) — not an email, no key."
+    }
+  ]
+}
