@@ -165,7 +165,30 @@ function builder(table) {
   b.then = (resolve, reject) => Promise.resolve(rows()).then(resolve, reject);
   return b;
 }
-const fakeDb = { transaction: async (fn) => fn((table) => builder(table)) };
+// Transaction-handle shape: a builder factory plus the .raw the advisory
+// lock (lockCustomerComms) issues. `ops`, when given, records statement
+// order for the lock-before-reads assertions.
+function fakeTrx(ops = null, tableFactory = builder) {
+  const t = (table) => {
+    const b = tableFactory(table);
+    if (ops) {
+      let locked = false;
+      const origForUpdate = b.forUpdate;
+      b.forUpdate = () => { locked = true; return origForUpdate(); };
+      const origFirst = b.first;
+      b.first = (...args) => { ops.push(`read:${table}${locked ? ':forUpdate' : ''}`); return origFirst(...args); };
+      const origThen = b.then;
+      b.then = (resolve, reject) => { ops.push(`read:${table}`); return origThen(resolve, reject); };
+    }
+    return b;
+  };
+  t.raw = async (sql, bindings) => {
+    if (ops) ops.push(`raw:${String(sql)}:${JSON.stringify(bindings)}`);
+    return {};
+  };
+  return t;
+}
+const fakeDb = { transaction: async (fn) => fn(fakeTrx()) };
 
 const CUSTOMER = {
   id: 'cust-1', active: false, pipeline_stage: 'churned', deleted_at: null,
@@ -252,13 +275,13 @@ describe('mintRestartEstimate', () => {
 
   test('a failed audit note fails the mint (aborted pg transaction must never resolve with a URL)', async () => {
     const failingDb = {
-      transaction: async (fn) => fn((table) => {
+      transaction: async (fn) => fn(fakeTrx(null, (table) => {
         const b = builder(table);
         if (table === 'customer_interactions') {
           b.insert = () => Promise.reject(new Error('note insert boom'));
         }
         return b;
-      }),
+      })),
     };
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: failingDb }) }))
       .rejects.toThrow('note insert boom');
@@ -384,13 +407,13 @@ describe('mintRestartEstimate', () => {
     // The pricing-ai ownership loaders answer [] for an inactive customer,
     // so the mint reads scheduled_services directly — a broken read refuses.
     const failingDb = {
-      transaction: async (fn) => fn((table) => {
+      transaction: async (fn) => fn(fakeTrx(null, (table) => {
         const b = builder(table);
         if (table.startsWith('scheduled_services')) {
           b.whereNotIn = () => { throw new Error('rows read boom'); };
         }
         return b;
-      }),
+      })),
     };
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: failingDb }) }))
       .rejects.toMatchObject({ code: 'pricing_unavailable' });
@@ -411,6 +434,47 @@ describe('mintRestartEstimate', () => {
     );
     tables.estimates = [];
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });
+  });
+
+  test('a STORED commercial property never gets an online restart price — refused before reuse or mint (codex pre-push P0)', async () => {
+    tables.customers[0].property_type = 'commercial';
+    // Even a LIVE reusable restart estimate must not be handed back.
+    tables.estimates.push({
+      id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+    });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(recompute).not.toHaveBeenCalled();
+    expect(tables.estimates).toHaveLength(1); // nothing new minted
+  });
+
+  test('a RESOLVED commercial property (cached lookup / seed classification) refuses too', async () => {
+    const d = deps();
+    d.pricingAi.resolvePropertyContext = async () => ({
+      propertyInput: { homeSqFt: 2200, lotSqFt: 9000, stories: 1, propertyType: 'commercial' },
+      grassType: 'st_augustine', palmCount: null,
+    });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(recompute).not.toHaveBeenCalled();
+    expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('an unevaluable commercial check fails closed (never prices blind)', async () => {
+    const d = deps({ isCommercialProperty: () => { throw new Error('classifier boom'); } });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(recompute).not.toHaveBeenCalled();
+    expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('the mint takes the customer-comms advisory lock BEFORE its customers row lock (lock-order contract)', async () => {
+    const ops = [];
+    const orderedDb = { transaction: async (fn) => fn(fakeTrx(ops)) };
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: orderedDb }), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const advisoryIdx = ops.findIndex((op) => op.includes('pg_advisory_xact_lock') && op.includes('customer-comms:cust-1'));
+    const customerReadIdx = ops.findIndex((op) => op.startsWith('read:customers'));
+    expect(advisoryIdx).toBe(0); // FIRST statement of the transaction
+    expect(customerReadIdx).toBeGreaterThan(advisoryIdx);
+    expect(ops[customerReadIdx]).toBe('read:customers:forUpdate');
   });
 
   test('a multi-premises profile never gets an online restart price (proof false, proof unreadable, or no provable primary street)', async () => {
@@ -498,7 +562,7 @@ describe('mintRestartEstimate', () => {
 // ── accept-time revalidation (codex GH r4 P1): the checks the public accept
 // transaction re-runs on a plan_restart estimate under the estimate row lock.
 describe('assertRestartAcceptEligible', () => {
-  const trx = (table) => builder(table);
+  const trx = fakeTrx();
   const RESTART_ESTIMATE = { id: 'est-r1' };
   beforeEach(() => {
     tables.estimates = [{
@@ -559,14 +623,40 @@ describe('assertRestartAcceptEligible', () => {
   });
 
   test('an unreadable residual read fails closed with a retryable 409', async () => {
-    const failingTrx = (table) => {
+    const failingTrx = fakeTrx(null, (table) => {
       const b = builder(table);
       if (table.startsWith('scheduled_services')) {
         b.whereNotIn = () => { throw new Error('rows read boom'); };
       }
       return b;
-    };
+    });
     await expect(actualRestart.assertRestartAcceptEligible(failingTrx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+  });
+
+  test('serializes BEFORE reading: comms advisory lock + customers FOR UPDATE precede every eligibility read (codex pre-push P1)', async () => {
+    const ops = [];
+    await actualRestart.assertRestartAcceptEligible(fakeTrx(ops), RESTART_ESTIMATE);
+    const advisoryIdx = ops.findIndex((op) => op.includes('pg_advisory_xact_lock') && op.includes('customer-comms:cust-1'));
+    const customerReadIdx = ops.findIndex((op) => op.startsWith('read:customers'));
+    const residualReads = ops
+      .map((op, i) => ({ op, i }))
+      .filter(({ op }) => op.startsWith('read:scheduled_services'));
+    // The advisory key is taken, and BEFORE the customers read.
+    expect(advisoryIdx).toBeGreaterThanOrEqual(0);
+    expect(customerReadIdx).toBeGreaterThan(advisoryIdx);
+    // The customers read itself holds the row lock (a concurrent
+    // reactivation UPDATE blocks until this accept commits or rolls back).
+    expect(ops[customerReadIdx]).toBe('read:customers:forUpdate');
+    // Every residual eligibility read runs after BOTH locks.
+    expect(residualReads.length).toBeGreaterThan(0);
+    for (const { i } of residualReads) expect(i).toBeGreaterThan(customerReadIdx);
+  });
+
+  test('an unacquirable advisory lock fails closed (never proceeds unfenced)', async () => {
+    const t = fakeTrx();
+    t.raw = async () => { throw new Error('lock boom'); };
+    await expect(actualRestart.assertRestartAcceptEligible(t, RESTART_ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
   });
 });

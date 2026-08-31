@@ -32,6 +32,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { FAMILY_LABELS } = require('./templates');
+const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 
 const SOURCE = 'plan_restart';
 const RESTARTABLE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
@@ -188,6 +189,15 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
   const nowDate = now();
 
   return dbh.transaction(async (trx) => {
+    // Customer-comms advisory lock FIRST (lock-order contract §1,
+    // utils/customer-comms-lock.js — before this txn's own customers row
+    // lock). It is also the FIRST lock the public accept transaction takes
+    // for a customer-linked estimate, so a mint racing an accept serializes
+    // at the advisory level before either takes a row lock — closing the
+    // customers-row vs estimates-row AB-BA between the two C4 paths (mint
+    // locks customer → archives estimates; accept locks estimate →
+    // revalidates customer).
+    await lockCustomerComms(trx, customer.id);
     // Lock the customer row: a double-tap must not mint two restart estimates.
     const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
     if (!fresh) throw new RestartUnavailableError('not_cancelled', 'This account is not cancelled.');
@@ -197,6 +207,30 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     if (fresh.active !== false || fresh.pipeline_stage !== 'churned') {
       throw new RestartUnavailableError('not_cancelled', 'This account is not cancelled.');
     }
+
+    // Commercial properties never get an online restart price (codex
+    // pre-push P0 — same doctrine as BOTH offer surfaces, cross-sell
+    // report + portal offer: the engine refuses real prices there and
+    // commercial expansion is a proposal conversation; variantsForService
+    // below only knows residential defaults). Checked on the STORED type
+    // here, BEFORE any reuse or mint, and re-checked on the RESOLVED type
+    // after the property context is built — a cached lookup classifying
+    // the property commercial must refuse too. FAIL CLOSED: a check that
+    // cannot be evaluated refuses.
+    const isCommercial = deps.isCommercialProperty
+      || require('../pricing-engine/commercial-helpers').isCommercialProperty;
+    const refuseCommercial = () => new RestartUnavailableError('pricing_unavailable', 'This restart needs to be set up by hand — please call or text us and we will take care of it.');
+    const assertNotCommercial = (property, label) => {
+      let commercial = true;
+      try {
+        commercial = isCommercial(property);
+      } catch (err) {
+        logger.warn(`[plan-restart] commercial check (${label}) failed for ${fresh.id} — refusing: ${err.message}`);
+        throw refuseCommercial();
+      }
+      if (commercial) throw refuseCommercial();
+    };
+    assertNotCommercial({ propertyType: fresh.property_type }, 'stored');
 
     const { families, caseId, source } = await cancelledFamiliesFor(fresh.id, trx);
     if (!families.length) {
@@ -309,6 +343,12 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       propertyLookup: trackedLookup,
       propertySeed,
     });
+    // Commercial re-check on the RESOLVED type (codex pre-push P0, same as
+    // the offer paths' post-resolve re-check): the stored column can be
+    // blank/stale while the cached lookup or the accepted-estimate seed
+    // classified the property commercial — that resolution must refuse,
+    // not price through residential defaults.
+    assertNotCommercial({ propertyType: propertyContext?.propertyInput?.propertyType }, 'resolved');
     const missing = pricingAi.missingPropertyFor(toPrice, propertyContext);
     if (missing) {
       throw new RestartUnavailableError('pricing_unavailable', 'We need a property measurement on file before we can price this online.');
@@ -497,8 +537,23 @@ async function assertRestartAcceptEligible(trx, estimate) {
     const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
     const planRestart = parseJson(row?.estimate_data, {})?.planRestart;
     quoted = Array.isArray(planRestart?.families) ? planRestart.families : null;
+    // Serialize against reactivation/restoration BEFORE the eligibility
+    // reads (codex pre-push P1): the estimate row lock fences neither the
+    // customers row nor scheduled_services, so a concurrent staff
+    // reactivation or row restoration could commit between plain reads
+    // here and this accept's commit. Locks, in the repo's established
+    // order (customer-comms-lock.js contract §1):
+    //   1. the per-customer comms advisory key — the accept txn already
+    //      holds it as its FIRST lock (reentrant, contract §3), and it is
+    //      the key every scheduled_services-inserting restoration writer
+    //      takes, so those serialize here;
+    //   2. the customers row FOR UPDATE — a reactivation is an UPDATE on
+    //      this row, so it now commits strictly before or after this
+    //      check, never inside it.
+    // The eligibility reads below run AFTER both locks.
+    await lockCustomerComms(trx, row?.customer_id);
     fresh = row?.customer_id
-      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id', 'active', 'pipeline_stage')
+      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'active', 'pipeline_stage')
       : null;
     ownedFamilies = fresh ? await ownedResidualFamilies(trx, fresh.id) : [];
   } catch (err) {
