@@ -261,11 +261,13 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     probe('invoices (refunded)', unavailable, () => completionTerminalInvoiceLookup(knex, {
       serviceRecordId: recordId, scheduledServiceId: serviceId,
     })),
+    // failClosed makes a payment_methods lookup failure THROW (default
+    // swallows it as "not on autopay") so the probe can record an outage.
     probe('autopay eligibility', unavailable, () => (inputs.customer
-      ? customerOnAutopay(inputs.customer, { db: knex, now })
+      ? customerOnAutopay(inputs.customer, { db: knex, now, failClosed: true })
       : null)),
     probe('typed follow-up obligation', unavailable, () => typedFollowupObligationForCompletedSource({
-      scheduledService: visit, knex,
+      scheduledService: visit, knex, strict: true,
     })),
     probe('scheduled_services (follow-up child)', unavailable, () => knex('scheduled_services')
       .where({ followup_source_service_id: serviceId })
@@ -299,6 +301,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     const visitDay = visit.scheduled_date ? new Date(`${String(visit.scheduled_date).slice(0, 10)}T12:00:00Z`) : now;
     const duesProbe = await probe('monthly dues collected', unavailable, () => monthlyDuesCollected(knex, customerId, visitDay));
     duesCollected = duesProbe.error ? false : Boolean(duesProbe.value);
+    inputs.duesLookupFailed = Boolean(duesProbe.error);
   }
   inputs.duesCollectedThisMonth = duesCollected;
   let annualCoverageValidated = null;
@@ -533,13 +536,21 @@ function deriveCloseoutFacts(inputs) {
 
   // ---- 6. invoice -----------------------------------------------------------------
   let invoice;
+  const billingInputsFailed = [
+    inputs.customer && inputs.autopayActive === null ? 'autopay' : null,
+    inputs.duesLookupFailed === true ? 'monthly_dues' : null,
+    inputs.payerBilled === null ? 'bill_to_payer' : null,
+    inputs.annualCoverageLookupFailed === true ? 'annual_coverage' : null,
+  ].filter(Boolean);
   const expectation = deriveBillingExpectation(inputs);
   const reconciled = reconcileLiveVsRefunded(inputs.liveInvoice, inputs.terminalInvoice, inputs.liveInvoice);
   const live = inputs.liveInvoice;
   if (!completed) invoice = awaiting({ expectation: expectation?.kind || null });
-  else if (reconciled.terminal && !(reconciled.liveBeside && INVOICE_SETTLED_STATUSES.has(String(reconciled.liveBeside.status)))) {
-    // The park rule governs what completion MINTS; for status it holds until
-    // the office has collected the live sibling. A paid live row = closed.
+  else if (reconciled.terminal) {
+    // ALWAYS parked while a refunded row exists beside a live one — even a
+    // PAID live sibling (pre-push codex P0): a later refund.failed can
+    // restore the refunded row to paid, leaving two paid invoices. Only a
+    // human reconciles that; this service never declares it closed.
     invoice = fact('pending', 'parked_manual_refunded_invoice', {
       refundedInvoiceId: reconciled.terminal.id, liveBesideInvoiceId: reconciled.liveBeside?.id || null,
       liveBesideStatus: reconciled.liveBeside?.status || null, expectation: expectation?.kind || null,
@@ -548,7 +559,6 @@ function deriveCloseoutFacts(inputs) {
     invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(live.status)) ? 'invoice_paid' : 'invoice_exists', {
       invoiceId: live.id, invoiceNumber: live.invoice_number || null, status: live.status || null,
       total: live.total != null ? Number(live.total) : null, payerBilled: Boolean(live.payer_id), expectation: expectation?.kind || null,
-      ...(reconciled.terminal ? { refundedSiblingInvoiceId: reconciled.terminal.id } : {}),
     });
     if (expectation && ['covered_membership', 'covered_annual', 'no_charge'].includes(expectation.kind) && !isBackfill) {
       contradictions.push({
@@ -558,10 +568,12 @@ function deriveCloseoutFacts(inputs) {
     }
   } else if (inputs.liveInvoiceLookupFailed || inputs.terminalInvoiceLookupFailed) {
     invoice = fact('unknown', 'invoice_lookup_failed', { expectation: expectation?.kind || null });
-  } else if (inputs.annualCoverageLookupFailed === true) {
-    // predictCompletionBilling would fall back to the stamp when validation
-    // is null — a coverage-authority outage must not read as "covered".
-    invoice = fact('unknown', 'annual_coverage_lookup_failed', { prepaidMethod: visit?.prepaid_method || null });
+  } else if (billingInputsFailed.length) {
+    // Any billing input that could not be read (autopay, visit-month dues,
+    // bill-to payer, annual coverage) would otherwise be coerced to a
+    // negative answer and predict "invoice missing" or "covered" — an
+    // outage must read unknown, never a verdict.
+    invoice = fact('unknown', 'billing_inputs_unavailable', { failed: billingInputsFailed, prepaidMethod: visit?.prepaid_method || null });
   } else if (isBackfill) invoice = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', expectation: expectation?.kind || null });
   else if (!expectation) invoice = fact('unknown', 'billing_expectation_unavailable');
   else if (['no_charge', 'covered_membership', 'covered_annual', 'prepaid'].includes(expectation.kind)) {

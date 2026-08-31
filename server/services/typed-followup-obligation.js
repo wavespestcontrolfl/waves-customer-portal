@@ -148,13 +148,16 @@ function typedFollowupVerdict({ scheduledService = {}, profile = {}, findingsTyp
  * typed verdict (untyped profile, no snapshot, type mismatch, not
  * completed) — callers treat null as "no obligation derivable".
  */
-async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db } = {}) {
+// `strict`: a status reader (closeout-status.js) must tell "lookup failed"
+// from "no obligation" — with strict the record/profile lookups propagate
+// instead of collapsing to null.
+async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db, strict = false } = {}) {
   if (!scheduledService?.id || scheduledService.status !== 'completed') return null;
-  const record = await knex('service_records')
+  const recordQuery = knex('service_records')
     .where({ scheduled_service_id: scheduledService.id })
     .orderBy('created_at', 'desc')
-    .first()
-    .catch(() => null);
+    .first();
+  const record = strict ? await recordQuery : await recordQuery.catch(() => null);
   if (!record) return null;
 
   // The completion FROZE its final verdict into structured_notes (both
@@ -170,7 +173,8 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   // Pre-freeze records (completed before this shipped): re-derive from the
   // committed snapshot + live profile — the best available approximation.
   const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-  const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex).catch(() => null);
+  const profilePromise = resolveCompletionProfileForScheduledService(scheduledService, knex);
+  const profile = strict ? await profilePromise : await profilePromise.catch(() => null);
   if (!profile) return null;
   const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;
   // A now-untyped alert-policy profile (bed_bug post-20260731400000) still

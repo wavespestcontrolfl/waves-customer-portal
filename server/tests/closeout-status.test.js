@@ -486,7 +486,7 @@ describe('closeout-status: Agent D findings', () => {
       visit: { ...closedOutInputs().visit, prepaid_method: 'annual_prepay_invoice', estimated_price: null },
       annualCoverageValidated: null, annualCoverageLookupFailed: true, liveInvoice: null,
     }));
-    expect(facts.invoice).toMatchObject({ state: 'unknown', reason: 'annual_coverage_lookup_failed' });
+    expect(facts.invoice).toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', failed: ['annual_coverage'] });
     expect(summarizeCloseout(facts).closedOut).toBe(false);
     expect(contradictions).toEqual([]);
   });
@@ -523,12 +523,23 @@ describe('closeout-status: Agent D findings', () => {
       .toMatchObject({ state: 'done', reason: 'recap_sms_delivered' });
   });
 
-  test('refunded sibling beside a PAID live invoice → done (office already collected), with the sibling noted', () => {
+  test('refunded sibling beside a PAID live invoice stays PARKED — refund.failed can restore the refunded row (codex P0)', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({
       liveInvoice: { ...closedOutInputs().liveInvoice, status: 'paid' },
       terminalInvoice: { id: 'inv-refunded', status: 'refunded' },
     }));
-    expect(facts.invoice).toMatchObject({ state: 'done', reason: 'invoice_paid', refundedSiblingInvoiceId: 'inv-refunded' });
+    expect(facts.invoice).toMatchObject({ state: 'pending', reason: 'parked_manual_refunded_invoice', liveBesideStatus: 'paid' });
+    expect(summarizeCloseout(facts).closedOut).toBe(false);
+  });
+
+  test('billing input outages (autopay / dues / payer) → invoice unknown with the failed inputs named', () => {
+    const noInvoice = { liveInvoice: null };
+    expect(deriveCloseoutFacts(closedOutInputs({ ...noInvoice, autopayActive: null })).facts.invoice)
+      .toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', failed: ['autopay'] });
+    expect(deriveCloseoutFacts(closedOutInputs({ ...noInvoice, duesLookupFailed: true })).facts.invoice.failed).toEqual(['monthly_dues']);
+    expect(deriveCloseoutFacts(closedOutInputs({ ...noInvoice, payerBilled: null })).facts.invoice.failed).toEqual(['bill_to_payer']);
+    // A live invoice already on the visit is evidence regardless of input outages.
+    expect(deriveCloseoutFacts(closedOutInputs({ autopayActive: null })).facts.invoice.state).toBe('done');
   });
 
   test('rescheduled visit is a phantom row → nothing owed', () => {
@@ -565,6 +576,24 @@ describe('closeout-status: Agent D findings', () => {
       visit: { ...closedOutInputs().visit, estimated_price: null }, liveInvoice: null,
     });
     expect(deriveCloseoutFacts(perApp).facts.invoice).toMatchObject({ state: 'pending', reason: 'expected_auto_charge_not_minted', amount: 98 });
+  });
+});
+
+describe('typed-followup-obligation: strict mode', () => {
+  const actual = jest.requireActual('../services/typed-followup-obligation');
+  const failingKnex = () => {
+    const err = new Error('records offline');
+    const q = { where() { return q; }, orderBy() { return q; }, first() { return q; }, then(res, rej) { return Promise.reject(err).then(res, rej); }, catch(fn) { return Promise.reject(err).catch(fn); } };
+    return q;
+  };
+  const completed = { id: 'svc-1', status: 'completed' };
+
+  test('default swallows the record lookup failure as null (legacy callers unchanged)', async () => {
+    await expect(actual.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex: failingKnex })).resolves.toBeNull();
+  });
+
+  test('strict propagates it so the closeout probe records an outage', async () => {
+    await expect(actual.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex: failingKnex, strict: true })).rejects.toThrow('records offline');
   });
 });
 
