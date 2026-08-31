@@ -134,6 +134,9 @@ function gbpLocationIdForCity(city) {
 }
 
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
+// completed_pending_review kinds that approve-and-publish (see
+// approveAndPublishNamedCompetitor). Mirrored by approve-autonomous-run.js.
+const APPROVABLE_PUBLISH_SKIP_REASONS = Object.freeze(['named_competitor_review', 'affiliate_review']);
 const DEFAULT_MIN_SCORE = THRESHOLDS.minScoreToAct;
 const INTERNAL_LINK_RETRYABLE_STATUSES = ['pending', 'queued', 'patch_candidate', 'skipped', 'failed'];
 
@@ -1128,10 +1131,22 @@ class AutonomousRunner {
         || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
+    // 6b. Affiliate review (owner ruling 2026-08-31): EVERY draft that carries
+    // an <AffiliateLink> parks for the owner during the pilot — no autopublish,
+    // no trust-build shortcut, no email-reply approval (yellow-class consumer
+    // pesticides were approved CONDITIONAL on per-product scrutiny a reply-
+    // "approved" would rubber-stamp). The guardrails already gated the
+    // products; this is the human sign-off on the finished post. Approve with
+    // server/scripts/approve-autonomous-run.js (same publish path as the
+    // named-competitor review).
+    const affiliateProductIds = (contentGuardrails && typeof contentGuardrails.affiliateProductIdsIn === 'function' && draft?.body)
+      ? contentGuardrails.affiliateProductIdsIn(draft.body) : [];
+    const affiliateReview = affiliateProductIds.length > 0;
+
     // 7. Decide outcome.
     if (dryRun || run.shadow_mode) {
       // Shadow / dry: never publish. Record what would have happened.
-      const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required;
+      const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required && !affiliateReview;
       const finalized = await finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
@@ -1140,7 +1155,7 @@ class AutonomousRunner {
       return finalized;
     }
 
-    if (!gatesPass || !trustBuildSatisfied || brief.human_review_required) {
+    if (!gatesPass || !trustBuildSatisfied || brief.human_review_required || affiliateReview) {
       // Pure quality-gate failure on ANY lane (owner directive 2026-07-18:
       // exceptions-only review queue): one feedback-informed redraft, then
       // silent skip — same disposition as the guardrails/comparison gates.
@@ -1182,15 +1197,23 @@ class AutonomousRunner {
       // errors, router-flagged briefs, named-competitor, trust-build ramp).
       const reason = !gatesPass ? 'gate_fail'
         : forceNamedCompetitorReview ? 'named_competitor_review'
+        : affiliateReview ? 'affiliate_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review')
+      const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review' || reason === 'affiliate_review')
         ? 'Review autonomous_runs.draft_payload, then approve with server/scripts/approve-autonomous-run.js --id=<run_id> --by=<operator>.'
         : null;
+      // Name the referenced products with their risk class so the owner
+      // reviews with the label context in front of him.
+      const affiliateNote = affiliateReview ? (() => {
+        let idx = new Map();
+        try { idx = require('../../../packages/affiliate-registry').productIndex(); } catch (_) { /* registry unavailable — ids still listed */ }
+        return `affiliate products: ${affiliateProductIds.map((id) => `${id} [${idx.get(id)?.row?.risk_class || 'unregistered'}/${idx.get(id)?.state || 'n/a'}]`).join(', ')}`;
+      })() : null;
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
-        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), trustBuildNote].filter(Boolean).join(' | '),
+        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), affiliateNote, trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
       // Owner email-approval loop (2026-07-28): approvable kinds notify the
@@ -2866,6 +2889,11 @@ class AutonomousRunner {
   // statusCode) on any guard/gate/publish failure so the caller leaves the
   // opportunity pending. Idempotent-ish: a second approval after a live publish
   // is rejected because the run is no longer 'named_competitor_review'.
+  // Parked kinds whose approval PUBLISHES the reviewed draft (vs trust-build
+  // credit): a human signs off on every competitor naming and on every
+  // affiliate post (owner ruling 2026-08-31). Approval stamps
+  // trust_build_approved_by/at — the marker the PR poller's affiliate belt
+  // requires before auto-merging a head that carries <AffiliateLink>.
   async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
     // Serialize with runDaily / runCatchUp / admin run-now behind the engine
@@ -2896,7 +2924,7 @@ class AutonomousRunner {
       // otherwise pass every check and claim the opportunity (now parked for the
       // NEW run), publishing the stale draft the operator is no longer reviewing.
       const latestParked = await db('autonomous_runs')
-        .where({ opportunity_id: opportunityId, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false })
+        .where({ opportunity_id: opportunityId, outcome: 'completed_pending_review', skip_reason: run.skip_reason, shadow_mode: false })
         .orderBy('claimed_at', 'desc')
         .orderBy('id', 'desc')
         .first();
@@ -2908,8 +2936,8 @@ class AutonomousRunner {
       run = await db('autonomous_runs').where('opportunity_id', opportunityId).orderBy('claimed_at', 'desc').orderBy('id', 'desc').first();
       if (!run) { const e = new Error('No autonomous run found for this opportunity'); e.statusCode = 404; throw e; }
     }
-    if (run.outcome !== 'completed_pending_review' || run.skip_reason !== 'named_competitor_review' || run.shadow_mode === true) {
-      const e = new Error('Only a live named-competitor review run can be approved-and-published'); e.statusCode = 400; throw e;
+    if (run.outcome !== 'completed_pending_review' || !APPROVABLE_PUBLISH_SKIP_REASONS.includes(run.skip_reason) || run.shadow_mode === true) {
+      const e = new Error('Only a live named-competitor or affiliate review run can be approved-and-published'); e.statusCode = 400; throw e;
     }
     const draft = parseJsonMaybe(run.draft_payload);
     if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }

@@ -281,13 +281,29 @@ async function recheckTopicTargeting(run, pr, gh) {
     const data = parse(file.content)?.data || {};
     const index = await topicGate.loadLiveIndex();
     const res = topicGate.evaluateDraftTargeting({ frontmatter: data, body: file.content }, { index, service: brief.service || null });
-    if (res.ok) return { ok: true };
+    // The head file rides along so the affiliate belt below can read it
+    // without a second GitHub fetch.
+    if (res.ok) return { ok: true, content: file.content };
     // Gate findings are deterministic for this head + live corpus (another
     // post owns the entity / framing drifted); everything above is transient.
     return { ok: false, deterministic: true, reason: res.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ') };
   } catch (err) {
     return { ok: false, reason: `gate could not run: ${err.message}` };
   }
+}
+
+// Affiliate belt (owner ruling 2026-08-31): a head whose blog file carries
+// <AffiliateLink> auto-merges ONLY if the run carries the owner's approval
+// stamp (trust_build_approved_by — set by approve-autonomous-run.js on an
+// affiliate_review park). A run that somehow reached astro_pr_pending_merge
+// without it (or whose file gained the component on the branch) is
+// withheld, never merged. Pure: the head content comes from the topic
+// recheck's fetch. An unreadable head (no content) fails closed.
+function affiliateBeltVerdict(run, headContent) {
+  if (typeof headContent !== 'string') return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
+  if (!/<AffiliateLink\b/.test(headContent)) return { ok: true };
+  if (run?.trust_build_approved_by) return { ok: true };
+  return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
 }
 
 const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
@@ -1411,6 +1427,15 @@ async function maybeAutoMerge(run, pr) {
           withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
           return null;
         }
+        // 3.8a Affiliate belt — see recheckAffiliateApproval. Withheld (not
+        //      parked): the fix is the owner's approval, which the next tick
+        //      then honors.
+        const aff = affiliateBeltVerdict(run, topic.content);
+        if (!aff.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
+          withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+          return null;
+        }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
         //     an operator dismiss/requeue landing during it must still block
         //     the merge — repeat the queue re-check immediately before merging.
@@ -1725,6 +1750,7 @@ module.exports = {
   pollPending,
   pollRun,
   _internals: {
+    affiliateBeltVerdict,
     autoMergeEnabled,
     blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,

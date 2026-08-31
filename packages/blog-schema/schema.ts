@@ -7,6 +7,7 @@
 // does not match the recorded upstream-checksum.txt.
 
 import { z } from 'zod';
+import { AFFILIATE_PRODUCT_IDS, getAffiliateProduct, PROTECTED_POST_TYPES as AFFILIATE_PROTECTED_POST_TYPES } from '../affiliate-registry/index.ts';
 import { SERVICE_AREAS } from './service-areas.ts';
 
 // ─────────────────────────────────────────────────────────────
@@ -58,6 +59,11 @@ export const disclosureType = z.enum([
   'pricing-transparency',
   'service-area-limits',
   'regulatory',
+  // Post carries <AffiliateLink> components; BlogPostLayout renders the FTC
+  // affiliate disclosure block above the body from this type (owner
+  // monetization pilot 2026-08-31). Biconditional with the component —
+  // see validateAffiliateUsage.
+  'affiliate',
   'none',
 ]);
 
@@ -274,7 +280,19 @@ export const COMPONENT_NAMES = [
   'SeasonalPressureChart',
   'HomeZoneMap',
   'PestEvidenceGrid',
+  'SpiderIdBoard',
   'AppPhone',
+  // Mid-article service CTA card (src/components/blog/InlineCTA.astro) —
+  // registered in BlogPostLayout since its creation but never cataloged, so
+  // the gate rejected every post that used it. Cataloged 2026-08-31 because
+  // the affiliate placement rule ("service CTA before product recs")
+  // references it.
+  'InlineCTA',
+  // Affiliate product link resolved from packages/affiliate-registry at
+  // build time (owner monetization pilot 2026-08-31). Props are validated
+  // below; usage rules (≤3, disclosure, CTA-first, hub-only) live in
+  // validateAffiliateUsage.
+  'AffiliateLink',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -295,6 +313,25 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
 const confidenceEnum = z.enum(['high', 'medium', 'low']);
 
 export const componentPropSchemas = {
+  AffiliateLink: z.object({
+    product: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]*$/, 'product must be a kebab-case registry id')
+      .refine(
+        (id) => AFFILIATE_PRODUCT_IDS.has(id),
+        'unknown affiliate product — add it to packages/affiliate-registry/registry.json first (any status; inactive rows render as plain links)',
+      ),
+    placement: z.string().regex(/^[a-z0-9-]+$/, 'placement must be a static kebab-case id (e.g. primary-rec)'),
+  }),
+  InlineCTA: z.object({
+    headline: z.string().optional(),
+    description: z.string().optional(),
+    ctaLabel: z.string().optional(),
+    ctaHref: z.string().optional(),
+    phone: z.string().optional(),
+    tel: z.string().optional(),
+    eyebrow: z.string().optional(),
+  }),
   BottomLineBox: z.object({
     verdict: z.string().min(1),
     recommendation: z.string().min(1),
@@ -364,6 +401,40 @@ export const componentPropSchemas = {
       .optional(),
     caption: z.string().optional(),
   }),
+  // Southwest Florida spider identification board — the SWFL species set is
+  // baked in, so it renders standalone with zero props (all props are
+  // overrides). Every card carries where/hunt/eggSac because those three
+  // facts are what decide the treatment plan.
+  SpiderIdBoard: z.object({
+    title: z.string().min(1).optional(),
+    eyebrow: z.string().min(1).optional(),
+    species: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          sciName: z.string().min(1).optional(),
+          risk: z.enum(['beneficial', 'nuisance', 'medical']),
+          glyph: z.enum(['orb', 'tangle', 'crevice', 'hunter']).optional(),
+          where: z.string().min(1),
+          hunt: z.string().min(1),
+          eggSac: z.string().min(1),
+          // Citation URL — rendered straight into href, so it gets the same
+          // URL validation as frontmatter `canonical` rather than a bare
+          // non-empty check (a missing protocol would ship a broken source
+          // link on a card whose whole job is being verifiable).
+          source: z
+            .object({
+              label: z.string().min(1),
+              url: z.url(),
+            })
+            .optional(),
+        }),
+      )
+      .min(1)
+      .optional(),
+    footnote: z.string().optional(),
+    caption: z.string().optional(),
+  }),
   AppPhone: z.object({
     src: imagePath,
     alt: z.string().min(1),
@@ -388,6 +459,14 @@ export const componentPropSchemas = {
       .min(1)
       .optional(),
     caption: z.string().optional(),
+    // Non-pest seasonal quantities (e.g. irrigation demand) reuse the
+    // band chart; these override the pest-specific eyebrow, screen-reader
+    // metric noun and peak summary. Omitted = the pest defaults.
+    eyebrow: z.string().min(1).optional(),
+    metric: z.string().min(1).optional(),
+    legendNormal: z.string().min(1).optional(),
+    legendPeak: z.string().min(1).optional(),
+    peakSummary: z.string().min(1).optional(),
   }),
   // "Where we inspect & treat" schematic — default zone list baked in;
   // renders standalone with zero props (all props are overrides).
@@ -506,6 +585,86 @@ export function validateMarkdownComponents(
     missing_recommended: missingRecommended,
     unknown_components: unknownComponents,
   };
+}
+
+// ─────────────────────────────────────────────────────────────
+// Affiliate usage rules (owner monetization pilot 2026-08-31)
+//
+// Deterministic placement contract for posts carrying <AffiliateLink>:
+// affiliate is FALLBACK monetization, so the Waves service CTA stays
+// primary and the reader's question is answered before any product
+// appears. The admin portal's content-guardrails enforces the same rules
+// on autonomous drafts; this is the astro-side gate for hand-authored
+// posts (publish:post). Code blocks are stripped before scanning.
+// ─────────────────────────────────────────────────────────────
+
+export const AFFILIATE_LINK_MAX_PER_POST = 3;
+const SERVICE_CTA_LINK_RE =
+  /\]\(\s*\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/|\]\(\s*\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/|<InlineCTA\b/;
+
+export interface AffiliateUsageResult {
+  ok: boolean;
+  count: number;
+  blockers: string[];
+  warnings: string[];
+}
+
+export function validateAffiliateUsage(
+  body_mdx: string,
+  frontmatter: { disclosure?: { type?: string }; post_type?: string; domains?: unknown; tracking?: { domains?: unknown } },
+  opts: { fileExt?: string } = {},
+): AffiliateUsageResult {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  let cleaned = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
+  cleaned = cleaned.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
+  cleaned = cleaned.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+
+  const positions: number[] = [];
+  const re = /<AffiliateLink\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cleaned)) !== null) positions.push(m.index);
+  const count = positions.length;
+  const declared = frontmatter.disclosure?.type === 'affiliate';
+
+  if (count === 0) {
+    if (declared) blockers.push('disclosure.type is "affiliate" but the body contains no <AffiliateLink> — remove the disclosure or add the links');
+    return { ok: blockers.length === 0, count, blockers, warnings };
+  }
+  if (!declared) blockers.push('body contains <AffiliateLink> but frontmatter.disclosure.type is not "affiliate" (FTC material-connection disclosure is rendered from that type)');
+  if (opts.fileExt && opts.fileExt.toLowerCase() !== '.mdx') blockers.push(`<AffiliateLink> requires an .mdx post — a ${opts.fileExt} file renders the tag as literal text`);
+  if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
+  const firstHeading = cleaned.search(/^#{2,3}\s/m);
+  if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
+  if (!SERVICE_CTA_LINK_RE.test(cleaned.slice(0, positions[0]))) {
+    blockers.push('no Waves service CTA (<InlineCTA> or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
+  }
+  // Page-class eligibility (fail closed): the post's post_type must be one
+  // the referenced product row allows; protected local-service types never
+  // qualify. The renderer re-checks this at build time.
+  const postType = frontmatter.post_type ?? '';
+  if (!postType) blockers.push('affiliate posts must declare post_type (page-class eligibility cannot be verified)');
+  else if ((AFFILIATE_PROTECTED_POST_TYPES as readonly string[]).includes(postType)) blockers.push(`post_type "${postType}" captures local service intent — affiliate links are never allowed on it`);
+  const idRe = /<AffiliateLink\b[^>]*\bproduct\s*=\s*["']([^"']+)["']/g;
+  let idm: RegExpExecArray | null;
+  const checked = new Set<string>();
+  while ((idm = idRe.exec(cleaned)) !== null) {
+    const id = idm[1];
+    if (checked.has(id)) continue;
+    checked.add(id);
+    const row = getAffiliateProduct(id);
+    if (row && postType && row.status !== 'prohibited' && !(row.allowed_post_types ?? []).includes(postType)) {
+      blockers.push(`affiliate product "${id}" is not eligible on a "${postType}" post (allowed: ${(row.allowed_post_types ?? []).join(', ') || 'none'})`);
+    }
+  }
+  const domainsDeclared = (Array.isArray(frontmatter.domains) && frontmatter.domains.length > 0)
+    || (Array.isArray(frontmatter.tracking?.domains) && (frontmatter.tracking!.domains as unknown[]).length > 0);
+  if (domainsDeclared) blockers.push('affiliate posts are hub-only during the pilot — remove domains/tracking.domains');
+  for (const pos of positions) {
+    const window = cleaned.slice(Math.max(0, pos - 120), pos + 200);
+    if (/\$\s?\d/.test(window)) { warnings.push('a dollar amount appears near an affiliate link — never print merchant prices; say "view current price"'); break; }
+  }
+  return { ok: blockers.length === 0, count, blockers, warnings };
 }
 
 function extractMdxComponentNames(mdx: string): Set<string> {

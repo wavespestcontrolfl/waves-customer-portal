@@ -406,9 +406,9 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     withAffiliateEnv(() => {
       const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r)).toEqual(['P0:UNREGISTERED_AFFILIATE_LINK']);
-      // PR-1 posture: AffiliateLink is deliberately NOT in SAFE_MDX_COMPONENTS
-      // yet — the astro renderer doesn't exist. Doubly dark.
-      expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
+      // AffiliateLink is cataloged now (astro #503 shipped the renderer) —
+      // the gate alone keeps the lane dark.
+      expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(false);
     }, { gate: '' });
   });
 
@@ -623,6 +623,11 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('')).toBe(false);
     }, { gate: '' }); // gate OFF — stripping still detects
+  });
+
+  test('affiliateProductIdsIn lists distinct referenced ids (invalid props as "(invalid)")', () => {
+    expect(guardrails.affiliateProductIdsIn(`${link('rain-gauge')} ${link('rain-gauge')} ${link('ant-bait')} <AffiliateLink product={x}>y</AffiliateLink>`)).toEqual(['rain-gauge', 'ant-bait', '(invalid)']);
+    expect(guardrails.affiliateProductIdsIn('no links')).toEqual([]);
   });
 
   test('every affiliate finding code has a gate-retry directive', () => {
@@ -1496,8 +1501,8 @@ describe('MDX component allowlist (UNCATALOGED_COMPONENT)', () => {
     // COMPONENT_NAMES with BlogPostLayout.astro mdxComponents to exactly this
     // set — a portal drift from it re-opens the parked-PR defect class.
     expect([...guardrails.SAFE_MDX_COMPONENTS].sort()).toEqual([
-      'AppPhone', 'BottomLineBox', 'ComparisonTable', 'HomeZoneMap',
-      'HonestRejection', 'PestEvidenceGrid', 'SeasonalPressureChart',
+      'AffiliateLink', 'AppPhone', 'BottomLineBox', 'ComparisonTable', 'HomeZoneMap',
+      'HonestRejection', 'InlineCTA', 'PestEvidenceGrid', 'SeasonalPressureChart', 'SpiderIdBoard',
     ]);
   });
 

@@ -1674,6 +1674,13 @@ function collectAffiliateLinkTags(text) {
   return tags;
 }
 
+// Distinct product ids referenced by <AffiliateLink> tags in a body — the
+// runner uses this to force the affiliate_review park and to name the
+// products (with risk class) in the reviewer notes.
+function affiliateProductIdsIn(text) {
+  return [...new Set(collectAffiliateLinkTags(text).map((t) => t.productId || '(invalid)'))];
+}
+
 function affiliateTagCountsByProduct(text) {
   const counts = new Map();
   for (const t of collectAffiliateLinkTags(text)) {
@@ -2361,13 +2368,22 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
 // other body-policy P0s. If the astro catalog changes again, update this
 // list to the new catalog∩renderer intersection.
 const SAFE_MDX_COMPONENTS = Object.freeze([
+  // Affiliate product link (wavespestcontrol-astro #503, owner monetization
+  // pilot 2026-08-31) — the ONLY way a body links an affiliate product;
+  // affiliateComponentFindings owns its rules.
+  'AffiliateLink',
   'AppPhone',
   'BottomLineBox',
   'ComparisonTable',
   'HomeZoneMap',
   'HonestRejection',
+  // Mid-article service CTA card — registered in BlogPostLayout since its
+  // creation, cataloged upstream 2026-08-31 (#503).
+  'InlineCTA',
   'PestEvidenceGrid',
   'SeasonalPressureChart',
+  // Cataloged + registered upstream before #503; the portal set had drifted.
+  'SpiderIdBoard',
 ]);
 
 const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
@@ -5473,6 +5489,9 @@ module.exports = {
   // social share lanes) — affiliate links are web-only; runs regardless of
   // GATE_AFFILIATE_LINKS so stripping holds while the lane is dark.
   containsAffiliateMaterial,
+  // distinct <AffiliateLink> product ids in a body — the runner's
+  // affiliate_review park predicate (owner: every affiliate post parks).
+  affiliateProductIdsIn,
   // single source of truth for the FAQ-section policy — consumed by
   // blog-writer, writer-agent-config, and content-quality-gate so the
   // generators/gates can never contradict the publish-time guard.

@@ -258,6 +258,19 @@ afterEach(() => {
   publisher.internalLinkPlanningDisabled.mockReturnValue(false);
 });
 
+describe('affiliate belt (owner ruling 2026-08-31)', () => {
+  const { affiliateBeltVerdict } = poller._internals;
+  test('a head without <AffiliateLink> passes; unreadable head fails closed', () => {
+    expect(affiliateBeltVerdict({}, '---\ntitle: x\n---\nplain body').ok).toBe(true);
+    expect(affiliateBeltVerdict({}, null).ok).toBe(false);
+  });
+  test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it', () => {
+    const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    expect(affiliateBeltVerdict({ trust_build_approved_by: null }, body).ok).toBe(false);
+    expect(affiliateBeltVerdict({ trust_build_approved_by: 'adam' }, body).ok).toBe(true);
+  });
+});
+
 describe('helpers', () => {
   test('prNumberFromUrl parses GitHub PR URLs and rejects junk', () => {
     expect(poller._internals.prNumberFromUrl('https://github.com/o/r/pull/42')).toBe(42);
