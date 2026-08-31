@@ -801,13 +801,16 @@ function normalizeProposalLines(estimate) {
       if (item.frequency === 'one_time') push(item.description || building.name, 'one_time', item.amount);
       else {
         // COGS visits must match the annualized revenue occurrences —
-        // visitsFor reads TOP-LEVEL visitsPerYear (codex pre-push P1).
+        // visitsFor reads TOP-LEVEL visitsPerYear — and QUANTITY multiplies
+        // both revenue (folded into amount) and the units of service
+        // performed, so it scales the cost visits too (GH codex P1).
         const occurrences = item.frequency === 'per_application'
           ? Number(item.visitsPerYear) || 0
           : OCCURRENCES_PER_YEAR[item.frequency] || 0;
+        const quantity = Math.max(1, Number(item.quantity) || 1);
         push(item.description || building.name, 'recurring', annualizedAmount(item), {
-          quoted: { frequency: item.frequency, amountPerOccurrence: item.amount, ...(item.visitsPerYear ? { visitsPerYear: item.visitsPerYear } : {}) },
-          ...(occurrences > 0 ? { visitsPerYear: occurrences } : {}),
+          quoted: { frequency: item.frequency, quantity, amountPerOccurrence: item.amount, ...(item.visitsPerYear ? { visitsPerYear: item.visitsPerYear } : {}) },
+          ...(occurrences > 0 ? { visitsPerYear: occurrences * quantity } : {}),
         });
       }
     }
@@ -825,7 +828,9 @@ function normalizeProposalLines(estimate) {
   };
   for (const program of proposal.programs || []) {
     push(program.label || program.service, 'recurring', program.annual, {
-      serviceKey: PROGRAM_FAMILY_TO_KEY[program.service] || keyFromName(program.label || program.service),
+      // 'other' stays honestly unmapped — operator marketing text must not
+      // pick a COGS family ("Termite Foam Renewal" is not bait) (GH codex P1).
+      serviceKey: PROGRAM_FAMILY_TO_KEY[program.service] || program.service || 'other',
       quoted: {
         service: program.service,
         pricePerApplication: program.pricePerApplication,
@@ -912,11 +917,20 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       covered.get(key).push({ price: Number(l.price) || 0, line: l });
     };
     rawLines.forEach(remember);
-    const merge = (extra) => {
+    // Stale-revision guard (GH codex P1): a revised draft rewrites
+    // data.result but leaves the OLD engineResult behind. A cadence class
+    // the mapped result already priced is therefore consume-only — an
+    // engine row either matches an existing charge (and enriches it) or is
+    // treated as a stale revision and dropped. Only cadence classes the
+    // mapped result did NOT price at all (the legitimate mixed shape) merge
+    // new lines.
+    const mappedCadences = new Set(rawLines.map((l) => l.cadence));
+    const merge = (extra, { consumeOnlyMappedCadences = false } = {}) => {
       const survivors = [];
       for (const line of extra) {
         const entries = covered.get(priceKey(line)) || [];
         const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
+        if (matchIdx < 0 && consumeOnlyMappedCadences && mappedCadences.has(line.cadence)) continue;
         if (matchIdx >= 0) {
           // Consumed — but the discarded raw row may be the ONLY carrier of
           // cost/provenance metadata (explicitCogsCost, mosquito overrides,
@@ -949,7 +963,9 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       }
     } else {
       merge(fromResult);
-      if (data.engineResult && data.engineResult !== result) merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }));
+      if (data.engineResult && data.engineResult !== result) {
+        merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }), { consumeOnlyMappedCadences: true });
+      }
     }
   }
   const dimensions = dimensionsFrom(data, result);

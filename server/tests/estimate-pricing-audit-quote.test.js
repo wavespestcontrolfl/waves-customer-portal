@@ -284,6 +284,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.some((l) => /stale/i.test(l.label))).toBe(false);
     // Program family decides the COGS key — never the marketing label.
     expect(audit.lines.find((l) => /turf/i.test(l.label))).toMatchObject({ serviceKey: 'lawn_care', cadence: 'recurring', price: 1800, visitsPerYear: 6 });
+    // quantity scales the COGS visit count (folded into revenue already).
+    expect(audit.lines.find((l) => /exterior pest/i.test(l.label)).quoted.quantity).toBe(1);
     // Quarterly building line annualizes by its FREQUENCY (200 × 4), not ×12
     // — and its COGS visit count matches the same occurrences.
     expect(audit.lines.find((l) => /exterior pest/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 800, visitsPerYear: 4 });
@@ -412,20 +414,24 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(rows[0].cogs.estimatedCost).toBe(1900); // the raw row's cost survived the dedupe
   });
 
-  test('one mapped counterpart consumes exactly one equal-priced engine row', async () => {
+  test('stale-revision guard: same-cadence engine extras are consume-only', async () => {
     const audit = await buildEstimatePricingAudit({
-      id: 'est-consume', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '1000.00',
+      id: 'est-consume', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '500.00',
       estimate_data: {
         result: { oneTime: { items: [{ service: 'exclusion', name: 'Exclusion', price: 500 }] } },
         engineResult: {
           lineItems: [
-            { service: 'exclusion', name: 'Exclusion — Building A', price: 500, monthly: null }, // absorbed by the mapped row
-            { service: 'exclusion', name: 'Exclusion — Building B', price: 500, monthly: null }, // distinct charge — survives
+            { service: 'exclusion', name: 'Exclusion — old rev A', price: 500, monthly: null }, // matches → enriches, no new line
+            { service: 'exclusion', name: 'Exclusion — old rev B', price: 900, monthly: null }, // stale revision price — dropped
+            // A cadence the mapped result never priced still merges (the
+            // legitimate mixed shape).
+            { service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660 },
           ],
         },
       },
     });
-    expect(audit.lines.filter((l) => l.serviceKey === 'exclusion')).toHaveLength(2);
+    expect(audit.lines.filter((l) => l.serviceKey === 'exclusion')).toHaveLength(1);
+    expect(audit.lines.find((l) => l.serviceKey === 'pest_control')).toMatchObject({ cadence: 'recurring', price: 660 });
   });
 
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
