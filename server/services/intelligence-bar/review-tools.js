@@ -578,4 +578,11 @@ async function hasRecentReviewRequest(customerId) {
   return !!recent;
 }
 
-module.exports = { REVIEW_TOOLS, executeReviewTool, hasRecentReviewRequest };
+// Full customer row for the proposal-time recipient pin — the service-contact
+// resolver needs the slot columns + consent artifact, not a phone projection.
+async function loadReviewRecipient(customerId) {
+  if (!customerId) return null;
+  return db('customers').where('id', String(customerId)).first();
+}
+
+module.exports = { REVIEW_TOOLS, executeReviewTool, hasRecentReviewRequest, loadReviewRecipient };

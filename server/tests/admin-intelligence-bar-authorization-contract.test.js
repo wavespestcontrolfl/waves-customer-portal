@@ -15,6 +15,7 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
 const mockResolveLeadForUpdate = jest.fn();
@@ -49,7 +50,10 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], exec
 jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT_TOOLS: [], executeProcurementTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/review-tools', () => ({ REVIEW_TOOLS: [], executeReviewTool: jest.fn(), hasRecentReviewRequest: jest.fn(async () => false) }));
+jest.mock('../services/intelligence-bar/review-tools', () => ({
+  REVIEW_TOOLS: [], executeReviewTool: jest.fn(), hasRecentReviewRequest: jest.fn(async () => false),
+  loadReviewRecipient: (...args) => mockLoadReviewRecipient(...args),
+}));
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
@@ -305,6 +309,12 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
     mockCreatePendingAction.mockResolvedValue({
       id: PENDING_ID, tool_name: 'x', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
     });
+    // The full-row reload returns whatever the name/id resolution found —
+    // the review-request pin reads service-contact columns off THIS row.
+    mockLoadReviewRecipient.mockImplementation(async (id) => {
+      const r = await mockResolveCommsCustomer.mock.results.at(-1)?.value;
+      return r && String(r.id) === String(id) ? r : null;
+    });
   });
 
   test('trigger_review_request: recipient resolved at proposal, shown on the card, refused at confirm on phone drift', async () => {
@@ -337,6 +347,42 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
       expect(res.status).toBe(409);
       expect((await res.json()).preview_changed).toBe(true);
       expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('trigger_review_request: a consented service contact is the pinned recipient — its phone AND name ride the card', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({
+      id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000',
+      service_contact_name: 'acct 1042 tenant', service_contact_phone: '+19415551111',
+      service_contacts_consent_at: '2026-08-01T12:00:00Z',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'trigger_review_request', input: { customer_name: 'acct 1042' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'ask for a review', context: 'customers' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._pinned_phone).toBe('+19415551111');
+      expect(stored.contract.pinned_recipient).toMatchObject({ customer_id: 'c1', phone_last4: '1111', role: 'service contact' });
+      expect(stored.contract.pinned_recipient.name).toMatch(/tenant/);
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Send review request to acct 1042 tenant \(…1111\)/));
+    });
+  });
+
+  test('trigger_review_request: 30-day cooldown is resolved at proposal — refused, never a card', async () => {
+    const reviewTools = require('../services/intelligence-bar/review-tools');
+    reviewTools.hasRecentReviewRequest.mockResolvedValueOnce(true);
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'trigger_review_request', input: { customer_name: 'acct 1042' } }],
+      [{ type: 'text', text: 'Already sent.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'ask for a review', context: 'customers' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const toolResult = mockMessagesCreate.mock.calls[1][0].messages.at(-1).content[0];
+      expect(JSON.parse(toolResult.content)).toMatchObject({ already_sent: true });
     });
   });
 

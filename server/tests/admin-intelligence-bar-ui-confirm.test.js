@@ -23,6 +23,7 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
 const mockResolveLeadForUpdate = jest.fn();
@@ -57,7 +58,10 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], exec
 jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT_TOOLS: [], executeProcurementTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/review-tools', () => ({ REVIEW_TOOLS: [], executeReviewTool: jest.fn(), hasRecentReviewRequest: jest.fn(async () => false) }));
+jest.mock('../services/intelligence-bar/review-tools', () => ({
+  REVIEW_TOOLS: [], executeReviewTool: jest.fn(), hasRecentReviewRequest: jest.fn(async () => false),
+  loadReviewRecipient: (...args) => mockLoadReviewRecipient(...args),
+}));
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),

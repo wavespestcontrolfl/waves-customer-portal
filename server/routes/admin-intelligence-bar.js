@@ -555,10 +555,19 @@ async function resolveReplyViaSmsRecipient({ email_id, customer_name }) {
   return null;
 }
 
+// Review requests are addressed by the service-contact SMS resolver, which
+// needs the full row (service-contact slots + consent artifact) — a
+// phone-only projection would silently pin the primary phone.
 async function resolveReviewRequestRecipient({ customer_id, customer_name }) {
-  if (customer_id) return db('customers').where('id', String(customer_id)).first('id', 'first_name', 'last_name', 'phone');
-  if (customer_name) return resolveCommsCustomer({ customer_name });
-  return null;
+  let id = customer_id ? String(customer_id) : null;
+  if (!id && customer_name) {
+    const byName = await resolveCommsCustomer({ customer_name });
+    if (!byName || byName.error) return byName;
+    id = byName.id;
+  }
+  if (!id) return null;
+  const { loadReviewRecipient } = require('../services/intelligence-bar/review-tools');
+  return loadReviewRecipient(id);
 }
 
 const {
@@ -825,9 +834,15 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Review requests send to the SERVICE-CONTACT SMS recipient (the
       // centralized sender's resolver), not necessarily customers.phone —
       // pin the number that will actually receive it (codex r5 P1).
-      const pinPhone = toolUse.name === 'trigger_review_request'
-        ? require('../services/customer-contact').getServiceContactSmsRecipient(recipient).phone
-        : recipient.phone;
+      const contactApi = require('../services/customer-contact');
+      const smsTarget = toolUse.name === 'trigger_review_request'
+        ? contactApi.getServiceContactSmsRecipient(recipient)
+        : null;
+      const pinPhone = smsTarget ? smsTarget.phone : recipient.phone;
+      // The resolver keeps role 'service_contact' even when it falls back to
+      // the primary's phone — a DIFFERENT number is the only reliable sign
+      // the text goes to the service contact rather than the account holder.
+      const toServiceContact = !!smsTarget && smsTarget.phone !== contactApi.getPrimaryContact(recipient).phone;
       if (!pinPhone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
       if (toolUse.name === 'trigger_review_request') {
         // The executor suppresses requests inside the 30-day cooldown and
@@ -846,7 +861,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         ...preview,
         pinned_recipient: {
           customer_id: recipient.id,
-          name: `${recipient.first_name || ''} ${recipient.last_name || ''}`.trim(),
+          // The card names WHO receives the text: the resolved service
+          // contact when that is the recipient, never the primary's name
+          // on the contact's phone.
+          name: (toServiceContact && smsTarget.name
+            ? smsTarget.name
+            : `${recipient.first_name || ''} ${recipient.last_name || ''}`).trim(),
+          ...(toServiceContact ? { role: 'service contact' } : {}),
           phone_last4: String(pinPhone).replace(/\D/g, '').slice(-4) || null,
         },
       };
