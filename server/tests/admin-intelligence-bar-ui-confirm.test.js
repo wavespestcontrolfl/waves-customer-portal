@@ -228,7 +228,10 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
-      expect(mockExecuteTool).toHaveBeenCalledWith('query_customers', { search: 'Jeff' });
+      // Base tools receive the route-derived action context as a third
+      // argument (cancel_plan records the operator from it) — never the
+      // model's own claims.
+      expect(mockExecuteTool).toHaveBeenCalledWith('query_customers', { search: 'Jeff' }, expect.any(Object));
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
     });
@@ -462,6 +465,7 @@ describe('/confirm-action commit path', () => {
       expect(mockExecuteTool).toHaveBeenCalledWith(
         'create_customer',
         { first_name: 'Jeff', phone: '9415550100', confirmed: true },
+        expect.objectContaining({ confirmed: true, technicianId: 'admin-1' }),
       );
       expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ success: true }));
     });
@@ -672,7 +676,10 @@ describe('technician tool execution is default-deny (P0)', () => {
         body: JSON.stringify({ action: 'query_customers', params: { search: 'Jeff' } }),
       });
       expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('query_customers', { search: 'Jeff' });
+      // Base tools receive the route-derived action context as a third
+      // argument (cancel_plan records the operator from it) — never the
+      // model's own claims.
+      expect(mockExecuteTool).toHaveBeenCalledWith('query_customers', { search: 'Jeff' }, expect.any(Object));
     });
   });
 

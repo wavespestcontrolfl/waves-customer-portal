@@ -13,17 +13,12 @@ const { gsmSafeName } = require('../services/messaging/gsm-normalize');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
+const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
 const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
 const { etDateString } = require('../utils/datetime-et');
-
-function etDisplayDate(value) {
-  const at = value ? new Date(value) : new Date();
-  const safe = Number.isNaN(at.getTime()) ? new Date() : at;
-  return safe.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric' });
-}
 
 // Shape the portal reads to render the truthful post-submit state (H0).
 // `processed` is true only when the processor reports a clean, churned run;
@@ -658,87 +653,61 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }
 
-    // Send customer confirmation SMS. A cancellation is auto-processed, so it
-    // gets a dedicated template with cancellation-specific next steps.
+    // Customer confirmations. A cancellation is auto-processed, so it gets
+    // the dedicated truth-gated templates (SMS + email, both awaited so the
+    // response names only the channels that actually accepted) — the ONE
+    // helper the admin Cancel plan path (C3) also uses; the customer's
+    // portal submit is a customer-action entry point, so no quiet-hours
+    // hold applies (owner ruling 2026-08-29).
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
-    const familyLabelOf = (key) => {
-      const { familyLabel } = require('../services/cancellation-resolution/templates');
-      return (typeof familyLabel === 'function' && familyLabel(key)) || String(key || '').replace(/_/g, ' ');
-    };
     let confirmationSmsSent = false;
     let confirmationEmailSent = false;
-    try {
-      // Truth gate (H0, 2026-08-30): the processor runs synchronously above,
-      // so the customer's text must say what actually happened. A fully
-      // processed cancel gets the "done as of today" confirmation; a partial
-      // one (in-progress visit, processor error) gets the "closing out by
-      // hand" copy so nobody is told their plan is gone while an office
-      // follow-up is still owed.
-      // A scoped cancel gets its own truthful template — the account is not
-      // cancelled, only the named service(s); the rest continue.
-      const scopedProcessed = cancellationProcessed && Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length > 0;
-      const smsTemplateKey = isCancellation
-        ? (cancellationProcessed
-          ? (scopedProcessed ? 'service_cancellation_scoped_confirmation' : 'service_cancellation_confirmation')
-          : 'service_cancellation_received')
-        : 'service_request_confirmation';
-      const smsVars = isCancellation
-        ? {
-            first_name: gsmSafeName(req.customer.first_name),
-            // ET date of the request — a quiet-hours hold delivers this text
-            // the next morning, so the body never says "today".
-            effective_date: etDisplayDate(request.created_at),
-            ...(scopedProcessed ? {
-              service: cancellationResult.scope.map(familyLabelOf).join(' and '),
-              remaining: (cancellationResult.remaining || []).map(familyLabelOf).join(' and ') || 'your other services',
-            } : {}),
-          }
-        : {
-            first_name: gsmSafeName(req.customer.first_name),
-            category: categoryLabel,
-            response_time: responseTime,
-          };
-      const body = await renderRequiredSmsTemplate(smsTemplateKey, smsVars, {
-        workflow: smsTemplateKey,
-        entity_type: 'service_request',
-        entity_id: request.id,
+    if (isCancellation) {
+      const confirmations = await sendCancellationConfirmations({
+        customer: req.customer,
+        request,
+        result: cancellationResult,
+        processed: cancellationProcessed,
+        urgency: validUrgency,
       });
-      const smsResult = await sendCustomerMessage({
-        to: req.customer.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'support_resolution',
-        customerId: req.customer.id,
-        identityTrustLevel: 'authenticated_portal',
-        entryPoint: 'customer_service_request',
-        metadata: {
-          original_message_type: smsTemplateKey,
-          service_request_id: request.id,
-          urgency: validUrgency,
-        },
-      });
-      confirmationSmsSent = !!smsResult.sent;
-      // No quiet-hours requeue: customer_service_request is a
-      // customer-action entry point (owner ruling 2026-08-29) — the
-      // confirmation answers the customer's own portal submit immediately,
-      // at any hour, so QUIET_HOURS_HOLD cannot surface here.
-      if (!smsResult.sent) {
-        logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      confirmationSmsSent = confirmations.smsSent;
+      confirmationEmailSent = confirmations.emailSent;
+    } else {
+      try {
+        const body = await renderRequiredSmsTemplate('service_request_confirmation', {
+          first_name: gsmSafeName(req.customer.first_name),
+          category: categoryLabel,
+          response_time: responseTime,
+        }, {
+          workflow: 'service_request_confirmation',
+          entity_type: 'service_request',
+          entity_id: request.id,
+        });
+        const smsResult = await sendCustomerMessage({
+          to: req.customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'support_resolution',
+          customerId: req.customer.id,
+          identityTrustLevel: 'authenticated_portal',
+          entryPoint: 'customer_service_request',
+          metadata: {
+            original_message_type: 'service_request_confirmation',
+            service_request_id: request.id,
+            urgency: validUrgency,
+          },
+        });
+        // No quiet-hours requeue: customer_service_request is a
+        // customer-action entry point (owner ruling 2026-08-29) — the
+        // confirmation answers the customer's own portal submit immediately,
+        // at any hour, so QUIET_HOURS_HOLD cannot surface here.
+        if (!smsResult.sent) {
+          logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
+      } catch (smsErr) {
+        logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
       }
-    } catch (smsErr) {
-      logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
-    }
-
-    // No generic "request received" email for a cancellation: the account was
-    // just churned (active=false) and that template's CTAs link into the
-    // authenticated portal, which an inactive customer can no longer open
-    // (portal auth requires active=true). The dedicated cancellation SMS above
-    // is the confirmation — but if it couldn't be delivered (no phone,
-    // landline, opted out), the customer would otherwise get NO confirmation
-    // at all and can't see the request in the portal either, so fall back to
-    // the cancellation-safe email (no portal CTAs).
-    if (!isCancellation) {
       void AccountMembershipEmail.sendRequestReceived({
         customerId: req.customer.id,
         request,
@@ -746,30 +715,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }).catch((emailErr) => {
         logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
       });
-    } else {
-      // A customer-initiated cancel gets BOTH the text and the email (owner
-      // ruling 2026-08-31 — the rule the non-cancellation branch already
-      // follows); the email is the durable artifact, not an SMS fallback.
-      // Awaited (not fire-and-forget) so the response can say which channel
-      // actually accepted the confirmation — a skipped/failed email must not
-      // become "an email is on its way" on the customer's screen.
-      try {
-        const emailResult = await AccountMembershipEmail.sendCancellationReceived({
-          customerId: req.customer.id,
-          request,
-          processed: cancellationProcessed,
-          ...(Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length ? {
-            scope: {
-              cancelled: cancellationResult.scope.map(familyLabelOf),
-              remaining: (cancellationResult.remaining || []).map(familyLabelOf),
-              tierAfter: cancellationResult.tierAfter || null,
-            },
-          } : {}),
-        });
-        confirmationEmailSent = !!(emailResult && emailResult.ok);
-      } catch (emailErr) {
-        logger.warn(`Failed to send cancellation confirmation email for request ${request.id}: ${emailErr.message}`);
-      }
     }
 
     res.status(201).json({

@@ -92,6 +92,8 @@ jest.mock('../models/db', () => {
   const colCond = (col, opOrVal, maybeVal) => {
     if (maybeVal === undefined) return (r) => r[col] === opOrVal;
     if (opOrVal === '>=') return (r) => r[col] != null && r[col] >= maybeVal;
+    // keepThrough (C3) narrows the sweep to strictly-after the paid window.
+    if (opOrVal === '>') return (r) => r[col] != null && r[col] > maybeVal;
     throw new Error(`fake db: unsupported operator ${opOrVal}`);
   };
   function makeQuery(table) {
@@ -785,5 +787,97 @@ describe('processCancellationRequest', () => {
     mockNotifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
     const internal = await processCancellationRequest({ customerId: 'c1', requestId: 'reqZ' });
     expect(internal.errors).not.toContain('termite_retrieval_task');
+  });
+
+  // ── C3: admin-side options on the same engine ──────────────────────────
+  describe('admin options (actor / keepThrough / waiveLateFee)', () => {
+    const seedActive = () => {
+      db.__tables.customers = [
+        { id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, next_charge_date: new Date(), monthly_rate: 89 },
+      ];
+      db.__tables.payments = [];
+      db.__tables.payment_methods = [];
+      db.__tables.appointment_reminders = [];
+      db.__tables.invoices = [];
+      db.__tables.plan_holds = [];
+      db.__tables.termite_stations = [];
+      db.__tables.job_status_history = [];
+      db.__tables.customer_interactions = [];
+    };
+
+    test('keepThrough keeps dated visits on/before the paid-coverage end, still pulls what falls after AND open rebook intents, and stops recurrence on everything', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 'in1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-10', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+        { id: 'edge', customer_id: 'c1', status: 'pending', scheduled_date: '2099-02-28', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+        { id: 'after', customer_id: 'c1', status: 'pending', scheduled_date: '2099-03-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+        { id: 'rebook', customer_id: 'c1', status: 'rescheduled', scheduled_date: PAST, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', keepThrough: '2099-02-28' });
+      const byId = Object.fromEntries(db.__tables.scheduled_services.map((r) => [r.id, r]));
+      expect(byId.in1.status).toBe('confirmed');
+      expect(byId.edge.status).toBe('pending');
+      expect(byId.after.status).toBe('cancelled');
+      expect(byId.rebook.status).toBe('cancelled');
+      expect(byId.in1.recurring_ongoing).toBe(false);
+      expect(byId.edge.recurring_ongoing).toBe(false);
+      expect(result).toEqual(expect.objectContaining({ ok: true, churned: true, cancelledCount: 2, recurrenceStopped: 2, keptThrough: '2099-02-28' }));
+      // Billing still stops now — coverage is paid, the plan is not renewing.
+      expect(db.__tables.customers[0]).toEqual(expect.objectContaining({ active: false, pipeline_stage: 'churned', autopay_enabled: false }));
+      expect(db.__tables.customer_interactions[0].body).toContain('Paid coverage kept through 2099-02-28');
+    });
+
+    test('a past keepThrough is ignored — the sweep never widens', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r2', requestId: 'r2', keepThrough: PAST });
+      expect(db.__tables.scheduled_services[0].status).toBe('cancelled');
+      expect(result.keptThrough).toBeNull();
+    });
+
+    test('waiveLateFee tells both fee rails to waive (offboard intent on a whole-account cancel) and is recorded', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const ApptCardRequests = require('../services/appointment-card-request');
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r3', requestId: 'r3', waiveLateFee: true });
+      expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1', waiveFee: true, intent: 'offboard' });
+      expect(ApptCardRequests.handleAppointmentCardCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1', waiveFee: true });
+      expect(result.lateFeeWaived).toBe(true);
+      expect(db.__tables.customer_interactions[0].body).toContain('Scheduled-visit fee waived');
+    });
+
+    test('the default (customer-initiated) call is byte-identical: no waive args, no actor suffix, Portal note', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Portal cancellation request r4', requestId: 'r4' });
+      expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1' });
+      expect(result).toEqual(expect.objectContaining({ keptThrough: null, lateFeeWaived: false }));
+      expect(db.__tables.customers[0].churn_reason_detail).toBe('Portal cancellation request r4');
+      expect(db.__tables.customer_interactions[0].body).toMatch(/^Portal cancellation request r4/);
+    });
+
+    test('actor is recorded on the timeline note and churn_reason_detail', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r5', requestId: 'r5', actor: { type: 'admin', userId: 'admin-1' } });
+      expect(db.__tables.customers[0].churn_reason_detail).toBe('Admin cancellation request r5 [Admin (user admin-1)]');
+      expect(db.__tables.customer_interactions[0].body).toMatch(/^Admin \(user admin-1\) cancellation request r5/);
+
+      db.__reset();
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r6', requestId: 'r6', actor: { type: 'ib', userId: 'admin-1' } });
+      expect(db.__tables.customers[0].churn_reason_detail).toBe('Admin cancellation request r6 [Intelligence Bar (user admin-1)]');
+    });
   });
 });

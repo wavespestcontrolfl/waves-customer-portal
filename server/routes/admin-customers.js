@@ -3244,6 +3244,9 @@ router.get('/:id', async (req, res, next) => {
         bankName: contract.bank_name,
       })),
       annualPrepayTerms: (annualPrepayTerms || []).map(mapAnnualPrepayTerm),
+      // Cancel-flow C3: the Customer 360 "Cancel plan…" control renders only
+      // while GATE_CANCEL_FLOW_V2 is on (its endpoints 404 otherwise).
+      cancelPlanEnabled: require('../services/cancellation-resolution').cancelFlowV2Enabled(),
       // Prefill hint for the "Record collected annual prepay" modal — which
       // estimate this prepay most credibly comes from and the amount its own
       // accept-as-prepay lane would invoice. Suggestion-only; never blocks
@@ -5113,6 +5116,45 @@ router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     if (err.blockers) return res.status(409).json({ error: err.message, blockers: err.blockers });
+    next(err);
+  }
+});
+
+// ─── Cancel plan (cancel-flow C3) ────────────────────────────────────────────
+// Admin-side cancellation on the SAME engine the customer portal uses
+// (services/admin-cancellation.js). Preview = before/after facts, no writes;
+// commit = service_requests row → processor → case → confirmations. Both
+// 404 while GATE_CANCEL_FLOW_V2 is off. The Intelligence Bar `cancel_plan`
+// tool drives the same service through its own confirm boundary.
+function cancelPlanErrorResponse(res, err) {
+  if (err && err.status && err.code) {
+    return res.status(err.status).json({ error: err.message, code: err.code });
+  }
+  return null;
+}
+
+router.post('/:id/cancel-plan/preview', requireAdmin, async (req, res, next) => {
+  try {
+    const AdminCancellation = require('../services/admin-cancellation');
+    const preview = await AdminCancellation.previewCancelPlan({ customerId: req.params.id, ...(req.body || {}) });
+    res.json(preview);
+  } catch (err) {
+    if (cancelPlanErrorResponse(res, err)) return;
+    next(err);
+  }
+});
+
+router.post('/:id/cancel-plan', requireAdmin, async (req, res, next) => {
+  try {
+    const AdminCancellation = require('../services/admin-cancellation');
+    const outcome = await AdminCancellation.commitCancelPlan({
+      customerId: req.params.id,
+      ...(req.body || {}),
+      actor: { type: 'admin', userId: req.technicianId || null },
+    });
+    res.json({ success: true, ...outcome });
+  } catch (err) {
+    if (cancelPlanErrorResponse(res, err)) return;
     next(err);
   }
 });

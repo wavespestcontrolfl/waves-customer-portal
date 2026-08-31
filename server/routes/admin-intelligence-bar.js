@@ -182,6 +182,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // execute it for a technician token.
   ...HISTORY_TOOL_NAMES,
   'create_customer',
+  // Cancel plan (C3) churns accounts and moves billing — admin only, like the
+  // requireAdmin Customer 360 endpoints it mirrors.
+  'cancel_plan',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -191,6 +194,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
 const PII_TOOL_NAMES = new Set([
   'create_customer',
   'update_property_access',
+  // cancel_plan previews/results echo the customer's name and free-text note.
+  'cancel_plan',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
@@ -504,6 +509,31 @@ function operatorAdjustmentCardLine(adj) {
 }
 
 function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName === 'cancel_plan' && preview?.preview === true) {
+    // The card must show everything the commit will do: who, what scope,
+    // the visits coming off, the money, the effective date, whether the
+    // customer gets texted/emailed, and any recorded refund (never an
+    // automatic one).
+    const prepay = preview.prepay || null;
+    return {
+      customer: preview.customer_name || params.customer_id,
+      scope: preview.whole_account ? 'whole account' : (preview.scope || []).join(', '),
+      visits_to_pull: preview.visits_to_pull,
+      tier: `${preview.tier_before || 'none'} → ${preview.tier_after || 'none'}`,
+      monthly: `${preview.monthly_before ?? '—'} → ${preview.monthly_after ?? '—'}`,
+      effective: preview.effective_date === 'end_of_coverage' ? `end of paid coverage (${preview.effective_on})` : `now (${preview.effective_on})`,
+      ...(prepay ? {
+        prepay: prepay.disposition === 'end_at_term'
+          ? `ends at term ${prepay.termEnd}; no renewal`
+          : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
+      } : {}),
+      waive_late_fee: preview.waive_late_fee === true,
+      send_confirmation: preview.send_confirmation !== false ? 'SMS + email' : 'no customer communication',
+      ...(preview.reason_code ? { reason_code: preview.reason_code } : {}),
+      ...(preview.note ? { note: preview.note } : {}),
+      ...(preview.termite_retrieval ? { termite_stations: 'retrieval task will be raised' } : {}),
+    };
+  }
   if (toolName === 'send_sms' && preview?.pinned_recipient) {
     // The card must show WHO the confirmed send goes to — the pinned
     // identity resolved at proposal time, not a raw partial name that
@@ -1451,7 +1481,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (REVENUE_TOOL_NAMES.has(toolName)) {
     return executeRevenueTool(toolName, input);
   }
-  return executeTool(toolName, input);
+  return executeTool(toolName, input, actionContext);
 }
 
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
@@ -1574,7 +1604,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`
         : `\n\nWRITE CONFIRMATION (conversational mode):
-For create_customer, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
+For create_customer, cancel_plan, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
     }
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to

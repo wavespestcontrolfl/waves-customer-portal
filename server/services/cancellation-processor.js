@@ -248,7 +248,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
   };
 }
 
-async function applyScopedWindDown(customerId, plan, { requestId } = {}) {
+async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = 'Portal', lateFeeWaived = false } = {}) {
   await db.transaction(async (trx) => {
     if (plan.monthlyLane) {
       await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
@@ -288,8 +288,9 @@ async function applyScopedWindDown(customerId, plan, { requestId } = {}) {
       customer_id: customerId,
       interaction_type: 'note',
       subject: `Cancelled ${plan.inScope.join(', ')} — plan continues with ${plan.remaining.join(', ')}`,
-      body: `Portal cancellation request ${requestId || ''}`.trim()
-        + `. WaveGuard ${plan.tierBefore} → ${plan.tierAfter}.${rateLine}`,
+      body: `${actorLabel} cancellation request ${requestId || ''}`.trim()
+        + `. WaveGuard ${plan.tierBefore} → ${plan.tierAfter}.${rateLine}`
+        + (lateFeeWaived ? ' Scheduled-visit fee waived.' : ''),
     });
   } catch (noteErr) {
     logger.warn(`[cancellation-processor] scoped audit note failed for ${customerId}: ${noteErr.message}`);
@@ -308,10 +309,40 @@ async function applyScopedWindDown(customerId, plan, { requestId } = {}) {
  * is raised only when termite_bait is in scope. The result carries `scope`
  * and `remaining` so the route reports exactly what happened.
  */
-async function processCancellationRequest({ customerId, reason, requestId, families } = {}) {
+async function processCancellationRequest({
+  customerId, reason, requestId, families,
+  // C3 (admin-side cancel on the same engine) — all additive, default =
+  // the customer-portal behavior byte-for-byte:
+  //   actor        { type: 'customer'|'admin'|'ib', userId } — recorded on
+  //                the timeline note and churn_reason_detail so a churn
+  //                report can tell who pulled the plan.
+  //   keepThrough  YYYY-MM-DD (end of paid coverage): the visit sweep SKIPS
+  //                dated visits on/before it (they are already paid for)
+  //                while recurrence still stops. Date-exempt 'rescheduled'
+  //                rebook intents are still pulled — an open rebook could
+  //                land past the paid window.
+  //   waiveLateFee scheduled-visit fee waived on every pulled visit — the
+  //                card-hold rail releases instead of charging and the
+  //                appointment-card rail closes 'waived'; recorded on the
+  //                result and the timeline note.
+  actor = null, keepThrough = null, waiveLateFee = false,
+} = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
   const errors = [];
+  const actorType = actor && actor.type ? String(actor.type) : 'customer';
+  const actorLabel = actorType === 'admin'
+    ? `Admin${actor?.userId ? ` (user ${actor.userId})` : ''}`
+    : actorType === 'ib'
+      ? `Intelligence Bar${actor?.userId ? ` (user ${actor.userId})` : ''}`
+      : 'Portal';
+  // Sweep floor: keepThrough only ever NARROWS the sweep (a past date is
+  // meaningless — nothing before today is swept anyway).
+  const today = etDateString();
+  const sweepAfter = keepThrough && /^\d{4}-\d{2}-\d{2}$/.test(String(keepThrough)) && String(keepThrough) >= today
+    ? String(keepThrough)
+    : null;
+  const lateFeeWaived = waiveLateFee === true;
   const scopedFamilies = Array.isArray(families) ? families.filter(Boolean) : [];
   const scoped = scopedFamilies.length > 0;
   let scopedIds = null;
@@ -374,7 +405,11 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
         // varchar(30)), and start at 'unclassified' — the AI classification
         // runs LAST (see below) so it can never block this wind-down.
         update.churn_mrr = Number(customer.monthly_rate) || 0;
-        update.churn_reason_detail = cancelReason;
+        // Actor rides on the detail (C3): a churn pulled by the office
+        // reads differently in the Pareto than one the customer chose.
+        update.churn_reason_detail = (actorType === 'customer'
+          ? cancelReason
+          : `${cancelReason} [${actorLabel}]`).slice(0, 500);
         update.churn_reason_code = 'unclassified';
       }
       // PR E (GATE_CANCEL_FLOW_V2): tier/rate wind-down — the 2026-08-30
@@ -586,7 +621,11 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
         // rows keep their ORIGINAL — often past — date until SmartRebooker
         // actions them back onto the calendar, so an open rebook intent is
         // pulled regardless of date (else a churned customer could be rebooked).
-        this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
+        // keepThrough (C3, end of paid coverage): dated visits on/before it
+        // stay — they are paid for; only what falls past the window is pulled.
+        if (sweepAfter) this.where('scheduled_date', '>', sweepAfter);
+        else this.where('scheduled_date', '>=', today);
+        this.orWhere('status', 'rescheduled');
       })
       // Never touch a row whose customer-visible track layer says the work is
       // DONE or LIVE — track_state can lead the legacy status (the tracker
@@ -741,17 +780,28 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
     // ambiguous Stripe result, post-charge write failure).
     try {
       const CardHolds = require('./estimate-card-holds');
-      const holdResult = await CardHolds.handleCardHoldCancellation({ scheduledServiceId: svc.id });
+      // waiveLateFee (C3, office-initiated waive): the hold rail releases
+      // instead of judging the fee window — 'offboard' intent on a
+      // whole-account cancel (a leaving customer's hold never parks), a
+      // plain waived cancel when the account stays (scoped).
+      const holdResult = await CardHolds.handleCardHoldCancellation({
+        scheduledServiceId: svc.id,
+        ...(lateFeeWaived ? { waiveFee: true, ...(scoped ? {} : { intent: 'offboard' }) } : {}),
+      });
       if (holdResult && CARD_HOLD_REVIEW_REASONS.has(holdResult.reason)) {
         errors.push(`card_hold:${svc.id}`);
         logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason}`);
       }
       // Appointment-card fee rail fallback for visits with no hold row
       // (mutually exclusive lanes — the rail re-checks). Customer-initiated
-      // cancel: no waive. Same review-reason surfacing.
+      // cancel: no waive; office-initiated waive closes the fee 'waived'.
+      // Same review-reason surfacing.
       if (holdResult?.reason === 'no_hold') {
         const ApptCardRequests = require('./appointment-card-request');
-        const apptResult = await ApptCardRequests.handleAppointmentCardCancellation({ scheduledServiceId: svc.id });
+        const apptResult = await ApptCardRequests.handleAppointmentCardCancellation({
+          scheduledServiceId: svc.id,
+          ...(lateFeeWaived ? { waiveFee: true } : {}),
+        });
         if (apptResult && CARD_HOLD_REVIEW_REASONS.has(apptResult.reason)) {
           errors.push(`appt_card_fee:${svc.id}`);
           logger.error(`[cancellation-processor] appointment-card fee for ${svc.id} needs review: ${apptResult.reason}`);
@@ -843,7 +893,7 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
   let scopedWoundDown = false;
   if (scoped && scopedPlan?.ok) {
     try {
-      await applyScopedWindDown(customerId, scopedPlan, { requestId });
+      await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived });
       scopedWoundDown = true;
     } catch (err) {
       errors.push('scoped_wind_down');
@@ -858,9 +908,11 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
         interaction_type: 'note',
         subject: 'Cancellation processed — churned + upcoming visits pulled',
         body:
-          `Portal cancellation request ${requestId || ''}`.trim() +
+          `${actorLabel} cancellation request ${requestId || ''}`.trim() +
           `. Cancelled ${cancelledCount} upcoming visit(s), stopped recurrence, ` +
-          'set pipeline_stage=churned + active=false, disabled autopay.',
+          'set pipeline_stage=churned + active=false, disabled autopay.' +
+          (sweepAfter ? ` Paid coverage kept through ${sweepAfter}.` : '') +
+          (lateFeeWaived ? ' Scheduled-visit fee waived.' : ''),
       });
     } catch (noteErr) {
       logger.warn(`[cancellation-processor] audit note failed for ${customerId}: ${noteErr.message}`);
@@ -893,6 +945,10 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
 
   return {
     cancelledCount, recurrenceStopped, churned, ok, errors,
+    // C3 facts the caller records on the case: what was kept and whether
+    // the fee rails were told to waive.
+    keptThrough: sweepAfter,
+    lateFeeWaived,
     ...(scoped ? {
       scope: scopedPlan?.inScope || scopedFamilies,
       remaining: scopedPlan?.remaining || [],
