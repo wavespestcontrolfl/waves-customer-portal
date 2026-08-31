@@ -1,16 +1,21 @@
 // Expanded Visit Brief for one stop on the tech route (TechHomePage
 // StopRow accordion). Everything here is READ-ONLY display of data the
 // server already derived:
-//   - day-payload row fields (phone, address, alerts, last-visit previews,
-//     prepaid, billingLane.prediction)
+//   - day-payload row fields (phone, address, alerts, line-scoped
+//     last-visit previews, prepaid, billingLane.prediction)
 //   - GET /admin/schedule/:id/estimate-source  → the Quoted section
 //   - GET /admin/schedule/:id/visit-brief      → access codes + history
 //     (LLM prose only when GATE_PREVISIT_BRIEF serves a brief; the
 //     deterministic `facts` block when GATE_VISIT_FACTS is on; silent
 //     degrade to day-row alerts alone when both are dark)
-// Money labels are deliberately distinct — Quoted / Paid · prepaid /
-// Amount due today — and never show a catalog price. Checkout math stays
-// in MobileCheckoutSheet; this panel displays, checkout charges.
+// Grouped stops fetch and render PER MEMBER: siblings keep their own
+// line-scoped history, billing lanes, and possibly separate estimate
+// provenance — the panel dedupes what is genuinely shared (property
+// access, an estimate both lines came from) and shows the rest per
+// service. Money labels are deliberately distinct — Quoted / Paid ·
+// prepaid / Amount due today — and never show a catalog price. Checkout
+// math stays in MobileCheckoutSheet; this panel displays, checkout
+// charges.
 //
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
@@ -50,6 +55,17 @@ const factMutedStyle = { fontSize: 14, color: DARK.muted, margin: '3px 0 0' };
 
 function SectionLabel({ children }) {
   return <div style={sectionLabelStyle}>{children}</div>;
+}
+
+// Member service-type sub-label inside a section, shown only on grouped
+// stops where per-member blocks need telling apart.
+function MemberLabel({ service, show }) {
+  if (!show) return null;
+  return (
+    <p style={{ ...factMutedStyle, margin: '6px 0 0' }}>
+      {service.serviceType || service.service_type || 'Service'}
+    </p>
+  );
 }
 
 // tel:/sms: anchors styled like ActionBtn — real links so iOS hands them
@@ -140,15 +156,7 @@ function AccessSection({ alerts, access }) {
   );
 }
 
-function QuotedSection({ estimate, loading }) {
-  if (loading) {
-    return (
-      <>
-        <SectionLabel>Quoted</SectionLabel>
-        <p style={factMutedStyle}>Loading estimate…</p>
-      </>
-    );
-  }
+function QuotedSection({ estimate }) {
   if (!estimate?.linked) return null;
   const lines = Array.isArray(estimate.lines) ? estimate.lines : [];
   const deposit = estimate.deposit || null;
@@ -205,11 +213,7 @@ function MemberMoney({ service, showType }) {
   if (!rows.length) return null;
   return (
     <>
-      {showType && (
-        <p style={{ ...factMutedStyle, margin: '6px 0 0' }}>
-          {service.serviceType || service.service_type || 'Service'}
-        </p>
-      )}
+      <MemberLabel service={service} show={showType} />
       {rows.map(([label, value, accent]) => (
         <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 700 : undefined }}>
           <span style={{ color: DARK.muted, fontWeight: 400 }}>{label}: </span>{value}
@@ -285,24 +289,92 @@ function WdoBriefSection({ brief }) {
   );
 }
 
-function LastVisitSection({ service, servedBrief, facts }) {
+// One protocol-window / history product line — label facts only, exactly
+// as the brief stored them.
+function productLine(p) {
+  const bits = [p?.name];
+  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${p.ratePer1000} ${p.rateUnit}/1000 sq ft`);
+  else if (p?.rate != null && p?.rateUnit) bits.push(`${p.rate} ${p.rateUnit}`);
+  if (p?.role) bits.push(p.role);
+  return bits.filter(Boolean).join(' · ');
+}
+
+// The served generic visit brief's guidance the tech actually preps from:
+// visit scope prose, customer context, and the deterministic product
+// guidance (lawn protocol window with its fixed-vs-conditional split and
+// protocol gates, or same-line product history + companion lines). The
+// LLM never wrote the product lists — they render verbatim.
+function BriefGuidanceSection({ brief, service, showType }) {
+  if (!brief) return null;
+  const guidance = brief.product_guidance || null;
+  const lawn = guidance?.source === 'lawn_protocol_window' ? guidance : null;
+  const historyProducts = guidance?.source === 'service_history' && Array.isArray(guidance.products)
+    ? guidance.products.filter((p) => p?.name)
+    : [];
+  const companions = Array.isArray(guidance?.companions) ? guidance.companions : [];
+  const fixed = lawn && Array.isArray(lawn.products) ? lawn.products.filter((p) => p?.name) : [];
+  const conditional = lawn && Array.isArray(lawn.conditional_products) ? lawn.conditional_products.filter((p) => p?.name) : [];
+  const protocolGates = lawn && Array.isArray(lawn.protocol_gates) ? lawn.protocol_gates.filter((g) => g?.title || g?.ruleText) : [];
+  const hasContent = brief.open_scope || brief.customer_context
+    || fixed.length || conditional.length || protocolGates.length
+    || historyProducts.length || companions.length;
+  if (!hasContent) return null;
+  return (
+    <>
+      <SectionLabel>Visit guidance</SectionLabel>
+      <MemberLabel service={service} show={showType} />
+      {brief.open_scope && <p style={factRowStyle}>{brief.open_scope}</p>}
+      {brief.customer_context && <p style={factMutedStyle}>{brief.customer_context}</p>}
+      {lawn?.window && (
+        <p style={{ ...factRowStyle, fontWeight: 600 }}>
+          {lawn.window.title || 'Protocol window'}
+          {lawn.window.goal ? <span style={{ color: DARK.muted, fontWeight: 400 }}> — {lawn.window.goal}</span> : null}
+        </p>
+      )}
+      {protocolGates.map((g, i) => (
+        <p key={`g${i}`} style={{ ...factRowStyle, color: DARK.amber }}>
+          ⚠ {g.title || 'Protocol gate'}{g.ruleText ? ` — ${g.ruleText}` : ''}
+        </p>
+      ))}
+      {fixed.map((p, i) => <p key={`f${i}`} style={factRowStyle}>• {productLine(p)}</p>)}
+      {conditional.map((p, i) => (
+        <p key={`c${i}`} style={factMutedStyle}>
+          • {productLine(p)} — conditional{p.trigger ? `: ${p.trigger}` : ''}
+        </p>
+      ))}
+      {historyProducts.length > 0 && (
+        <p style={factRowStyle}>
+          <span style={{ color: DARK.muted }}>Prior products: </span>
+          {historyProducts.map((p) => p.name).join(', ')}
+        </p>
+      )}
+      {companions.map((c, i) => (
+        <p key={`co${i}`} style={factMutedStyle}>
+          {String(c.line || 'companion').replace(/_/g, ' ')}: {(c.products || []).map((p) => p?.name).filter(Boolean).join(', ') || 'no prior products'}
+        </p>
+      ))}
+    </>
+  );
+}
+
+function LastVisitSection({ service, visitBrief, facts, showType }) {
   // Deterministic products from whichever source answered; LLM prose only
   // from a served brief. Day-row fallbacks use the LINE-SCOPED fields
   // only (lastLineService*): the any-line lastService* fields would label
   // another line's visit — a recent pest stop on a lawn visit — as this
   // stop's history.
-  const briefLast = servedBrief?.last_visit || facts?.last_visit || null;
+  const briefLast = visitBrief?.last_visit || facts?.last_visit || null;
   const date = briefLast?.date || service.lastLineServiceDate || null;
   const type = briefLast?.type || service.lastLineServiceType || null;
   const notes = service.lastLineServiceNotes || null;
-  const summary = servedBrief?.last_visit?.summary || null;
+  const summary = visitBrief?.last_visit?.summary || null;
   const products = Array.isArray(briefLast?.products) ? briefLast.products : [];
-  const priorities = Array.isArray(servedBrief?.priorities) ? servedBrief.priorities : [];
-  const watchItems = Array.isArray(servedBrief?.watch_items) ? servedBrief.watch_items : [];
+  const priorities = Array.isArray(visitBrief?.priorities) ? visitBrief.priorities : [];
+  const watchItems = Array.isArray(visitBrief?.watch_items) ? visitBrief.watch_items : [];
   if (!date && !notes && !products.length && !priorities.length && !watchItems.length) return null;
   return (
     <>
-      <SectionLabel>Last visit</SectionLabel>
+      <MemberLabel service={service} show={showType} />
       {date && (
         <p style={factRowStyle}>
           {String(date).slice(0, 10)}{type ? ` · ${type}` : ''}
@@ -368,20 +440,40 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const phone = service.customerPhone || service.customer_phone || null;
   const address = service.address || null;
   const alerts = stopPropertyAlerts(stop);
+  const grouped = stop.services.length > 1;
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
-  const estimate = detail?.estimate || null;
-  // The endpoint serves briefs of different SHAPES by type: the generic
-  // visit brief carries access/last_visit/priorities; the WDO brief is
-  // the pre-inspection schema (risk_score, top_3_*, homeowner_questions)
-  // and gets its own section — reading visit-brief keys off it would
-  // silently drop all of its guidance.
-  const briefType = detail?.brief?.type || null;
-  const servedBrief = detail?.brief?.brief || null;
-  const wdoBrief = briefType === 'wdo_inspection' ? servedBrief : null;
-  const visitBrief = wdoBrief ? null : servedBrief;
-  const facts = detail?.brief?.facts || null;
-  const access = visitBrief?.access || facts?.access || null;
+  const byService = detail?.byService || {};
+
+  // Per-member view of the two detail fetches. The endpoint serves briefs
+  // of different SHAPES by type: the generic visit brief carries
+  // access/last_visit/priorities/guidance; the WDO brief is the
+  // pre-inspection schema and gets its own section — reading visit-brief
+  // keys off it would silently drop all of its guidance.
+  const memberBits = stop.services.map((s) => {
+    const d = byService[s.id] || {};
+    const briefType = d.brief?.type || null;
+    const servedBrief = d.brief?.brief || null;
+    const wdo = briefType === 'wdo_inspection' ? servedBrief : null;
+    return {
+      service: s,
+      estimate: d.estimate || null,
+      wdo,
+      visitBrief: wdo ? null : servedBrief,
+      facts: d.brief?.facts || null,
+    };
+  });
+  // Property access is shared across the stop — first member that
+  // answered carries it.
+  const access = memberBits.map((m) => m.visitBrief?.access || m.facts?.access).find(Boolean) || null;
+  // Estimates dedupe by id: siblings booked from ONE estimate render it
+  // once; separately-quoted siblings each render their own.
+  const estimates = [];
+  for (const m of memberBits) {
+    if (m.estimate?.linked && !estimates.some((e) => e.estimateId && e.estimateId === m.estimate.estimateId)) {
+      estimates.push(m.estimate);
+    }
+  }
   const tel = telHref(phone);
   const sms = smsHref(phone);
 
@@ -404,15 +496,50 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
 
       <AccessSection alerts={alerts} access={access} />
 
-      {wdoBrief && <WdoBriefSection brief={wdoBrief} />}
+      {memberBits.map((m) => (m.wdo ? (
+        <div key={`wdo-${m.service.id}`}>
+          <WdoBriefSection brief={m.wdo} />
+        </div>
+      ) : null))}
 
-      <QuotedSection estimate={estimate} loading={loading} />
+      {loading && <p style={{ ...factMutedStyle, marginTop: 10 }}>Loading estimate & visit details…</p>}
+      {estimates.map((est) => (
+        <QuotedSection key={est.estimateId || est.estimateSlug || 'est'} estimate={est} />
+      ))}
 
-      {/* Quoted = only what the linked estimate proved — a visit with no
-          estimate shows no Quoted row (never a catalog/current price). */}
-      <MoneySection stop={stop} quotedTotal={estimate?.linked ? estimate.quotedTotal : null} />
+      {/* Quoted = only what a linked estimate proved — never a catalog
+          price. The headline Quoted total renders only when the whole
+          stop traces to ONE estimate; separately-quoted siblings keep
+          their totals inside their own Quoted sections. */}
+      <MoneySection stop={stop} quotedTotal={estimates.length === 1 ? estimates[0].quotedTotal : null} />
 
-      <LastVisitSection service={service} servedBrief={visitBrief} facts={facts} />
+      {memberBits.some((m) => {
+        const bl = m.visitBrief?.last_visit || m.facts?.last_visit;
+        return bl || m.service.lastLineServiceDate || m.service.lastLineServiceNotes
+          || (m.visitBrief?.priorities || []).length || (m.visitBrief?.watch_items || []).length;
+      }) && (
+        <>
+          <SectionLabel>Last visit</SectionLabel>
+          {memberBits.map((m) => (
+            <LastVisitSection
+              key={m.service.id}
+              service={m.service}
+              visitBrief={m.visitBrief}
+              facts={m.facts}
+              showType={grouped}
+            />
+          ))}
+        </>
+      )}
+
+      {memberBits.map((m) => (
+        <BriefGuidanceSection
+          key={`guide-${m.service.id}`}
+          brief={m.visitBrief}
+          service={m.service}
+          showType={grouped}
+        />
+      ))}
 
       {failed && (
         <div style={{ marginTop: 10 }}>
@@ -434,7 +561,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         <ServiceActions
           key={s.id}
           service={s}
-          showType={stop.services.length > 1}
+          showType={grouped}
           onPhotos={onPhotos}
           onProject={onProject}
           onZone={onZone}

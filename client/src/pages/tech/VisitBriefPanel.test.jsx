@@ -28,8 +28,11 @@ const stopOf = (...services) => ({
   liveCount: services.length,
 });
 
+const detailFor = (byService, status = 'ready') => ({ status, byService });
+
 const LINKED_ESTIMATE = {
   linked: true,
+  estimateId: 'est-1',
   estimateSlug: 'EST-2026-0254',
   quotedTotal: 450,
   lines: [
@@ -45,7 +48,7 @@ describe('VisitBriefPanel', () => {
     render(
       <VisitBriefPanel
         stop={stopOf({ ...BASE_SERVICE, prepaidAmount: 50, prepaidMethod: 'card' })}
-        detail={{ status: 'ready', estimate: LINKED_ESTIMATE, brief: { brief: null } }}
+        detail={detailFor({ 'svc-1': { estimate: LINKED_ESTIMATE, brief: { brief: null } } })}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
@@ -55,7 +58,6 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText('Prepaid $50 (card)')).toBeInTheDocument();
     expect(screen.getByText('Amount due today:')).toBeInTheDocument();
     expect(screen.getByText('Collect $95 today')).toBeInTheDocument();
-    // Quoted lines with their accepted unit prices.
     expect(screen.getByText(/\$115 \/application/)).toBeInTheDocument();
     expect(screen.getByText(/\$89 \/mo/)).toBeInTheDocument();
     expect(screen.getByText(/Deposit paid \$100 · \$40 credit remaining/)).toBeInTheDocument();
@@ -65,19 +67,18 @@ describe('VisitBriefPanel', () => {
     render(
       <VisitBriefPanel
         stop={stopOf(BASE_SERVICE)}
-        detail={{ status: 'ready', estimate: { linked: false }, brief: { brief: null } }}
+        detail={detailFor({ 'svc-1': { estimate: { linked: false }, brief: { brief: null } } })}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
     expect(screen.queryByText(/Quoted/)).not.toBeInTheDocument();
-    // Amount due today still rides the day payload.
     expect(screen.getByText('Collect $95 today')).toBeInTheDocument();
   });
 
   it('tap-to-call and tap-to-text anchors carry sanitized hrefs; hidden without a phone', () => {
     const { unmount } = render(
       <VisitBriefPanel
-        stop={stopOf(BASE_SERVICE)} detail={{ status: 'ready', estimate: null, brief: null }}
+        stop={stopOf(BASE_SERVICE)} detail={detailFor({})}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
@@ -87,7 +88,7 @@ describe('VisitBriefPanel', () => {
     render(
       <VisitBriefPanel
         stop={stopOf({ ...BASE_SERVICE, customerPhone: null })}
-        detail={{ status: 'ready', estimate: null, brief: null }}
+        detail={detailFor({})}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
@@ -108,7 +109,7 @@ describe('VisitBriefPanel', () => {
     const { unmount } = render(
       <VisitBriefPanel
         stop={stopOf(BASE_SERVICE)}
-        detail={{ status: 'ready', estimate: null, brief: { brief: null, facts } }}
+        detail={detailFor({ 'svc-1': { brief: { brief: null, facts } } })}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
@@ -122,7 +123,7 @@ describe('VisitBriefPanel', () => {
     render(
       <VisitBriefPanel
         stop={stopOf(BASE_SERVICE)}
-        detail={{ status: 'ready', estimate: null, brief: { brief: null } }}
+        detail={detailFor({ 'svc-1': { brief: { brief: null } } })}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
@@ -141,16 +142,15 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText('Chemical sensitivity — no interior spray')).toBeInTheDocument();
   });
 
-  it('shows the retry row only when both detail fetches failed', () => {
+  it('shows the retry row only when every detail fetch failed', () => {
     const onRetry = vi.fn();
     render(
       <VisitBriefPanel
-        stop={stopOf(BASE_SERVICE)} detail={{ status: 'error', estimate: null, brief: null }}
+        stop={stopOf(BASE_SERVICE)} detail={detailFor({}, 'error')}
         onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
-    const btn = screen.getByText(/retry/i);
-    fireEvent.click(btn);
+    fireEvent.click(screen.getByText(/retry/i));
     expect(onRetry).toHaveBeenCalled();
   });
 
@@ -159,22 +159,20 @@ describe('VisitBriefPanel', () => {
       <VisitBriefPanel
         stop={stopOf({
           ...BASE_SERVICE,
-          // Any-line newest (a pest visit) must NOT label this lawn stop's history…
           lastServiceDate: '2026-08-20',
           lastServiceType: 'Quarterly Pest Control',
           lastServiceNotes: 'Pest visit notes',
-          // …the line-scoped fields are the truth for this stop.
           lastLineServiceDate: '2026-06-02',
           lastLineServiceType: 'Lawn Care Service',
           lastLineServiceNotes: 'Fertilized front turf',
         })}
-        detail={{ status: 'ready', estimate: null, brief: null }}
+        detail={detailFor({})}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
     expect(screen.getByText(/2026-06-02 · Lawn Care Service/)).toBeInTheDocument();
     expect(screen.getByText('Fertilized front turf')).toBeInTheDocument();
-    expect(screen.queryByText(/Quarterly Pest Control/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/2026-08-20/)).not.toBeInTheDocument();
     expect(screen.queryByText('Pest visit notes')).not.toBeInTheDocument();
   });
 
@@ -182,24 +180,24 @@ describe('VisitBriefPanel', () => {
     render(
       <VisitBriefPanel
         stop={stopOf(BASE_SERVICE)}
-        detail={{
-          status: 'ready',
-          estimate: null,
-          brief: {
+        detail={detailFor({
+          'svc-1': {
             brief: {
-              risk_score: 'High',
-              risk_reason: '1968 slab home near mapped activity',
-              top_3_priorities: ['Probe garage sill plate'],
-              top_3_unknowns: ['Crawlspace access'],
-              homeowner_questions: ['Any past termite treatment?'],
-            },
-            type: 'wdo_inspection',
-            facts: {
-              access: { codes: { neighborhoodGate: null, propertyGate: '4482', garage: null, lockbox: null }, alerts: [] },
-              last_visit: null,
+              brief: {
+                risk_score: 'High',
+                risk_reason: '1968 slab home near mapped activity',
+                top_3_priorities: ['Probe garage sill plate'],
+                top_3_unknowns: ['Crawlspace access'],
+                homeowner_questions: ['Any past termite treatment?'],
+              },
+              type: 'wdo_inspection',
+              facts: {
+                access: { codes: { neighborhoodGate: null, propertyGate: '4482', garage: null, lockbox: null }, alerts: [] },
+                last_visit: null,
+              },
             },
           },
-        }}
+        })}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
@@ -207,32 +205,114 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText('• Probe garage sill plate')).toBeInTheDocument();
     expect(screen.getByText('• Crawlspace access')).toBeInTheDocument();
     expect(screen.getByText('• Any past termite treatment?')).toBeInTheDocument();
-    // The WDO response's facts still surface the codes.
     expect(screen.getByText('4482')).toBeInTheDocument();
   });
 
   it('grouped stop renders money per member — a prepaid primary does not hide a sibling due', () => {
     const primary = {
-      ...BASE_SERVICE,
-      id: 'svc-1',
-      serviceType: 'Quarterly Pest Control',
+      ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control',
       billingLane: { prediction: { kind: 'prepaid', amount: 0 } },
     };
     const sibling = {
-      ...BASE_SERVICE,
-      id: 'svc-2',
-      serviceType: 'Lawn Care Service',
+      ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service',
       billingLane: { prediction: { kind: 'invoice', amount: 60 } },
     };
     render(
       <VisitBriefPanel
         stop={{ key: 'visit:v1', isVisit: true, services: [primary, sibling], primary, liveCount: 2 }}
-        detail={{ status: 'ready', estimate: null, brief: null }}
+        detail={detailFor({})}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
       />,
     );
     expect(screen.getByText('Prepaid — nothing to collect')).toBeInTheDocument();
     expect(screen.getByText('Collect $60 today')).toBeInTheDocument();
+  });
+
+  it('grouped stop renders each member\'s own estimate and history; one shared estimate renders once', () => {
+    const primary = { ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control', billingLane: null };
+    const sibling = { ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service', billingLane: null };
+    const stop = { key: 'visit:v1', isVisit: true, services: [primary, sibling], primary, liveCount: 2 };
+    const siblingEstimate = {
+      linked: true, estimateId: 'est-2', estimateSlug: 'EST-2026-0301', quotedTotal: 720,
+      lines: [{ name: 'Lawn Care Program', monthlyPrice: 60 }], deposit: null, payment: null,
+    };
+    const { unmount } = render(
+      <VisitBriefPanel
+        stop={stop}
+        detail={detailFor({
+          'svc-1': {
+            estimate: LINKED_ESTIMATE,
+            brief: { brief: null, facts: { access: null, last_visit: { date: '2026-06-02', type: 'Quarterly Pest Control', products: [{ name: 'Talstar P' }] } } },
+          },
+          'svc-2': {
+            estimate: siblingEstimate,
+            brief: { brief: null, facts: { access: null, last_visit: { date: '2026-05-19', type: 'Lawn Care Service', products: [{ name: 'Prodiamine' }] } } },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    // Both estimates render their own Quoted sections…
+    expect(screen.getByText('Quoted · EST-2026-0254')).toBeInTheDocument();
+    expect(screen.getByText('Quoted · EST-2026-0301')).toBeInTheDocument();
+    // …and no single headline Quoted total (two distinct estimates).
+    expect(screen.queryByText('Quoted:')).not.toBeInTheDocument();
+    // Each member's line-scoped history renders.
+    expect(screen.getByText(/Talstar P/)).toBeInTheDocument();
+    expect(screen.getByText(/Prodiamine/)).toBeInTheDocument();
+    unmount();
+    // Same estimate on both members → rendered once.
+    render(
+      <VisitBriefPanel
+        stop={stop}
+        detail={detailFor({
+          'svc-1': { estimate: LINKED_ESTIMATE, brief: { brief: null } },
+          'svc-2': { estimate: LINKED_ESTIMATE, brief: { brief: null } },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByText('Quoted · EST-2026-0254')).toHaveLength(1);
+    expect(screen.getByText('Quoted:')).toBeInTheDocument();
+  });
+
+  it('renders the served brief\'s guidance: scope, context, and lawn fixed-vs-conditional products', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf({ ...BASE_SERVICE, serviceType: 'Lawn Care Service' })}
+        detail={detailFor({
+          'svc-1': {
+            brief: {
+              brief: {
+                open_scope: 'Booked from accepted estimate (Silver tier).',
+                customer_context: 'Customer asked about brown patches near the driveway.',
+                priorities: [],
+                watch_items: [],
+                last_visit: null,
+                access: null,
+                product_guidance: {
+                  source: 'lawn_protocol_window',
+                  available: true,
+                  window: { title: 'August — Summer stress window', goal: 'Fungus prevention and stress recovery' },
+                  protocol_gates: [{ title: 'Blackout ordinance', ruleText: 'No fertilizer before Sep 30 in Sarasota County' }],
+                  products: [{ name: 'Headway G', ratePer1000: 3, rateUnit: 'lb', role: 'fungicide' }],
+                  conditional_products: [{ name: 'Dylox 420', trigger: 'visible grub damage', conditional: true }],
+                },
+              },
+              type: 'visit_brief_v1',
+            },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Visit guidance')).toBeInTheDocument();
+    expect(screen.getByText('Booked from accepted estimate (Silver tier).')).toBeInTheDocument();
+    expect(screen.getByText('Customer asked about brown patches near the driveway.')).toBeInTheDocument();
+    expect(screen.getByText(/August — Summer stress window/)).toBeInTheDocument();
+    expect(screen.getByText(/Blackout ordinance — No fertilizer before Sep 30/)).toBeInTheDocument();
+    expect(screen.getByText('• Headway G · 3 lb/1000 sq ft · fungicide')).toBeInTheDocument();
+    expect(screen.getByText('• Dylox 420 — conditional: visible grub damage')).toBeInTheDocument();
   });
 
   it('renders the per-service action buttons with the old ServiceRow logic preserved', () => {
@@ -243,16 +323,12 @@ describe('VisitBriefPanel', () => {
     render(
       <VisitBriefPanel
         stop={{ key: 'visit:v1', isVisit: true, services: [sent, traceless], primary: sent, liveCount: 2 }}
-        detail={{ status: 'ready', estimate: null, brief: null }}
+        detail={detailFor({})}
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={onProject} onZone={onZone} onLead={vi.fn()}
       />,
     );
-    // Terminal label for the sent report; member service types shown on a grouped stop.
     expect(screen.getByText('🗂️ Sent')).toBeInTheDocument();
-    // Member type labels appear in both the per-member Money block and the
-    // Actions block on a grouped stop.
     expect(screen.getAllByText('Rodent Station Check').length).toBeGreaterThan(0);
-    // traceEligible === false hides Zone for that member only.
     expect(screen.getAllByLabelText('Trace treatment zone')).toHaveLength(1);
     fireEvent.click(screen.getByText('🗂️ Sent'));
     expect(onProject).toHaveBeenCalledWith(sent);

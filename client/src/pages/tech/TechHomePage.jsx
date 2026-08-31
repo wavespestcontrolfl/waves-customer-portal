@@ -421,34 +421,40 @@ export default function TechHomePage() {
     else if (target === 'en_route') handleEnRoute(nextStop.id);
   };
   // Visit Brief detail loader — one estimate-source + one visit-brief
-  // fetch per stop, cached for the session. Partial success is fine (each
-  // section fails soft); only both failing renders the Retry row. A 404
-  // (ownership filter / older stop) reads as "nothing linked", not an
-  // error — both endpoints answer it with "not found" bodies.
-  const loadStopDetail = useCallback(async (serviceId) => {
-    setStopDetail((d) => ({ ...d, [serviceId]: { status: 'loading', estimate: null, brief: null } }));
+  // fetch per MEMBER service of the stop (grouped siblings keep their own
+  // line-scoped history and possibly separate estimate provenance),
+  // cached for the session under the stop's primary id. Partial success
+  // is fine (each section fails soft); only everything failing renders
+  // the Retry row. A 404 (ownership filter / older stop) reads as
+  // "nothing linked", not an error.
+  const loadStopDetail = useCallback(async (stop) => {
+    const key = stop.primary.id;
+    setStopDetail((d) => ({ ...d, [key]: { status: 'loading', byService: {} } }));
     const soft = (path) => techRequest(path).catch((err) => {
       if (/not found/i.test(err?.message || '')) return null;
       throw err;
     });
-    const [est, brief] = await Promise.allSettled([
-      soft(`/admin/schedule/${serviceId}/estimate-source`),
-      soft(`/admin/schedule/${serviceId}/visit-brief`),
-    ]);
-    const bothFailed = est.status === 'rejected' && brief.status === 'rejected';
+    const results = await Promise.allSettled(stop.services.flatMap((s) => [
+      soft(`/admin/schedule/${s.id}/estimate-source`).then((v) => ['estimate', s.id, v]),
+      soft(`/admin/schedule/${s.id}/visit-brief`).then((v) => ['brief', s.id, v]),
+    ]));
+    const byService = {};
+    let fulfilled = 0;
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      fulfilled += 1;
+      const [kind, id, value] = r.value;
+      byService[id] = { ...byService[id], [kind]: value };
+    }
     setStopDetail((d) => ({
       ...d,
-      [serviceId]: {
-        status: bothFailed ? 'error' : 'ready',
-        estimate: est.status === 'fulfilled' ? est.value : null,
-        brief: brief.status === 'fulfilled' ? brief.value : null,
-      },
+      [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
     }));
   }, []);
   const toggleStop = useCallback((stop) => {
     const id = stop.primary.id;
     setExpandedStopId((cur) => (cur === id ? null : id));
-    if (!stopDetail[id]) loadStopDetail(id);
+    if (!stopDetail[id]) loadStopDetail(stop);
   }, [stopDetail, loadStopDetail]);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
@@ -798,7 +804,7 @@ export default function TechHomePage() {
                 expanded={expandedStopId === stop.primary.id}
                 detail={stopDetail[stop.primary.id]}
                 onToggle={() => toggleStop(stop)}
-                onRetryDetail={() => loadStopDetail(stop.primary.id)}
+                onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
                   isTypedFindingsService(s)
                     ? openTypedCompletion(s)
