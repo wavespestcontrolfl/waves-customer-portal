@@ -137,6 +137,47 @@ describe('TechLayout staff-session verification', () => {
     expect(localStorage.getItem('waves_admin_token')).toBeNull();
   });
 
+  it('takes over the full PWA identity — manifest, apple title, AND document title — and restores on unmount', async () => {
+    // A tech signing in through /admin/login lands here after the admin
+    // bookmark hook restored the customer identity; document.title must be
+    // swapped by this layout (the restore runs first in effect order) and
+    // must match the /tech SECTIONS title renderHTML serves on a cold load.
+    document.head.innerHTML = `
+      <link rel="manifest" href="/manifest.json">
+      <meta name="apple-mobile-web-app-title" content="Waves">
+    `;
+    document.title = 'Waves Customer Portal';
+    localStorage.setItem('waves_admin_token', 'staff-access-token');
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, {
+      id: 'tech-1',
+      name: 'River Tech',
+      email: 'river@example.com',
+      role: 'technician',
+      mustChangePassword: false,
+    })));
+
+    const view = renderTech('/tech');
+    expect(await screen.findByText('Protected field route')).toBeInTheDocument();
+    expect(document.querySelector('link[rel="manifest"]')).toHaveAttribute(
+      'href',
+      '/manifest.tech.json',
+    );
+    expect(
+      document.querySelector('meta[name="apple-mobile-web-app-title"]'),
+    ).toHaveAttribute('content', 'Field Tools');
+    expect(document.title).toBe('Waves Tech');
+
+    view.unmount();
+    expect(document.querySelector('link[rel="manifest"]')).toHaveAttribute(
+      'href',
+      '/manifest.json',
+    );
+    expect(
+      document.querySelector('meta[name="apple-mobile-web-app-title"]'),
+    ).toHaveAttribute('content', 'Waves');
+    expect(document.title).toBe('Waves Customer Portal');
+  });
+
   it('routes a verified forced-rotation session to change password', async () => {
     localStorage.setItem('waves_admin_token', 'rotation-token');
     vi.stubGlobal('fetch', vi.fn(async () => response(200, {

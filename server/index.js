@@ -815,6 +815,12 @@ if (config.nodeEnv === 'production') {
       title: 'Waves Admin',
       appleTitle: 'Waves Admin',
       themeColor: '#18181B',
+      // html.admin-app scopes the admin form/font CSS (index.css) and marks
+      // the document as already-admin for the SPA's bookmark-meta snapshot.
+      // Served here so a cold /admin load has it on first paint; Vite dev
+      // serves the raw index.html, where AdminSafariShell's effect adds it
+      // after mount instead (dev is not a home-screen install surface).
+      htmlClass: 'admin-app',
     },
     {
       prefix: '/tech',
@@ -839,6 +845,7 @@ if (config.nodeEnv === 'production') {
         title: section.title,
         appleTitle: section.appleTitle,
         themeColor: section.themeColor,
+        htmlClass: section.htmlClass,
       });
     }
     try {

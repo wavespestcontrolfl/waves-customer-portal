@@ -114,11 +114,20 @@ export default function TechLayout() {
     const title = document.querySelector('meta[name="apple-mobile-web-app-title"]');
     const prevManifest = link?.getAttribute('href');
     const prevTitle = title?.getAttribute('content');
+    const prevDocumentTitle = document.title;
     link?.setAttribute('href', '/manifest.tech.json');
     title?.setAttribute('content', 'Field Tools');
+    // Browser-tab title too — tech owns its complete identity. A tech who
+    // signed in via /admin/login arrives here after the admin bookmark
+    // hook's cleanup restored the CUSTOMER title, and this effect runs
+    // after that restore, so without this line the tab keeps "Waves
+    // Customer Portal". Matches the /tech SECTIONS title renderHTML
+    // (server/index.js) serves on a cold prod load.
+    document.title = 'Waves Tech';
     return () => {
       if (link && prevManifest) link.setAttribute('href', prevManifest);
       if (title && prevTitle) title.setAttribute('content', prevTitle);
+      document.title = prevDocumentTitle;
     };
   }, []);
 

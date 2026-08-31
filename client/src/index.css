@@ -60,7 +60,8 @@ body {
 
   /* Safari home-screen admin: 16px prevents focus zoom, while a 44px control
      box keeps fields and portaled-dialog actions usable above the home
-     indicator. html.admin-app is mounted by AdminLayoutV2 so this also covers
+     indicator. html.admin-app is mounted by AdminSafariShell (App.jsx) for
+     the whole /admin/* tree, including /admin/login, so this also covers
      React portals rendered as direct body children. */
   html.admin-app input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]):not([type="color"]),
   html.admin-app textarea,
@@ -175,7 +176,8 @@ input[type="week"] {
 }
 
 /* /admin/* — Roboto everywhere. Scoped to html.admin-app (mounted by
-   AdminLayoutV2, same hook the pointer:coarse block above uses), so the customer portal and tech
+   AdminSafariShell for every /admin/* route, including login, same hook
+   the pointer:coarse block above uses), so the customer portal and tech
    portal keep their existing brand fonts (Luckiest Guy / Baloo 2 / Inter /
    Montserrat) while portaled admin overlays (Dialog / Sheet / Mobile*Sheet,
    rendered outside .admin-shell-v2) are covered too — previously they leaked
@@ -185,10 +187,12 @@ input[type="week"] {
    !important is required because every nav link and many inline-styled
    elements set their own font-family via the style attribute, which
    beats class-based rules in the cascade.
-   .admin-shell-v2 stays as an additional selector because html.admin-app is
-   only added by AdminLayoutV2's useEffect, which can run after the browser's
-   first paint on a cold /admin mount — the shell class is present in the
-   initial markup, so keeping it avoids a Roboto font flash / layout shift. */
+   .admin-shell-v2 stays as an additional selector because in Vite dev
+   html.admin-app is only added by a useEffect, which can run after the
+   browser's first paint on a cold /admin mount — the shell class is present
+   in the initial markup, so keeping it avoids a Roboto font flash / layout
+   shift. In production renderHTML (server/index.js) injects html.admin-app
+   server-side for /admin paths. */
 html.admin-app,
 html.admin-app *,
 .admin-shell-v2,
@@ -215,6 +219,8 @@ html.admin-app pre *,
    toolbar + fixed tab bar. 100dvh tracks the visible viewport. */
 :root {
   --admin-vh: 100vh;
+  --vv-offset-top: 0px;
+  --keyboard-inset: 0px;
 }
 @supports (height: 100dvh) {
   :root {
@@ -280,6 +286,19 @@ html.admin-app [style*="overflow-x: auto"]:has(> table) {
   /* scrollIntoView targets get breathing room below the viewport top; on
      mobile they clear the fixed 52px top bar instead of sliding under it. */
   scroll-padding-top: 12px;
+}
+
+/* Staff auth pages sit outside AdminLayoutV2. They still get html.admin-app
+   (server-rendered in prod, AdminSafariShell's effect otherwise) so 16px/44px
+   input rules apply; this class keeps the form off the notch and the iOS
+   toolbar. */
+html.admin-app .admin-auth-page {
+  min-height: var(--admin-vh, 100dvh);
+  padding: calc(20px + env(safe-area-inset-top, 0px))
+    max(20px, env(safe-area-inset-right, 0px))
+    calc(20px + env(safe-area-inset-bottom, 0px))
+    max(20px, env(safe-area-inset-left, 0px));
+  box-sizing: border-box;
 }
 @media (max-width: 767px) {
   .admin-shell-v2 .admin-main {

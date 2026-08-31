@@ -99,6 +99,7 @@ import {
   cn,
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import useSpeechDictation from "../../hooks/useSpeechDictation";
 import {
   MMS_TOTAL_BUDGET_BYTES,
   fitImagesToBudget,
@@ -715,9 +716,11 @@ function SmsTab() {
   // the /5min cron in server/services/scheduler.js.
   const [sendTiming, setSendTiming] = useState("now");
   const [sendCustomAt, setSendCustomAt] = useState("");
-  // Voice-to-text (Web Speech API) — populated below on first use.
-  const [listening, setListening] = useState(false);
-  const recognitionRef = useRef(null);
+  const dictation = useSpeechDictation((text) => {
+    setMsgBody((b) => (b ? `${b} ${text}` : text));
+  });
+  const { listening, supported: dictationSupported, toggle: toggleDictation } =
+    dictation;
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
@@ -1203,51 +1206,6 @@ function SmsTab() {
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return next;
     });
-  };
-
-  // Web Speech API dictation — toggles on/off, appends final transcripts to
-  // the message field. Falls back to an alert on browsers without support
-  // (Firefox). iOS Safari ships `webkitSpeechRecognition`.
-  const toggleDictation = () => {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
-    if (!SR) {
-      alert(
-        "Voice dictation isn't supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.",
-      );
-      return;
-    }
-    if (listening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      return;
-    }
-    const rec = new SR();
-    rec.continuous = true;
-    rec.interimResults = false;
-    rec.lang = "en-US";
-    rec.onresult = (ev) => {
-      let append = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
-      }
-      if (append)
-        setMsgBody((b) => (b ? `${b} ${append.trim()}` : append.trim()));
-    };
-    rec.onerror = (e) => {
-      if (e.error !== "aborted" && e.error !== "no-speech") {
-        alert(`Dictation error: ${e.error}`);
-      }
-      setListening(false);
-    };
-    rec.onend = () => {
-      setListening(false);
-      recognitionRef.current = null;
-    };
-    recognitionRef.current = rec;
-    rec.start();
-    setListening(true);
   };
 
   const handleAiDraft = async () => {
@@ -2112,17 +2070,16 @@ function SmsTab() {
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           Message
         </label>{" "}
-        <div className="relative">
-          {" "}
+        <div>
           <textarea
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
             readOnly={rewritingSms}
             rows={3}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-3 pr-20 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
-          <div className="absolute top-2 right-2 flex items-center gap-1">
+          <div className="mt-2 flex items-center gap-2">
             <button
               type="button"
               onClick={handleRewriteSms}
@@ -2136,7 +2093,7 @@ function SmsTab() {
               aria-label="Rewrite message in Waves tone"
               title="Rewrite in Waves tone"
               className={cn(
-                "flex items-center justify-center h-8 w-8 rounded-full u-focus-ring",
+                "inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
                 "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
                 "disabled:opacity-50 disabled:cursor-not-allowed",
               )}
@@ -2147,27 +2104,28 @@ function SmsTab() {
                 <Sparkles size={16} strokeWidth={2.2} />
               )}
             </button>
-            {/* Mic: voice-to-text dictation via Web Speech API. */}
-            <button
-              type="button"
-              onClick={toggleDictation}
-              disabled={rewritingSms}
-              aria-label={listening ? "Stop dictation" : "Start voice dictation"}
-              title={listening ? "Stop dictation" : "Start voice dictation"}
-              className={cn(
-                "flex items-center justify-center h-8 w-8 rounded-full u-focus-ring",
-                listening
-                  ? "bg-alert-fg text-white animate-pulse"
-                  : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
-                "disabled:opacity-50 disabled:cursor-not-allowed",
-              )}
-            >
-              {listening ? (
-                <MicOff size={16} strokeWidth={2.2} />
-              ) : (
-                <Mic size={16} strokeWidth={2.2} />
-              )}
-            </button>{" "}
+            {dictationSupported && (
+              <button
+                type="button"
+                onClick={toggleDictation}
+                disabled={rewritingSms}
+                aria-label={listening ? "Stop dictation" : "Start voice dictation"}
+                title={listening ? "Stop dictation" : "Start voice dictation"}
+                className={cn(
+                  "inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
+                  listening
+                    ? "bg-alert-fg text-white animate-pulse"
+                    : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
+                  "disabled:opacity-50 disabled:cursor-not-allowed",
+                )}
+              >
+                {listening ? (
+                  <MicOff size={16} strokeWidth={2.2} />
+                ) : (
+                  <Mic size={16} strokeWidth={2.2} />
+                )}
+              </button>
+            )}
           </div>
         </div>
         {/* Attachment tray */}
@@ -2191,7 +2149,7 @@ function SmsTab() {
                   onClick={() => removeAttachment(i)}
                   aria-label={`Remove ${a.fileName}`}
                   className="absolute -top-1.5 -right-1.5 flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
-                  style={{ width: 18, height: 18, fontSize: 11, lineHeight: 1 }}
+                  style={{ width: 28, height: 28, fontSize: 16, lineHeight: 1 }}
                 >
                   ×
                 </button>{" "}
@@ -2271,7 +2229,7 @@ function SmsTab() {
               disabled={uploading}
               aria-label="Add attachment"
               title="Add image"
-              className="flex items-center justify-center h-10 w-10 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
+              className="flex items-center justify-center h-11 w-11 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
             >
               {" "}
               <svg
@@ -2301,7 +2259,7 @@ function SmsTab() {
                     setShowAttachSheet(false);
                     cameraInputRef.current?.click();
                   }}
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                  className="block w-full min-h-11 text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
                 >
                   Take photo
                 </button>{" "}
@@ -2311,7 +2269,7 @@ function SmsTab() {
                     setShowAttachSheet(false);
                     fileInputRef.current?.click();
                   }}
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                  className="block w-full min-h-11 text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
                 >
                   Photo library
                 </button>{" "}

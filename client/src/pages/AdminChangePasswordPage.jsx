@@ -83,14 +83,13 @@ export default function AdminChangePasswordPage() {
 
   return (
     <main
+      className="admin-auth-page"
       style={{
-        minHeight: '100vh',
         background: D.bg,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         fontFamily: ADMIN_FONT,
-        padding: 20,
       }}
     >
       <div style={{ maxWidth: 440, width: '100%' }}>
@@ -164,8 +163,8 @@ export default function AdminChangePasswordPage() {
               marginTop: 18,
               border: 0,
               borderRadius: 10,
-              background: D.red,
-              color: D.white,
+              background: '#f4f4f5',
+              color: '#18181B',
               fontSize: 15,
               fontWeight: 700,
               cursor: loading ? 'wait' : 'pointer',

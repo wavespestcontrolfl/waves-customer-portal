@@ -9,6 +9,7 @@
     <meta name="theme-color" content="#111111" />
     <link rel="manifest" href="/manifest.json" />
     <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Waves" />
     <link rel="apple-touch-icon" href="/waves-logo-192.png" />
@@ -21,6 +22,12 @@
     <meta name="twitter:title" content="Waves Customer Portal" />
     <meta name="twitter:description" content="Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service." />
     <title>Waves Customer Portal</title>
+    <!-- Safari home-screen bookmark: this document is the customer PWA by
+         default. In production renderHTML (server/index.js) swaps the
+         manifest/title/apple-title/theme-color and adds html.admin-app for
+         /admin before the response is sent — do NOT add a second inline
+         first-paint script here. In Vite dev the admin identity arrives via
+         AdminSafariShell's effect instead (dev is not an install surface). -->
     <link rel="icon" type="image/png" href="/waves-logo-192.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
