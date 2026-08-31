@@ -91,8 +91,20 @@ describe('visitMoneySummary', () => {
 });
 
 describe('prepaidLine', () => {
-  it('names annual-prepay coverage without a number (stamp amount is non-authoritative)', () => {
-    expect(prepaidLine({ prepaidAmount: 999, prepaidMethod: 'annual_prepay_invoice' })).toBe('Annual prepay on file');
+  it('names annual-prepay coverage ONLY when the term-validated prediction confirms it', () => {
+    expect(prepaidLine({
+      prepaidAmount: 999,
+      prepaidMethod: 'annual_prepay_invoice',
+      billingLane: { prediction: { kind: 'covered_annual', amount: 0 } },
+    })).toBe('Annual prepay on file');
+    // A stale stamp (refund/void/expired term → prediction 'invoice')
+    // must never claim coverage next to a Collect headline.
+    expect(prepaidLine({
+      prepaidAmount: 999,
+      prepaidMethod: 'annual_prepay_invoice',
+      billingLane: { prediction: { kind: 'invoice', amount: 150 } },
+    })).toBe(null);
+    expect(prepaidLine({ prepaidAmount: 999, prepaidMethod: 'annual_prepay_invoice' })).toBe(null);
   });
   it('shows the recorded prepayment amount and method', () => {
     expect(prepaidLine({ prepaidAmount: 115, prepaidMethod: 'card' })).toBe('Prepaid $115 (card)');
@@ -175,6 +187,19 @@ describe('lawnGateLabels', () => {
       someFutureGate: 42,
     })).toEqual(['armyworm threshold 3 per sqft', 'some future gate: 42']);
     expect(lawnGateLabels(null)).toEqual([]);
+  });
+
+  it('renders every application-limit violation message, deduped against the mirrored trigger', () => {
+    expect(lawnGateLabels({
+      trigger: 'Annual max reached for Celsius WG',
+      applicationLimits: [
+        { severity: 'block', type: 'annual_max', message: 'Annual max reached for Celsius WG' },
+        { severity: 'warn', type: 'min_interval', message: 'Applied 5 days ago — 7-day minimum interval' },
+      ],
+    })).toEqual([
+      'Annual max reached for Celsius WG',
+      'Applied 5 days ago — 7-day minimum interval',
+    ]);
   });
 });
 

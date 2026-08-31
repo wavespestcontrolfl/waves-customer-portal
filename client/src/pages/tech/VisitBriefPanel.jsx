@@ -158,11 +158,13 @@ function AccessSection({ alerts, access }) {
   );
 }
 
+// Quote LINES only — deposit/payment posture is SERVICE-scoped (the
+// endpoint resolves both for the requested scheduledServiceId, honoring
+// per-job payer policy), so those render per member in MemberMoney and
+// never dedupe away with a shared estimate.
 function QuotedSection({ estimate }) {
   if (!estimate?.linked) return null;
   const lines = Array.isArray(estimate.lines) ? estimate.lines : [];
-  const deposit = estimate.deposit || null;
-  const payment = estimate.payment || null;
   return (
     <>
       <SectionLabel>Quoted{estimate.estimateSlug ? ` · ${estimate.estimateSlug}` : ''}</SectionLabel>
@@ -175,6 +177,39 @@ function QuotedSection({ estimate }) {
           </p>
         );
       })}
+    </>
+  );
+}
+
+// One member service's Paid · prepaid / Amount due today rows. Grouped
+// stops render one block per member (siblings keep separate invoices and
+// billing lanes — a prepaid primary must not hide a sibling's amount due).
+function MemberMoney({ service, estimate, showType }) {
+  const summary = visitMoneySummary(service);
+  const prepaid = prepaidLine(service);
+  // Deposit/payment posture is SERVICE-scoped (resolved per requested
+  // scheduledServiceId) — it renders here per member, never deduped with
+  // a shared estimate's lines.
+  const deposit = estimate?.linked ? estimate.deposit : null;
+  const payment = estimate?.linked ? estimate.payment : null;
+  const rows = [];
+  if (prepaid || summary.invoice?.settled) {
+    rows.push(['Paid · prepaid', prepaid || summary.note, null]);
+  }
+  if (summary.headline) {
+    rows.push(['Amount due today', summary.headline, summary.collectNeeded ? DARK.amber : null]);
+  }
+  const hasDepositInfo = deposit?.payerBilled || Number(deposit?.paid) > 0 || deposit?.required
+    || payment?.annualPrepay || payment?.billingTerm;
+  if (!rows.length && !hasDepositInfo) return null;
+  return (
+    <>
+      <MemberLabel service={service} show={showType} />
+      {rows.map(([label, value, accent]) => (
+        <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 700 : undefined }}>
+          <span style={{ color: DARK.muted, fontWeight: 400 }}>{label}: </span>{value}
+        </p>
+      ))}
       {deposit?.payerBilled && (
         <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 600 }}>
           Bills to a payer — do not collect from the homeowner.
@@ -195,32 +230,6 @@ function QuotedSection({ estimate }) {
       {payment?.billingTerm && !payment?.annualPrepay && (
         <p style={factMutedStyle}>Billing: {String(payment.billingTerm).replace(/_/g, ' ')}</p>
       )}
-    </>
-  );
-}
-
-// One member service's Paid · prepaid / Amount due today rows. Grouped
-// stops render one block per member (siblings keep separate invoices and
-// billing lanes — a prepaid primary must not hide a sibling's amount due).
-function MemberMoney({ service, showType }) {
-  const summary = visitMoneySummary(service);
-  const prepaid = prepaidLine(service);
-  const rows = [];
-  if (prepaid || summary.invoice?.settled) {
-    rows.push(['Paid · prepaid', prepaid || summary.note, null]);
-  }
-  if (summary.headline) {
-    rows.push(['Amount due today', summary.headline, summary.collectNeeded ? DARK.amber : null]);
-  }
-  if (!rows.length) return null;
-  return (
-    <>
-      <MemberLabel service={service} show={showType} />
-      {rows.map(([label, value, accent]) => (
-        <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 700 : undefined }}>
-          <span style={{ color: DARK.muted, fontWeight: 400 }}>{label}: </span>{value}
-        </p>
-      ))}
       {summary.invoice && !summary.invoice.settled && summary.note && (
         <p style={factMutedStyle}>{summary.note}</p>
       )}
@@ -231,13 +240,14 @@ function MemberMoney({ service, showType }) {
   );
 }
 
-function MoneySection({ stop, quotedEstimate }) {
+function MoneySection({ memberBits, quotedEstimate, grouped }) {
   // Honest framing (never a blended monthly+one-time number): unit-aware
   // terms when the lines prove their units, the legacy total otherwise.
   const quoted = quotedTermsLabel(quotedEstimate);
-  const memberHasMoney = stop.services.some((s) => {
-    const m = visitMoneySummary(s);
-    return m.headline || m.invoice || prepaidLine(s);
+  const memberHasMoney = memberBits.some((m) => {
+    const s = visitMoneySummary(m.service);
+    return s.headline || s.invoice || prepaidLine(m.service)
+      || (m.estimate?.linked && (m.estimate.deposit || m.estimate.payment));
   });
   if (!quoted && !memberHasMoney) return null;
   return (
@@ -248,8 +258,8 @@ function MoneySection({ stop, quotedEstimate }) {
           <span style={{ color: DARK.muted }}>Quoted: </span>{quoted}
         </p>
       )}
-      {stop.services.map((s) => (
-        <MemberMoney key={s.id} service={s} showType={stop.services.length > 1} />
+      {memberBits.map((m) => (
+        <MemberMoney key={m.service.id} service={m.service} estimate={m.estimate} showType={grouped} />
       ))}
     </>
   );
@@ -529,7 +539,11 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           price. The headline Quoted row renders only when the whole
           stop traces to ONE estimate; separately-quoted siblings keep
           their terms inside their own Quoted sections. */}
-      <MoneySection stop={stop} quotedEstimate={estimates.length === 1 ? estimates[0] : null} />
+      <MoneySection
+        memberBits={memberBits}
+        quotedEstimate={estimates.length === 1 ? estimates[0] : null}
+        grouped={grouped}
+      />
 
       {memberBits.some((m) => {
         const bl = m.visitBrief?.last_visit || m.facts?.last_visit;

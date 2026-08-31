@@ -101,9 +101,9 @@ describe('deterministicVisitFacts', () => {
     expect(facts.last_visit).toBeNull();
   });
 
-  test('property_preferences outage is fail-soft: facts still answer without codes', async () => {
+  test('property_preferences OUTAGE yields access: null (never a codes-cleared block that would suppress cached access)', async () => {
     const facts = await deterministicVisitFacts(SVC, fakeDbh({ throws: { property_preferences: true } }));
-    expect(facts.access.codes.neighborhoodGate).toBeNull();
+    expect(facts.access).toBeNull();
     expect(facts.last_visit.date).toBe('2026-07-14');
   });
 

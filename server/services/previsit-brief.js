@@ -150,18 +150,26 @@ function visitFactsGateEnabled() {
 // beats a 500. The route omits the key entirely if this still throws.
 async function deterministicVisitFacts(svc, dbh = db) {
   let prefs = null;
+  let prefsUnavailable = false;
   try {
     prefs = await dbh('property_preferences').where({ customer_id: svc.customer_id }).first();
   } catch (err) {
+    prefsUnavailable = true;
     logger.warn(`[previsit-brief] visit-facts property_preferences unreadable for customer ${svc.customer_id}: ${err.message}`);
   }
   const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
   // First-visit is a POSITIVE claim (same rule as assembleGrounding):
   // unreadable history (available:false) asserts nothing.
   const genuinelyNew = history.available ? !history.last : false;
+  // A prefs OUTAGE yields access: null, never an empty access block — the
+  // clients prefer live facts over a cached brief's access, and a truthy
+  // codes-cleared block would suppress the valid cached codes. Only a
+  // successful lookup (row present or genuinely absent) asserts access.
   // rawServicePreferences stays null here: the pest opt-out alerts already
   // ride the day payload's propertyAlerts — facts add codes/notes/pets.
-  const access = buildAccessBlock(prefs, svc, genuinelyNew, normalizeServiceType(svc.service_type), null);
+  const access = prefsUnavailable
+    ? null
+    : buildAccessBlock(prefs, svc, genuinelyNew, normalizeServiceType(svc.service_type), null);
   let lastVisit = null;
   const lastRecord = history.available ? history.lineRecords[0] || null : null;
   if (lastRecord) {

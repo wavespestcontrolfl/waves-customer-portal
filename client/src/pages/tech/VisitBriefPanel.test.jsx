@@ -229,6 +229,50 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText('Collect $60 today')).toBeInTheDocument();
   });
 
+  it('falls back to the cached brief\'s access when facts carry access: null (prefs outage)', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf(BASE_SERVICE)}
+        detail={detailFor({
+          'svc-1': {
+            brief: {
+              brief: {
+                access: { codes: { neighborhoodGate: '9911', propertyGate: null, garage: null, lockbox: null }, alerts: [] },
+                last_visit: null,
+              },
+              type: 'visit_brief_v1',
+              facts: { access: null, last_visit: null },
+            },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('9911')).toBeInTheDocument();
+  });
+
+  it('service-scoped deposit posture renders per member, never deduped with a shared estimate', () => {
+    const primary = { ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control', billingLane: null };
+    const sibling = { ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service', billingLane: null };
+    const stop = { key: 'visit:v1', isVisit: true, services: [primary, sibling], primary, liveCount: 2 };
+    render(
+      <VisitBriefPanel
+        stop={stop}
+        detail={detailFor({
+          'svc-1': { estimate: { ...LINKED_ESTIMATE, deposit: { payerBilled: false, paid: 100, creditRemaining: 0 } } },
+          // Same estimate id, but THIS member bills to a payer.
+          'svc-2': { estimate: { ...LINKED_ESTIMATE, deposit: { payerBilled: true } } },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    // Shared quote lines render once…
+    expect(screen.getAllByText('Quoted · EST-2026-0254')).toHaveLength(1);
+    // …but each member keeps its own billing posture.
+    expect(screen.getByText(/Deposit paid \$100/)).toBeInTheDocument();
+    expect(screen.getByText('Bills to a payer — do not collect from the homeowner.')).toBeInTheDocument();
+  });
+
   it('grouped stop renders each member\'s own estimate and history; one shared estimate renders once', () => {
     const primary = { ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control', billingLane: null };
     const sibling = { ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service', billingLane: null };

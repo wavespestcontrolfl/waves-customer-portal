@@ -89,10 +89,16 @@ export function visitMoneySummary(service) {
 /** "Prepaid $120 (card)" line from the visit's recorded prepayment. */
 export function prepaidLine(service) {
   const method = String(service?.prepaidMethod || '');
-  // The annual-prepay stamp's amount is non-authoritative (billing-lane
-  // zeroes it; coverage is the term-validated stamp) — name the coverage,
-  // never the number.
-  if (method === 'annual_prepay_invoice') return 'Annual prepay on file';
+  // The annual-prepay stamp is a historical marker, not proof of live
+  // coverage: after a refund/void/expired term the prediction rejects it
+  // and returns kind 'invoice'. Only the term-validated covered_annual
+  // prediction may claim coverage — and never the stamp's amount (the
+  // billing lane zeroes it as non-authoritative).
+  if (method === 'annual_prepay_invoice') {
+    return service?.billingLane?.prediction?.kind === 'covered_annual'
+      ? 'Annual prepay on file'
+      : null;
+  }
   const amount = Number(service?.prepaidAmount);
   if (!Number.isFinite(amount) || amount <= 0) return null;
   return `Prepaid ${fmtMoney(amount)}${method ? ` (${method.replace(/_/g, ' ')})` : ''}`;
@@ -194,10 +200,20 @@ export function lawnGateLabels(gates) {
       case 'maxLabelRate': out.push(`label rate max ${value}`); break;
       case 'postAppIrrigation': out.push('irrigate after application'); break;
       case 'targetN': out.push(`target ${value}`); break;
+      // Customer-specific application-limit violations arrive as
+      // [{severity, type, message}] — render every message, never the
+      // default array-to-string collapse.
+      case 'applicationLimits':
+        for (const v of Array.isArray(value) ? value : []) {
+          if (v?.message) out.push(String(v.message));
+        }
+        break;
       default: out.push(value === true ? humanizeKey(key) : `${humanizeKey(key)}: ${value}`);
     }
   }
-  return out;
+  // The trigger convenience field mirrors the first application-limit
+  // message — dedupe identical wording.
+  return [...new Set(out)];
 }
 
 /**
