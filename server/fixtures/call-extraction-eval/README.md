@@ -39,6 +39,31 @@ Comparing models: point `CALL_EXTRACTION_PROVIDER` / `CALL_EXTRACTION_MODEL`
 at the challenger and run the manual command below — the per-field table is
 the bake-off scorecard (the 2026-07-18 bake-off only had pass/fail).
 
+## Speaker labels (`speaker-labels.json`)
+
+Owner-labeled ground truth for the Agent/Caller relabel pass
+(`OPENAI_TRANSCRIPT_LABEL_MODEL`). Cases store a call id, a sha256 of the
+canonical raw diarized transcript (rebuilt from
+`call_log.transcript_structured`), and one `agent`/`caller` label per raw
+line — never transcript text or contact details.
+
+```sh
+# 1. Print a labeling sheet (PII on screen — run privately, never commit output)
+node server/scripts/speaker-label-eval.js --sheet
+
+# 2. Verify every suggested label, paste the corrected stubs into speaker-labels.json
+
+# 3. Score the production relabel pass (word- and line-level speaker accuracy)
+node server/scripts/speaker-label-eval.js
+
+# Challenger: OPENAI_TRANSCRIPT_LABEL_MODEL=<model> node server/scripts/speaker-label-eval.js
+```
+
+Suggested labels on the sheet come from the current model's stored output —
+they are the thing under test, so every line needs a human eye before it
+becomes gold. A re-transcribed call stops scoring (`transcript_drift`)
+rather than scoring against shifted lines.
+
 Run the scheduled eval path against production data from inside the Railway
 service:
 

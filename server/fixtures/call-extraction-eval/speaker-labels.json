@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "call-speaker-labels.v1",
+  "description": "Owner-labeled speaker ground truth for the Agent/Caller transcript relabel pass (OPENAI_TRANSCRIPT_LABEL_MODEL). Each case stores a call_log id, a sha256 of the canonical raw diarized transcript rebuilt from call_log.transcript_structured, and one speaker label per raw line — never transcript text, names, phone numbers, or addresses. Generate a labeling sheet with: node server/scripts/speaker-label-eval.js --sheet (run privately inside the Railway service; the sheet prints transcript text and must never be committed). line_speakers[i] labels the i-th non-empty line of the canonical raw transcript; transcript_sha256 pins that alignment — a re-transcribed call no longer scores (transcript_drift) instead of scoring against shifted lines.",
+  "cases": []
+}

@@ -5931,6 +5931,10 @@ const CallRecordingProcessor = {
   // plus the same hallucination guard the live pipeline applies.
   transcribeRecording,
   isImplausibleTranscript,
+  // Re-used by the speaker-label eval (server/scripts/speaker-label-eval.js)
+  // so accuracy is measured through the EXACT production relabel pass —
+  // same prompt, model env, timeout, and word-preservation guard.
+  labelTranscriptWithOpenAI,
   /**
    * Process a call recording end-to-end.
    * Called from recording-status webhook or manually from admin.
