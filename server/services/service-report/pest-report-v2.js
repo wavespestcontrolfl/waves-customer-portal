@@ -318,9 +318,17 @@ function isCockroachTypedReportType(type) {
 // rings on the web, not the drawn "Where we treated" image in the PDF.
 // Dark by default; kill = unset. Read at call time (tests + flips) through
 // the canonical gate parser; the registry entry in config/feature-gates.js
-// keeps it in standard gate status reporting.
+// keeps it in standard gate status reporting. Fallback parse (same
+// semantics as gateEnvValue) exists ONLY because a dozen test suites mock
+// feature-gates with a partial surface ({ isEnabled }) — a mocked-away
+// parser must read as gate-dark logic, not a TypeError, in every suite
+// that transitively builds a report payload.
 function pestTraceOrNothingGateOn() {
-  return require('../../config/feature-gates').gateEnvValue('GATE_PEST_TRACE_OR_NOTHING');
+  try {
+    const { gateEnvValue } = require('../../config/feature-gates');
+    if (typeof gateEnvValue === 'function') return gateEnvValue('GATE_PEST_TRACE_OR_NOTHING');
+  } catch { /* partial test mock */ }
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_PEST_TRACE_OR_NOTHING || '').toLowerCase());
 }
 
 function pestReportV2PdfSignature(service = {}) {
