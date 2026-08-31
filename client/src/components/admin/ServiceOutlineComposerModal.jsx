@@ -307,7 +307,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
 
   return createPortal(
     <div className="fixed inset-0 z-[70] flex items-end justify-center bg-zinc-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true">
-      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-lg border border-zinc-200 bg-white shadow-xl sm:rounded-lg">
+      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl sm:rounded-md">
         <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">
