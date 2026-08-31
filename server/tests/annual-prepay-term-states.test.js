@@ -97,7 +97,8 @@ function writerCandidateFiles() {
         if (ent.name === 'node_modules' || ent.name === 'tests' || ent.name === 'migrations' || ent.name === '__tests__') continue;
         walk(full);
       } else if (ent.name.endsWith('.js') && !ent.name.endsWith('.test.js')) {
-        if (fs.readFileSync(full, 'utf8').includes(TABLE)) out.push(path.relative(ROOT, full));
+        // Case-insensitive: raw SQL may name the table in uppercase.
+        if (fs.readFileSync(full, 'utf8').toLowerCase().includes(TABLE)) out.push(path.relative(ROOT, full));
       }
     }
   };
@@ -150,7 +151,9 @@ function chainAfter(src, start) {
 function chainGuards(chain) {
   const upTo = chain.search(/\.(?:update|insert)\(/);
   const head = upTo === -1 ? chain : chain.slice(0, upTo);
-  return [...head.matchAll(/\.(where(?:In|NotIn|Null|NotNull|Not)?)\(([^)]*)/g)]
+  // orWhere* included: appending an OR branch loosens a guard and must
+  // change the pinned array.
+  return [...head.matchAll(/\.((?:orW|w)here(?:In|NotIn|Null|NotNull|Not)?)\(([^)]*)/g)]
     .map((g) => `${g[1]}(${g[2].replace(/\s+/g, ' ').trim()})`);
 }
 
@@ -170,6 +173,12 @@ function statusWriteSites(src) {
     // smuggle a status from anywhere).
     if (/\.\.\./.test(body)) out.push({ expr: '<spread in write object>', guards });
     if (/\[\s*['"]status['"]\s*\]\s*:/.test(body)) out.push({ expr: '<computed status key>', guards });
+    // Identifier-computed keys (`[column]: …`) could be 'status' at runtime.
+    // The only sanctioned identifiers are the *Col notice/reminder column
+    // helpers, whose outputs are behaviorally pinned non-status below.
+    for (const k of body.matchAll(/\[\s*([A-Za-z_$][\w$]*)\s*\]\s*:/g)) {
+      if (!/Col$/.test(k[1])) out.push({ expr: `<computed identifier key ${k[1]}>`, guards });
+    }
     if (/(?:^|,|\{)\s*status\s*(?:,|$)/.test(body.trim())) out.push({ expr: '<shorthand status key>', guards });
     for (const s of body.matchAll(/(?:\b|['"])status['"]?\s*:\s*((?:[^,\n]|,(?!\s*['"[\]\w]+\s*:))+)/g)) {
       out.push({ expr: s[1].replace(/,\s*$/, '').trim(), guards });
@@ -219,6 +228,14 @@ function statusWriteSites(src) {
       const body = declStart === -1 ? null : src.slice(declStart).match(/\{([\s\S]*?)\};/);
       if (!body) { out.push({ expr: `<unresolved object ${a}>`, guards }); return; }
       objectStatuses(body[1], guards);
+      // Post-init mutations of the payload (`x.status = …`, `x[expr] = …`)
+      // would not appear in the initializer — capture or fail closed.
+      for (const asn of src.matchAll(new RegExp(`\\b${a}\\.status\\s*=\\s*([^;\\n]+)`, 'g'))) {
+        out.push({ expr: asn[1].trim(), guards });
+      }
+      if (new RegExp(`\\b${a}\\[`).test(src)) {
+        out.push({ expr: `<computed assignment to write object ${a}>`, guards });
+      }
       return;
     }
     out.push({ expr: `<unclassifiable write args: ${a.slice(0, 40)}>`, guards });
@@ -341,6 +358,17 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     // But a plain object with other keys and no status stays silent.
     expect(statusWriteExpressions("await db('annual_prepay_terms').update({ updated_at: now });"))
       .toEqual([]);
+    // Identifier-computed key that could be 'status' at runtime.
+    expect(statusWriteExpressions("const column = 'status';\nawait db('annual_prepay_terms').update({ [column]: 'refunded' });"))
+      .toEqual(['<computed identifier key column>']);
+    // Sanctioned *Col identifiers (notice/reminder columns, pinned non-status) pass.
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ [claimCol]: now });"))
+      .toEqual([]);
+    // Post-init payload mutation.
+    expect(statusWriteExpressions("const payload = { updated_at: now };\npayload.status = 'refunded';\nawait db('annual_prepay_terms').update(payload);"))
+      .toEqual(["'refunded'"]);
+    expect(statusWriteExpressions("const payload = { updated_at: now };\npayload[column] = value;\nawait db('annual_prepay_terms').update(payload);"))
+      .toEqual(['<computed assignment to write object payload>']);
   });
 });
 
@@ -479,7 +507,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       {
         expr: "term.status === 'active' ? 'renewal_pending' : term.status",
         guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
-          'whereNull(noticeCol)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)'],
+          'whereNull(noticeCol)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
+          "orWhere(claimCol, '<', staleClaimCutoff)"],
       },
       // Move 5: claim release — undecided + still unsent.
       { expr: 'previousStatus', guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)'] },
@@ -532,6 +561,62 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     for (const invStatus of ['void', 'cancelled', 'canceled', 'refunded']) {
       expect(f({ status: invStatus })).toBe('cancelled');
     }
+  });
+
+  test('sanctioned computed-key identifiers (*Col) can never be status: the column helpers return only notice_/payment_reminder_ names', () => {
+    for (const days of [30, 15, 7, 3, 1, 0, 99, null]) {
+      for (const fn of [_private.noticeColumnForDaysOut, _private.noticeClaimColumnForDaysOut,
+        _private.paymentReminderColumnForDaysOut, _private.paymentReminderClaimColumnForDaysOut]) {
+        const col = fn(days);
+        if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
+        expect(col).not.toBe('status');
+      }
+    }
+  });
+
+  test('dynamic status producers stay bound: every nextStatus assignment in the module comes from the two pinned producers', () => {
+    const src = read('server/services/annual-prepay-renewals.js');
+    const assignments = [...src.matchAll(/(?:const\s+)?nextStatus\s*=\s*([^;\n]+)/g)]
+      .map((m) => m[1].trim())
+      .filter((rhs) => !rhs.startsWith('==')); // comparisons, not assignments
+    expect(assignments.length).toBeGreaterThanOrEqual(2);
+    for (const rhs of assignments) {
+      expect(rhs).toMatch(/^(await statusForPrepayInvoice\(|invoiceTermStatus\()/);
+    }
+  });
+
+  test('read-side grouping constants are pinned in the PRODUCTION module, not only in the doc', () => {
+    const src = read('server/services/annual-prepay-renewals.js');
+    expect(src).toContain("const ACTIVE_STATUSES = ['active', 'renewal_pending'];");
+    expect(src).toContain("const DECIDED_COVERED_STATUSES = ['renewed', 'switch_plan'];");
+    expect(src).toContain("const PAYMENT_PENDING_STATUS = 'payment_pending';");
+  });
+
+  test('the doc moves table has 13 rows with CHECK-valid targets and each row names its documented guard', () => {
+    const doc = read(DOC);
+    const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| .+ \| (.+?) \|$/gm)]
+      .map((m) => ({ n: Number(m[1]), to: m[3], guard: m[4] }));
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
+    for (const r of rows) {
+      for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
+    }
+    const guardFrag = {
+      1: 'renewal_decision',
+      2: "'payment_pending'",
+      3: 'ACTIVE_STATUSES AND renewal_decision IS NULL',
+      4: 'notice_N_claimed_at IS NULL OR stale',
+      5: 'notice_N_sent_at IS NULL',
+      6: 'same as 3',
+      7: 'same as 3',
+      8: 'same as 3',
+      9: 'renewal_decision IS NULL',
+      10: 'ACTIVE_STATUSES',
+      11: 'dispute_suspended_at IS NOT NULL',
+      12: "NOT IN ('cancelled','canceled')",
+      13: 'none',
+    };
+    for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });
 
   test('statusForPrepayInvoice (the birth wrapper createTerm actually calls) keeps its three documented branches', () => {
