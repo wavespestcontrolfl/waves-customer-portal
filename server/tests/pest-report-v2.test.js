@@ -185,7 +185,29 @@ describe('buildPestReportV2 — supporting metric', () => {
 });
 
 describe('pestReportV2PdfSignature — PDF cache-key component', () => {
-  afterEach(() => { delete process.env.PEST_REPORT_V2; });
+  afterEach(() => { delete process.env.PEST_REPORT_V2; delete process.env.GATE_PEST_TRACE_OR_NOTHING; });
+
+  test('trace-or-nothing gate appends -ton1 to every pest-line key (cached PDFs re-render once)', () => {
+    process.env.PEST_REPORT_V2 = 'true';
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-ton1');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
+    })).toBe('-roachtyped2-ton1');
+    // Non-pest lines stay untouched in every gate state.
+    expect(pestReportV2PdfSignature({ service_line: 'lawn' })).toBe('');
+    delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c');
+  });
+
+  test('-ton1 keys pest PDFs even with PEST_REPORT_V2 off — the suppression is V2-independent (codex P1)', () => {
+    delete process.env.PEST_REPORT_V2;
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1');
+    delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
+  });
 
   it('is empty when the gate is off, regardless of line', () => {
     delete process.env.PEST_REPORT_V2;

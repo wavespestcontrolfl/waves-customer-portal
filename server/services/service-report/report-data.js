@@ -5039,11 +5039,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the card would otherwise show a placeholder identity.
     techVisitCard: process.env.GATE_REPORT_TECH_PHOTO === 'true'
       && !!(service.technician_name || service.technician_first_name),
-    // Owner ruling 2026-08-30: a complaint-driven visit is the wrong moment
-    // for a Google ask — callback reports never request a review while the
-    // re-service gate is on. Gate-dark keeps today's behavior.
-    reviewRequestEligible: !service.has_left_google_review
-      && !(reserviceReportCopyGateOn() && service.is_callback === true),
+    // R4 REVERSED (owner 2026-08-31, "lets put the review request back
+    // in"): callback reports ask for a review again — a resolved complaint
+    // visit is a fine moment for the ask. The offer cards (cross-sell /
+    // referral) STAY suppressed on callbacks; only the review returns.
+    reviewRequestEligible: !service.has_left_google_review,
+    // "Traced spray map or nothing" for the whole pest line (owner
+    // 2026-08-31, GATE_PEST_TRACE_OR_NOTHING, dark): with the gate on, the
+    // web schematic diagram, the PDF's drawn schematic, and the standalone
+    // map.svg all render nothing when no technician trace exists —
+    // recurring, one-time, and re-service pest visits alike.
+    pestTraceOrNothing: require('./pest-report-v2').pestTraceOrNothingGateOn()
+      && serviceLine === 'pest',
     hasLeftGoogleReview: !!service.has_left_google_review,
     // Canonical review office for the report CTA, resolved SERVER-side
     // (config/locations.js resolveReviewLocation: city → zip → geo → stored

@@ -311,10 +311,37 @@ function isCockroachTypedReportType(type) {
   return /roach/i.test(String(type || ''));
 }
 
+// "Traced spray map or nothing" for the WHOLE pest line (owner 2026-08-31,
+// generalizing the #3631 callback rule to recurring / one-time /
+// re-service): with this gate on, a pest report with no technician trace
+// renders NO generated schematic — not the animated "Where we protected"
+// rings on the web, not the drawn "Where we treated" image in the PDF.
+// Dark by default; kill = unset. Read at call time (tests + flips) through
+// the canonical gate parser; the registry entry in config/feature-gates.js
+// keeps it in standard gate status reporting. Fallback parse (same
+// semantics as gateEnvValue) exists ONLY because a dozen test suites mock
+// feature-gates with a partial surface ({ isEnabled }) — a mocked-away
+// parser must read as gate-dark logic, not a TypeError, in every suite
+// that transitively builds a report payload.
+function pestTraceOrNothingGateOn() {
+  try {
+    const { gateEnvValue } = require('../../config/feature-gates');
+    if (typeof gateEnvValue === 'function') return gateEnvValue('GATE_PEST_TRACE_OR_NOTHING');
+  } catch { /* partial test mock */ }
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_PEST_TRACE_OR_NOTHING || '').toLowerCase());
+}
+
 function pestReportV2PdfSignature(service = {}) {
-  if (process.env.PEST_REPORT_V2 !== 'true') return '';
   const line = service.service_line || detectServiceLine(service.service_type);
   if (line !== 'pest') return '';
+  // '-ton1' rides EVERY pest-line key while trace-or-nothing is on: the
+  // suppression changes what a pest PDF renders (the schematic fallback),
+  // so cached documents re-render once on next view. Appended (not
+  // switched) so the gates' states all key distinctly — and computed
+  // INDEPENDENTLY of PEST_REPORT_V2 (codex P1): the schematic suppression
+  // applies to every pest PDF, V2 dashboard or not.
+  const tonSuffix = pestTraceOrNothingGateOn() ? '-ton1' : '';
+  if (process.env.PEST_REPORT_V2 !== 'true') return tonSuffix;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
@@ -323,7 +350,7 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return '-roachtyped2';
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}`;
   } catch { /* fall through to the line suffix */ }
   // 'c' = the trust-fix composition (codex P2 #3043): the customer-concern
   // card, softened no-activity copy, facts-only weather, and property-gated
@@ -332,13 +359,14 @@ function pestReportV2PdfSignature(service = {}) {
   // ('b' was the typed-activity composition, owner ruling 2026-07-14.)
   // Bump this suffix whenever the pest-line report COMPOSITION changes —
   // each pest PDF re-renders once on next view.
-  return '-pestv2c';
+  return `-pestv2c${tonSuffix}`;
 }
 
 module.exports = {
   buildPestReportV2,
   buildCustomerConcernCard,
   pestReportV2PdfSignature,
+  pestTraceOrNothingGateOn,
   isCockroachTypedReportType,
   // exported for tests
   stripZoneLetter,

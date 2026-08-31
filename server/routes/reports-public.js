@@ -2161,7 +2161,10 @@ router.get('/:token/map.svg', async (req, res, next) => {
     // 2026-08-30) — the standalone map endpoint must not keep serving what
     // the live page and PDF no longer render (codex P2 r6). Same scoping
     // as the PDF: only lines whose reservice block composed (rs2-keyed).
-    if (reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport) {
+    // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31) widens the verdict to
+    // the whole pest line ('-ton1'-keyed).
+    if ((reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport)
+      || data.pestTraceOrNothing === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
     res.type('image/svg+xml');

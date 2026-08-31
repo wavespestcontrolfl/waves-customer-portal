@@ -1871,6 +1871,16 @@ const gates = {
   // nothing fills, parks, or renders. Kill switch: unset the var.
   callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
 
+  // "Traced spray map or nothing" across the whole pest line (owner
+  // 2026-08-31, generalizing the #3631 callback rule): with the gate on, a
+  // pest report with no technician trace renders NO generated schematic —
+  // web rings diagram, PDF drawn map, and /map.svg all suppress; the
+  // '-ton1' PDF key suffix re-renders cached pest documents once.
+  // Consumers re-read the env at call time via
+  // pestTraceOrNothingGateOn() (pest-report-v2.js → gateEnvValue), so a
+  // flip needs no redeploy. Kill switch: unset GATE_PEST_TRACE_OR_NOTHING.
+  pestTraceOrNothing: gateEnvValue('GATE_PEST_TRACE_OR_NOTHING'),
+
   // Re-service (callback) report copy (2026-08-30): the customer report for
   // a callback visit keys off `service_records.is_callback` instead of the
   // editable display name, drops below the honest V2 status branches, splits
