@@ -74,6 +74,31 @@ describe('closeoutIssuesForVisit', () => {
     const stuck = { ...base({ completion: fact('failed', 'completed_visit_without_record') }), requirements: { unevaluated: ['requiresCustomerSignature'] } };
     expect(closeoutIssuesForVisit(stuck).map((i) => i.type)).toEqual([CLOSEOUT_ALERT_TYPES.completion]);
   });
+  test('canonical contradictions map to closeout_contradiction issues with per-code identity (GH codex r4)', () => {
+    const status = {
+      ...base(),
+      contradictions: [
+        { code: 'invoice_on_covered_visit', detail: 'x' },
+        { code: 'some_future_code', detail: 'y' },
+      ],
+    };
+    const issues = closeoutIssuesForVisit(status);
+    expect(issues).toEqual([
+      expect.objectContaining({
+        type: 'closeout_contradiction',
+        fact: 'contradictions',
+        reason: 'invoice_on_covered_visit',
+        identity: 'closeout_contradiction:invoice_on_covered_visit',
+        summary: expect.stringMatching(/covered/),
+      }),
+      expect.objectContaining({
+        reason: 'some_future_code',
+        identity: 'closeout_contradiction:some_future_code',
+        summary: expect.stringMatching(/some future code/),
+      }),
+    ]);
+    expect(closeoutIssuesForVisit({ ...base(), contradictions: [] })).toEqual([]);
+  });
 });
 
 describe('loadCloseoutStatuses', () => {

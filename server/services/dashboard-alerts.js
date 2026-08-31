@@ -58,7 +58,7 @@ function heldCloseoutAlert({ count, label }) {
     count: Math.max(Number(count || 0), 1),
     // Deliberately NO members: a held snapshot knows a floor, not the set.
     label,
-    href: `/admin/dispatch?date=${etDateString()}`,
+    href: `/admin/dispatch?tab=schedule&date=${etDateString()}`,
     heldThroughOutage: true,
   };
 }
@@ -467,7 +467,9 @@ async function computeDashboardAlertsUncached() {
             gapIds.push(row.id); issueCount += merged.length; gapIdentities.push(...merged);
           }
         } else if (issues.length) {
-          const identities = issues.map((i) => `${row.id}:${i.type}`);
+          // identity (contradictions) carries the code so a NEW
+          // contradiction on a dismissed visit reads as new work.
+          const identities = issues.map((i) => `${row.id}:${i.identity || i.type}`);
           gapIds.push(row.id); issueCount += issues.length; gapIdentities.push(...identities);
           carry.set(row.id, { count: issues.length, identities });
         } else {
@@ -519,10 +521,11 @@ async function computeDashboardAlertsUncached() {
           // issue (report published → delivery fails), not just on count.
           members: queueMembers(gapIdentities),
           label: `${gapIds.length} completed visit${gapIds.length === 1 ? '' : 's'} today not closed out (${issueCount} open item${issueCount === 1 ? '' : 's'})`,
-          // Day view lists today's visits (per-visit closeout facts: IB
-          // get_closeout_status / list_open_closeouts; a JobDrawer panel is
-          // a follow-up UI PR).
-          href: `/admin/dispatch?date=${today}`,
+          // Schedule tab's day view lists today's visits (GH codex r4 P2:
+          // without tab=schedule the page defaults to the Board tab, which
+          // has no closeout facts). Per-visit facts: IB get_closeout_status
+          // / list_open_closeouts; a JobDrawer panel is a follow-up UI PR.
+          href: `/admin/dispatch?tab=schedule&date=${today}`,
         });
       }
     }

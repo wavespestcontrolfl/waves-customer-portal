@@ -44,6 +44,11 @@ const CLOSEOUT_ALERT_TYPES = Object.freeze({
   // auto-clear — the operator verifies on paper and dismisses it (the
   // admin_alerts lifecycle persists the dismissal per visit:type identity).
   signature: 'customer_signature_unverified',
+  // Not a fact either: canonical contradictions (GH codex r4 P2) —
+  // summarizeCloseout keeps closedOut false on them even when every mapped
+  // fact reads done/not_required. Issues carry an `identity` including the
+  // code so a NEW contradiction on an already-dismissed visit re-surfaces.
+  contradiction: 'closeout_contradiction',
 });
 const CLOSEOUT_ALERT_LABELS = Object.freeze({
   completion_not_committed: 'Completion not committed',
@@ -52,6 +57,16 @@ const CLOSEOUT_ALERT_LABELS = Object.freeze({
   missing_required_material_log: 'Missing required material log',
   missing_required_photos: 'Missing required photos',
   customer_signature_unverified: 'Customer signature unverified',
+  closeout_contradiction: 'Closeout records contradict',
+});
+// Operator copy for the canonical contradiction codes closeout-status
+// emits today; unknown future codes fall back to a humanized code so a new
+// contradiction never maps to silence.
+const CONTRADICTION_SUMMARIES = Object.freeze({
+  invoice_on_covered_visit: 'An invoice exists on a visit the billing lane predicts as covered — verify the charge before it bills.',
+  invoice_on_non_performed_visit: 'An invoice exists but the visit outcome says nothing was performed — verify before it bills.',
+  applications_on_non_performed_visit: 'Application rows were logged but the visit outcome says nothing was performed.',
+  record_without_completed_visit: 'A completion record exists but the visit is not marked completed.',
 });
 // The five closeout FACTS the mapper reads (signature is a requirement, not
 // a fact — it has no state and never counts toward readability).
@@ -196,6 +211,21 @@ function closeoutIssuesForVisit(status) {
       fact: 'requirements',
       reason: 'requires_customer_signature_unevaluated',
       summary: 'This service requires a customer signature, which the portal cannot verify — confirm it was captured, then dismiss.',
+    });
+  }
+  // Canonical contradictions (GH codex r4 P2): every code is an operator
+  // issue — records disagree, so the visit must not present as clean. One
+  // issue per code; `identity` distinguishes codes inside the shared type so
+  // dashboard dismissal membership re-surfaces on a NEW contradiction.
+  for (const c of (status.contradictions || [])) {
+    if (!c?.code) continue;
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.contradiction,
+      fact: 'contradictions',
+      reason: c.code,
+      identity: `${CLOSEOUT_ALERT_TYPES.contradiction}:${c.code}`,
+      summary: CONTRADICTION_SUMMARIES[c.code]
+        || `Closeout records contradict each other (${String(c.code).replace(/_/g, ' ')}).`,
     });
   }
   return issues;

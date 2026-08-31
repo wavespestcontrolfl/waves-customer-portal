@@ -320,7 +320,7 @@ describe('Action Inbox generators', () => {
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'closeout_gaps_today');
     // Members are visit:issue identities so a new issue on a listed visit re-surfaces a dismissal (GH r2).
-    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: expect.stringMatching(/^\/admin\/dispatch\?date=\d{4}-\d{2}-\d{2}$/), members: ['svc-b:missing_required_photos', 'svc-b:missing_required_service_report'] });
+    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: expect.stringMatching(/^\/admin\/dispatch\?tab=schedule&date=\d{4}-\d{2}-\d{2}$/), members: ['svc-b:missing_required_photos', 'svc-b:missing_required_service_report'] });
     expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
     expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d']);
   });

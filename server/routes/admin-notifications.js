@@ -134,6 +134,29 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
       ? a.members.join(',')
       : null,
   }));
+  // A held/memberless snapshot (closeout outage form) must not blind the
+  // membership-aware re-show (GH codex r4 P2): the newest dismissal row wins
+  // in admin-unread, so recording NULL members here would replace an earlier
+  // membership-aware dismissal and suppress genuinely NEW work at
+  // same-or-lower count for the whole window. Carry the latest known
+  // membership forward instead; with no prior membership row, the
+  // documented count-only semantics apply as before.
+  const memberlessIds = dismissalRows.filter((r) => r.dismissed_members === null).map((r) => r.alert_id);
+  if (memberlessIds.length) {
+    try {
+      const prior = await db('dashboard_alert_dismissed')
+        .where({ admin_user_id: adminUserId })
+        .whereIn('alert_id', memberlessIds)
+        .whereNotNull('dismissed_members')
+        .orderBy('dismissed_at', 'desc')
+        .select('alert_id', 'dismissed_members');
+      const latestByAlert = new Map();
+      for (const p of prior) if (!latestByAlert.has(p.alert_id)) latestByAlert.set(p.alert_id, p.dismissed_members);
+      for (const r of dismissalRows) {
+        if (r.dismissed_members === null && latestByAlert.has(r.alert_id)) r.dismissed_members = latestByAlert.get(r.alert_id);
+      }
+    } catch { /* pre-migration tolerance: dismissed_members absent → keep null */ }
+  }
   try {
     await db('dashboard_alert_dismissed').insert(dismissalRows);
   } catch (err) {
