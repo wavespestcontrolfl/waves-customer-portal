@@ -416,6 +416,23 @@ describe('Action Inbox generators', () => {
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today').members).toHaveLength(2);
   });
 
+  test('closeout_gaps_today: an unreadable alert-state row with something known open holds a snapshot, not absence (codex r13)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    const gap = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' } } };
+    primeDb({ scheduled_services: [{ id: 'svc-a' }, { id: 'svc-b' }], dashboard_alert_state: () => { throw new Error('state table unavailable'); } });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', gap], ['svc-b', null]]));
+    const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(item).toMatchObject({ count: 1, heldThroughOutage: true });
+    expect(item.members).toBeUndefined();
+    // Nothing known open + unreadable state row → still nothing invented.
+    __private.resetCloseoutCarry();
+    primeDb({ scheduled_services: [{ id: 'svc-b' }], dashboard_alert_state: () => { throw new Error('state table unavailable'); } });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-b', null]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+  });
+
   test('closeout_sweep_incomplete: a day over the cap surfaces the unchecked count instead of a silent false-clean (codex r7)', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     const { __private } = require('../services/dashboard-alerts');

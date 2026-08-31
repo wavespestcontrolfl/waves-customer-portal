@@ -38,12 +38,17 @@ function closeoutCarryFor(date) {
 }
 // Same-day persisted closeout alert (the cron GCs this row only on a genuine
 // absence) — the shared, restart-proof floor a held snapshot stands on.
+// Returns { row, error }: a failed read is NOT an absent row — callers hold a
+// snapshot on error rather than letting the cron clear an unverified alert.
 async function persistedCloseoutAlertForDay(today) {
-  const row = await db('dashboard_alert_state')
-    .where({ alert_id: 'closeout_gaps_today' })
-    .first('current_count', 'last_label', 'last_seen_at')
-    .catch(() => null);
-  return row && row.last_seen_at && etDateString(new Date(row.last_seen_at)) === today ? row : null;
+  try {
+    const row = await db('dashboard_alert_state')
+      .where({ alert_id: 'closeout_gaps_today' })
+      .first('current_count', 'last_label', 'last_seen_at');
+    return { row: row && row.last_seen_at && etDateString(new Date(row.last_seen_at)) === today ? row : null, error: null };
+  } catch (err) {
+    return { row: null, error: err };
+  }
 }
 function heldCloseoutAlert({ count, label }) {
   return {
@@ -465,14 +470,17 @@ async function computeDashboardAlertsUncached() {
       // hold count = max(readable, persisted) and omit members — an
       // incomplete read knows a floor, not the set — so an outage can neither
       // clear the alert nor make its recovery read as an escalation.
-      const held = unreadableIds.length ? await persistedCloseoutAlertForDay(today) : null;
-      if (held) {
-        const count = Math.max(gapIds.length, Number(held.current_count || 0), 1);
+      const persisted = unreadableIds.length ? await persistedCloseoutAlertForDay(today) : { row: null, error: null };
+      const held = persisted.row;
+      if (held || (persisted.error && (gapIds.length || carry.size))) {
+        // Active row, OR the row itself was unreadable while something is
+        // known open — hold a floor; never let an unverifiable read clear it.
+        const count = Math.max(gapIds.length, Number(held?.current_count || 0), 1);
         alerts.push(heldCloseoutAlert({
           count,
           label: gapIds.length
             ? `${count} completed visit${count === 1 ? '' : 's'} today not closed out (closeout lookup partially unavailable)`
-            : (held.last_label || `${count} completed visit(s) today not closed out — closeout lookup temporarily unavailable`),
+            : (held?.last_label || `${count} completed visit(s) today not closed out — closeout lookup temporarily unavailable`),
         }));
       } else if (gapIds.length) {
         alerts.push({
@@ -495,7 +503,7 @@ async function computeDashboardAlertsUncached() {
     // as it last stood (same-day persisted row, else the in-process carry).
     try {
       if (!alerts.some((a) => a.id === 'closeout_gaps_today')) {
-        const held = await persistedCloseoutAlertForDay(today);
+        const { row: held } = await persistedCloseoutAlertForDay(today);
         const carried = closeoutCarryFor(today).size;
         if (held || carried) {
           alerts.push(heldCloseoutAlert({
