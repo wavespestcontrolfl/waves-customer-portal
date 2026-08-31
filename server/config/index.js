@@ -8,10 +8,9 @@ module.exports = {
 
   db: {
     connectionString: process.env.DATABASE_URL,
-    pool: {
-      min: parseInt(process.env.DB_POOL_MIN) || 2,
-      max: parseInt(process.env.DB_POOL_MAX) || 10,
-    },
+    // Pool sizing lives in knexfile.js (which models/db.js consumes) — a
+    // mirror here was dead config that made DB_POOL_MAX look wired when it
+    // wasn't.
   },
 
   jwt: {

@@ -23,8 +23,12 @@ const logger = require('../services/logger');
  *     terminal-cleanup comment in scheduler.js anticipated).
  *
  * Cost: one pool connection (pool max 10/20) is checked out per running
- * wrapped job. Wrapped jobs are minutes-long at worst and mostly seconds,
- * and their schedules are spread, so concurrent holders stay low.
+ * wrapped job — and it must stay exactly one. The job-health writes run on
+ * that same held connection: when they went through the shared pool as a
+ * second checkout, a top-of-hour herd of wrapped jobs could pin every pool
+ * connection and then all block on the job_health acquire — a self-deadlock
+ * that starved the web routes into KnexTimeouts (Sentry NODE-EXPRESS-21/22,
+ * card-expiry-warnings dead for weeks).
  *
  * NOT for jobs that already claim work atomically (FOR UPDATE SKIP LOCKED
  * queues, conditional-UPDATE claims) — those are fleet-safe without it.
@@ -46,23 +50,66 @@ function sanitizeJobError(message) {
 // errors) can NEVER break or delay the job itself. Skipped ticks
 // (lease_held / no_connection) are normal fleet behavior and are not
 // recorded.
-async function recordJobStart(jobName) {
+//
+// `conn` (optional): a raw pg connection the caller already holds. When
+// present the write runs on it instead of checking out a second pool
+// connection — required inside runExclusive, where a pool acquire while the
+// lock connection is pinned recreates the herd self-deadlock described in
+// the header. Standalone callers (scheduler.js skip records) pass nothing
+// and use the pool as before.
+async function recordJobStart(jobName, conn) {
   try {
+    const now = new Date();
+    if (conn) {
+      await conn.query({
+        text: `INSERT INTO job_health (job_name, last_started_at, last_status, updated_at)
+               VALUES ($1, $2, 'running', $2)
+               ON CONFLICT (job_name) DO UPDATE SET
+                 last_started_at = EXCLUDED.last_started_at,
+                 last_status = EXCLUDED.last_status,
+                 updated_at = EXCLUDED.updated_at`,
+        values: [jobName, now],
+      });
+      return;
+    }
     await db('job_health')
-      .insert({ job_name: jobName, last_started_at: new Date(), last_status: 'running', updated_at: new Date() })
+      .insert({ job_name: jobName, last_started_at: now, last_status: 'running', updated_at: now })
       .onConflict('job_name')
-      .merge({ last_started_at: new Date(), last_status: 'running', updated_at: new Date() });
+      .merge({ last_started_at: now, last_status: 'running', updated_at: now });
   } catch (err) {
     logger.warn(`[cron-lock] ${jobName}: job_health start record failed (${err.message})`);
   }
 }
 
-async function recordJobEnd(jobName, startedAtMs, error) {
+async function recordJobEnd(jobName, startedAtMs, error, conn) {
   try {
     const finishedAt = new Date();
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    if (conn) {
+      if (error) {
+        await conn.query({
+          text: `UPDATE job_health SET
+                   last_finished_at = $2, last_duration_ms = $3, updated_at = $2,
+                   last_status = 'failed', last_error = $4,
+                   consecutive_failures = consecutive_failures + 1
+                 WHERE job_name = $1`,
+          values: [jobName, finishedAt, durationMs, sanitizeJobError(error.message || error)],
+        });
+      } else {
+        await conn.query({
+          text: `UPDATE job_health SET
+                   last_finished_at = $2, last_duration_ms = $3, updated_at = $2,
+                   last_status = 'success', last_success_at = $2, last_error = NULL,
+                   consecutive_failures = 0
+                 WHERE job_name = $1`,
+          values: [jobName, finishedAt, durationMs],
+        });
+      }
+      return;
+    }
     const patch = {
       last_finished_at: finishedAt,
-      last_duration_ms: Math.max(0, Date.now() - startedAtMs),
+      last_duration_ms: durationMs,
       updated_at: finishedAt,
     };
     if (error) {
@@ -110,15 +157,15 @@ async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
       return { skipped: true, reason: 'lease_held' };
     }
     const startedAtMs = Date.now();
-    if (recordHealth) await recordJobStart(jobName);
+    if (recordHealth) await recordJobStart(jobName, conn);
     try {
       const result = await fn();
-      if (recordHealth) await recordJobEnd(jobName, startedAtMs, null);
+      if (recordHealth) await recordJobEnd(jobName, startedAtMs, null, conn);
       return result;
     } catch (err) {
       // Record the failure, then preserve the existing contract: the
       // error still propagates to the job's own handler.
-      if (recordHealth) await recordJobEnd(jobName, startedAtMs, err);
+      if (recordHealth) await recordJobEnd(jobName, startedAtMs, err, conn);
       throw err;
     }
   } finally {

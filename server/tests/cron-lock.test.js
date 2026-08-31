@@ -24,7 +24,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const db = require('../models/db');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
 
 function mockConnection(lockGranted) {
   return {
@@ -36,6 +36,9 @@ function mockConnection(lockGranted) {
     }),
   };
 }
+
+const healthCalls = (conn) =>
+  conn.query.mock.calls.map(([arg]) => arg).filter((arg) => arg.text.includes('job_health'));
 
 describe('cron-lock runExclusive', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -116,26 +119,41 @@ describe('cron-lock runExclusive', () => {
 describe('cron-lock job-health recorder', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('a successful run records start (upsert) and success end', async () => {
+  test('a successful run records start (upsert) and success end ON THE HELD CONNECTION', async () => {
     const conn = mockConnection(true);
     db.client.acquireConnection.mockResolvedValue(conn);
 
     await runExclusive('lawn-pricing-sweep', async () => 'ok');
 
-    expect(db).toHaveBeenCalledWith('job_health');
+    const writes = healthCalls(conn);
     // Start: upsert with running status
-    expect(db.__builder.insert).toHaveBeenCalledWith(expect.objectContaining({
-      job_name: 'lawn-pricing-sweep', last_status: 'running',
-    }));
-    expect(db.__builder.onConflict).toHaveBeenCalledWith('job_name');
+    expect(writes[0].text).toContain('INSERT INTO job_health');
+    expect(writes[0].text).toContain('ON CONFLICT (job_name)');
+    expect(writes[0].text).toContain("'running'");
+    expect(writes[0].values).toEqual(['lawn-pricing-sweep', expect.any(Date)]);
     // End: success clears the failure streak and stamps last_success_at
-    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
-      last_status: 'success',
-      consecutive_failures: 0,
-      last_error: null,
-      last_success_at: expect.any(Date),
-      last_duration_ms: expect.any(Number),
-    }));
+    expect(writes[1].text).toContain("last_status = 'success'");
+    expect(writes[1].text).toContain('consecutive_failures = 0');
+    expect(writes[1].text).toContain('last_error = NULL');
+    expect(writes[1].values).toEqual(['lawn-pricing-sweep', expect.any(Date), expect.any(Number)]);
+  });
+
+  test('NEVER acquires a second pool connection while the lock connection is held', async () => {
+    // The regression this file exists to prevent: job_health writes through
+    // the shared pool while the advisory-lock connection is pinned let a
+    // top-of-hour cron herd drain the pool and self-deadlock (prod outage
+    // 08-30: KnexTimeout on /api/pay and /api/auth/refresh).
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    await runExclusive('herd-job', async () => 'ok');
+    await expect(
+      runExclusive('herd-job', async () => { throw new Error('boom'); }),
+    ).rejects.toThrow('boom');
+
+    expect(db).not.toHaveBeenCalledWith('job_health');
+    expect(db.client.acquireConnection).toHaveBeenCalledTimes(2); // one per run
+    expect(healthCalls(conn).length).toBe(4); // both runs recorded on conn
   });
 
   test('a failing run records the error, increments the streak, and still throws', async () => {
@@ -146,11 +164,9 @@ describe('cron-lock job-health recorder', () => {
       runExclusive('ga4-sync', async () => { throw new Error('quota exceeded'); }),
     ).rejects.toThrow('quota exceeded');
 
-    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
-      last_status: 'failed',
-      last_error: 'quota exceeded',
-      consecutive_failures: expect.objectContaining({ __raw: 'consecutive_failures + 1' }),
-    }));
+    const fail = healthCalls(conn).find((c) => c.text.includes("last_status = 'failed'"));
+    expect(fail.text).toContain('consecutive_failures = consecutive_failures + 1');
+    expect(fail.values).toEqual(['ga4-sync', expect.any(Date), expect.any(Number), 'quota exceeded']);
   });
 
   test('recorded errors mask phone-number-shaped digit runs (Twilio payload echo)', async () => {
@@ -163,9 +179,10 @@ describe('cron-lock job-health recorder', () => {
       }),
     ).rejects.toThrow();
 
-    const patch = db.__builder.update.mock.calls.find(([arg]) => arg.last_status === 'failed')[0];
-    expect(patch.last_error).not.toContain('941');
-    expect(patch.last_error).toContain('[redacted-number]');
+    const fail = healthCalls(conn).find((c) => c.text.includes("last_status = 'failed'"));
+    const recordedError = fail.values[3];
+    expect(recordedError).not.toContain('941');
+    expect(recordedError).toContain('[redacted-number]');
   });
 
   test('recordHealth: false records nothing for dynamic per-entity locks', async () => {
@@ -174,6 +191,7 @@ describe('cron-lock job-health recorder', () => {
 
     const result = await runExclusive('review-send:cust-123', async () => 'sent', { recordHealth: false });
     expect(result).toBe('sent');
+    expect(healthCalls(conn)).toEqual([]);
     expect(db).not.toHaveBeenCalledWith('job_health');
   });
 
@@ -182,19 +200,39 @@ describe('cron-lock job-health recorder', () => {
     db.client.acquireConnection.mockResolvedValue(conn);
 
     await runExclusive('test-job', jest.fn());
+    expect(healthCalls(conn)).toEqual([]);
     expect(db).not.toHaveBeenCalledWith('job_health');
   });
 
   test('recorder failure never breaks the job (pre-migration safety)', async () => {
     const conn = mockConnection(true);
     db.client.acquireConnection.mockResolvedValue(conn);
-    db.__builder.merge.mockRejectedValueOnce(new Error('relation "job_health" does not exist'));
-    db.__builder.update.mockRejectedValueOnce(new Error('relation "job_health" does not exist'));
+    conn.query.mockImplementation(async ({ text }) => {
+      if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+      if (text.includes('job_health')) throw new Error('relation "job_health" does not exist');
+      return { rows: [] };
+    });
 
     const body = jest.fn().mockResolvedValue({ sent: 2 });
     const result = await runExclusive('test-job', body);
 
     expect(body).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ sent: 2 });
+  });
+
+  test('standalone recorders (no held connection) still write through the pool', async () => {
+    // scheduler.js records skipped-tick failures OUTSIDE runExclusive — no
+    // pinned connection exists there, so the pool path is correct.
+    await recordJobStart('reschedule-intent-watcher');
+    expect(db).toHaveBeenCalledWith('job_health');
+    expect(db.__builder.insert).toHaveBeenCalledWith(expect.objectContaining({
+      job_name: 'reschedule-intent-watcher', last_status: 'running',
+    }));
+
+    await recordJobEnd('reschedule-intent-watcher', Date.now(), new Error('tick skipped: no_connection'));
+    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
+      last_status: 'failed',
+      last_error: 'tick skipped: no_connection',
+    }));
   });
 });

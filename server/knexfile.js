@@ -33,10 +33,19 @@ if (!hasUsableDatabaseUrl(process.env.DATABASE_URL)) {
   }
 }
 
+// DB_POOL_MIN / DB_POOL_MAX must be read HERE: models/db.js builds knex
+// straight from this file, so a pool knob anywhere else is dead config
+// (config/index.js once mirrored these envs into config.db.pool, which
+// nothing read — setting DB_POOL_MAX on Railway silently did nothing).
+function poolSize(envName, fallback) {
+  const n = parseInt(process.env[envName], 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 const development = {
   client: 'pg',
   connection: process.env.DATABASE_URL,
-  pool: { min: 2, max: 10 },
+  pool: { min: poolSize('DB_POOL_MIN', 2), max: poolSize('DB_POOL_MAX', 10) },
   migrations: {
     directory: './models/migrations',
     tableName: 'knex_migrations',
@@ -60,7 +69,7 @@ module.exports = {
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
     },
-    pool: { min: 2, max: 20 },
+    pool: { min: poolSize('DB_POOL_MIN', 2), max: poolSize('DB_POOL_MAX', 20) },
     migrations: {
       directory: './models/migrations',
       tableName: 'knex_migrations',
