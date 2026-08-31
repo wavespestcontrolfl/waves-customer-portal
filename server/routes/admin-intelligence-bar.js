@@ -53,6 +53,7 @@ const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligen
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
+const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
@@ -89,6 +90,7 @@ const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
+const CLOSEOUT_TOOL_NAMES = new Set(CLOSEOUT_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
@@ -1297,10 +1299,10 @@ function getToolsForContext(context, isAdmin = false) {
   // time too, so a forced call fails closed with the rest of threads).
   const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS, ...infra];
+    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...infra];
+    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
     return [...base, ...SEO_QUERY_TOOLS, ...infra];
@@ -1372,6 +1374,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (ESTIMATE_TOOL_NAMES.has(toolName)) {
     return executeEstimateTool(toolName, input, actionContext);
+  }
+  if (CLOSEOUT_TOOL_NAMES.has(toolName)) {
+    return executeCloseoutTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
