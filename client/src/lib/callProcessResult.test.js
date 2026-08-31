@@ -13,6 +13,10 @@ describe("describeProcessResult", () => {
     expect(v.didWork).toBe(false);
     expect(v.severity).toBe("blocked");
     expect(v.text).toMatch(/Nothing ran/);
+    // Names the control that is actually visible for a 'processing' row —
+    // both lists show Reprocess only once the row reads 'processed'.
+    expect(v.text).toMatch(/hit Process again/);
+    expect(v.text).not.toMatch(/Reprocess/);
   });
 
   it("an unrecognised skip fails closed as blocked", () => {

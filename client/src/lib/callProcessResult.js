@@ -36,7 +36,11 @@ const SETTLED_SKIP_COPY = {
 // Skips where NOTHING ran. Each one leaves the call exactly as it was, so
 // the operator has to know the button did not do what it looks like it did.
 const BLOCKED_SKIP_COPY = {
-  already_processing: 'Nothing ran — another pass still holds this call. Give it a few minutes, then hit Reprocess.',
+  // Names PROCESS, not Reprocess: the row is still 'processing', and both
+  // lists label the control by status — Reprocess appears only once a row
+  // reads 'processed'. Pointing at a button the operator cannot see is its
+  // own small lie.
+  already_processing: 'Nothing ran — another pass still holds this call. Give it about ten minutes, then hit Process again.',
   recording_not_ready: "Nothing ran — the recording hasn't landed from Twilio yet.",
   terminal_write_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
   transcription_rejected_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
@@ -79,5 +83,3 @@ export function describeProcessResult(res) {
     text: `Processed${parts.length ? ` — ${parts.join(' · ')}` : ''}`,
   };
 }
-
-export const _test = { SETTLED_SKIP_COPY, BLOCKED_SKIP_COPY };
