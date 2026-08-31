@@ -567,7 +567,7 @@ function RowActionsMenu({ items, label = "More actions" }) {
       {open &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center sm:p-4"
+            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
             style={{ fontFamily: ROBOTO }}
@@ -692,7 +692,7 @@ function FilterSheetV2({ value, onChange, options, counts }) {
       {open &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center sm:p-4"
+            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
             aria-label="Filter estimates"
@@ -2993,7 +2993,7 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
       {open &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center sm:p-4"
+            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
             aria-label={title}
