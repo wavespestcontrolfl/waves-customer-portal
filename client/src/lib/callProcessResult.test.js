@@ -45,6 +45,14 @@ describe("describeProcessResult", () => {
     expect(v.text).toMatch(/held for review/);
   });
 
+  it("a rejected implausible transcript is settled, not pending", () => {
+    // The server stamps a terminal rejection and cleans up prior artifacts;
+    // amber here would falsely suggest a Reprocess is owed.
+    const v = describeProcessResult({ success: true, skipped: true, reason: "transcription_rejected_implausible" });
+    expect(v.didWork).toBe(true);
+    expect(v.severity).toBe("ok");
+  });
+
   it("a hard failure is failed, not blocked", () => {
     const v = describeProcessResult({ success: false, error: "openai timeout" });
     expect(v.severity).toBe("failed");

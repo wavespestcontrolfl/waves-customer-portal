@@ -26,6 +26,11 @@ const SETTLED_SKIP_COPY = {
   // review. Calling that "nothing was saved" invites a pointless reprocess.
   v2_canonical_write_blocked:
     'Processed and held for review — no customer, lead or appointment was created from it.',
+  // Also settled, not pending: the server stamps a terminal rejection,
+  // dismisses stale triage cards and retires artifacts a prior hallucinated
+  // extraction left behind. Nothing is owed and a Reprocess would be wasted.
+  transcription_rejected_implausible:
+    "Rejected — the transcript didn't plausibly belong to this call, so it was discarded.",
 };
 
 // Skips where NOTHING ran. Each one leaves the call exactly as it was, so
@@ -35,7 +40,6 @@ const BLOCKED_SKIP_COPY = {
   recording_not_ready: "Nothing ran — the recording hasn't landed from Twilio yet.",
   terminal_write_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
   transcription_rejected_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
-  transcription_rejected_implausible: "Stopped — the transcript didn't plausibly belong to this call.",
   no_completed_recording: 'Nothing ran — Twilio has no completed recording for this call.',
 };
 
