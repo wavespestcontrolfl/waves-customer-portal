@@ -54,7 +54,7 @@ const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'cha
  * @returns {Promise<{cancelledCount:number, recurrenceStopped:number,
  *                    churned:boolean, ok:boolean, errors:string[]}>}
  */
-async function raiseTermiteRetrievalTask(customerId, requestId = null) {
+async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
   // program filter: the table also holds rodent/trapping stations, which are
   // always Waves-owned and are NOT bait-station rentals.
   const stations = await db('termite_stations')
@@ -71,12 +71,21 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null) {
   }
   const NotificationService = require('./notification-service');
   const count = rented.length;
+  // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the
+  // calendar through the coverage boundary — pulling the stations now would
+  // make those visits undeliverable, so the task is DATED, never "pull now".
+  const timing = retrieveAfter
+    ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.`
+    : ' Schedule the retrieval visit.';
   const result = await NotificationService.notifyAdmin(
     'service',
-    'Termite stations to retrieve after cancellation',
+    retrieveAfter
+      ? `Termite stations to retrieve after paid coverage ends ${retrieveAfter}`
+      : 'Termite stations to retrieve after cancellation',
     (count
-      ? `${count} Waves-owned bait station${count === 1 ? '' : 's'} on this property need to be pulled — schedule the retrieval visit.`
-      : 'This account is flagged as a bait-station rental — confirm the stations on site and schedule the retrieval visit.')
+      ? `${count} Waves-owned bait station${count === 1 ? '' : 's'} on this property need to be pulled.`
+      : 'This account is flagged as a bait-station rental — confirm the stations on site.')
+      + timing
       + ' No charge to the customer.',
     {
       icon: '🪵',
@@ -89,7 +98,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null) {
       // the same request stay idempotent, while a restored customer who later
       // cancels another rental program gets a fresh task.
       dedupeKey: `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
-      metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental },
+      metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental, ...(retrieveAfter ? { retrieveAfter } : {}) },
     }
   );
   // notifyAdmin resolves null (never throws) when the deduped insert fails —
@@ -345,6 +354,11 @@ async function processCancellationRequest({
   const sweepAfter = keepThrough && /^\d{4}-\d{2}-\d{2}$/.test(String(keepThrough)) && String(keepThrough) >= today
     ? String(keepThrough)
     : null;
+  // Coverage identity for the keep-through exemption (lazy: the renewals
+  // module is heavy and only a keep-through sweep needs the constant).
+  const keepThroughPrepaidMethod = sweepAfter
+    ? require('./annual-prepay-renewals').ANNUAL_PREPAY_PREPAID_METHOD
+    : null;
   const lateFeeWaived = waiveLateFee === true;
   const scopedFamilies = Array.isArray(families) ? families.filter(Boolean) : [];
   const scoped = scopedFamilies.length > 0;
@@ -531,7 +545,7 @@ async function processCancellationRequest({
 
   if (churned || (scoped && scopedFamilies.includes('termite_bait'))) {
     try {
-      await raiseTermiteRetrievalTask(customerId, requestId);
+      await raiseTermiteRetrievalTask(customerId, requestId, { retrieveAfter: sweepAfter });
     } catch (err) {
       errors.push('termite_retrieval_task');
       logger.error(`[cancellation-processor] termite station retrieval task failed for ${customerId}: ${err.message}`);
@@ -624,10 +638,24 @@ async function processCancellationRequest({
         // rows keep their ORIGINAL — often past — date until SmartRebooker
         // actions them back onto the calendar, so an open rebook intent is
         // pulled regardless of date (else a churned customer could be rebooked).
-        // keepThrough (C3, end of paid coverage): dated visits on/before it
-        // stay — they are paid for; only what falls past the window is pulled.
-        if (sweepAfter) this.where('scheduled_date', '>', sweepAfter);
-        else this.where('scheduled_date', '>=', today);
+        // keepThrough (C3, end of paid coverage): ONLY rows the prepaid term
+        // covers (stamp or term id — the canonical coverage identity) ride
+        // out the paid window. A mixed account's uncovered rows (monthly
+        // lawn beside prepaid pest) are pulled NOW like any plain cancel:
+        // billing stops immediately, so uncovered work must never stay on
+        // the calendar deliverable for free.
+        if (sweepAfter) {
+          this.where(function keptOrPastWindow() {
+            this.where('scheduled_date', '>', sweepAfter)
+              .orWhere(function uncoveredUpcoming() {
+                this.where('scheduled_date', '>=', today)
+                  .whereNull('annual_prepay_term_id')
+                  .whereRaw('(prepaid_method IS DISTINCT FROM ?)', [keepThroughPrepaidMethod]);
+              });
+          });
+        } else {
+          this.where('scheduled_date', '>=', today);
+        }
         this.orWhere('status', 'rescheduled');
       })
       // Never touch a row whose customer-visible track layer says the work is

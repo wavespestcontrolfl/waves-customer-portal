@@ -154,19 +154,32 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, scope, w
     refundAmount: refund ? refund.amount : null,
     refundManual: refund ? refund.needsManualCalc : null,
     visitsPulled: impact ? (impact.visitsCancelled ?? null) : null,
+    // Stable visit identities: a reschedule, or one visit completing while
+    // another appears, keeps the count identical — the ids+dates don't.
+    pulledVisitKeys: impact && Array.isArray(impact.pulledVisitKeys) ? impact.pulledVisitKeys : null,
+    // Every displayed billing output the operator approves: tier and
+    // monthly before/after, and each remaining service's repriced rate (a
+    // plan-ledger edit changes these with the visit count unchanged).
+    tierBefore: impact ? (impact.tierBefore ?? null) : null,
+    tierAfter: impact ? (impact.tierAfter ?? null) : null,
+    monthlyBefore: impact ? (impact.accountMonthlyBefore ?? null) : null,
+    monthlyAfter: impact ? (impact.accountMonthlyAfter ?? null) : null,
+    remaining: impact && Array.isArray(impact.remaining)
+      ? impact.remaining.map((r) => `${r.key}:${r.monthlyBefore}:${r.monthlyAfter}`)
+      : null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(facts)).digest('hex');
 }
 
 /**
  * Ruling C-6: prepaid amount ÷ included visits × remaining visits. Included
- * visits = the term's coverage_visit_count; completed = covered visits
- * (annual-prepay stamp) already completed inside the term window. When the
+ * visits = the term's coverage_visit_count; completed = the term's coverage
+ * rows (coverageRowsForTerm — the canonical identity, which includes a
+ * pre-activation completion the stamp misses) already completed. When the
  * count is not on the term the refund is recorded as needing a manual
  * calculation — never invented.
  */
 async function computePrepayRefund(term) {
-  const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
   const prepaidAmount = term && term.prepay_amount != null ? Number(term.prepay_amount) : null;
   const includedVisits = Number.parseInt(term && term.coverage_visit_count, 10);
   const base = {
@@ -180,26 +193,55 @@ async function computePrepayRefund(term) {
   };
   if (!(base.prepaidAmount > 0)) return { ...base, reason: 'prepay_amount_missing' };
   if (!base.includedVisits) return { ...base, reason: 'coverage_visit_count_missing' };
-  let completed = [];
+  let completedRows = [];
   try {
-    completed = await db('scheduled_services')
-      .where({ customer_id: term.customer_id, status: 'completed', prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
-      .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
-      .select('id', 'annual_prepay_term_id');
+    // Canonical coverage identity (coverageRowsForTerm — the mechanism the
+    // renewal module itself counts with): a coverage visit that COMPLETED
+    // before the prepay invoice was paid is deliberately UNSTAMPED (its
+    // invoice is settled/credited at reconciliation), so the stamp-based
+    // count missed it and inflated remainingVisits — refunding a slice the
+    // customer already consumed.
+    const { coverageRowsForTerm } = require('./annual-prepay-renewals');
+    const rows = await coverageRowsForTerm({ ...term });
+    completedRows = (Array.isArray(rows) ? rows : []).filter((r) =>
+      String(r.status || '').toLowerCase() === 'completed'
+      // Overlapping terms: a visit committed to ANOTHER term never consumes
+      // THIS term's slices (rows predating the term-id stamp stay counted).
+      && (r.annual_prepay_term_id == null || String(r.annual_prepay_term_id) === String(term.id)));
   } catch (err) {
     logger.warn(`[admin-cancellation] covered-visit count failed for term ${term.id}: ${err.message}`);
     return { ...base, reason: 'covered_visit_count_failed' };
   }
-  // Overlapping terms: a covered visit stamped with ANOTHER term's id must
-  // not shrink THIS term's remaining count (rows predating the term-id stamp
-  // fall back to the window test above).
-  const ownRows = (Array.isArray(completed) ? completed : []).filter(
-    (r) => r.annual_prepay_term_id == null || String(r.annual_prepay_term_id) === String(term.id),
-  );
-  const completedVisits = ownRows.length;
+  const completedVisits = completedRows.length;
   const remainingVisits = Math.max(0, base.includedVisits - completedVisits);
   const amount = Math.round((base.prepaidAmount / base.includedVisits) * remainingVisits * 100) / 100;
   return { ...base, completedVisits, remainingVisits, amount, needsManualCalc: false };
+}
+
+// A scoped cancel must never pull PREPAID visits: resolveLiveTerm only
+// guards whole-account cancels, so a scope that selects the covered family
+// would cancel already-paid visits while the term stays live — no decision,
+// no refund. The term cannot be mapped to a family safely, but the covered
+// ROWS can (stamp / term id — the canonical coverage identity): refuse when
+// any live-covered upcoming visit falls inside the scope (fail closed).
+async function scopedCoverageConflict(customerId, scope) {
+  const { coveredTermsAsOf, ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
+  const terms = await coveredTermsAsOf(db, etDateString())
+    .where('t.customer_id', customerId)
+    .select('t.id');
+  if (!terms || !terms.length) return false;
+  const { familyOfServiceRow } = require('./cancellation-processor');
+  const { CANCELLABLE_STATUSES } = require('./cancellation-eligibility');
+  const rows = await db('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .whereIn('s.status', CANCELLABLE_STATUSES)
+    .where('s.scheduled_date', '>=', etDateString())
+    .where(function coveredIdentity() {
+      this.where('s.prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD).orWhereNotNull('s.annual_prepay_term_id');
+    })
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+  return (rows || []).some((r) => scope.includes(familyOfServiceRow(r)));
 }
 
 // Resolve scope against ownership. Returns { wholeAccount, scope, plan,
@@ -208,7 +250,12 @@ async function computePrepayRefund(term) {
 async function resolveScope(customerId, families) {
   if (!families.length) return { wholeAccount: true, scope: [], plan: null, scopeError: null };
   const plan = await planScopedWindDown(customerId, families);
-  if (plan.ok) return { wholeAccount: false, scope: plan.inScope, plan, scopeError: null };
+  if (plan.ok) {
+    if (await scopedCoverageConflict(customerId, plan.inScope)) {
+      return { wholeAccount: false, scope: plan.inScope, plan: null, scopeError: 'scoped_covers_prepaid' };
+    }
+    return { wholeAccount: false, scope: plan.inScope, plan, scopeError: null };
+  }
   if (plan.error === 'scope_is_whole_account') return { wholeAccount: true, scope: [], plan: null, scopeError: null };
   return { wholeAccount: false, scope: families, plan: null, scopeError: plan.error };
 }
@@ -216,6 +263,10 @@ async function resolveScope(customerId, families) {
 function scopeErrorToHttp(scopeError) {
   if (scopeError === 'scope_not_owned') {
     return new CancelPlanError(409, 'scope_not_owned', 'That service is not on the plan any more. Refresh and try again.');
+  }
+  if (scopeError === 'scoped_covers_prepaid') {
+    return new CancelPlanError(409, 'scoped_covers_prepaid',
+      'Upcoming visits in that selection are covered by the annual prepay term. Cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place.');
   }
   return new CancelPlanError(409, 'scoped_cancellation_unattributed',
     'The services that would stay cannot be priced from the ledger. Cancel the whole plan, or repair the plan-rate ledger first.');

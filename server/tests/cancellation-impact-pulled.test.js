@@ -24,6 +24,7 @@ jest.mock('../services/self-booking-plan-sync', () => ({ inferTierFromServiceCou
 jest.mock('../services/plan-rate-ledger', () => ({ loadComponents: jest.fn(async () => []) }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn(async () => ({ total: 0 })) }));
 jest.mock('../services/annual-prepay-renewals', () => ({
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
   coveredTermsAsOf: jest.fn(() => ({
     where: jest.fn(function where() { return this; }),
     first: jest.fn(async () => null),
@@ -66,15 +67,22 @@ test('live and complete track rows count as upcoming but are never "pulled"', as
   expect(impact.nextVisitCancelled).toBe('2099-02-01');
 });
 
-test('keep-through boundary keeps dated visits on or before it out of the pulled count', async () => {
+test('keep-through boundary keeps COVERED dated visits on or before it out of the pulled count; uncovered rows pull now', async () => {
   mockRows = [
-    { family: 'pest_control', status: 'confirmed', scheduled_date: '2099-01-05', track_state: 'scheduled' },
-    { family: 'pest_control', status: 'pending', scheduled_date: '2099-02-15', track_state: null },
-    { family: 'pest_control', status: 'pending', scheduled_date: '2099-03-01', track_state: null },
+    // Covered, inside the boundary — KEPT.
+    { id: 'v1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-01-05', track_state: 'scheduled', prepaid_method: 'annual_prepay_invoice' },
+    { id: 'v2', family: 'pest_control', status: 'pending', scheduled_date: '2099-02-15', track_state: null, annual_prepay_term_id: 'term-1' },
+    // Covered but past the boundary — pulled.
+    { id: 'v3', family: 'pest_control', status: 'pending', scheduled_date: '2099-03-01', track_state: null, prepaid_method: 'annual_prepay_invoice' },
+    // Mixed account: an UNCOVERED row inside the boundary is pulled now
+    // (billing stops immediately; no free work).
+    { id: 'v4', family: 'lawn_care', status: 'confirmed', scheduled_date: '2099-01-20', track_state: null },
     // Undated/rescheduled rows have no date to keep them — always pulled.
-    { family: 'pest_control', status: 'rescheduled', scheduled_date: '2001-01-01', track_state: null },
+    { id: 'v5', family: 'pest_control', status: 'rescheduled', scheduled_date: '2001-01-01', track_state: null },
   ];
   const impact = await buildCancellationImpact('cust-1', [], { after: '2099-02-15' });
-  expect(impact.visitsCancelled).toBe(2);
+  expect(impact.visitsCancelled).toBe(3);
   expect(impact.nextVisitCancelled).toBe('2001-01-01');
+  // Stable identities for the approved-facts fingerprint, sorted.
+  expect(impact.pulledVisitKeys).toEqual(['v3:2099-03-01', 'v4:2099-01-20', 'v5:2001-01-01'].sort());
 });

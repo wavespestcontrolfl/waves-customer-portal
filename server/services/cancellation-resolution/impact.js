@@ -43,21 +43,26 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     })
     .select('s.*', 'sv.service_key', 'sv.service_name');
 
+  // Coverage identity for the keep-through exemption — must mirror the
+  // processor's sweep exactly (lazy: the renewals module is heavy).
+  const prepaidMethod = after ? require('../annual-prepay-renewals').ANNUAL_PREPAY_PREPAID_METHOD : null;
   const perFamily = new Map();
   for (const row of rows) {
     const family = familyOfServiceRow(row);
     if (!family) continue;
-    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null });
+    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] });
     const slot = perFamily.get(family);
     const d = String(row.scheduled_date).slice(0, 10);
     const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (d >= today || row.status === 'rescheduled');
     if (upcoming) {
       slot.upcoming += 1;
       if (!slot.nextVisitDate || d < slot.nextVisitDate) slot.nextVisitDate = d;
-      // Keep-through boundary (C3 end-of-coverage): dated visits on or
-      // before it are KEPT by the processor's sweep floor, so they are not
-      // "pulled". An undated/rescheduled row has no date to keep it.
-      const kept = after && row.status !== 'rescheduled' && d <= String(after);
+      // Keep-through boundary (C3 end-of-coverage): only rows the prepaid
+      // term COVERS (stamp or term id — same identity as the processor's
+      // sweep) are KEPT through the boundary; a mixed account's uncovered
+      // rows are pulled now. An undated/rescheduled row has no date to keep.
+      const covered = (prepaidMethod != null && row.prepaid_method === prepaidMethod) || row.annual_prepay_term_id != null;
+      const kept = after && covered && row.status !== 'rescheduled' && d <= String(after);
       // Live/done on the track layer: the processor's sweep excludes rows
       // whose track_state is complete / en_route / on_property (null-safe —
       // legacy rows have no track_state) and parks them for manual review,
@@ -67,6 +72,9 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
       if (!kept && !trackExcluded) {
         slot.pulled += 1;
         if (!slot.nextPulledDate || d < slot.nextPulledDate) slot.nextPulledDate = d;
+        // Stable identity for the approved-facts fingerprint: a reschedule
+        // (same count, different date) must still read as changed facts.
+        slot.pulledKeys.push(`${row.id}:${d}`);
       }
     }
   }
@@ -132,6 +140,12 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     .map((f) => perFamily.get(f)?.nextPulledDate)
     .filter(Boolean)
     .sort()[0] || null;
+  // Stable identities of the visits this cancel pulls (id:date, sorted) —
+  // the approved-facts fingerprint keys on them so a reschedule or a
+  // complete-and-appear swap never slips past an unchanged count.
+  const pulledVisitKeys = cancelledFamilies
+    .flatMap((f) => perFamily.get(f)?.pulledKeys || [])
+    .sort();
 
   const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
   const monthly = customer.monthly_rate == null ? null : Number(customer.monthly_rate);
@@ -156,6 +170,7 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     remaining: wholeAccount ? [] : (plan ? plan.remainingRates.map((r) => ({ key: r.family, label: labelOf(r.family), monthlyBefore: r.before, monthlyAfter: r.after })) : []),
     visitsCancelled,
     nextVisitCancelled,
+    pulledVisitKeys,
     lateCancelFee: null,
     openBalance,
     payUrl: null,

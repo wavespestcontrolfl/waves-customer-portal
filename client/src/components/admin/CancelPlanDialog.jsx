@@ -232,7 +232,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                     <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">
                       {preview.scopeError === "scope_not_owned"
                         ? "That service is not on the plan any more."
-                        : "The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first."}
+                        : preview.scopeError === "scoped_covers_prepaid"
+                          ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place."
+                          : "The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first."}
                     </div>
                   )}
                   {modeMismatch && (

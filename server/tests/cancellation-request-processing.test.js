@@ -78,6 +78,12 @@ jest.mock('../services/appointment-card-request', () => ({
   handleAppointmentCardCancellation: jest.fn().mockResolvedValue({ handled: false, released: true, reason: 'no_card_request' }),
 }));
 
+// The keep-through sweep reads only the coverage-identity constant — never
+// load the heavy renewals module inside this harness.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
+}));
+
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -96,23 +102,38 @@ jest.mock('../models/db', () => {
     if (opOrVal === '>') return (r) => r[col] != null && r[col] > maybeVal;
     throw new Error(`fake db: unsupported operator ${opOrVal}`);
   };
+  // Grouped builder: AND-chains split into OR-disjuncts by orWhere, matching
+  // knex's where(function () { this.where(...).orWhere(...) }). Recursive —
+  // a nested where(function) becomes one condition of the enclosing chain.
+  function buildGroupMatcher(fn) {
+    const disjuncts = [];
+    let current = [];
+    const asCond = (a, op, val) => (typeof a === 'function' ? buildGroupMatcher(a) : colCond(a, op, val));
+    const group = {
+      where(a, op, val) { current.push(asCond(a, op, val)); return group; },
+      orWhere(a, op, val) { disjuncts.push(current); current = [asCond(a, op, val)]; return group; },
+      whereNull(col) { current.push((r) => r[col] == null); return group; },
+      whereNotNull(col) { current.push((r) => r[col] != null); return group; },
+      whereRaw(sql, bindings) {
+        const distinct = String(sql).match(/\(?\s*([a-z_]+)\s+IS\s+DISTINCT\s+FROM\s+\?/i);
+        if (!distinct) throw new Error(`fake db group: unsupported whereRaw ${sql}`);
+        const col = distinct[1];
+        const v = Array.isArray(bindings) ? bindings[0] : bindings;
+        current.push((r) => r[col] !== v); // JS !== is null-safe like IS DISTINCT FROM
+        return group;
+      },
+    };
+    fn.call(group);
+    disjuncts.push(current);
+    return (r) => disjuncts.some((ds) => ds.every((c) => c(r)));
+  }
   function makeQuery(table) {
     const rows = tables[table] || (tables[table] = []);
     const conds = [];
     const q = {
       where(criteria, opOrVal, maybeVal) {
         if (typeof criteria === 'function') {
-          // Grouped builder: AND-chains split into OR-disjuncts by orWhere,
-          // matching knex's where(function () { this.where(...).orWhere(...) }).
-          const disjuncts = [];
-          let current = [];
-          const group = {
-            where(col, op, val) { current.push(colCond(col, op, val)); return group; },
-            orWhere(col, op, val) { disjuncts.push(current); current = [colCond(col, op, val)]; return group; },
-          };
-          criteria.call(group);
-          disjuncts.push(current);
-          conds.push((r) => disjuncts.some((ds) => ds.every((c) => c(r))));
+          conds.push(buildGroupMatcher(criteria));
         } else if (typeof criteria === 'string') {
           conds.push(colCond(criteria, opOrVal, maybeVal));
         } else {
@@ -731,6 +752,29 @@ describe('processCancellationRequest', () => {
     expect(opts.metadata).toEqual(expect.objectContaining({ kind: 'termite_station_retrieval', customerId: 'c1', stationCount: 1 }));
   });
 
+  test('end-of-coverage cancel DATES the retrieval task for the coverage boundary — stations stay until paid termite visits deliver', async () => {
+    db.__tables.scheduled_services = [
+      { id: 'tv1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice' },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [
+      { id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true },
+    ];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT2', keepThrough: '2099-02-28' });
+
+    expect(result.churned).toBe(true);
+    const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toContain('after paid coverage ends 2099-02-28');
+    expect(body).toContain('schedule the retrieval AFTER that date');
+    expect(opts.metadata).toEqual(expect.objectContaining({ retrieveAfter: '2099-02-28' }));
+    // The covered termite visit stays on the calendar.
+    expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
+  });
+
   test('rental flag without pinned stations still raises the task; no rental → no task', async () => {
     db.__tables.scheduled_services = [];
     db.__tables.termite_stations = [];
@@ -805,12 +849,12 @@ describe('processCancellationRequest', () => {
       db.__tables.customer_interactions = [];
     };
 
-    test('keepThrough keeps dated visits on/before the paid-coverage end, still pulls what falls after AND open rebook intents, and stops recurrence on everything', async () => {
+    test('keepThrough keeps COVERED dated visits on/before the paid-coverage end, still pulls what falls after AND open rebook intents, and stops recurrence on everything', async () => {
       seedActive();
       db.__tables.scheduled_services = [
-        { id: 'in1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-10', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
-        { id: 'edge', customer_id: 'c1', status: 'pending', scheduled_date: '2099-02-28', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
-        { id: 'after', customer_id: 'c1', status: 'pending', scheduled_date: '2099-03-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+        { id: 'in1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-10', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'edge', customer_id: 'c1', status: 'pending', scheduled_date: '2099-02-28', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true, annual_prepay_term_id: 'term-1' },
+        { id: 'after', customer_id: 'c1', status: 'pending', scheduled_date: '2099-03-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice' },
         { id: 'rebook', customer_id: 'c1', status: 'rescheduled', scheduled_date: PAST, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
       ];
       const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', keepThrough: '2099-02-28' });
@@ -825,6 +869,22 @@ describe('processCancellationRequest', () => {
       // Billing still stops now — coverage is paid, the plan is not renewing.
       expect(db.__tables.customers[0]).toEqual(expect.objectContaining({ active: false, pipeline_stage: 'churned', autopay_enabled: false }));
       expect(db.__tables.customer_interactions[0].body).toContain('Paid coverage kept through 2099-02-28');
+    });
+
+    test('mixed account: keepThrough retains ONLY term-covered rows — uncovered visits inside the window are pulled now', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        // Prepaid pest — covered, inside the window: stays.
+        { id: 'pest', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-10', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true, prepaid_method: 'annual_prepay_invoice' },
+        // Monthly lawn — NOT covered by the term: billing stops now, so the
+        // visit must not stay on the calendar deliverable for free.
+        { id: 'lawn', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-15', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r7', requestId: 'r7', keepThrough: '2099-02-28' });
+      const byId = Object.fromEntries(db.__tables.scheduled_services.map((r) => [r.id, r]));
+      expect(byId.pest.status).toBe('confirmed');
+      expect(byId.lawn.status).toBe('cancelled');
+      expect(result).toEqual(expect.objectContaining({ ok: true, cancelledCount: 1, keptThrough: '2099-02-28' }));
     });
 
     test('a past keepThrough is ignored — the sweep never widens', async () => {

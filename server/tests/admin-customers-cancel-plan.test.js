@@ -58,6 +58,7 @@ const mockPlan = jest.fn();
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: (...args) => mockProcess(...args),
   planScopedWindDown: (...args) => mockPlan(...args),
+  familyOfServiceRow: (row) => row.family || null,
   CHURN_REASON: 'Customer cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
@@ -70,6 +71,15 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     select: jest.fn(async () => mockState.annual_prepay_terms || []),
     first: jest.fn(async () => (mockState.annual_prepay_terms || [])[0] || null),
   })),
+  // Canonical coverage rows for a term: window-matched scheduled rows minus
+  // explicit non-coverage services (the real helper filters by the term's
+  // coverage service type).
+  coverageRowsForTerm: jest.fn(async (term) => (mockState.scheduled_services || []).filter((r) =>
+    r.customer_id === term.customer_id
+    && !r.non_coverage
+    && String(r.status) !== 'cancelled'
+    && String(r.scheduled_date) >= String(term.term_start).slice(0, 10)
+    && String(r.scheduled_date) <= String(term.term_end).slice(0, 10))),
   recordDecision: (...args) => mockRecordDecision(...args),
 }));
 
@@ -108,20 +118,52 @@ let mockState;
 function builderFor(table) {
   const b = {};
   const conds = [];
-  const rows = () => (mockState[table] || []).filter((r) => conds.every((c) => c(r)));
+  // 'scheduled_services as s' reads the base table; qualified columns
+  // ('s.customer_id') match their bare field on the row.
+  const baseTable = String(table).split(' ')[0];
+  const col = (c) => (String(c).includes('.') ? String(c).split('.').pop() : c);
+  const rows = () => (mockState[baseTable] || []).filter((r) => conds.every((c) => c(r)));
+  // Grouped builder (knex where(function () { ... })): AND-chains split into
+  // OR-disjuncts by orWhere.
+  const buildGroupMatcher = (fn) => {
+    const disjuncts = [];
+    let current = [];
+    const group = {
+      where(a, op, val) {
+        if (typeof a === 'function') current.push(buildGroupMatcher(a));
+        else if (typeof a === 'object') Object.entries(a).forEach(([k, v]) => current.push((r) => r[col(k)] === v));
+        else if (val === undefined) current.push((r) => r[col(a)] === op);
+        else throw new Error(`fake db group: unsupported operator ${op}`);
+        return group;
+      },
+      orWhere(a, op, val) {
+        disjuncts.push(current);
+        current = [];
+        return group.where(a, op, val);
+      },
+      whereNull(c) { current.push((r) => r[col(c)] == null); return group; },
+      whereNotNull(c) { current.push((r) => r[col(c)] != null); return group; },
+      orWhereNotNull(c) { disjuncts.push(current); current = [(r) => r[col(c)] != null]; return group; },
+    };
+    fn.call(group);
+    disjuncts.push(current);
+    return (r) => disjuncts.some((ds) => ds.every((c) => c(r)));
+  };
   b.where = jest.fn((criteria, opOrVal, maybeVal) => {
-    if (typeof criteria === 'string') {
-      if (maybeVal === undefined) conds.push((r) => r[criteria] === opOrVal);
-      else if (opOrVal === '>=') conds.push((r) => r[criteria] >= maybeVal);
+    if (typeof criteria === 'function') {
+      conds.push(buildGroupMatcher(criteria));
+    } else if (typeof criteria === 'string') {
+      if (maybeVal === undefined) conds.push((r) => r[col(criteria)] === opOrVal);
+      else if (opOrVal === '>=') conds.push((r) => r[col(criteria)] >= maybeVal);
       else throw new Error(`fake db: unsupported operator ${opOrVal}`);
     } else if (typeof criteria === 'object') {
-      Object.entries(criteria).forEach(([k, v]) => conds.push((r) => r[k] === v));
+      Object.entries(criteria).forEach(([k, v]) => conds.push((r) => r[col(k)] === v));
     }
     return b;
   });
-  b.whereIn = jest.fn((col, vals) => { conds.push((r) => vals.includes(r[col])); return b; });
-  b.whereNull = jest.fn((col) => { conds.push((r) => r[col] == null); return b; });
-  b.whereBetween = jest.fn((col, [lo, hi]) => { conds.push((r) => r[col] >= lo && r[col] <= hi); return b; });
+  b.whereIn = jest.fn((c, vals) => { conds.push((r) => vals.includes(r[col(c)])); return b; });
+  b.whereNull = jest.fn((c) => { conds.push((r) => r[col(c)] == null); return b; });
+  b.whereBetween = jest.fn((c, [lo, hi]) => { conds.push((r) => r[col(c)] >= lo && r[col(c)] <= hi); return b; });
   for (const method of ['leftJoin', 'orderBy', 'limit', 'offset']) b[method] = jest.fn(() => b);
   b.select = jest.fn(async () => rows());
   b.first = jest.fn(async () => rows()[0] || null);
@@ -245,7 +287,9 @@ describe('POST /:id/cancel-plan/preview', () => {
     }];
     mockState.scheduled_services = [
       { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
-      { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-05-01' },
+      // A DIFFERENT service completed in the window (not a coverage row —
+      // the canonical helper filters it by service type).
+      { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-05-01', non_coverage: true },
       { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
     ];
     let body = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'end_of_coverage' })).json();
@@ -558,6 +602,43 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockProcess).toHaveBeenCalledTimes(1);
       // The refund task is still owed.
       expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('billing');
+    }));
+
+    test('a coverage visit completed BEFORE activation (deliberately unstamped) counts as consumed — its slice is never refunded', () => withServer(async (baseUrl) => {
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        // Completed inside the pending window: reconciliation settles or
+        // credits its invoice; the stamp never lands, but the visit consumed
+        // a coverage slice all the same.
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-03-05' },
+      ];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
+    }));
+
+    test('a scoped cancel that would pull COVERED visits is refused — 409 scoped_covers_prepaid, nothing written', () => withServer(async (baseUrl) => {
+      mockState.scheduled_services = [
+        { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-01-05', prepaid_method: 'annual_prepay_invoice' },
+      ];
+      mockPlan.mockResolvedValue({ ok: true, inScope: ['pest_control'], remaining: ['lawn_care'], tierBefore: 'Silver', tierAfter: 'Bronze' });
+      const preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['pest_control'] })).json();
+      expect(preview).toEqual(expect.objectContaining({ scopedSupported: false, scopeError: 'scoped_covers_prepaid' }));
+      const res = await post(baseUrl, '/cancel-plan', { families: ['pest_control'] });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('scoped_covers_prepaid');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('a scoped cancel OUTSIDE the covered family still runs (the covered rows are provably out of scope)', () => withServer(async (baseUrl) => {
+      mockState.scheduled_services = [
+        { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-01-05', prepaid_method: 'annual_prepay_invoice' },
+      ];
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'] });
+      const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] });
+      expect(res.status).toBe(200);
+      expect(mockProcess).toHaveBeenCalledTimes(1);
+      expect(mockRecordDecision).not.toHaveBeenCalled();
     }));
 
     test('refund math ignores completed visits stamped to ANOTHER term (overlapping terms)', () => withServer(async (baseUrl) => {
