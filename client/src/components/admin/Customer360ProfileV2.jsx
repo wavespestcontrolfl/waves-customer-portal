@@ -7631,10 +7631,14 @@ export default function Customer360ProfileV2({
             )}
           </div>{" "}
         </div>
-        {/* Mobile spacer for sticky action bar */}
+        {/* Mobile spacer for sticky action bar — tracks the same keyboard
+            inset as the bar itself so content still scrolls clear of it. */}
         <div
           className="c360-mobile-footer-spacer"
-          style={{ height: "calc(56px + env(safe-area-inset-bottom, 0px))" }}
+          style={{
+            height:
+              "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",
+          }}
           aria-hidden="true"
         />{" "}
       </div>
@@ -7652,9 +7656,12 @@ export default function Customer360ProfileV2({
           portrait). stopPropagation so taps on the bar (esp. the ⋯ menu)
           don't bubble to the overlay's close handler. */}
       <div
-        className="c360-mobile-actionbar fixed top-0 left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
+        className="c360-mobile-actionbar fixed left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
         onClick={(e) => e.stopPropagation()}
         style={{
+          // Track the Safari-bookmark visual viewport (keyboard / URL bar)
+          // like the AdminLayoutV2 header; 0px until the shell sets the var.
+          top: "var(--vv-offset-top, 0px)",
           paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
         }}
       >
@@ -7662,7 +7669,7 @@ export default function Customer360ProfileV2({
         <button
           onClick={onClose}
           aria-label="Back"
-          className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+          className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
         >
           {" "}
           <ChevronLeft size={18} strokeWidth={1.75} />{" "}
@@ -7671,7 +7678,7 @@ export default function Customer360ProfileV2({
           {c.phone && (
             <a
               href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Text
             </a>
@@ -7681,7 +7688,7 @@ export default function Customer360ProfileV2({
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
               styledButton
-              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Call
             </CallBridgeLink>
@@ -7689,7 +7696,7 @@ export default function Customer360ProfileV2({
           {isAdmin && (
             <button
               onClick={openEditModal}
-              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
             >
               Edit
             </button>
@@ -7700,7 +7707,7 @@ export default function Customer360ProfileV2({
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="More"
               aria-expanded={menuOpen}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
             >
               {" "}
               <MoreHorizontal size={18} strokeWidth={1.75} />{" "}

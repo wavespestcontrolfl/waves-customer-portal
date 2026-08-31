@@ -69,7 +69,7 @@ export default function MorePage() {
         return (
         <section key={section} className="mt-2">
           {" "}
-          <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">
+          <div className="px-4 py-2 text-12 font-medium uppercase tracking-label text-zinc-500">
             {section}
           </div>{" "}
           <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
@@ -104,7 +104,7 @@ export default function MorePage() {
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
           {" "}
-          <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">
+          <div className="px-4 py-2 text-12 font-medium uppercase tracking-label text-zinc-500">
             Settings
           </div>{" "}
           <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">

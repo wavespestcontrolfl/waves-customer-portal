@@ -203,6 +203,16 @@ function RecapLinkRedirect() {
   return <Navigate to={`/report/${token}#visit-recap`} replace />;
 }
 
+// Safari home-screen bookmark: keep admin identity + visual-viewport
+// vars on the whole /admin/* tree, including /admin/login (outside the layout).
+function AdminSafariShell() {
+  const { pathname } = useLocation();
+  const active = isAdminPath(pathname);
+  useAdminBookmarkMeta(active);
+  useAdminViewport(active);
+  return null;
+}
+
 // The portal-domain newsletter landing was retired 2026-07-09 — the astro
 // site's wavespestcontrol.com/newsletter is the single landing (owner call:
 // one page, not two mirrors). Already-shared portal links keep working via
@@ -235,6 +245,9 @@ import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
+import useAdminBookmarkMeta from './hooks/useAdminBookmarkMeta';
+import useAdminViewport from './hooks/useAdminViewport';
+import { isAdminPath } from './lib/adminBookmarkMeta';
 import AdminTabRedirect from './components/admin/AdminTabRedirect';
 import { isNativeApp } from './native/platform';
 import WavesShell from './components/brand/WavesShell';
@@ -470,6 +483,7 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PublicFunnelTracking />
+        <AdminSafariShell />
         <InstallPrompt />
         <BiometricGate>
         <RoutesErrorBoundary>

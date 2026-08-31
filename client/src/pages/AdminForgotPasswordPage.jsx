@@ -36,7 +36,7 @@ export default function AdminForgotPasswordPage() {
   };
 
   return (
-    <main style={{ minHeight: '100vh', background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT, padding: 20 }}>
+    <main className="admin-auth-page" style={{ background: D.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: ADMIN_FONT }}>
       <div style={{ maxWidth: 440, width: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: 28 }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 48, marginBottom: 12 }} />
@@ -74,7 +74,7 @@ export default function AdminForgotPasswordPage() {
                   {error}
                 </div>
               )}
-              <button type="submit" disabled={loading} style={{ width: '100%', minHeight: 48, marginTop: 18, border: 0, borderRadius: 10, background: D.red, color: D.white, fontSize: 15, fontWeight: 700, cursor: loading ? 'wait' : 'pointer', opacity: loading ? 0.7 : 1 }}>
+              <button type="submit" disabled={loading} style={{ width: '100%', minHeight: 48, marginTop: 18, border: 0, borderRadius: 10, background: '#f4f4f5', color: '#18181B', fontSize: 15, fontWeight: 700, cursor: loading ? 'wait' : 'pointer', opacity: loading ? 0.7 : 1 }}>
                 {loading ? 'Sending reset link…' : 'Email reset link'}
               </button>
             </form>

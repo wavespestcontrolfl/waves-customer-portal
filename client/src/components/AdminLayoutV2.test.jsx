@@ -24,12 +24,13 @@ vi.mock("./admin/GlobalCommandPalette", async () => {
   };
 });
 
-describe("AdminLayoutV2 Safari bookmark metadata", () => {
+describe("AdminLayoutV2", () => {
   beforeEach(() => {
     Object.defineProperty(HTMLElement.prototype, "scrollTo", {
       configurable: true,
       value: vi.fn(),
     });
+    document.documentElement.className = "";
     document.head.innerHTML = `
       <link rel="manifest" href="/manifest.json">
       <meta name="apple-mobile-web-app-title" content="Waves">
@@ -50,10 +51,28 @@ describe("AdminLayoutV2 Safari bookmark metadata", () => {
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    document.documentElement.className = "";
   });
 
-  it("activates the admin manifest and restores the customer defaults on unmount", async () => {
-    const view = render(
+  it("renders the authenticated child route", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/dashboard"]}>
+        <Routes>
+          <Route element={<AdminLayoutV2 />}>
+            <Route path="/admin/dashboard" element={<div>Admin child</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Admin child")).toBeInTheDocument();
+  });
+
+  it("no longer owns the Safari bookmark identity (moved to AdminSafariShell in App)", async () => {
+    // Regression pin: the manifest/title swap lives in useAdminBookmarkMeta,
+    // mounted app-wide so /admin/login (outside this layout) is covered. A
+    // duplicate effect here would fight the app-level one on unmount.
+    render(
       <MemoryRouter initialEntries={["/admin/dashboard"]}>
         <Routes>
           <Route element={<AdminLayoutV2 />}>
@@ -64,17 +83,6 @@ describe("AdminLayoutV2 Safari bookmark metadata", () => {
     );
 
     await screen.findByText("Admin child");
-    expect(document.documentElement).toHaveClass("admin-app");
-    expect(document.querySelector('link[rel="manifest"]')).toHaveAttribute(
-      "href",
-      "/admin-manifest.json",
-    );
-    expect(
-      document.querySelector('meta[name="apple-mobile-web-app-title"]'),
-    ).toHaveAttribute("content", "Waves Admin");
-    expect(document.title).toBe("Waves Admin");
-
-    view.unmount();
     expect(document.documentElement).not.toHaveClass("admin-app");
     expect(document.querySelector('link[rel="manifest"]')).toHaveAttribute(
       "href",

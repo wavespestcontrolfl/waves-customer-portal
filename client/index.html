@@ -9,6 +9,7 @@
     <meta name="theme-color" content="#111111" />
     <link rel="manifest" href="/manifest.json" />
     <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Waves" />
     <link rel="apple-touch-icon" href="/waves-logo-192.png" />
@@ -21,6 +22,25 @@
     <meta name="twitter:title" content="Waves Customer Portal" />
     <meta name="twitter:description" content="Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service." />
     <title>Waves Customer Portal</title>
+    <!-- Safari home-screen bookmark: this document is the customer PWA by
+         default. Apply admin identity before React so Add to Home Screen
+         from /admin/login captures "Waves Admin", not the customer portal. -->
+    <script>
+      (function () {
+        var path = location.pathname;
+        if (path !== '/admin' && path.indexOf('/admin/') !== 0) return;
+        document.documentElement.classList.add('admin-app');
+        document.title = 'Waves Admin';
+        var manifest = document.querySelector('link[rel="manifest"]');
+        if (manifest) manifest.setAttribute('href', '/admin-manifest.json');
+        var title = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+        if (title) title.setAttribute('content', 'Waves Admin');
+        var theme = document.querySelector('meta[name="theme-color"]');
+        if (theme) theme.setAttribute('content', '#18181B');
+        var desc = document.querySelector('meta[name="description"]');
+        if (desc) desc.setAttribute('content', 'Waves Pest Control admin portal — dispatch, customers, billing, and reports.');
+      })();
+    </script>
     <link rel="icon" type="image/png" href="/waves-logo-192.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
