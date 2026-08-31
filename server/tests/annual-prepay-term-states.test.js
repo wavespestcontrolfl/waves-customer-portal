@@ -518,7 +518,12 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
             unscannable.push(`${rel}: dynamic-table payload ${ident[1]} is mutated after init`);
           }
         }
-        if (/(?:\b|['"])status['"]?\s*:/.test(args) || /\[\s*['"]status['"]\s*\]/.test(args)) {
+        // Key forms: `status:`, quoted, computed-literal, shorthand `{ status }`,
+        // and the two-arg column form `.update('status', v)`. Spreads in the
+        // audited file's payloads are covered by the audit + site-count
+        // ratchet (they re-point ids, and a new site fails until re-audited).
+        if (/(?:\b|['"])status['"]?\s*:/.test(args) || /\[\s*['"]status['"]\s*\]/.test(args)
+          || /[{,]\s*status\s*[,}]/.test(args) || /\(\s*['"]status['"]\s*,/.test(args)) {
           unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} carries a status key`);
         }
       }
