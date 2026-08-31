@@ -805,6 +805,22 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('InlineCTA ctaHref routes through the internal-route allowlist; destinations are exact (Codex #3646 r15)', () => {
+    withAffiliateEnv(() => {
+      // A root-relative ctaHref to a route this repo cannot prove exists is
+      // UNKNOWN_INTERNAL_ROUTE — a dead customer-facing CTA never publishes.
+      const dead = 'Intro.\n\n## Sec\n\n<InlineCTA ctaHref="/definitely-not-a-real-page/" />\n\nProse.';
+      const r = guardrails.evaluate({ body: dead, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      const live = 'Intro.\n\n## Sec\n\n<InlineCTA ctaHref="/quote/" />\n\nProse.';
+      expect(guardrails.evaluate({ body: live, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+      // Angle-bracket destinations keep internal whitespace: /quote/%20 is
+      // not the service route (astro parity).
+      const spaced = `Intro.\n\n## Sec\n\nGet a [quote](</quote/ >).\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: spaced, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
   test('whitespace-padded product/placement props fail closed against the exact astro contract (Codex #3646 r11)', () => {
     withAffiliateEnv(() => {
       const padded = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product=" rain-gauge " placement="primary-rec">x</AffiliateLink>`;

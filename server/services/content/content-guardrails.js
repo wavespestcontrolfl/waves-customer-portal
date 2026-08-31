@@ -1629,7 +1629,9 @@ const SERVICE_ROUTE_PATH_RE =
   /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
 const WAVES_HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
 function isServiceCtaHref(href) {
-  const t = String(href || '').trim();
+  // EXACT value — no trimming (astro parity): whitespace inside a
+  // destination (</quote/ >) renders an encoded, non-service URL.
+  const t = String(href || '');
   if (t.startsWith('/')) return SERVICE_ROUTE_PATH_RE.test(t);
   if (!/^https:\/\//i.test(t)) return false;
   try {
@@ -1917,7 +1919,10 @@ function hasServiceCtaLink(body) {
     if (backslashRunBefore(attrMasked, span.labelStart) % 2 === 1) continue;
     const inner = attrMasked.slice(span.destStart, span.destEnd + 1).trim();
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
-    const dest = dm ? (dm[1] !== undefined ? dm[1] : dm[2]).trim() : '';
+    // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
+    // </quote/ > renders /quote/%20, not the service route) — only the
+    // syntax whitespace outside <…> is trimmed.
+    const dest = dm ? (dm[1] !== undefined ? dm[1] : dm[2]) : '';
     if (dest && isServiceCtaHref(dest)) return true;
   }
   return false;
@@ -1968,7 +1973,7 @@ function inlineCtaContractFinding(body) {
 
 // All affiliate policy findings for a draft — an ARRAY (several can apply,
 // and review/redraft needs each named). Deduped per (code, product).
-function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null, registry = null } = {}) {
   const findings = [];
   const seen = new Set();
   const push = (severity, code, key, message) => {
@@ -1999,7 +2004,10 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // documents the flag; reading the env here (reserviceReportCopy pattern)
   // keeps flips/tests immediate and keeps '1'/'on' dark (Codex r4 P1).
   const gateOn = process.env.GATE_AFFILIATE_LINKS === 'true';
-  const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex() : new Map();
+  // `registry` (optional) overrides the vendored copy — the merge-time belt
+  // injects the LIVE astro registry.json so an astro-only row change is
+  // honored before any portal sync/deploy (Codex #3646 r15 P1).
+  const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex(registry ? { registry } : undefined) : new Map();
   const postType = String(frontmatter?.post_type || '').trim().toLowerCase();
 
   for (const tag of tags) {
@@ -4223,7 +4231,11 @@ function normalizeInternalPath(dest) {
 // job.)
 // Arms: markdown destinations, QUOTED href/src, reference definitions, and
 // UNQUOTED href/src (legal in HTML — `<a href=/pest-library/fleas/>`).
-const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)|\b(?:href|src)\s*=\s*(\/[^\s>"'`]+)/gim;
+// ctaHref included: <InlineCTA ctaHref="/…"> writes its destination into a
+// live anchor, so a root-relative value must pass the same
+// UNKNOWN_INTERNAL_ROUTE allowlist as any Markdown/href link — a dead CTA
+// route must never publish (Codex #3646 r15 P1).
+const RELATIVE_DEST_RE = /\]\(\s*<?\s*(\/[^)\s>]*)|\b(?:href|src|ctaHref)\s*=\s*\{?\s*["'`](\/[^"'`]*)|^[ \t]*\[[^\]^][^\]]*\]:[ \t]+<?(\/[^\s>]*)|\b(?:href|src|ctaHref)\s*=\s*(\/[^\s>"'`]+)/gim;
 
 // EVERY absolute URL in the text — markdown destinations, href/src,
 // reference definitions, CommonMark autolinks (<https://…>), and bare GFM

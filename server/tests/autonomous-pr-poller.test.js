@@ -246,6 +246,9 @@ const __affReg = (() => {
   return regPath;
 })();
 
+// The belt reads the authoritative astro registry via gh.getFile (r15).
+const __liveRegFile = { content: require('node:fs').readFileSync(__affReg, 'utf8') };
+
 beforeEach(() => {
   process.env.AFFILIATE_REGISTRY_PATH = __affReg;
   require('../../packages/affiliate-registry')._resetCache();
@@ -283,6 +286,12 @@ afterEach(() => {
 describe('affiliate belt (owner ruling 2026-08-31)', () => {
   const { affiliateBeltVerdict } = poller._internals;
   const registryPkg = require('../../packages/affiliate-registry');
+  // The belt reads the AUTHORITATIVE astro registry via the GitHub client
+  // (Codex #3646 r15 P1) — a fake gh serves the fixture registry (or a
+  // mutated one) as the astro base registry.json.
+  const liveReg = () => JSON.parse(require('node:fs').readFileSync(__affReg, 'utf8'));
+  const ghFor = (registry) => ({ getFile: async (path) => (path === 'packages/affiliate-registry/registry.json' && registry !== null ? { content: JSON.stringify(registry) } : null) });
+  const belt = (run, head, sha, gh = ghFor(liveReg())) => affiliateBeltVerdict(run, head, sha, gh);
   let prevGate;
   beforeEach(() => { prevGate = process.env.GATE_AFFILIATE_LINKS; process.env.GATE_AFFILIATE_LINKS = 'true'; });
   afterEach(() => {
@@ -290,58 +299,60 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     process.env.AFFILIATE_REGISTRY_PATH = __affReg; registryPkg._resetCache();
   });
 
-  test('the full guardrail contract is re-run at merge time: unregistered-since-approval and wrong post_type withhold', () => {
+  test('the full guardrail contract is re-run at merge time against the LIVE astro registry: unregistered-since-approval and wrong post_type withhold', async () => {
     const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
-    expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
-    // registry emptied since approval → UNREGISTERED at merge time
-    process.env.AFFILIATE_REGISTRY_PATH = '/nonexistent/registry.json'; registryPkg._resetCache();
-    expect(affiliateBeltVerdict(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/UNREGISTERED_AFFILIATE_LINK/) });
-    process.env.AFFILIATE_REGISTRY_PATH = __affReg; registryPkg._resetCache();
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(true);
+    // registry emptied ASTRO-SIDE since approval → UNREGISTERED at merge
+    // time, even though the local vendored copy still carries the row.
+    expect(await belt(approved, body, 'headsha1', ghFor({ version: 1, products: [] }))).toMatchObject({ ok: false, reason: expect.stringMatching(/UNREGISTERED_AFFILIATE_LINK/) });
+    // live registry unreadable → withheld (fail closed), never local fallback
+    expect(await belt(approved, body, 'headsha1', ghFor(null))).toMatchObject({ ok: false, reason: expect.stringMatching(/authoritative astro registry unreadable/) });
+    expect(await belt(approved, body, 'headsha1', null)).toMatchObject({ ok: false, reason: expect.stringMatching(/authoritative astro registry unreadable/) });
     // post_type narrowed out of eligibility since approval
     const wrongType = body.replace('post_type: protocol', 'post_type: seasonal');
     const approvedWrong = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongType, trust_build_approved_head_sha: 'headsha1' }) };
-    expect(affiliateBeltVerdict(approvedWrong, wrongType, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_LINK_ON_PROTECTED_PAGE/) });
+    expect(await belt(approvedWrong, wrongType, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_LINK_ON_PROTECTED_PAGE/) });
     // placement removed from the row's allowlist since approval
     const wrongPlacement = body.replace('placement="primary-rec"', 'placement="sidebar"');
     const approvedWp = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongPlacement, trust_build_approved_head_sha: 'headsha1' }) };
-    expect(affiliateBeltVerdict(approvedWp, wrongPlacement, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_PLACEMENT_NOT_ALLOWED/) });
+    expect(await belt(approvedWp, wrongPlacement, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_PLACEMENT_NOT_ALLOWED/) });
   });
-  test('the kill switch is re-checked at merge time: an approved affiliate head is withheld once GATE_AFFILIATE_LINKS is off', () => {
+  test('the kill switch is re-checked at merge time: an approved affiliate head is withheld once GATE_AFFILIATE_LINKS is off', async () => {
     const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
     delete process.env.GATE_AFFILIATE_LINKS;
-    expect(affiliateBeltVerdict(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/GATE_AFFILIATE_LINKS/) });
+    expect(await belt(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/GATE_AFFILIATE_LINKS/) });
     process.env.GATE_AFFILIATE_LINKS = '1';
-    expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(false);
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(false);
     process.env.GATE_AFFILIATE_LINKS = 'true';
-    expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(true);
   });
-  test('a head without <AffiliateLink> passes; unreadable head fails closed', () => {
-    expect(affiliateBeltVerdict({}, '---\ntitle: x\n---\nplain body').ok).toBe(true);
-    expect(affiliateBeltVerdict({}, null).ok).toBe(false);
+  test('a head without <AffiliateLink> passes; unreadable head fails closed', async () => {
+    expect((await belt({}, '---\ntitle: x\n---\nplain body')).ok).toBe(true);
+    expect((await belt({}, null)).ok).toBe(false);
     // A code-fenced example is not a rendered component — an otherwise
     // affiliate-free head must not be withheld forever (pre-push audit P1).
     const fenced = '---\ntitle: x\n---\n\n## Sec\n\n```mdx\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n```\n\nplain body';
-    expect(affiliateBeltVerdict({}, fenced).ok).toBe(true);
+    expect((await belt({}, fenced)).ok).toBe(true);
   });
-  test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', () => {
+  test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', async () => {
     const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
-    expect(affiliateBeltVerdict({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body, 'headsha1').ok).toBe(false);
-    expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
-    expect(affiliateBeltVerdict(approved, { content: body }, 'HEADSHA1').ok).toBe(true);
+    expect((await belt({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body, 'headsha1')).ok).toBe(false);
+    expect((await belt(approved, body, 'headsha1')).ok).toBe(true);
+    expect((await belt(approved, { content: body }, 'HEADSHA1')).ok).toBe(true);
     // Bound to the exact approved head: a later push (or no SHA) fails closed.
-    expect(affiliateBeltVerdict(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/merge by hand/) });
-    expect(affiliateBeltVerdict(approved, body, null).ok).toBe(false);
-    expect(affiliateBeltVerdict({ ...approved, draft_payload: JSON.stringify({ body }) }, body, 'headsha1').ok).toBe(false);
+    expect(await belt(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/merge by hand/) });
+    expect((await belt(approved, body, null)).ok).toBe(false);
+    expect((await belt({ ...approved, draft_payload: JSON.stringify({ body }) }, body, 'headsha1')).ok).toBe(false);
     // A product added on the branch AFTER approval is not approved.
     const extra = `${body}\n<AffiliateLink product="ant-bait" placement="alt-rec">y</AffiliateLink>`;
-    expect(affiliateBeltVerdict(approved, extra, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
+    expect(await belt(approved, extra, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
   });
-  test('an unresolvable head file fails closed; a resolved non-affiliate file passes', () => {
-    expect(affiliateBeltVerdict({}, null).ok).toBe(false);
-    expect(affiliateBeltVerdict({}, { content: '---\ntitle: Service page\n---\nplain' }).ok).toBe(true);
+  test('an unresolvable head file fails closed; a resolved non-affiliate file passes', async () => {
+    expect((await belt({}, null)).ok).toBe(false);
+    expect((await belt({}, { content: '---\ntitle: Service page\n---\nplain' })).ok).toBe(true);
   });
 });
 
@@ -1192,7 +1203,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
       publisher.assertCodexReviewClear.mockResolvedValue(true);
       gh.mergePr.mockResolvedValue({ merged: true });
-      gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/test-post.mdx' ? affiliateFile : null));
+      gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/test-post.mdx' ? affiliateFile : path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
     };
     // 1. No approval stamp → withheld, never merged.
     arm();
@@ -1221,6 +1232,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
       publisher.assertCodexReviewClear.mockResolvedValue(true);
       gh.mergePr.mockResolvedValue({ merged: true });
+      gh.getFile.mockImplementation(async (path) => (path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
     };
     const refresh = (over = {}) => makeRun({
       action_type: 'refresh_existing_page', brief_id: 'brief-r',

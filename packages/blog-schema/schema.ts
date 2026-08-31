@@ -667,7 +667,10 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       // inside an item; 0 at top level) — a 4-space-indented run is code
       // CONTENT and the fence stays open.
       const close = strippedLine.match(/^( *)(`{3,}|~{3,})\s*$/);
-      if (close && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; }
+      // A closer must sit at the OPENER's blockquote depth: inside a fence
+      // opened at "> ~~~", a "> > ~~~" line is literal fence CONTENT (the
+      // extra ">" is text), never the close (CommonMark).
+      if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; }
     } else {
       const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
       const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
@@ -955,7 +958,9 @@ const WAVES_HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.c
 // A service-route destination: a root-relative service path, or the same
 // path spelled as an absolute https URL on a hub host.
 function isServiceCtaHref(href: string): boolean {
-  const t = href.trim();
+  // EXACT value — no trimming: whitespace inside a destination (</quote/ >)
+  // renders an encoded, non-service URL and must fail closed.
+  const t = href;
   if (t.startsWith('/')) return SERVICE_ROUTE_PATH_RE.test(t);
   if (!/^https:\/\//i.test(t)) return false;
   try {
@@ -1038,7 +1043,10 @@ function* markdownLinkDests(src: string): Generator<string> {
     // CommonMark destination: the first token — <>-wrapped or bare — with
     // anything after whitespace being the (ignored) title.
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
-    if (dm) yield (dm[1] ?? dm[2] ?? '').trim();
+    // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
+    // </quote/ > renders /quote/%20, never the service route) — only the
+    // syntax whitespace outside <…> is trimmed.
+    if (dm) yield dm[1] ?? dm[2] ?? '';
     i = k;
   }
 }
@@ -1281,7 +1289,11 @@ export function validateAffiliateUsage(
   }, unmasked);
   structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
     && !detailsRendersOpen(attrs), unmasked);
-  const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
+  // Tag-shaped text inside a quoted JSX attribute (<div title="<AffiliateLink />">)
+  // renders no component — position-check the count against the attr-masked
+  // view, like the InlineCTA scan (Codex #3646 r15 P1).
+  const cleanedAttrView = maskJsxAttrQuotes(cleaned);
+  const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start).filter((p) => cleanedAttrView[p] !== ' ');
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
 
@@ -1294,8 +1306,9 @@ export function validateAffiliateUsage(
   // attrs still read from `unmasked` so a REAL expression-wrapped tag's
   // quoted props stay validatable).
   const exprStringView = blankExpressionStrings(unmasked);
+  const unmaskedAttrView = maskJsxAttrQuotes(unmasked);
   for (const { start, attrs } of tagsNamed(unmasked, 'InlineCTA')) {
-    if (exprStringView[start] === ' ') continue;
+    if (exprStringView[start] === ' ' || unmaskedAttrView[start] === ' ') continue;
     if (attrs === null) continue;
     if (hasJsxSpread(attrs)) {
       blockers.push('<InlineCTA> may not carry a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated');
@@ -1335,7 +1348,7 @@ export function validateAffiliateUsage(
   // value the gate never validated.
   const checked = new Set<string>();
   for (const { start, attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
-    if (exprStringView[start] === ' ') continue; // quoted JSX text renders as text
+    if (exprStringView[start] === ' ' || unmaskedAttrView[start] === ' ') continue; // quoted JSX/attr text renders as text
     if (attrs !== null && hasJsxSpread(attrs)) {
       blockers.push('<AffiliateLink> may not carry a JSX spread ({...}) — a spread can override product/placement at render time, so the invocation cannot be validated against the registry');
       continue;
@@ -1375,7 +1388,7 @@ export function validateAffiliateUsage(
 function extractMdxComponentNames(mdx: string): Set<string> {
   // A component name spelled inside an expression string is text (same
   // rule as extractComponentInvocations) — scan the string-blanked view.
-  const cleaned = blankExpressionStrings(blankNonRenderedCode(mdx));
+  const cleaned = maskJsxAttrQuotes(blankExpressionStrings(blankNonRenderedCode(mdx)));
 
   const names = new Set<string>();
   const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
@@ -1571,12 +1584,13 @@ function extractComponentInvocations(cleaned: string): ParsedInvocation[] {
   // against the string-blanked view (attrs still read from `cleaned` so a
   // REAL expression-wrapped invocation's quoted props stay validatable).
   const strView = blankExpressionStrings(cleaned);
+  const attrView = maskJsxAttrQuotes(cleaned);
   // Matches opening tag up to closing `>`, capturing name + raw attr string.
   // Handles self-closing (<Foo ... />) and paired (<Foo ...>…</Foo>).
   const pattern = /<([A-Z][A-Za-z0-9]*)((?:\s+[^>]*?)?)\s*(\/?)>/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(cleaned)) !== null) {
-    if (strView[match.index] === ' ') continue;
+    if (strView[match.index] === ' ' || attrView[match.index] === ' ') continue;
     invocations.push({ name: match[1], attrs: match[2] ?? '' });
   }
   return invocations;

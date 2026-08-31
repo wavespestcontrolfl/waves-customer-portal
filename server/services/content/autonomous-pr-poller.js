@@ -332,7 +332,7 @@ async function headRefreshFileContent(run, pr) {
 // target file), or null/undefined (unreadable — fail closed). The approval is BOUND to the reviewed draft: every affiliate
 // product id on the head must be one the approved draft_payload body
 // referenced, so a branch push after approval cannot add products.
-function affiliateBeltVerdict(run, head, prHeadSha = null) {
+async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
   // A RENDERED <AffiliateLink> only — the guardrails counting view masks
@@ -377,6 +377,19 @@ function affiliateBeltVerdict(run, head, prHeadSha = null) {
   // registry — the approval and green preview may be days old, and a row
   // paused, gone stale, or narrowed since then must not land. P0s only:
   // the P1 placement nudges were judged at review time.
+  // The AUTHORITATIVE registry lives in the astro repo — the local vendored
+  // copy can lag an astro-only row merge (pause, narrowed post types or
+  // placements) until a portal sync + deploy, so the merge-time recheck
+  // reads the LIVE base-branch registry.json with the same client that
+  // fetched the head file; unreadable fails closed (Codex #3646 r15 P1).
+  let liveRegistry = null;
+  try {
+    const f = gh ? await gh.getFile('packages/affiliate-registry/registry.json') : null;
+    if (f && typeof f.content === 'string') liveRegistry = JSON.parse(f.content);
+  } catch (_) { liveRegistry = null; }
+  if (!liveRegistry || typeof liveRegistry !== 'object') {
+    return { ok: false, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
+  }
   let guard; let parseFm;
   try {
     guard = require('./content-guardrails');
@@ -390,7 +403,7 @@ function affiliateBeltVerdict(run, head, prHeadSha = null) {
     bodyHead = typeof parsed?.content === 'string' ? parsed.content : content;
   } catch (_) { /* unparseable frontmatter → scan raw; missing post_type fails closed below */ }
   const hard = guard._internals
-    .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true })
+    .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true, registry: liveRegistry })
     .filter((f) => f.severity === 'P0');
   if (hard.length) {
     return { ok: false, reason: `affiliate guardrail contract no longer clear at merge time: ${[...new Set(hard.map((f) => f.code))].join(', ')} — re-verify the registry rows or dismiss` };
@@ -1522,7 +1535,7 @@ async function maybeAutoMerge(run, pr) {
         // 3.8a Affiliate belt — see recheckAffiliateApproval. Withheld (not
         //      parked): the fix is the owner's approval, which the next tick
         //      then honors.
-        const aff = affiliateBeltVerdict(run, topic.content, pr.head?.sha);
+        const aff = await affiliateBeltVerdict(run, topic.content, pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
           withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
@@ -1563,7 +1576,7 @@ async function maybeAutoMerge(run, pr) {
       let withheld = null;
       const { withTopicMergeLock } = require('./topic-targeting-gate');
       mergeRes = await withTopicMergeLock(db, async (trx) => {
-        const aff = affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha);
+        const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
           withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
