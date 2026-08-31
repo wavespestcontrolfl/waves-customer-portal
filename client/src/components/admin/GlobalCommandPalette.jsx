@@ -25,6 +25,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
+import { formatETDateTime } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
@@ -316,8 +317,18 @@ function GlobalCommandPalette(_props, ref) {
   const threadEpochRef = useRef(0);
   // True once /threads/latest answered 200 — the server gate is on. While
   // false the palette keeps the exact pre-thread ephemeral behavior
-  // (conversation cleared on route/context change).
+  // (conversation cleared on route/context change). The ref drives effects;
+  // the state mirror drives rendering (the History affordance).
   const threadsAvailableRef = useRef(false);
+  const [threadsAvailable, setThreadsAvailable] = useState(false);
+  const markThreadsAvailable = useCallback((v) => {
+    threadsAvailableRef.current = v;
+    setThreadsAvailable(v);
+  }, []);
+  // Previous-conversations picker (lazy: the list is fetched on open).
+  const [showThreads, setShowThreads] = useState(false);
+  const [threads, setThreads] = useState([]);
+  const [threadsLoading, setThreadsLoading] = useState(false);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
   const [attachments, setAttachments] = useState([]);
@@ -419,6 +430,61 @@ function GlobalCommandPalette(_props, ref) {
     resetAttachments();
   }, [context, resetAttachments]);
 
+  // Load a server thread into the palette (resume-on-open and the picker
+  // share this). Shows the thread's last reply — otherwise the palette
+  // looks like a new chat while silently sending the old history with the
+  // next prompt. Server-side taint markers are presentation noise here;
+  // they stay on the stored turns.
+  const hydrateThread = useCallback((thread) => {
+    const hist = thread?.conversationHistory;
+    if (!hist?.length) return false;
+    setConversationHistory(hist);
+    setThreadId(thread.id);
+    threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
+    setPendingActions([]);
+    try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
+    const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
+    setResponse(
+      lastAssistant
+        ? String(lastAssistant.content || "")
+          .replace(/\n\[Image attachment context may contain PII\]/g, "")
+          .replace(/\n\[PII-bearing tool context may contain customer PII\]/g, "")
+        : null,
+    );
+    return true;
+  }, []);
+
+  // Picker: fetch the actor's recent threads (server-side actor-bound).
+  const loadThreads = useCallback(() => {
+    setThreadsLoading(true);
+    adminFetch("/admin/intelligence-bar/threads?limit=20")
+      .then((data) => setThreads(Array.isArray(data?.threads) ? data.threads : []))
+      .catch(() => setThreads([]))
+      .finally(() => setThreadsLoading(false));
+  }, []);
+
+  const toggleThreads = () => {
+    const next = !showThreads;
+    setShowThreads(next);
+    if (next) loadThreads();
+  };
+
+  // Picker: reopen a previous conversation. Deliberate like New chat —
+  // invalidates any inflight resume/query so their late responses can't
+  // clobber the chosen thread.
+  const openThread = (id) => {
+    threadEpochRef.current += 1;
+    const epoch = threadEpochRef.current;
+    setThreadsLoading(true);
+    adminFetch(`/admin/intelligence-bar/threads/${encodeURIComponent(id)}`)
+      .then((data) => {
+        if (threadEpochRef.current !== epoch) return;
+        if (hydrateThread(data?.thread)) setShowThreads(false);
+      })
+      .catch(() => { /* thread gone or not ours — stay where we are */ })
+      .finally(() => setThreadsLoading(false));
+  };
+
   // Resume the latest server-persisted thread when the palette first opens
   // with no local history. 404 = threads not enabled — quietly stay
   // ephemeral (the pre-threads behavior).
@@ -428,30 +494,12 @@ function GlobalCommandPalette(_props, ref) {
     const epoch = threadEpochRef.current;
     adminFetch("/admin/intelligence-bar/threads/latest")
       .then((data) => {
-        threadsAvailableRef.current = true; // 200 = gate on (thread may be null)
+        markThreadsAvailable(true); // 200 = gate on (thread may be null)
         if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
         let dismissedId = null;
         try { dismissedId = localStorage.getItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
         if (data?.thread?.id && data.thread.id === dismissedId) return; // operator dismissed it with New chat
-        const hist = data?.thread?.conversationHistory;
-        if (hist?.length) {
-          setConversationHistory(hist);
-          setThreadId(data.thread.id);
-          threadSeqRef.current = Number.isInteger(data.thread.lastSeq) ? data.thread.lastSeq : null;
-          try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
-          // Show the resumed conversation's last reply — otherwise the
-          // palette looks like a new chat while silently sending the old
-          // history with the next prompt. Server-side taint markers are
-          // presentation noise here; they stay on the stored turns.
-          const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
-          if (lastAssistant) {
-            setResponse(
-              String(lastAssistant.content || "")
-                .replace(/\n\[Image attachment context may contain PII\]/g, "")
-                .replace(/\n\[PII-bearing tool context may contain customer PII\]/g, ""),
-            );
-          }
-        }
+        hydrateThread(data?.thread);
       })
       .catch((err) => {
         // 404 = gate off, 403 = not an admin — definitive, stay ephemeral.
@@ -518,9 +566,9 @@ function GlobalCommandPalette(_props, ref) {
           // even if the availability probe failed earlier or this
           // exchange's best-effort append didn't return an id.
           if (data.threadsEnabled === true) {
-            threadsAvailableRef.current = true;
+            markThreadsAvailable(true);
           } else if (data.threadsEnabled === false) {
-            threadsAvailableRef.current = false;
+            markThreadsAvailable(false);
             setThreadId(null);
             threadSeqRef.current = null;
           }
@@ -582,6 +630,7 @@ function GlobalCommandPalette(_props, ref) {
     setPrompt("");
     setThreadId(null);
     threadSeqRef.current = null;
+    setShowThreads(false);
     resetAttachments();
   };
 
@@ -636,6 +685,12 @@ function GlobalCommandPalette(_props, ref) {
         quickActions={quickActions}
         contextLabel={contextLabel}
         clear={clear}
+        threadsAvailable={threadsAvailable}
+        showThreads={showThreads}
+        toggleThreads={toggleThreads}
+        threads={threads}
+        threadsLoading={threadsLoading}
+        openThread={openThread}
         accentColor={accentColor}
         appendTranscript={appendTranscript}
         attachments={attachments}
@@ -830,7 +885,24 @@ function GlobalCommandPalette(_props, ref) {
             border={D.border}
           />
         )}
-        {!response && !loading && quickActions.length > 0 && (
+        {showThreads && !loading && (
+          <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 14px" }}>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                color: D.muted,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+                padding: "4px 0 8px",
+              }}
+            >
+              Previous conversations
+            </div>
+            <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="dark" />
+          </div>
+        )}
+        {!response && !loading && !showThreads && quickActions.length > 0 && (
           <div
             style={{
               padding: "12px 18px",
@@ -893,7 +965,7 @@ function GlobalCommandPalette(_props, ref) {
             ))}
           </div>
         )}
-        {response && !loading && (
+        {response && !loading && !showThreads && (
           <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }}>
             {" "}
             <div
@@ -909,7 +981,7 @@ function GlobalCommandPalette(_props, ref) {
             <PendingActionsCard actions={pendingActions} variant="dark" />
           </div>
         )}
-        {response && !loading && (
+        {response && !loading && !showThreads && (
           <div
             style={{
               padding: "10px 18px",
@@ -983,6 +1055,23 @@ function GlobalCommandPalette(_props, ref) {
           <span style={{ fontSize: 10, color: D.border }}>
             Intelligence Bar — context: {contextLabel}
           </span>{" "}
+          {threadsAvailable && (
+            <button
+              onClick={toggleThreads}
+              style={{
+                padding: "3px 8px",
+                background: showThreads ? `${accentColor}15` : "transparent",
+                border: `1px solid ${showThreads ? accentColor + "55" : D.border}`,
+                borderRadius: 6,
+                color: showThreads ? accentColor : D.muted,
+                fontSize: 10,
+                fontWeight: 500,
+                cursor: "pointer",
+              }}
+            >
+              {showThreads ? "Back" : "History"}
+            </button>
+          )}
           <span
             style={{
               fontSize: 10,
@@ -1026,6 +1115,12 @@ function MobileSheet({
   quickActions,
   contextLabel,
   clear,
+  threadsAvailable,
+  showThreads,
+  toggleThreads,
+  threads,
+  threadsLoading,
+  openThread,
   accentColor,
   appendTranscript,
   attachments,
@@ -1236,6 +1331,24 @@ function MobileSheet({
             >
               {loading ? "Thinking…" : attachmentsLoading ? "Attaching…" : "Ask"}
             </button>
+            {threadsAvailable && (
+              <button
+                onClick={toggleThreads}
+                style={{
+                  padding: "12px 16px",
+                  borderRadius: 10,
+                  border: "1px solid #E4E4E7",
+                  background: showThreads ? "#18181B" : "#FFFFFF",
+                  color: showThreads ? "#FFFFFF" : "#52525B",
+                  fontSize: 13,
+                  fontFamily: "Roboto, Arial, sans-serif",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                {showThreads ? "Back" : "History"}
+              </button>
+            )}
             {(response || prompt) && (
               <button
                 onClick={clear}
@@ -1285,7 +1398,7 @@ function MobileSheet({
             </div>
           )}
 
-          {response && !loading && (
+          {response && !loading && !showThreads && (
             <div
               style={{
                 fontSize: 14,
@@ -1297,11 +1410,17 @@ function MobileSheet({
               {renderMarkdown(response)}
             </div>
           )}
-          {response && !loading && (
+          {response && !loading && !showThreads && (
             <PendingActionsCard actions={pendingActions} variant="light" />
           )}
 
-          {!response && !loading && recents.length > 0 && (
+          {showThreads && !loading && (
+            <Section label="Previous conversations">
+              <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="light" />
+            </Section>
+          )}
+
+          {!response && !loading && !showThreads && recents.length > 0 && (
             <Section label="Recent">
               {recents.map((r, i) => (
                 <SheetRow
@@ -1320,7 +1439,7 @@ function MobileSheet({
             </Section>
           )}
 
-          {!response && !loading && quickActions.length > 0 && (
+          {!response && !loading && !showThreads && quickActions.length > 0 && (
             <Section label="Quick actions">
               {quickActions.map((a) => (
                 <SheetRow
@@ -1341,6 +1460,7 @@ function MobileSheet({
 
           {!response &&
             !loading &&
+            !showThreads &&
             recents.length === 0 &&
             quickActions.length === 0 && (
               <div
@@ -1464,6 +1584,75 @@ function AttachmentStrip({ attachments, onRemove, border, padded = true }) {
       ))}
     </div>
   );
+}
+
+// Previous-conversations picker rows. "dark" = desktop D-palette modal,
+// "light" = mobile sheet (rendered inside a Section card).
+function ThreadList({ threads, loading, onOpen, variant }) {
+  const light = variant === "light";
+  const textColor = light ? "#18181B" : D.text;
+  const mutedColor = light ? "#71717A" : D.muted;
+  if (loading && threads.length === 0) {
+    return (
+      <div style={{ padding: light ? "14px 16px" : "8px 0", fontSize: 13, color: mutedColor }}>
+        Loading…
+      </div>
+    );
+  }
+  if (threads.length === 0) {
+    return (
+      <div style={{ padding: light ? "14px 16px" : "8px 0", fontSize: 13, color: mutedColor }}>
+        No previous conversations yet.
+      </div>
+    );
+  }
+  return threads.map((t) => {
+    const when = t.last_active_at
+      ? formatETDateTime(t.last_active_at, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+      : "";
+    const where = CONTEXT_LABELS[t.context] || t.context || "";
+    return (
+      <button
+        key={t.id}
+        onClick={() => onOpen(t.id)}
+        style={{
+          display: "flex",
+          // Phones: meta stacks under the title so the title keeps the width.
+          flexDirection: light ? "column" : "row",
+          alignItems: light ? "stretch" : "center",
+          justifyContent: "space-between",
+          gap: light ? 3 : 12,
+          width: "100%",
+          padding: light ? "12px 16px" : "9px 10px",
+          minHeight: light ? 52 : 0,
+          background: light ? "#FFFFFF" : "transparent",
+          border: "none",
+          borderBottom: light ? "0.5px solid #E4E4E7" : `1px solid ${D.border}22`,
+          borderRadius: light ? 0 : 6,
+          cursor: "pointer",
+          textAlign: "left",
+          fontFamily: "Roboto, Arial, sans-serif",
+        }}
+      >
+        <span
+          style={{
+            flex: light ? "none" : 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: light ? 14 : 13,
+            color: textColor,
+          }}
+        >
+          {t.title || "Conversation"}
+        </span>
+        <span style={{ fontSize: light ? 12 : 11, color: mutedColor, whiteSpace: "nowrap" }}>
+          {where}{where && when ? " · " : ""}{when}
+        </span>
+      </button>
+    );
+  });
 }
 
 function Section({ label, children }) {
