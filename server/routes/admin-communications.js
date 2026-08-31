@@ -204,6 +204,7 @@ router.post('/sms', async (req, res, next) => {
   let manualReservationId = null;
   let parkedThreadIds = [];
   let claimedReviewRequestId = null;
+  let claimedReviewClaimToken = null;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -490,6 +491,13 @@ router.post('/sms', async (req, res, next) => {
           return abortUnsent(409, 'This review link was already sent or canceled — remove it from the message and re-insert if still needed.');
         }
         claimedReviewRequestId = rr.id;
+        claimedReviewClaimToken = seam.claimed;
+        // Final pre-provider fence: the token we hold must still be the live
+        // claim (a stale-claim reclaim by another send supersedes it).
+        if (!(await ReviewService.inlineClaimStillHeld(rr.id, claimedReviewClaimToken))) {
+          claimedReviewRequestId = null;
+          return abortUnsent(409, 'This review link was just claimed by another send — remove it and re-insert if still needed.');
+        }
       } catch (claimErr) {
         logger.warn(`[communications] inline review pre-send claim failed — aborting send (requestId=${reviewRequestId}): ${claimErr.message}`);
         return abortUnsent(503, 'Could not verify the inserted review link — try again in a moment.');
@@ -544,7 +552,7 @@ router.post('/sms', async (req, res, next) => {
     if (result.blocked || result.sent === false) {
       // The reply never left — release the claims and the parked cards.
       if (claimedReviewRequestId) {
-        await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId);
+        await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
@@ -577,13 +585,13 @@ router.post('/sms', async (req, res, next) => {
           // and, failing that, the stale-claim reconcile in
           // claimInlineForSend repairs it from the outbound log.
           try {
-            await ReviewService.markInlineDelivered(claimedReviewRequestId);
+            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
           } catch (firstErr) {
             logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${claimedReviewRequestId}): ${firstErr.message}`);
-            await ReviewService.markInlineDelivered(claimedReviewRequestId);
+            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
           }
         } else {
-          await ReviewService.releaseInlineClaim(claimedReviewRequestId);
+          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
         }
       } catch (markErr) {
         logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
@@ -715,9 +723,9 @@ router.post('/sms', async (req, res, next) => {
       try {
         const ReviewService = require('../services/review-request');
         if (err?.providerOutcome?.sent === true) {
-          await ReviewService.markInlineDelivered(claimedReviewRequestId);
+          await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
         } else {
-          await ReviewService.releaseInlineClaim(claimedReviewRequestId);
+          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
         }
       } catch (claimErr) {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);

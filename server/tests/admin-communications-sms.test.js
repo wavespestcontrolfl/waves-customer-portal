@@ -64,7 +64,8 @@ jest.mock('../services/sms-auto-send', () => ({
 // provider call and abort on any validation miss (fail closed — the tokenized
 // review page carries customer data).
 jest.mock('../services/review-request', () => ({
-  claimInlineForSend: jest.fn(async () => true),
+  claimInlineForSend: jest.fn(async () => new Date('2026-08-31T03:00:00.000Z')),
+  inlineClaimStillHeld: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),
   markInlineDelivered: jest.fn(async () => {}),
   reviewSmsAllowedNow: jest.fn(async () => ({ allowed: true })),
@@ -623,7 +624,7 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(200);
       expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
-      expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
     });
   });
 

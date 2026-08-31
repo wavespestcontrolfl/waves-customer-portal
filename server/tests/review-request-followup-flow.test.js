@@ -576,7 +576,7 @@ describe('review request follow-up flow', () => {
       throw new Error(`Unexpected table query: ${table}`);
     });
 
-    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
     expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline', status: 'pending' });
     expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
@@ -654,7 +654,7 @@ describe('review request follow-up flow', () => {
     const { rrQuery } = wireStaleClaimNoLocalEvidence();
     rrQuery.update.mockResolvedValueOnce(1); // the reclaim
 
-    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
     expect(rrQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
@@ -708,6 +708,28 @@ describe('review request follow-up flow', () => {
 
     expect(await ReviewService.createInline({ customerId: 'cust-1', armSafetyNet: false })).toBeNull();
     expect(insert.query.insert).not.toHaveBeenCalled();
+  });
+
+  test('claim token fences mark/release and the pre-provider check — a superseded holder cannot act', async () => {
+    const rrQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    const mine = new Date('2026-06-03T14:00:00.000Z');
+    const theirs = new Date('2026-06-03T14:11:00.000Z'); // a later reclaim
+
+    // Fenced mark + release scope the UPDATE to the token the caller holds.
+    await ReviewService.markInlineDelivered('rr-inline', mine);
+    expect(rrQuery.where).toHaveBeenCalledWith('claimed_at', mine);
+    await ReviewService.releaseInlineClaim('rr-inline', mine);
+    expect(rrQuery.where).toHaveBeenCalledWith('claimed_at', mine);
+
+    // Pre-provider fence: the row now carries the reclaim's token.
+    rrQuery.first.mockResolvedValueOnce({ claimed_at: theirs });
+    expect(await ReviewService.inlineClaimStillHeld('rr-inline', mine)).toBe(false);
+    rrQuery.first.mockResolvedValueOnce({ claimed_at: mine });
+    expect(await ReviewService.inlineClaimStillHeld('rr-inline', mine)).toBe(true);
   });
 
   test('releaseInlineClaim hands a claimed row back to pending', async () => {

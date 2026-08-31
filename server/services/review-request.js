@@ -1781,20 +1781,23 @@ const ReviewService = {
     return { url, requestId: request.id, token: request.token };
   },
 
-  async markInlineDelivered(requestId) {
+  async markInlineDelivered(requestId, claimToken = null) {
     if (!requestId) return;
-    await db("review_requests")
+    let q = db("review_requests")
       .where({ id: requestId })
       .whereNull("sms_sent_at")
       // "sending" = the composer path's pre-send claim (claimInlineForSend);
       // "pending" = the dispatch completion-SMS path, which sends under its
       // own per-service row so it needs no claim.
-      .whereIn("status", ["pending", "sending"])
-      .update({
-        sms_sent_at: new Date(),
-        scheduled_for: null,
-        status: "sent",
-      });
+      .whereIn("status", ["pending", "sending"]);
+    // Composer callers pass their claim token: a holder superseded by a
+    // reclaim must not stamp the replacement claim's row.
+    if (claimToken) q = q.where("claimed_at", claimToken);
+    await q.update({
+      sms_sent_at: new Date(),
+      scheduled_for: null,
+      status: "sent",
+    });
   },
 
   /**
@@ -1819,11 +1822,16 @@ const ReviewService = {
    */
   async claimInlineForSend(requestId) {
     if (!requestId) return false;
+    // The claim stamp doubles as the FENCE token: mark/release only act
+    // while claimed_at still equals the token the caller was handed, so a
+    // holder superseded by a later reclaim can neither mark nor release the
+    // replacement claim (inlineClaimStillHeld re-checks it pre-provider).
+    const token = new Date();
     const claimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
       .whereNull("sms_sent_at")
-      .update({ status: "sending", claimed_at: new Date() });
-    if (claimed > 0) return true;
+      .update({ status: "sending", claimed_at: token });
+    if (claimed > 0) return token;
 
     // Not pending — a stale abandoned claim is the only other claimable
     // state, and only after reconciling it against the outbound log.
@@ -1886,12 +1894,23 @@ const ReviewService = {
         return false;
       }
     }
+    const reclaimToken = new Date();
     const reclaimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
       .where("claimed_at", "<", staleBefore)
-      .update({ claimed_at: new Date() });
-    return reclaimed > 0;
+      .update({ claimed_at: reclaimToken });
+    return reclaimed > 0 ? reclaimToken : false;
+  },
+
+  /** Final pre-provider fence: is `claimToken` still the live claim on the row? */
+  async inlineClaimStillHeld(requestId, claimToken) {
+    if (!requestId || !claimToken) return false;
+    const row = await db("review_requests")
+      .where({ id: requestId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .first("claimed_at");
+    return !!row?.claimed_at && new Date(row.claimed_at).getTime() === new Date(claimToken).getTime();
   },
 
   /**
@@ -1924,12 +1943,14 @@ const ReviewService = {
     return { allowed: true };
   },
 
-  async releaseInlineClaim(requestId) {
+  async releaseInlineClaim(requestId, claimToken = null) {
     if (!requestId) return;
-    await db("review_requests")
+    let q = db("review_requests")
       .where({ id: requestId, status: "sending" })
-      .whereNull("sms_sent_at")
-      .update({ status: "pending", claimed_at: null });
+      .whereNull("sms_sent_at");
+    // Fenced: a superseded holder must not release the replacement claim.
+    if (claimToken) q = q.where("claimed_at", claimToken);
+    await q.update({ status: "pending", claimed_at: null });
   },
 
   /**
