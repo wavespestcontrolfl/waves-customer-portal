@@ -48,7 +48,7 @@ const logger = require('./logger');
 const { mergeLeadExtractedData, shouldRefreshLeadSummary } = require('../utils/lead-extracted-data-merge');
 const { properCase } = require('../utils/name-case');
 const { composeServiceInterest } = require('../utils/lead-service-interest');
-const { leadContactCompleteness } = require('../utils/lead-contact-completeness');
+const { leadContactCompleteness, leadQualification } = require('../utils/lead-contact-completeness');
 
 const isEmpty = (v) => v === null || v === undefined || v === '';
 
@@ -820,8 +820,12 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         service_address: leadUpdates.address ?? current?.address,
         email: leadUpdates.email ?? current?.email,
       });
-      leadUpdates.is_qualified = contact.complete
-        && (['hot', 'warm'].includes(extracted.lead_quality) || current?.is_qualified === true);
+      leadUpdates.is_qualified = leadQualification({
+        contactComplete: contact.complete,
+        leadQuality: extracted.lead_quality,
+        priorQualified: current?.is_qualified,
+        disqualificationReason: current?.disqualification_reason,
+      });
     }
     if (language) leadUpdates.preferred_language = language;
     // Only (re)link a customer when one was unambiguously resolved — never

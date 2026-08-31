@@ -1879,6 +1879,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
 const {
   QUALIFYING_CONTACT_LABELS,
   leadContactCompleteness,
+  leadQualification,
 } = require('../utils/lead-contact-completeness');
 
 // A real new-sales prospect we can still work even though the customer upsert
@@ -2899,9 +2900,14 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
         : payload);
       if (Object.prototype.hasOwnProperty.call(out, 'is_qualified')) {
         // Same monotonic rule as the Step 4b write, re-judged against the
-        // LOCKED row: earned by this call OR retained from the row.
-        out.is_qualified = contact.complete
-          && (['hot', 'warm'].includes(leadQuality) || lockedLead.is_qualified === true);
+        // LOCKED row: earned by this call OR retained from the row, and never
+        // over a standing human disqualification.
+        out.is_qualified = leadQualification({
+          contactComplete: contact.complete,
+          leadQuality,
+          priorQualified: lockedLead.is_qualified,
+          disqualificationReason: lockedLead.disqualification_reason,
+        });
       }
     }
   }
@@ -9712,9 +9718,15 @@ const CallRecordingProcessor = {
             // earlier call had qualified — which also drops it from the Google
             // Ads qualified-lead conversion upload (ads/data-manager.js). A real
             // demotion is a human act and has its own column
-            // (leads.disqualification_reason), never a side effect of a callback.
-            leadUpdates.is_qualified = contact.complete
-              && (['hot', 'warm'].includes(extracted.lead_quality) || current?.is_qualified === true);
+            // (leads.disqualification_reason) — which the shared rule now
+            // actually READS, so a staff disqualification is not undone by a
+            // hot follow-up and not preserved-as-qualified by a cold one.
+            leadUpdates.is_qualified = leadQualification({
+              contactComplete: contact.complete,
+              leadQuality: extracted.lead_quality,
+              priorQualified: current?.is_qualified,
+              disqualificationReason: current?.disqualification_reason,
+            });
             // Only ever SET the customer link, never clear it. The unnamed-lead
             // path runs with customerId null and can reuse an existing lead
             // found by phone — writing customer_id = null there would detach a

@@ -143,10 +143,11 @@ describe('mergeLeadExtractedData — follow-up calls never degrade the lead', ()
 });
 
 describe('is_qualified is monotonic under evidence', () => {
-  // The rule both writers now apply, asserted directly: a lead the office can
-  // work stays qualified across a 'cold' callback.
-  const qualifies = (leadQuality, contactComplete, priorQualified) => contactComplete
-    && (['hot', 'warm'].includes(leadQuality) || priorQualified === true);
+  // The SHARED rule all three writers apply, exercised directly rather than
+  // restated — restating it is how they drifted apart in the first place.
+  const { leadQualification } = require('../utils/lead-contact-completeness');
+  const qualifies = (leadQuality, contactComplete, priorQualified, disqualificationReason = null) =>
+    leadQualification({ leadQuality, contactComplete, priorQualified, disqualificationReason });
 
   it('a cold callback does not demote a qualified lead', () => {
     expect(qualifies('cold', true, true)).toBe(true);
@@ -162,6 +163,18 @@ describe('is_qualified is monotonic under evidence', () => {
 
   it('a hot call still earns qualification outright', () => {
     expect(qualifies('hot', true, false)).toBe(true);
+  });
+
+  it('a standing human disqualification outranks retention AND a hot call', () => {
+    // Staff can set disqualification_reason without touching is_qualified
+    // (admin-leads.js permits it), so a gate that ignored the column let a
+    // callback quietly re-qualify a lead the office had ruled out.
+    expect(qualifies('cold', true, true, 'not in service area')).toBe(false);
+    expect(qualifies('hot', true, false, 'not in service area')).toBe(false);
+  });
+
+  it('whitespace in the reason column is not a disqualification', () => {
+    expect(qualifies('cold', true, true, '   ')).toBe(true);
   });
 });
 
@@ -436,6 +449,7 @@ describe('both lead writers share one contact-completeness gate', () => {
     // the Google Ads qualified-lead upload — with its evidence gone.
     const source = require('fs').readFileSync(require.resolve('../services/lead-from-extraction'), 'utf8');
     expect(source).toContain('leadContactCompleteness');
-    expect(source).toMatch(/is_qualified = contact\.complete/);
+    expect(source).toContain('leadQualification({');
+    expect(source).toMatch(/disqualificationReason: current\?\.disqualification_reason/);
   });
 });
