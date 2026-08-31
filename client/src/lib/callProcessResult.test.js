@@ -35,6 +35,16 @@ describe("describeProcessResult", () => {
     }
   });
 
+  it("a policy hold reads as processed-and-held, not as nothing-ran", () => {
+    // The server persists the extraction, a terminal status and an open
+    // review on this path; only the canonical writes are withheld. Saying
+    // "nothing was saved" would invite a pointless reprocess.
+    const v = describeProcessResult({ success: true, skipped: true, reason: "v2_canonical_write_blocked" });
+    expect(v.didWork).toBe(true);
+    expect(v.severity).toBe("ok");
+    expect(v.text).toMatch(/held for review/);
+  });
+
   it("a hard failure is failed, not blocked", () => {
     const v = describeProcessResult({ success: false, error: "openai timeout" });
     expect(v.severity).toBe("failed");

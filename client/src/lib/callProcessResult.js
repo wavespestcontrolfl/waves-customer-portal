@@ -20,6 +20,12 @@ const SETTLED_SKIP_COPY = {
   pan_quarantined: 'Quarantined — a card number was read aloud, so the recording is not stored.',
   already_has_recording: 'Already has its recording — nothing to recover.',
   already_recovered_by_peer: 'Another pass already recovered this recording.',
+  // NOT a failure and NOT a no-op: the run completed and persisted the
+  // extraction, summary, sentiment, lead quality and a terminal status, then
+  // deliberately withheld the customer/lead/appointment writes and opened a
+  // review. Calling that "nothing was saved" invites a pointless reprocess.
+  v2_canonical_write_blocked:
+    'Processed and held for review — no customer, lead or appointment was created from it.',
 };
 
 // Skips where NOTHING ran. Each one leaves the call exactly as it was, so
@@ -29,7 +35,6 @@ const BLOCKED_SKIP_COPY = {
   recording_not_ready: "Nothing ran — the recording hasn't landed from Twilio yet.",
   terminal_write_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
   transcription_rejected_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
-  v2_canonical_write_blocked: 'Nothing was saved — the extraction write was blocked.',
   transcription_rejected_implausible: "Stopped — the transcript didn't plausibly belong to this call.",
   no_completed_recording: 'Nothing ran — Twilio has no completed recording for this call.',
 };
