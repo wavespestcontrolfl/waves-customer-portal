@@ -113,15 +113,35 @@ function writerCandidateFiles() {
 // The builder chain runs from `('annual_prepay_terms')` to the first `;` at
 // paren/brace depth zero — a `;` inside a `.where(function () { …; })`
 // callback does not end it.
+// Walk text skipping string literals ('…', "…", `…` incl. escapes) and
+// comments, calling cb(ch, i) for each syntactic character. Keeps the
+// delimiter walkers from counting brackets inside strings/comments.
+function walkSyntax(text, start, cb) {
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      for (i += 1; i < text.length; i += 1) {
+        if (text[i] === '\\') i += 1;
+        else if (text[i] === ch) break;
+      }
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') { i = text.indexOf('\n', i); if (i === -1) return; continue; }
+    if (ch === '/' && text[i + 1] === '*') { i = text.indexOf('*/', i); if (i === -1) return; i += 1; continue; }
+    if (cb(ch, i) === false) return;
+  }
+}
+
 function chainAfter(src, start) {
   let depth = 0;
-  for (let i = start; i < src.length; i += 1) {
-    const ch = src[i];
+  let end = src.length;
+  walkSyntax(src, start, (ch, i) => {
     if (ch === '(' || ch === '{' || ch === '[') depth += 1;
     else if (ch === ')' || ch === '}' || ch === ']') depth -= 1;
-    else if (ch === ';' && depth <= 0) return src.slice(start, i);
-  }
-  return src.slice(start);
+    else if (ch === ';' && depth <= 0) { end = i; return false; }
+    return true;
+  });
+  return src.slice(start, end);
 }
 
 // The WHERE guards attached to the same builder chain as a status write,
@@ -155,14 +175,17 @@ function statusWriteSites(src) {
       out.push({ expr: s[1].replace(/,\s*$/, '').trim(), guards });
     }
   };
-  // Balanced-paren argument text of a call starting at `(`.
+  // Balanced-paren argument text of a call starting at `(` — string/comment
+  // aware, so a ')' inside a note string cannot truncate the span.
   const argSpan = (text, openIdx) => {
     let depth = 0;
-    for (let i = openIdx; i < text.length; i += 1) {
-      if ('({['.includes(text[i])) depth += 1;
-      else if (')}]'.includes(text[i])) { depth -= 1; if (depth === 0) return text.slice(openIdx + 1, i); }
-    }
-    return text.slice(openIdx + 1);
+    let end = -1;
+    walkSyntax(text, openIdx, (ch, i) => {
+      if ('({['.includes(ch)) depth += 1;
+      else if (')}]'.includes(ch)) { depth -= 1; if (depth === 0) { end = i; return false; } }
+      return true;
+    });
+    return end === -1 ? text.slice(openIdx + 1) : text.slice(openIdx + 1, end);
   };
   // Classify one update/insert argument list. Every Knex mutation shape is
   // either understood or pushed as an unclassifiable marker — never skipped.

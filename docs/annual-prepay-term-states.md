@@ -27,10 +27,13 @@ this page in the same PR.
 | `refunded` | Allowed by the CHECK, **never written**. A refunded invoice maps to term `cancelled` (`invoiceTermStatus`). Legacy name. | no |
 
 "Decided" = `renewal_decision IS NOT NULL` (one of `renew` / `cancel` /
-`switch_plan`, also CHECK-enforced). The decision column is the real terminal
-latch: every status-mutating path below except move 13 guards on
-`renewal_decision IS NULL` or on `status IN ACTIVE_STATUSES`, so a decided
-term never moves again through the service layer.
+`switch_plan`, also CHECK-enforced). The decision column is the **intended**
+terminal latch: every status-mutating path below guards on
+`renewal_decision IS NULL` or on `status IN ACTIVE_STATUSES`, with two known
+exceptions — move 13 (deliberately unguarded), and move 1's existing-row
+re-run, whose decided-status preservation is a snapshot read, not a DB
+guard (the TOCTOU residue below; a decided row overwritten in that window
+could then re-activate through move 2's `payment_pending`-only guard).
 
 ## Allowed moves
 
