@@ -49,6 +49,12 @@ describe('resolveCommittedVisitTime — the committed row is the truth for a rem
       .resolves.toBe('2026-09-15T08:00');
   });
 
+  test('a windowless committed row overrides a stale non-null caller window (08:00 convention)', async () => {
+    rowReader({ scheduled_date: '2026-09-15', window_start: null });
+    await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: '13:00' }))
+      .resolves.toBe('2026-09-15T08:00');
+  });
+
   test('row not visible (not committed yet) → the caller values stand', async () => {
     rowReader(undefined);
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: '10:00' }))

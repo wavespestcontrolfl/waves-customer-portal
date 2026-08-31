@@ -2178,12 +2178,15 @@ const AppointmentReminders = {
         .where({ id: scheduledServiceId })
         .first('scheduled_date', 'window_start');
       if (row) {
+        // The row is the whole truth once found: a NULL window means
+        // "windowless" (08:00 convention), not "keep the caller's stale
+        // window".
         if (row.scheduled_date) {
           resolvedDate = row.scheduled_date instanceof Date
             ? row.scheduled_date.toISOString().slice(0, 10)
             : String(row.scheduled_date).slice(0, 10);
         }
-        if (row.window_start) resolvedStart = String(row.window_start).slice(0, 5);
+        resolvedStart = row.window_start ? String(row.window_start).slice(0, 5) : null;
       }
     } catch (err) {
       logger.warn(`[appt-remind] could not read back visit ${scheduledServiceId} for its reminder time (${err.message}) — using the caller's values`);
