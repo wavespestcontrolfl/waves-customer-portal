@@ -77,6 +77,14 @@ describe('cancel_plan unconfirmed', () => {
     expect(mockPreview).toHaveBeenCalledWith(expect.objectContaining({ families: [], effectiveDate: 'now', waiveLateFee: false, sendConfirmation: true, reasonCode: null, note: '' }));
   });
 
+  test('a params-level confirmed:true WITHOUT the route-derived actionContext.confirmed still previews — never commits', async () => {
+    // Closes the gate-off /execute and model-loop lanes: only /confirm-action
+    // attaches BOTH input.confirmed and actionContext.confirmed.
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, confirmed: true }, { technicianId: 'admin-1', isAdmin: true });
+    expect(result.preview).toBe(true);
+    expect(mockCommit).not.toHaveBeenCalled();
+  });
+
   test('service refusals surface as tool errors with their code', async () => {
     const err = Object.assign(new Error('Cancel flow V2 is not enabled'), { status: 404, code: 'cancel_flow_v2_off' });
     mockPreview.mockRejectedValueOnce(err);
@@ -109,7 +117,7 @@ describe('cancel_plan confirmed (server-derived)', () => {
       effectiveDate: '2026-08-31', lateFeeWaived: false, prepayDisposition: 'end_now_refund',
       refund: { amount: 360, needsManualCalc: false }, confirmationChannels: [], confirmationRequested: false, errors: ['in_progress_visit:s9'],
     });
-    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'now', prepay_disposition: 'end_now_refund', send_confirmation: false, confirmed: true }, { technicianId: 'admin-1' });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'now', prepay_disposition: 'end_now_refund', send_confirmation: false, confirmed: true }, { technicianId: 'admin-1', confirmed: true });
     expect(mockCommit).toHaveBeenCalledWith(expect.objectContaining({ prepayDisposition: 'end_now_refund', sendConfirmation: false }));
     expect(result.processed).toBe(false);
     expect(result.warning).toMatch(/in_progress_visit:s9/);
@@ -124,13 +132,13 @@ describe('cancel_plan confirmed (server-derived)', () => {
       requestId: 'req-3', processed: true, visitsPulled: 0, scope: [], remaining: [], tierBefore: null, tierAfter: null,
       effectiveDate: '2026-08-31', lateFeeWaived: false, prepayDisposition: null, confirmationChannels: [], confirmationRequested: false, errors: [],
     });
-    await executeTool('cancel_plan', { customer_id: CUSTOMER, preview_fingerprint: 'f'.repeat(64), confirmed: true }, { technicianId: 'admin-1' });
+    await executeTool('cancel_plan', { customer_id: CUSTOMER, preview_fingerprint: 'f'.repeat(64), confirmed: true }, { technicianId: 'admin-1', confirmed: true });
     expect(mockCommit).toHaveBeenCalledWith(expect.objectContaining({ previewFingerprint: 'f'.repeat(64) }));
   });
 
   test('a commit refusal (scope changed under the card) is a tool error with its code', async () => {
     mockCommit.mockRejectedValueOnce(Object.assign(new Error('not attributable'), { status: 409, code: 'scoped_cancellation_unattributed' }));
-    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['lawn_care'], confirmed: true }, { technicianId: 'admin-1' });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['lawn_care'], confirmed: true }, { technicianId: 'admin-1', confirmed: true });
     expect(result).toEqual({ error: 'not attributable', code: 'scoped_cancellation_unattributed' });
   });
 });

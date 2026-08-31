@@ -1644,7 +1644,12 @@ async function cancelPlan(input, actionContext = {}) {
   const AdminCancellation = require('../admin-cancellation');
   const serviceInput = cancelPlanServiceInput(input);
 
-  if (input.confirmed !== true) {
+  // BOTH confirmation signals, or it's a preview: /confirm-action is the
+  // only caller that attaches input.confirmed AND actionContext.confirmed
+  // (route-derived, never client params) — so a params-level confirmed
+  // smuggled through /execute or the gate-off model loop still previews
+  // (same posture as the estimate tools' actionContext.confirmed gate).
+  if (input.confirmed !== true || actionContext.confirmed !== true) {
     let preview;
     try {
       preview = await AdminCancellation.previewCancelPlan({ customerId, ...serviceInput });
