@@ -662,8 +662,12 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       openCh = null;
     }
     if (openCh) {
-      const close = strippedLine.match(/^ *(`{3,}|~{3,})\s*$/);
-      if (close && close[1][0] === openCh && close[1].length >= openLen) { intervals.push([start, pos + line.length]); openCh = null; }
+      // CommonMark: a closing fence may be indented at most 3 spaces
+      // relative to its container (the list content column for a fence
+      // inside an item; 0 at top level) — a 4-space-indented run is code
+      // CONTENT and the fence stays open.
+      const close = strippedLine.match(/^( *)(`{3,}|~{3,})\s*$/);
+      if (close && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; }
     } else {
       const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
       const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
@@ -716,21 +720,41 @@ function blankNonRenderedCode(src: string): string {
   return lines.join('\n');
 }
 
+// Index of the `}` closing the expression whose `{` is at `i` (-1 if
+// unbalanced). Honors JS literals so their content can't end it early:
+// strings ({'a}b'}), REGEX literals ({/"}/.test(x)} — a regex quote or
+// brace is not syntax; operator-position `/` starts one, char-class
+// aware), and // and /* */ comments.
+function closeOfExpressionAt(src: string, i: number): number {
+  let depth = 0; let q: string | null = null; let prevSig = '';
+  for (let j = i; j < src.length; j += 1) {
+    const c = src[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
+    if (depth > 0 && c === '/' && src[j + 1] === '/') { while (j < src.length && src[j] !== '\n') j += 1; continue; }
+    if (depth > 0 && c === '/' && src[j + 1] === '*') { const e = src.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+      let k = j + 1; let inClass = false; let closed = -1;
+      for (; k < src.length && src[k] !== '\n'; k += 1) {
+        const d = src[k];
+        if (d === '\\') { k += 1; continue; }
+        if (inClass) { if (d === ']') inClass = false; continue; }
+        if (d === '[') { inClass = true; continue; }
+        if (d === '/') { closed = k; break; }
+      }
+      if (closed > 0) { j = closed; prevSig = '/'; continue; }
+    }
+    if (c === '{') { depth += 1; prevSig = '{'; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; continue; }
+    if (!/\s/.test(c)) prevSig = c;
+  }
+  return -1;
+}
+
 function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolean } = {}): string {
   const out = src.split('');
   const blankRange = (a: number, b: number) => { for (let k = a; k <= b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
-  // Strings INSIDE an expression are honored so a `}` in {'a}b'} doesn't end it early.
-  const closeOfExpression = (i: number): number => {
-    let depth = 0; let q: string | null = null;
-    for (let j = i; j < src.length; j += 1) {
-      const c = src[j];
-      if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
-      if (c === '"' || c === "'" || c === '`') { q = c; continue; }
-      if (c === '{') depth += 1;
-      else if (c === '}') { depth -= 1; if (depth === 0) return j; }
-    }
-    return -1;
-  };
+  const closeOfExpression = (i: number): number => closeOfExpressionAt(src, i);
   // Context aware: inside a TAG quotes delimit attribute values (a brace in
   // title="a {b}" is not an expression); in PROSE an apostrophe is text
   // (don't / it's), so only braces matter there.
@@ -760,12 +784,12 @@ function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolea
         // counted (fail closed both ways).
         if (!keepJsx || !/<[A-Z]/.test(expr)) blankRange(i, j);
         else {
-          let q: string | null = null; let qs = -1;
-          for (let k = i; k <= j; k += 1) {
-            const c = src[k];
-            if (q) { if (c === '\\') { k += 1; continue; } if (c === q) { blankRange(qs, k); q = null; } continue; }
-            if (c === '"' || c === "'" || c === '`') { q = c; qs = k; }
-          }
+          // Blank the expression's string/regex/comment literals via the
+          // shared lexer (blankExpressionStrings) — a naive quote-pairing
+          // walk would let a regex quote (/"/) pair with a later REAL
+          // attribute quote and blank a counted component's opener.
+          const lexed = blankExpressionStrings(expr);
+          for (let k = i; k <= j; k += 1) if (lexed[k - i] !== src[k]) out[k] = lexed[k - i];
         }
         i = j + 1; continue;
       }
@@ -802,7 +826,20 @@ function blankExpressionStrings(src: string): string {
         if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; }
         continue;
       }
-      if (c === '/' && src[i + 1] === '/' ) { prevSig = c; i += 1; continue; }
+      // Comments render nothing and may spell tag-shaped text ({true &&
+      // // <div>}) — blank the FULL comment, not just its slashes.
+      if (c === '/' && src[i + 1] === '/') {
+        let j = i;
+        while (j < src.length && src[j] !== '\n') j += 1;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      if (c === '/' && src[i + 1] === '*') {
+        const e = src.indexOf('*/', i + 2);
+        const j = e === -1 ? src.length : e + 2;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
       if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
         // Regex literal: scan to the unescaped closing `/`, honoring
         // character classes ([/] does not close).
@@ -1118,7 +1155,7 @@ function maskJsxAttrQuotes(src: string): string {
   const re = /<[A-Za-z][\w.]*/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
-    let j = m.index + m[0].length; let q: string | null = null; let qStart = -1; let depth = 0;
+    let j = m.index + m[0].length; let q: string | null = null; let qStart = -1;
     for (; j < src.length; j += 1) {
       const c = src[j];
       if (q) {
@@ -1130,9 +1167,19 @@ function maskJsxAttrQuotes(src: string): string {
         continue;
       }
       if (c === '"' || c === "'" || c === '`') { q = c; qStart = j; continue; }
-      if (c === '{') depth += 1;
-      else if (c === '}') depth -= 1;
-      else if (c === '>' && depth === 0) break;
+      if (c === '{') {
+        // An expression-valued attribute renders no anchor text either, and
+        // its JS literals must not be mistaken for attr quotes (data={/"/}
+        // would otherwise pair the regex quote with the NEXT attribute's
+        // opener and leave that value unmasked). Lex the whole expression
+        // (regex/string/comment-aware) and blank it.
+        const e = closeOfExpressionAt(src, j);
+        if (e > 0) {
+          for (let t = j; t <= e; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          j = e; continue;
+        }
+      }
+      if (c === '>') break;
     }
     re.lastIndex = j;
   }
@@ -1309,7 +1356,9 @@ export function validateAffiliateUsage(
 }
 
 function extractMdxComponentNames(mdx: string): Set<string> {
-  const cleaned = blankNonRenderedCode(mdx);
+  // A component name spelled inside an expression string is text (same
+  // rule as extractComponentInvocations) — scan the string-blanked view.
+  const cleaned = blankExpressionStrings(blankNonRenderedCode(mdx));
 
   const names = new Set<string>();
   const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
@@ -1500,11 +1549,17 @@ interface ParsedInvocation {
 
 function extractComponentInvocations(cleaned: string): ParsedInvocation[] {
   const invocations: ParsedInvocation[] = [];
+  // A tag spelled inside an expression STRING ({'<AffiliateLink />'})
+  // renders as text, never as an invocation — position-check each match
+  // against the string-blanked view (attrs still read from `cleaned` so a
+  // REAL expression-wrapped invocation's quoted props stay validatable).
+  const strView = blankExpressionStrings(cleaned);
   // Matches opening tag up to closing `>`, capturing name + raw attr string.
   // Handles self-closing (<Foo ... />) and paired (<Foo ...>…</Foo>).
   const pattern = /<([A-Z][A-Za-z0-9]*)((?:\s+[^>]*?)?)\s*(\/?)>/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(cleaned)) !== null) {
+    if (strView[match.index] === ' ') continue;
     invocations.push({ name: match[1], attrs: match[2] ?? '' });
   }
   return invocations;
