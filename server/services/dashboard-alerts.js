@@ -481,7 +481,19 @@ async function computeDashboardAlertsUncached() {
       // hold count = max(readable, persisted) and omit members — an
       // incomplete read knows a floor, not the set — so an outage can neither
       // clear the alert nor make its recovery read as an escalation.
-      const persisted = unreadableIds.length ? await persistedCloseoutAlertForDay(today) : { row: null, error: null };
+      if (sweepTruncated) {
+        // A truncated sweep is an INCOMPLETE read: gapped visits beyond the
+        // cap were not checked this pass. Their carried identities stay
+        // counted so a clean in-window read can't clear the alert (r15).
+        const window = new Set(completedToday.map((r) => r.id));
+        for (const [id, entry] of carry) {
+          if (!window.has(id)) { gapIds.push(id); issueCount += entry.identities.length; gapIdentities.push(...entry.identities); }
+        }
+      }
+      // On a truncated read with nothing else holding the alert (e.g. an
+      // empty post-restart carry), the persisted row is the remaining floor.
+      const persisted = (unreadableIds.length || (sweepTruncated && !gapIds.length))
+        ? await persistedCloseoutAlertForDay(today) : { row: null, error: null };
       const held = persisted.row;
       if (held || (persisted.error && (gapIds.length || carry.size))) {
         // Active row, OR the row itself was unreadable while something is

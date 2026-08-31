@@ -451,6 +451,23 @@ describe('Action Inbox generators', () => {
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
   });
 
+  test('closeout_gaps_today: a gapped visit pushed past the sweep cap stays counted — a truncated clean window cannot clear it (pre-push r15)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    const gap = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' } } };
+    const clean = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'done', reason: 'report_published' } } };
+    primeDb({ scheduled_services: [{ id: 'svc-gap' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-gap', gap]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1 });
+    // Backfilled earlier visits push svc-gap past the cap; the checked 50 are all clean.
+    const rows = Array.from({ length: 51 }, (_, i) => ({ id: `svc-${i}` }));
+    primeDb({ scheduled_services: (calls) => (calls.some((c) => c.method === 'count') ? { n: 51 } : rows) });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map(rows.slice(0, 50).map((r) => [r.id, clean])));
+    const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(item).toMatchObject({ count: 1, members: ['svc-gap:missing_required_service_report'] });
+  });
+
   test('closeout_sweep_incomplete: a day over the cap surfaces the unchecked count instead of a silent false-clean (codex r7)', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     const { __private } = require('../services/dashboard-alerts');
