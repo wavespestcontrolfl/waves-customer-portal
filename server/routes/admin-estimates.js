@@ -385,6 +385,10 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[admin-estimates] send pricing snapshot failed for estimate ${estimate.id}: ${err.message}`);
+    // The spread above carried the PRIOR send's bundle forward — a failed
+    // rebuild must not re-stamp stale customer-shown pricing under a new
+    // renderedAt (codex pre-push P1).
+    delete sendSnapshot.pricingBundle;
     sendSnapshot.pricingBundleError = err.message;
   }
 
@@ -1475,7 +1479,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   let builtSendSnapshot = null;
   try {
     const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now);
-    builtSendSnapshot = snapshot.sendSnapshot || null;
+    // Only a VALIDATED bundle feeds the audit — same rule as the sibling
+    // and superseded branches (codex pre-push P1).
+    builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
+      ? snapshot.sendSnapshot
+      : null;
     // Merge only the keys we own (sendSnapshot, and proposalDelivery for an
     // authored proposal) so a proposal save committing mid-send isn't clobbered
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
@@ -1800,9 +1808,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       status: basisRow.viewed_at ? 'viewed' : 'sent',
       sent_at: now,
       expires_at: nextExpiresAt,
+      // No validated bundle ⇒ no sendSnapshot at all in the anchor: a
+      // prior send's frozen pricing must not be recorded as this send's
+      // customer-shown truth (codex pre-push P1).
       estimate_data: builtSendSnapshot
         ? { ...(basisData || {}), sendSnapshot: builtSendSnapshot }
-        : (basisData || {}),
+        : (() => { const { sendSnapshot: _stale, ...rest } = basisData || {}; return rest; })(),
     };
     await saveEstimatePricingAuditSnapshot(auditAnchor, {
       trigger: 'send',
