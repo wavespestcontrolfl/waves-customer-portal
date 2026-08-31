@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "Auth guards the public-route allowlist test recognises. A middleware that",
+    "is NOT listed here counts as NOT auth, so a route protected only by an",
+    "unlisted or anonymous wrapper shows up as public and fails",
+    "server/tests/public-route-allowlist.test.js. Adding a guard here is a",
+    "deliberate, reviewed change: it must fail closed (reject the request when",
+    "the credential is missing or invalid) and must not be a soft/optional check.",
+    "Fields: name = exported (or file-local) identifier; module = file that",
+    "defines it; local = defined in a route file rather than exported from",
+    "server/middleware; factory = called with arguments to produce the guard",
+    "(linkWorkerAuth('claim')); exempts = router-relative 'METHOD /path' entries",
+    "the guard deliberately lets through (those routes must be in the allowlist)."
+  ],
+  "guards": [
+    { "name": "adminAuthenticate", "module": "server/middleware/admin-auth.js",
+      "what": "staff JWT (admin or technician row, token version, terminal scope rejected)" },
+    { "name": "requireAdmin", "module": "server/middleware/admin-auth.js",
+      "what": "403 unless req.techRole === 'admin'; standalone it always 403s, so it fails closed" },
+    { "name": "requireTechOrAdmin", "module": "server/middleware/admin-auth.js",
+      "what": "403 unless req.techRole is admin/technician; standalone it always 403s, so it fails closed" },
+    { "name": "authenticate", "module": "server/middleware/auth.js",
+      "what": "customer JWT (active customer)" },
+    { "name": "authenticateAllowInactive", "module": "server/middleware/auth.js",
+      "what": "customer JWT admitting inactive (not deleted) customers; routes must gate per-action" },
+    { "name": "validateTwilioSignature", "module": "server/middleware/twilio-signature.js",
+      "what": "Twilio X-Twilio-Signature HMAC over the reconstructed public URL" },
+    { "name": "linkWorkerAuth", "module": "server/middleware/link-worker-auth.js", "factory": true,
+      "what": "Hermes worker HMAC-signed header (timestamp + nonce + body hash) or per-endpoint bearer" },
+    { "name": "mcpAuth", "module": "server/routes/mcp.js", "local": true,
+      "what": "GATE_MCP_READ_TOOLS + MCP_SERVICE_TOKEN bearer via constant-time compare" },
+    { "name": "terminalAuthenticate", "module": "server/routes/stripe-terminal.js", "local": true,
+      "what": "staff JWT that also admits terminal-scoped tokens minted by /validate-handoff (adminAuthenticate rejects that scope)" },
+    { "name": "adminAuthenticateExceptOauthCallback", "module": "server/routes/admin-email.js", "local": true,
+      "exempts": ["GET /oauth/callback"],
+      "what": "adminAuthenticate + requireAdmin for the whole Gmail router except Google's OAuth redirect target" }
+  ]
+}
