@@ -89,6 +89,18 @@ async function customerRateRows(conn) {
  */
 async function recordCustomerMrrSnapshots(periodMonth, conn) {
   conn = conn || require('../models/db');
+  // Never rewrite a PRE-BOUNDARY month with the corrected (narrow) lane
+  // population (Codex #3669 r6 P1): a deploy landing before the 11:50pm ET
+  // month-end capture (scheduler.js) would otherwise prune the closing
+  // month's legacy residue rows while the bridge boundary still treats that
+  // month as old-definition — the prior→closing diff would report every
+  // pruned row as churn. The month keeps its last old-definition rows; its
+  // AGGREGATE row is still refreshed (narrow — the documented step-down),
+  // so per-customer rows and the aggregate diverge for that one month.
+  const { LANE_DEFINITION_BOUNDARY } = require('./mrr-bridge');
+  if (String(periodMonth) < LANE_DEFINITION_BOUNDARY) {
+    return { period_month: periodMonth, count: 0, removed: 0, skipped: 'lane_definition_boundary' };
+  }
   const rows = await customerRateRows(conn);
   // Empty result = no qualifying customers (or the population query yielded none);
   // skip both the insert AND the prune so a transient empty read can't wipe the

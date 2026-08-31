@@ -154,14 +154,14 @@ describe('recordCustomerMrrSnapshots', () => {
       ],
       capture,
     });
-    const out = await recordCustomerMrrSnapshots('2026-06-01', db);
+    const out = await recordCustomerMrrSnapshots('2026-10-01', db);
 
-    expect(out).toEqual({ period_month: '2026-06-01', count: 2, removed: 0 });
+    expect(out).toEqual({ period_month: '2026-10-01', count: 2, removed: 0 });
     expect(capture.custConflict).toEqual(['period_month', 'customer_id']);
     expect(capture.custMerged).toBe(true);
     expect(capture.custRows).toEqual([
-      expect.objectContaining({ period_month: '2026-06-01', customer_id: 'c1', monthly_rate: 120, waveguard_tier: 'Gold' }),
-      expect.objectContaining({ period_month: '2026-06-01', customer_id: 'c2', monthly_rate: 40, waveguard_tier: 'Bronze' }),
+      expect.objectContaining({ period_month: '2026-10-01', customer_id: 'c1', monthly_rate: 120, waveguard_tier: 'Gold' }),
+      expect.objectContaining({ period_month: '2026-10-01', customer_id: 'c2', monthly_rate: 40, waveguard_tier: 'Bronze' }),
     ]);
   });
 
@@ -172,10 +172,10 @@ describe('recordCustomerMrrSnapshots', () => {
       capture,
       removedCount: 3, // 3 stale rows (deactivated/soft-deleted/rate→0 mid-month) deleted
     });
-    const out = await recordCustomerMrrSnapshots('2026-06-01', db);
+    const out = await recordCustomerMrrSnapshots('2026-10-01', db);
 
-    expect(out).toEqual({ period_month: '2026-06-01', count: 1, removed: 3 });
-    expect(capture.pruneWhere).toEqual({ period_month: '2026-06-01' });
+    expect(out).toEqual({ period_month: '2026-10-01', count: 1, removed: 3 });
+    expect(capture.pruneWhere).toEqual({ period_month: '2026-10-01' });
     expect(capture.pruneCol).toBe('customer_id');
     expect(capture.pruneKeep).toEqual(['c1']); // only the surviving population is kept
     expect(capture.pruneDel).toBe(true);
@@ -183,10 +183,25 @@ describe('recordCustomerMrrSnapshots', () => {
 
   test('writes nothing AND prunes nothing when the population is empty', async () => {
     const capture = {};
-    const out = await recordCustomerMrrSnapshots('2026-06-01', makeFakeDb({ customerRows: [], capture }));
-    expect(out).toEqual({ period_month: '2026-06-01', count: 0, removed: 0 });
+    const out = await recordCustomerMrrSnapshots('2026-10-01', makeFakeDb({ customerRows: [], capture }));
+    expect(out).toEqual({ period_month: '2026-10-01', count: 0, removed: 0 });
     expect(capture.custRows).toBeUndefined();
     expect(capture.pruneDel).toBeUndefined(); // a transient empty read must not wipe the month
+  });
+
+  test('a PRE-BOUNDARY month is never rewritten to the corrected population (Codex #3669 r6 P1)', async () => {
+    // Deploy before the 11:50pm ET month-end capture: the closing month must
+    // keep its old-definition rows, or the bridge's prior→closing diff reads
+    // every pruned residue row as churn while the boundary still calls that
+    // month old-definition.
+    const capture = {};
+    const out = await recordCustomerMrrSnapshots('2026-08-01', makeFakeDb({
+      customerRows: [{ customer_id: 'c1', monthly_rate: '120', waveguard_tier: 'Gold' }],
+      capture,
+    }));
+    expect(out).toEqual({ period_month: '2026-08-01', count: 0, removed: 0, skipped: 'lane_definition_boundary' });
+    expect(capture.custRows).toBeUndefined(); // no insert
+    expect(capture.pruneDel).toBeUndefined(); // and no prune
   });
 });
 
@@ -202,7 +217,7 @@ describe('recordMrrSnapshot', () => {
       customerRows: [{ customer_id: 'c1', monthly_rate: '600', waveguard_tier: 'Gold' }],
       capture,
     });
-    const out = await recordMrrSnapshot('2026-06-01', db);
+    const out = await recordMrrSnapshot('2026-10-01', db);
 
     // ONE pending-prepay set fetched up front and shared with the breakdown
     // (and tierBreakdown) so the persisted aggregate cannot be internally
@@ -212,7 +227,7 @@ describe('recordMrrSnapshot', () => {
     expect(capture.conflict).toBe('period_month');
     expect(capture.merged).toBe(true);
     expect(capture.row).toMatchObject({
-      period_month: '2026-06-01',
+      period_month: '2026-10-01',
       total_mrr: 1000,
       committed_mrr: 800,
       at_risk_mrr: 200,
@@ -225,9 +240,9 @@ describe('recordMrrSnapshot', () => {
     // per-customer
     expect(capture.custConflict).toEqual(['period_month', 'customer_id']);
     expect(capture.custRows).toEqual([
-      expect.objectContaining({ period_month: '2026-06-01', customer_id: 'c1', monthly_rate: 600 }),
+      expect.objectContaining({ period_month: '2026-10-01', customer_id: 'c1', monthly_rate: 600 }),
     ]);
-    expect(out).toMatchObject({ period_month: '2026-06-01', total: 1000, customerSnapshot: { period_month: '2026-06-01', count: 1 } });
+    expect(out).toMatchObject({ period_month: '2026-10-01', total: 1000, customerSnapshot: { period_month: '2026-10-01', count: 1 } });
   });
 
   test('a per-customer failure does not break the aggregate snapshot', async () => {
@@ -238,11 +253,11 @@ describe('recordMrrSnapshot', () => {
       capture,
       custFail: true,
     });
-    const out = await recordMrrSnapshot('2026-06-01', db);
+    const out = await recordMrrSnapshot('2026-10-01', db);
 
     // aggregate still committed; the call resolves; per-customer is isolated to null
     expect(capture.merged).toBe(true);
     expect(capture.custMerged).toBe(true); // it tried, then rejected internally
-    expect(out).toMatchObject({ period_month: '2026-06-01', total: 1000, customerSnapshot: null });
+    expect(out).toMatchObject({ period_month: '2026-10-01', total: 1000, customerSnapshot: null });
   });
 });
