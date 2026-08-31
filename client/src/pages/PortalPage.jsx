@@ -6668,7 +6668,7 @@ function BillingTab({ customer, refreshCustomer }) {
           </div>
         )}
 
-        <div style={{
+        <div data-billing-reminder-row="" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           flexWrap: 'wrap',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
@@ -6677,10 +6677,16 @@ function BillingTab({ customer, refreshCustomer }) {
               are account-operational — every customer gets them, like
               receipts. Only the delivery method is a choice; STOP remains
               the master kill switch. */}
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminders</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>How you receive reminders for upcoming or overdue billing items.</div>
           </div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+            marginLeft: compact ? 0 : 'auto',
+            flex: compact ? '1 0 100%' : '0 0 auto',
+            justifyContent: compact ? 'flex-end' : undefined,
+          }}>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
             const selectable = hasBillingEmail;
@@ -6701,14 +6707,15 @@ function BillingTab({ customer, refreshCustomer }) {
               </select>
             );
           })()}
+          </div>
         </div>
 
-        <div style={{
+        <div data-payment-confirm-row="" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           flexWrap: 'wrap',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
             {/* Channel-aware copy: the dropdown beside this row offers
                 Text / Email / Text & Email, so hardcoded "texts" copy read as
                 false the moment a customer picked Email. */}
@@ -6746,6 +6753,12 @@ function BillingTab({ customer, refreshCustomer }) {
               })()}
             </div>
           </div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+            marginLeft: compact ? 0 : 'auto',
+            flex: compact ? '1 0 100%' : '0 0 auto',
+            justifyContent: compact ? 'flex-end' : undefined,
+          }}>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
             const selectable = hasBillingEmail;
@@ -6771,10 +6784,11 @@ function BillingTab({ customer, refreshCustomer }) {
               delivery method is a choice, like billing reminders. A stored
               opt-out shows a one-tap way back on. */}
           {paymentSmsOff && (
-            <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 40, position: 'relative', flexShrink: 0 }}>
+            <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 44, position: 'relative', flexShrink: 0 }}>
               Turn on
             </button>
           )}
+          </div>
         </div>
 
         {billingPrefsStatus === 'error' && (

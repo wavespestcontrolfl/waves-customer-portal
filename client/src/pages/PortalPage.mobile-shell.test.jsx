@@ -142,4 +142,16 @@ describe('billing reminder channel selects', () => {
       expect(el.style.minHeight).toBe('44px');
     }
   });
+
+  it('stacks payment-confirmation controls when SMS is opted out on a compact width', async () => {
+    window.innerWidth = 360;
+    api.getNotificationPrefs.mockResolvedValue({ paymentConfirmationSms: false });
+
+    render(<BillingTab customer={customer} />);
+
+    expect(await screen.findByRole('button', { name: 'Turn on' })).toBeInTheDocument();
+    const row = document.querySelector('[data-payment-confirm-row]');
+    expect(row.lastElementChild.style.flex).toContain('1 0 100%');
+    expect(row.firstElementChild.style.flex).toContain('1 1 160px');
+  });
 });
