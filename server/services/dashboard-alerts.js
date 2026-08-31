@@ -21,6 +21,11 @@ const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
 const { whereLiveCustomer } = require('./customer-stages');
 const { autopayActivePredicate } = require('./autopay-eligibility');
+const { loadCloseoutStatuses, closeoutIssuesForVisit } = require('./closeout-alerts');
+
+// Closeout sweep bound — the day view checks at most this many completed
+// visits (Waves runs one technician; a day is ~5-15).
+const CLOSEOUT_SWEEP_CAP = 50;
 
 // A lead is "waiting" once it has gone this long with no first response.
 // Mirrors the Response Speed tile's alert threshold order-of-magnitude but
@@ -354,6 +359,43 @@ async function computeDashboardAlertsUncached() {
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }
+
+  // 6c. Completed visits TODAY that are not closed out — report, material
+  //     log, photos, report delivery, or a completion that never committed —
+  //     via the canonical closeout-status service (#3647) and the shared
+  //     fact→issue mapping (closeout-alerts.js). This is the feed the
+  //     dashboard and bell ACTUALLY read (the command-center root has no UI
+  //     caller). `unknown` facts (lookup outages) and legitimate not_required
+  //     rules never count as gaps; per-visit statuses are memoised 90s.
+  try {
+    const completedToday = (await db('scheduled_services')
+      .where({ scheduled_date: today, status: 'completed' })
+      .orderBy('window_start', 'asc')
+      .limit(CLOSEOUT_SWEEP_CAP)
+      .select('id')) || [];
+    if (completedToday.length) {
+      const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
+      const gapIds = [];
+      let issueCount = 0;
+      for (const row of completedToday) {
+        const issues = closeoutIssuesForVisit(statuses.get(row.id));
+        if (issues.length) { gapIds.push(row.id); issueCount += issues.length; }
+      }
+      if (gapIds.length) {
+        alerts.push({
+          id: 'closeout_gaps_today',
+          kind: 'action',
+          severity: 'warn',
+          count: gapIds.length,
+          // Queue membership so a dismissal re-surfaces when a NEW visit
+          // joins the gap set, not just when the count changes.
+          members: queueMembers(gapIds),
+          label: `${gapIds.length} completed visit${gapIds.length === 1 ? '' : 's'} today not closed out (${issueCount} open item${issueCount === 1 ? '' : 's'})`,
+          href: '/admin/dispatch',
+        });
+      }
+    }
+  } catch (err) { logger.error(`[dashboard-alerts] closeout_gaps_today: ${err.message}`); }
 
   // 7. Persisted admin command-center alerts. These are event-backed
   // operating alerts created by domain workflows such as WaveGuard lawn

@@ -24,6 +24,7 @@ jest.mock('../services/admin-alerts', () => ({
 jest.mock('../services/closeout-status', () => ({
   getCloseoutStatus: jest.fn(),
 }));
+const { __private: closeoutAlertsPrivate } = require('../services/closeout-alerts');
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
@@ -89,7 +90,7 @@ const run = () => __private.getJobsNeedingAttention({ date: DATE, technicianId: 
 
 beforeEach(() => {
   jest.clearAllMocks();
-  __private.closeoutMemo.clear();
+  closeoutAlertsPrivate.memo.clear();
 });
 
 test('fully closed-out visit fires no closeout alerts', async () => {
@@ -169,7 +170,7 @@ test('stuck resumable completion is the single closeout card (codex r1)', async 
   expect(alerts).toHaveLength(1);
   expect(alerts[0].summary).toMatch(/stuck mid-commit/);
   // A RUNNING completion stays silent — transient, not a gap.
-  __private.closeoutMemo.clear();
+  closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockResolvedValue(closeout({
     facts: { completion: fact('pending', 'completion_running'), report: fact('pending', 'awaiting_completion') },
   }));
@@ -182,7 +183,7 @@ test('published report with exhausted delivery fires the report card; queued del
   const alerts = (await run()).filter((a) => a.type === 'missing_required_service_report');
   expect(alerts).toHaveLength(1);
   expect(alerts[0]).toMatchObject({ summary: expect.stringMatching(/delivery failed after retries/), metadata: expect.objectContaining({ closeoutFact: 'reportDelivery' }) });
-  __private.closeoutMemo.clear();
+  closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockResolvedValue(closeout({ facts: { reportDelivery: fact('pending', 'delivery_queued') } }));
   expect((await run()).filter((a) => a.type === 'missing_required_service_report')).toEqual([]);
 });
@@ -192,12 +193,12 @@ test('closeout loads are memoised for 90s per visit; outages are never memoised 
   getCloseoutStatus.mockResolvedValue(closeout());
   await run(); await run();
   expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
-  __private.closeoutMemo.clear();
+  closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockRejectedValueOnce(new Error('down')).mockResolvedValue(closeout());
   await run(); await run();
   expect(getCloseoutStatus).toHaveBeenCalledTimes(3);
   // A PARTIAL outage (found:true, unavailable populated) is never memoised either (codex r3).
-  __private.closeoutMemo.clear();
+  closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockReset();
   getCloseoutStatus.mockResolvedValue(closeout({ unavailable: [{ lookup: 'service_photos', error: 'timeout' }] }));
   await run(); await run();

@@ -9,28 +9,7 @@ const {
   updateAlert,
   listEvents,
 } = require('../services/admin-alerts');
-const { getCloseoutStatus } = require('../services/closeout-status');
-
-// In-process memo for closeout loads. The dashboard polls GET / every 3
-// minutes and each closeout load is ~20-28 indexed probes; a 90s memo makes
-// the steady-state refresh cost ~zero while a just-completed visit is still
-// re-checked within two refreshes. Single-instance service; the memo holds
-// only ids/states/reasons (no PII) and is bounded by today's completed set.
-const CLOSEOUT_MEMO_TTL_MS = 90 * 1000;
-const CLOSEOUT_MEMO_MAX = 500;
-const closeoutMemo = new Map();
-async function memoisedCloseoutStatus(serviceId, now = Date.now()) {
-  const hit = closeoutMemo.get(serviceId);
-  if (hit && now - hit.at < CLOSEOUT_MEMO_TTL_MS) return hit.value;
-  const value = await getCloseoutStatus(serviceId).catch(() => null);
-  // Never memoise an outage — full OR partial (found:true with unavailable
-  // probes) — the next refresh must retry those lookups.
-  if (value && value.found && !(value.unavailable && value.unavailable.length)) {
-    if (closeoutMemo.size >= CLOSEOUT_MEMO_MAX) closeoutMemo.delete(closeoutMemo.keys().next().value);
-    closeoutMemo.set(serviceId, { at: now, value });
-  }
-  return value;
-}
+const { loadCloseoutStatuses, closeoutIssuesForVisit } = require('../services/closeout-alerts');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -226,110 +205,38 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
   }
 
   if (completedJobIds.length) {
-    // Closeout truth comes from the canonical service (#3647): ten separate
-    // facts per visit, with `unknown` for lookup outages — an outage or a
-    // legitimate not_required (frozen internal_only posture, backfill,
-    // non-performed outcome, catalog rule) never renders as "missing" the
-    // way the previous inline `.catch(() => [])` queries did. Alert types,
-    // ids, labels, and severities stay byte-identical so the admin_alerts
-    // lifecycle rows carry over.
-    // Each load is ~20 indexed probes — bound the fan-out so a busy day
-    // stays a handful of concurrent reads, never hundreds (codex r1).
-    const CLOSEOUT_CONCURRENCY = 4;
-    const statusByJobId = new Map();
-    for (let i = 0; i < completedJobIds.length; i += CLOSEOUT_CONCURRENCY) {
-      const slice = completedJobIds.slice(i, i + CLOSEOUT_CONCURRENCY);
-      const loaded = await Promise.all(slice.map((id) => memoisedCloseoutStatus(id)));
-      slice.forEach((id, j) => statusByJobId.set(id, loaded[j]));
-    }
-    // Open = required and unmet. `awaiting_completion` (no completion yet)
-    // and in-flight sends are transient, not gaps; unknown is an outage.
-    const openFact = (f) => Boolean(f)
-      && (f.state === 'pending' || f.state === 'failed')
-      && !['awaiting_completion', 'recap_sms_in_flight'].includes(f.reason);
-
+    // Closeout truth comes from the canonical service (#3647) through the
+    // shared fact→issue mapping (services/closeout-alerts.js) — the same
+    // mapping the dashboard's live `closeout_gaps_today` action uses, so the
+    // two surfaces can never disagree. Alert types, ids, labels, and
+    // severities stay byte-identical so admin_alerts lifecycle rows carry
+    // over; an outage or a legitimate not_required never renders as
+    // "missing" the way the previous inline `.catch(() => [])` queries did.
+    const statusByJobId = await loadCloseoutStatuses(completedJobIds);
+    const LABELS = {
+      missing_required_service_report: 'Missing required service report',
+      missing_required_material_log: 'Missing required material log',
+      missing_required_photos: 'Missing required photos',
+    };
     for (const row of rows.filter((r) => completedJobIds.includes(r.sourceRecordId))) {
       const status = statusByJobId.get(row.sourceRecordId);
-      if (!status || !status.found) continue; // service unavailable — never fabricate a gap
-      const closeoutRequirements = status.requirements || {};
-      const facts = status.facts || {};
-
-      // A completed visit whose completion never committed (no record, a
-      // terminal failed attempt) or is STUCK RESUMABLE (a stale claim past
-      // the 10-minute window that needs an operator re-POST) is ONE card,
-      // not three — the downstream facts are all unknowable until the
-      // completion lands. Running states are transient and stay silent.
-      const completionReason = facts.completion?.reason || '';
-      const completionStuck = facts.completion?.state === 'failed'
-        || completionReason === 'completed_visit_without_record'
-        || completionReason === 'completion_resumable'
-        || completionReason === 'completion_side_effects_resumable';
-      if (completionStuck) {
+      const closeoutRequirements = status?.requirements || {};
+      for (const found of closeoutIssuesForVisit(status)) {
         attention.push(issue({
           ...row,
-          id: `${row.sourceRecordId}_missing_required_service_report`,
-          type: 'missing_required_service_report',
+          id: `${row.sourceRecordId}_${found.type}`,
+          type: found.type,
           severity: 'medium',
-          label: 'Missing required service report',
-          summary: completionReason.includes('resumable')
-            ? 'Completion is stuck mid-commit — re-open the completion to resume its side effects.'
-            : 'Completed job has no completion record — closeout never committed.',
-          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'completion', closeoutReason: completionReason },
-        }));
-        continue;
-      }
-
-      // The report artifact and its DELIVERY are separate facts: a published
-      // report whose delivery exhausted its retries is a failed closeout too.
-      // Pending/in-flight deliveries (queued, sending, held) stay silent.
-      const deliveryFailed = facts.reportDelivery?.state === 'failed';
-      if (openFact(facts.report) || deliveryFailed) {
-        attention.push(issue({
-          ...row,
-          id: `${row.sourceRecordId}_missing_required_service_report`,
-          type: 'missing_required_service_report',
-          severity: 'medium',
-          label: 'Missing required service report',
-          summary: deliveryFailed && !openFact(facts.report)
-            ? 'Service report was published but its delivery failed after retries.'
-            : 'Completed job is missing the required closeout report.',
-          metadata: {
-            ...row.metadata, closeoutRequirements,
-            closeoutFact: openFact(facts.report) ? 'report' : 'reportDelivery',
-            closeoutReason: openFact(facts.report) ? facts.report.reason : facts.reportDelivery.reason,
-          },
-        }));
-      }
-      if (openFact(facts.application)) {
-        attention.push(issue({
-          ...row,
-          id: `${row.sourceRecordId}_missing_required_material_log`,
-          type: 'missing_required_material_log',
-          severity: 'medium',
-          label: 'Missing required material log',
-          summary: facts.application.reason === 'all_application_rows_retracted'
-            ? 'Every application row on this job was retracted — the required material log is empty.'
-            : 'Completed job is missing the required chemical or material application record.',
-          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'application', closeoutReason: facts.application.reason },
-        }));
-      }
-      if (openFact(facts.photos)) {
-        const requiredPhotoCount = Number(facts.photos.required || 0);
-        const actualPhotoCount = Number(facts.photos.actual || 0);
-        attention.push(issue({
-          ...row,
-          id: `${row.sourceRecordId}_missing_required_photos`,
-          type: 'missing_required_photos',
-          severity: 'medium',
-          label: 'Missing required photos',
-          summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
+          label: LABELS[found.type],
+          summary: found.summary,
           metadata: {
             ...row.metadata,
             closeoutRequirements,
-            closeoutFact: 'photos',
-            closeoutReason: facts.photos.reason,
-            actualPhotoCount,
-            requiredPhotoCount,
+            closeoutFact: found.fact,
+            closeoutReason: found.reason,
+            ...(found.type === 'missing_required_photos'
+              ? { actualPhotoCount: found.actualPhotoCount, requiredPhotoCount: found.requiredPhotoCount }
+              : {}),
           },
         }));
       }
@@ -692,4 +599,4 @@ router.get('/alerts/:id/events', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports.__private = { getJobsNeedingAttention, closeoutMemo };
+module.exports.__private = { getJobsNeedingAttention };

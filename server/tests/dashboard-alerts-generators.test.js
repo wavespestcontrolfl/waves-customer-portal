@@ -10,6 +10,10 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
 }));
 jest.mock('../services/mrr-breakdown', () => ({ listAtRiskMrrAccounts: jest.fn() }));
+jest.mock('../services/closeout-alerts', () => {
+  const actual = jest.requireActual('../services/closeout-alerts');
+  return { ...actual, loadCloseoutStatuses: jest.fn(async () => new Map()) };
+});
 jest.mock('../services/annual-prepay-renewals', () => ({
   getCardExpiryExemptions: jest.fn(async () => ({ customerIds: new Set(), chargeMethodIdsByCustomer: new Map() })),
 }));
@@ -33,7 +37,7 @@ const {
 const CHAIN_METHODS = [
   'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'whereNotIn',
   'orWhereRaw', 'orWhereNull', 'orWhere', 'orWhereIn', 'leftJoin', 'join', 'select', 'count',
-  'countDistinct', 'orderBy', 'modify',
+  'countDistinct', 'orderBy', 'modify', 'limit',
 ];
 
 function primeDb(results) {
@@ -293,6 +297,43 @@ describe('Action Inbox generators', () => {
     primeDb({ customers: { c: '0' }, 'customers as c': { c: '0' } });
     ({ alerts } = await computeDashboardAlertsUncached());
     expect(alerts.find((a) => a.id === 'autopay_coverage_low')).toBeUndefined();
+  });
+
+  test('closeout_gaps_today: warn action over today\'s completed visits with open closeout issues; unknown/not_required never count', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const fact = (state, reason, extra = {}) => ({ state, reason, ...extra });
+    const done = (o = {}) => ({
+      found: true,
+      facts: {
+        completion: fact('done', 'record_exists'), application: fact('done', 'x'), photos: fact('not_required', 'x'),
+        report: fact('done', 'x'), reportDelivery: fact('done', 'x'), invoice: fact('done', 'x'), invoiceDelivery: fact('done', 'x'),
+        comms: fact('done', 'x'), followUp: fact('not_required', 'x'), license: fact('not_required', 'x'), ...o,
+      },
+    });
+    primeDb({ scheduled_services: [{ id: 'svc-a' }, { id: 'svc-b' }, { id: 'svc-c' }, { id: 'svc-d' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([
+      ['svc-a', done()],                                                                 // closed out
+      ['svc-b', done({ report: fact('pending', 'no_report_artifact'), photos: fact('pending', 'photo_count_short', { required: 2, actual: 0 }) })], // 2 issues
+      ['svc-c', done({ report: fact('unknown', 'requirements_unavailable') })],          // outage → not a gap
+      ['svc-d', null],                                                                   // load failed → not a gap
+    ]));
+    const { alerts } = await computeDashboardAlertsUncached();
+    const item = alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: '/admin/dispatch', members: ['svc-b'] });
+    expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
+    expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d']);
+  });
+
+  test('closeout_gaps_today: absent when every completed visit is closed out or there are none', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    primeDb({ scheduled_services: [] });
+    let res = await computeDashboardAlertsUncached();
+    expect(res.alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+    expect(loadCloseoutStatuses).not.toHaveBeenCalled();
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', { found: true, facts: { completion: { state: 'done', reason: 'record_exists' } } }]]));
+    res = await computeDashboardAlertsUncached();
+    expect(res.alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
   });
 
   test('stale_draft_invoices: warns on billable drafts unsent 3+ days, deep-links the oldest, names the rows', async () => {
