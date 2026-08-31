@@ -382,6 +382,10 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
       ...estimate,
       estimate_data: estimateDataForBundle,
     });
+    // A prior send's persisted error was spread in above — a successful
+    // rebuild must clear it or the validated-bundle check downstream
+    // rejects a fresh bundle (GH codex P1).
+    delete sendSnapshot.pricingBundleError;
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[admin-estimates] send pricing snapshot failed for estimate ${estimate.id}: ${err.message}`);

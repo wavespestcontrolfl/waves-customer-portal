@@ -586,6 +586,37 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(roach.cogs.visitsPerYear).toBe(3);
   });
 
+  test('a SERVER-repriced row drops removed services left in the stale engineResult; unrepriced rows keep mixed-shape extras', async () => {
+    const shape = (extra) => ({
+      id: 'est-repriced', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      ...extra,
+      estimate_data: {
+        result: { recurring: { services: [{ name: 'Pest Control', mo: 55 }] } },
+        engineResult: {
+          lineItems: [
+            { service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660 },
+            { service: 'lawn_care', name: 'Lawn Care', monthly: 40, annual: 480 }, // removed by the reprice
+          ],
+        },
+      },
+    });
+    const repriced = await buildEstimatePricingAudit(shape({ pricing_authority: 'SERVER' }));
+    expect(repriced.lines.some((l) => l.serviceKey === 'lawn_care')).toBe(false);
+    expect(repriced.lines.filter((l) => l.serviceKey === 'pest_control')).toHaveLength(1);
+    const mixed = await buildEstimatePricingAudit(shape({}));
+    expect(mixed.lines.find((l) => l.serviceKey === 'lawn_care')).toMatchObject({ cadence: 'recurring', price: 480 });
+  });
+
+  test('corrective-work alias ids canonicalize to their COGS family', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-cw-alias', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '200.00',
+      estimate_data: {
+        proposal: { enabled: true, buildings: [], correctiveWork: [{ label: 'Flea Package', amount: 200, service: 'flea_package' }] },
+      },
+    });
+    expect(audit.lines.find((l) => /flea/i.test(l.label)).serviceKey).toBe('flea');
+  });
+
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-xfer', status: 'sent', monthly_total: '400.00', annual_total: '4800.00', onetime_total: null,

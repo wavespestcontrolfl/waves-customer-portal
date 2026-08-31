@@ -960,8 +960,14 @@ function normalizeProposalLines(estimate) {
     // The persisted canonical service id is the only sanctioned cost
     // family; the package's visit count scales one-time COGS units
     // (3-visit roach cleanout ≠ one treatment) (GH codex P1 ×2).
+    // Persisted engine ids canonicalize exactly like structured/raw rows
+    // (SERVICE_MAP key or VERIFIED alias — flea_package → flea); anything
+    // else stays the honest unmapped slug (GH codex P1).
+    const persistedKey = work.service
+      ? (SERVICE_MAP[work.service] ? work.service : ENGINE_ID_ALIASES[work.service])
+      : null;
     push(work.label || 'Corrective work', 'one_time', work.amount, {
-      ...(work.service && SERVICE_MAP[work.service] ? { serviceKey: work.service } : {}),
+      ...(persistedKey ? { serviceKey: persistedKey } : {}),
       ...(Number(work.visits) > 0 ? { visitsPerYear: Number(work.visits) } : {}),
     });
   }
@@ -1075,12 +1081,20 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // cadence-wide guard silently dropped a valid recurring service stored
     // only in engineResult.lineItems).
     const mappedServiceKeys = new Set(rawLines.map(priceKey));
-    const merge = (extra, { consumeOnlyMappedServices = false } = {}) => {
+    // A SERVER-authoritative reprice rewrote data.result WHOLESALE
+    // (admin-estimate-persistence: estimateData.result = serverResult)
+    // and left the earlier engineResult behind — there, an unmatched
+    // engine row is a removed or re-priced service, never a mixed-shape
+    // extra, so the whole container is consume-only (GH codex P1: a
+    // service the operator removed was still recorded and costed).
+    const serverRepriced = String(estimate.pricing_authority || '').toUpperCase() === 'SERVER'
+      && !!data.result && data.result !== data.engineResult;
+    const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false } = {}) => {
       const survivors = [];
       for (const line of extra) {
         const entries = covered.get(priceKey(line)) || [];
         const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
-        if (matchIdx < 0 && consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))) continue;
+        if (matchIdx < 0 && (consumeOnly || (consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))))) continue;
         if (matchIdx >= 0) {
           // Consumed — but the discarded raw row may be the ONLY carrier of
           // cost/provenance metadata (explicitCogsCost, mosquito overrides,
@@ -1128,8 +1142,8 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
         merge([
           ...normalizeRecurringLines(data.engineResult),
           ...normalizeOneTimeLines(data.engineResult, setupOpts),
-        ], { consumeOnlyMappedServices: true });
-        merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true });
+        ], { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
+        merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
       }
     }
   }
