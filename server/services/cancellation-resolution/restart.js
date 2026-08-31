@@ -53,6 +53,14 @@ function parseJson(value, fallback) {
 }
 
 // Families the customer cancelled, tied to the LATEST cancellation attempt.
+// The processor stamps this attempt's rows before the case row exists, so
+// "belongs to the latest attempt" tolerates an hour of skew.
+const ATTEMPT_SLACK_MS = 60 * 60 * 1000;
+function attemptBoundFor(caseCreatedAt) {
+  const t = new Date(caseCreatedAt).getTime();
+  return Number.isNaN(t) ? caseCreatedAt : new Date(t - ATTEMPT_SLACK_MS).toISOString();
+}
+
 async function cancelledFamiliesFor(customerId, dbh = db) {
   // Newest case regardless of status: when a cancellation partially
   // completes (case left 'open' while the customer is already stamped
@@ -88,7 +96,11 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     .limit(50)
     .select('s.*', 'sv.service_key', 'sv.service_name');
   if (latest && latest.created_at) {
-    rowsQuery = rowsQuery.where('s.cancelled_at', '>=', latest.created_at);
+    // Slack window: the H0 request path runs the processor BEFORE it writes
+    // the case row, so this attempt's rows carry cancelled_at slightly
+    // EARLIER than the case's created_at. An hour of slack keeps them in
+    // while still excluding a genuinely earlier cancellation's families.
+    rowsQuery = rowsQuery.where('s.cancelled_at', '>=', attemptBoundFor(latest.created_at));
   }
   const rows = await rowsQuery;
   const keys = [];
@@ -106,7 +118,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     .where({ customer_id: customerId, interaction_type: 'note' })
     .where('subject', 'like', 'Cancelled %')
     .orderBy('created_at', 'desc');
-  if (latest && latest.created_at) noteQuery = noteQuery.where('created_at', '>=', latest.created_at);
+  if (latest && latest.created_at) noteQuery = noteQuery.where('created_at', '>=', attemptBoundFor(latest.created_at));
   const note = await noteQuery.first('subject');
   if (note && note.subject) {
     const named = String(note.subject).split(' — ')[0].replace(/^Cancelled\s+/, '');
@@ -146,7 +158,10 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     // Lock the customer row: a double-tap must not mint two restart estimates.
     const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
     if (!fresh) throw new RestartUnavailableError('not_cancelled', 'This account is not cancelled.');
-    if (fresh.active === true || fresh.pipeline_stage !== 'churned') {
+    // Exactly the processor's stamp, re-verified under the lock: active
+    // EXPLICITLY false. A row drifting to active=NULL is not a processed
+    // cancellation and must not mint (same rule as the middleware).
+    if (fresh.active !== false || fresh.pipeline_stage !== 'churned') {
       throw new RestartUnavailableError('not_cancelled', 'This account is not cancelled.');
     }
 
@@ -166,14 +181,22 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
     let residualRows;
     try {
-      residualRows = await trx('scheduled_services as s')
+      // Two kinds of evidence, matching cancellation-eligibility's own view
+      // of a live obligation: (a) non-terminal recurring rows, and (b) a
+      // series anchor re-armed with recurring_ongoing=true — staff can
+      // restore a family on a completed anchor before its next occurrence
+      // exists, and that family is owned, not restartable.
+      const residualBase = () => trx('scheduled_services as s')
         .leftJoin('services as sv', 's.service_id', 'sv.id')
         .where('s.customer_id', fresh.id)
-        .whereNotIn('s.status', TERMINAL_STATUSES)
-        .where('s.is_recurring', true)
         .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
         .limit(200)
         .select('s.*', 'sv.service_key', 'sv.service_name');
+      const [nonTerminalRows, ongoingAnchorRows] = await Promise.all([
+        residualBase().whereNotIn('s.status', TERMINAL_STATUSES).where('s.is_recurring', true),
+        residualBase().where('s.recurring_ongoing', true),
+      ]);
+      residualRows = [...nonTerminalRows, ...ongoingAnchorRows];
     } catch (err) {
       logger.warn(`[plan-restart] residual ownership lookup failed for ${fresh.id} — refusing: ${err.message}`);
       throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
@@ -185,7 +208,9 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     }
     const ownedFamilies = uniqueServiceFamilies(residualKeys);
     const owned = new Set(ownedFamilies.map(pricingKeyFor));
-    const toPrice = families.map(pricingKeyFor).filter((key) => !owned.has(key));
+    // The families this mint may actually quote: cancelled minus residual.
+    const eligibleFamilies = families.filter((f) => !owned.has(pricingKeyFor(f)));
+    const toPrice = eligibleFamilies.map(pricingKeyFor);
     if (!toPrice.length) {
       throw new RestartUnavailableError('nothing_to_restart', 'Those services are already active on this account.');
     }
@@ -203,10 +228,13 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       .limit(10);
     const live = liveRestartEstimate(priorRows, nowDate);
     if (live) {
+      // Compare against the ELIGIBLE set, not the raw cancellation scope —
+      // a quote minted before staff restored one of its families would
+      // otherwise re-sell the now-live service.
       const liveFamilies = parseJson(live.estimate_data, {})?.planRestart?.families;
       const sameScope = Array.isArray(liveFamilies)
-        && liveFamilies.length === families.length
-        && [...liveFamilies].sort().join(',') === [...families].sort().join(',');
+        && liveFamilies.length === eligibleFamilies.length
+        && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
       if (sameScope) {
         return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
       }
@@ -259,7 +287,10 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       // doctrine; enforced centrally in estimate-engagement-engine).
       noEngagementAutomation: true,
       planRestart: {
-        families,
+        // The QUOTED families (reuse compares against these); the raw
+        // cancellation scope rides alongside for the audit trail.
+        families: eligibleFamilies,
+        cancelledFamilies: families,
         familiesSource: source,
         cancellationCaseId: caseId,
         mintedAt: nowDate.toISOString(),
@@ -277,6 +308,25 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     if (!recomputed?.recomputed) {
       throw new Error(`plan-restart recompute failed (${recomputed?.reason || 'unknown'})`);
     }
+
+    // FAIL CLOSED on review markers, the same demotion the offer path's
+    // optionIsPriceable applies: an engine result flagged for on-site
+    // verification, manual review, or low confidence — or a seed whose
+    // source estimate carried its own verification markers — never becomes
+    // a customer-visible price. The customer gets the priced-by-hand 409.
+    const raw = recomputed.rawEngineResult || {};
+    const flaggedLine = (raw.lineItems || []).some((l) => l && (
+      l.customQuoteFlag === true
+      || l.requiresManualReview === true
+      || String(l.pricingConfidence || '').toLowerCase() === 'low'
+      || String(l.turfConfidence || '').toLowerCase() === 'low'
+    ));
+    if (flaggedLine
+      || (Array.isArray(raw.fieldVerify) && raw.fieldVerify.length > 0)
+      || propertySeed?.requiresFieldVerification === true) {
+      throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
+    }
+
     estimateData.result = recomputed.serverResult;
     if (recomputed.pestPricingVersion && estimateData.engineInputs.services.pest
       && typeof estimateData.engineInputs.services.pest === 'object') {
@@ -314,7 +364,7 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       followup_final_sent: true,
       followup_expiring_sent: true,
       source: SOURCE,
-      service_interest: families.map((f) => FAMILY_LABELS[f] || f).join(' + '),
+      service_interest: eligibleFamilies.map((f) => FAMILY_LABELS[f] || f).join(' + '),
       category: fresh.property_type === 'commercial' ? 'COMMERCIAL' : 'RESIDENTIAL',
       pricing_authority: 'SERVER',
       server_computed_price: annualTotal > 0 ? annualTotal : null,
@@ -346,11 +396,11 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     await trx('customer_interactions').insert({
       customer_id: fresh.id,
       interaction_type: 'note',
-      subject: `Restart estimate requested from portal — ${families.map((f) => FAMILY_LABELS[f] || f).join(', ')}`,
+      subject: `Restart estimate requested from portal — ${eligibleFamilies.map((f) => FAMILY_LABELS[f] || f).join(', ')}`,
       body: `Customer opened a restart estimate (${created.id}) priced at today's rates. Accepting it restarts the plan.`,
     });
 
-    logger.info(`[plan-restart] minted estimate ${created.id} for customer ${fresh.id} (${families.join(',')} via ${source})`);
+    logger.info(`[plan-restart] minted estimate ${created.id} for customer ${fresh.id} (${eligibleFamilies.join(',')} via ${source})`);
     return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };
   });
 }

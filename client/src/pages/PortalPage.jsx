@@ -4047,6 +4047,10 @@ const APPOINTMENT_CHANNEL_KEYS = [
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
+  // C4: a cancelled account keeps the schedule READS; every notification /
+  // property-preference control writes through blocked routes, so those
+  // sections are hidden rather than shown broken.
+  const cancelledAccount = customer?.cancelled === true;
   const [upcoming, setUpcoming] = useState([]);
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
@@ -4074,12 +4078,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     // itself can fail the load.
     Promise.all([
       api.getSchedule(90),
-      api.getNotificationPrefs()
-        .then(data => ({ data, failed: false }))
-        .catch(() => ({ data: null, failed: true })),
-      api.getPropertyNotificationPrefs()
-        .then(data => ({ data, failed: false }))
-        .catch(() => ({ data: null, failed: true })),
+      // C4: a cancelled account renders no notification settings, so the
+      // prefs reads are skipped entirely (their routes are not widened).
+      cancelledAccount
+        ? Promise.resolve({ data: null, failed: false })
+        : api.getNotificationPrefs()
+          .then(data => ({ data, failed: false }))
+          .catch(() => ({ data: null, failed: true })),
+      cancelledAccount
+        ? Promise.resolve({ data: null, failed: false })
+        : api.getPropertyNotificationPrefs()
+          .then(data => ({ data, failed: false }))
+          .catch(() => ({ data: null, failed: true })),
     ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
       setReservice(schedData.reservice || null);
@@ -4096,7 +4106,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       console.error(err);
       setLoadError(err?.message || 'Could not load your schedule.');
     }).finally(() => setLoading(false));
-  }, []);
+  }, [cancelledAccount]);
 
   useEffect(() => {
     loadSchedule();
@@ -4697,7 +4707,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       {/* Notification Preferences — when the prefs request failed, say so
           with a retry instead of silently omitting the section (the schedule
           above stays fully usable). */}
-      {prefsError && !prefs && (
+      {prefsError && !prefs && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
@@ -4706,7 +4716,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           </div>
         </section>
       )}
-      {prefs && (
+      {prefs && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
@@ -4866,7 +4876,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </section>
       )}
 
-      {propertyPrefs.length > 0 && (
+      {propertyPrefs.length > 0 && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             {propertyPrefs.length > 1 ? (
@@ -5254,8 +5264,12 @@ function BillingTab({ customer, refreshCustomer }) {
     Promise.all([
       loadAllPayments(),
       api.getBalance(),
-      api.getCards(),
-      api.getNotificationPrefs().catch(() => null),
+      // C4: the cancelled tab hides Payment Methods and Billing
+      // Preferences, so their reads are skipped — a cancelled session must
+      // not fetch saved-card details it will never render (the cards route
+      // is not widened for cancelled reads either).
+      cancelledAccount ? Promise.resolve({ cards: [] }) : api.getCards(),
+      cancelledAccount ? Promise.resolve(null) : api.getNotificationPrefs().catch(() => null),
       api.getAutopay().catch(() => ({ state: 'unknown', loadError: true })),
     ])
       .then(([payData, balData, cardData, prefsData, autopayData]) => {
@@ -5283,7 +5297,7 @@ function BillingTab({ customer, refreshCustomer }) {
         setLoadError(err?.message || 'Could not load billing details.');
         setLoading(false);
       });
-  }, []);
+  }, [cancelledAccount]);
 
   useEffect(() => {
     loadBilling();
@@ -15001,7 +15015,13 @@ export default function PortalPage() {
       return [tab, 'upcoming', false, planService];
     } catch { return ['dashboard', 'upcoming', false, null]; }
   })();
-  const [activeTab, setActiveTab] = useState(initialTab);
+  // C4: a cancelled session must never MOUNT a blocked tab — Dashboard's
+  // first-commit fetches (lawn health, property score, referrals…) would
+  // 401 and churn the refresh token before the redirect effect runs. Clamp
+  // synchronously; the effect below still handles later customer changes.
+  const [activeTab, setActiveTab] = useState(
+    cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
+  );
   // Which My Plan service row to open expanded on the next Plan mount —
   // deep-link above or the home lawn teaser; nav clicks reset it.
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
@@ -15011,7 +15031,7 @@ export default function PortalPage() {
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
-  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest);
+  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest && !cancelledAccount);
   // Tab navigation writes the URL and back/forward adopts it, so a refresh
   // returns to the same tab (the deep-link parser above already reads
   // ?tab=) and the browser Back button walks portal tabs instead of
@@ -15748,7 +15768,7 @@ export default function PortalPage() {
           </nav>
         )}
         {!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}
-        {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);

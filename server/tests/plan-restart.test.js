@@ -299,6 +299,37 @@ describe('mintRestartEstimate', () => {
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'not_cancelled', restartUnavailable: true });
   });
 
+  test('refuses under the lock when active drifted to NULL (only the exact churn stamp mints)', async () => {
+    tables.customers[0].active = null;
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'not_cancelled' });
+  });
+
+  test('a re-armed completed series anchor (recurring_ongoing) counts as ownership', async () => {
+    tables.scheduled_services = [
+      { id: 'anchor', customer_id: 'cust-1', status: 'completed', is_recurring: true, recurring_ongoing: true, service_type: 'Quarterly Pest Control' },
+    ];
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const [estimateData, recomputeDeps] = recompute.mock.calls[0];
+    expect(Object.keys(estimateData.engineInputs.services)).toEqual(['lawn']);
+    expect(recomputeDeps.priorQualifyingServices).toEqual(['pest_control']);
+  });
+
+  test('an engine result flagged for review never publishes (fail closed to priced-by-hand)', async () => {
+    recompute.mockResolvedValueOnce({
+      recomputed: true,
+      serverResult: { engineVersion: 'v9.9', lineItems: [] },
+      rawEngineResult: { waveGuard: { tier: 'Silver' }, lineItems: [{ service: 'pest', requiresManualReview: true }] },
+      serverTotals: { monthlyTotal: 138, annualTotal: 1656, onetimeTotal: 99 },
+    });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+
+    // A seed whose source estimate carried verification markers refuses too.
+    const d = deps({ crossSell: { loadEstimateSeed: async () => ({ homeSqFt: 2200, requiresFieldVerification: true }) } });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+  });
+
   test('whole-account scope ([]) recovers the families from the rows the processor pulled', async () => {
     tables.cancellation_cases[0].scope = '[]';
     tables.scheduled_services = [
@@ -310,9 +341,14 @@ describe('mintRestartEstimate', () => {
       // A family churned in an EARLIER cancellation (before this case) is
       // not part of the plan the customer just cancelled.
       { id: 's5', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Tree & Shrub Program', cancelled_at: '2026-05-01' },
+      // The H0 path stamps rows BEFORE writing the case — minutes-earlier
+      // rows are still THIS attempt (slack window).
+      { id: 's6', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Lawn Care Program', cancelled_at: '2026-08-21T23:30:00' },
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control', 'mosquito'], caseId: 'case-1', source: 'cancelled_rows' });
+    expect(found.caseId).toBe('case-1');
+    expect(found.source).toBe('cancelled_rows');
+    expect([...found.families].sort()).toEqual(['lawn_care', 'mosquito', 'pest_control']);
   });
 
   test('an uncommitted LATEST case never lets an older committed scope answer — recovery keys to the new attempt', async () => {

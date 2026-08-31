@@ -63,7 +63,9 @@ const CANCELLED_READ_ROUTES = [
   ['GET', '/api/auth/properties'],
   ['GET', '/api/billing'],
   ['GET', '/api/billing/balance'],
-  ['GET', '/api/billing/cards'],
+  // NOT /api/billing/cards: the cancelled tab hides Payment Methods, so
+  // saved-method details (brand, last four, expiry, bank) stay unreadable
+  // from a long-lived cancelled session.
   ['GET', '/api/billing/autopay'],
   ['GET', '/api/schedule'],
   ['GET', '/api/schedule/next'],
@@ -73,8 +75,9 @@ const CANCELLED_READ_ROUTES = [
   ['GET', /^\/api\/documents\/service-report\/[^/]+$/],
   ['GET', /^\/api\/documents\/[^/]+\/download$/],
   ['GET', '/api/property/termite-bond'],
-  ['GET', '/api/notifications/preferences'],
-  ['GET', '/api/notifications/property-preferences'],
+  // NOT the notification-preference reads: the cancelled Visits tab hides
+  // every preference control (their writes are blocked), so nothing renders
+  // from those reads.
   ['POST', '/api/requests/restart-plan'],
 ];
 

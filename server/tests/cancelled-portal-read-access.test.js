@@ -178,16 +178,19 @@ async function call(method, path, headers = {}, body) {
 
 const WIDENED_READS = [
   ['GET', '/api/auth/me'], ['GET', '/api/auth/properties'],
-  ['GET', '/api/billing'], ['GET', '/api/billing?limit=100&cursor=0'], ['GET', '/api/billing/balance'], ['GET', '/api/billing/cards'],
+  ['GET', '/api/billing'], ['GET', '/api/billing?limit=100&cursor=0'], ['GET', '/api/billing/balance'],
   ['GET', '/api/billing/autopay'],
   ['GET', '/api/schedule?days=365'], ['GET', '/api/schedule/next'],
   ['GET', '/api/services?limit=50'], ['GET', '/api/services/stats/summary'],
   ['GET', '/api/documents'], ['GET', '/api/documents/service-report/svc-1'], ['GET', '/api/documents/doc-1/download'],
   ['GET', '/api/property/termite-bond'],
-  ['GET', '/api/notifications/preferences'], ['GET', '/api/notifications/property-preferences'],
   ['POST', '/api/requests/restart-plan'],
 ];
 const STILL_BLOCKED = [
+  // Reads the cancelled UI renders nothing from stay un-widened: saved-card
+  // details and the notification-preference reads.
+  ['GET', '/api/billing/cards'],
+  ['GET', '/api/notifications/preferences'], ['GET', '/api/notifications/property-preferences'],
   ['PUT', '/api/billing/autopay'], ['POST', '/api/billing/autopay/pause'],
   ['POST', '/api/billing/cards'], ['POST', '/api/billing/cards/setup-intent'], ['DELETE', '/api/billing/cards/pm-1'], ['PUT', '/api/billing/cards/pm-1/default'],
   ['POST', '/api/schedule/svc-1/confirm'], ['POST', '/api/schedule/svc-1/reschedule'],
