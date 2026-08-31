@@ -635,7 +635,55 @@ export const AFFILIATE_LINK_MAX_PER_POST = 3;
 // optional ?query/#fragment, then the closing paren) — "/quote/anything/"
 // is not the quote page (Codex PR3 r8 P1).
 const SERVICE_CTA_LINK_RE =
-  /\]\(\s*\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#][^)\s]*)?\s*\)|\]\(\s*\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#][^)\s]*)?\s*\)|<InlineCTA\b/;
+  /\]\(\s*\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#][^)\s]*)?\s*\)|\]\(\s*\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#][^)\s]*)?\s*\)/;
+
+// Length-preserving blanker for balanced `{…}` MDX expressions, quote-aware
+// inside tags (an attribute value like title="a {b}" is not an expression)
+// and tolerant of nested braces. Unbalanced braces are left alone.
+function blankMdxExpressions(src: string): string {
+  const out = src.split('');
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const q = ch; i += 1;
+      while (i < src.length && src[i] !== q) i += src[i] === '\\' ? 2 : 1;
+      i += 1; continue;
+    }
+    if (ch === '{') {
+      let depth = 0; let j = i;
+      for (; j < src.length; j += 1) {
+        if (src[j] === '{') depth += 1;
+        else if (src[j] === '}') { depth -= 1; if (depth === 0) break; }
+      }
+      if (j < src.length) { for (let k = i; k <= j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j + 1; continue; }
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
+// A service-route path (exact route, optional ?query/#fragment).
+const SERVICE_ROUTE_PATH_RE =
+  /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
+
+// True when the (masked) prefix carries a Waves service CTA: a markdown
+// link to a service route, or an <InlineCTA> that LEADS to one — no
+// ctaHref (the component defaults to the quote page) or a quoted literal
+// service route. An InlineCTA with a dynamic or non-service destination is
+// not the required CTA (fail closed).
+function hasServiceCtaBefore(prefix: string): boolean {
+  if (SERVICE_CTA_LINK_RE.test(prefix)) return true;
+  const ctaRe = /<InlineCTA\b([^>]*)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = ctaRe.exec(prefix)) !== null) {
+    const attrs = m[1];
+    if (!/\bctaHref\s*=/.test(attrs)) return true;
+    const href = /\bctaHref\s*=\s*["']([^"']*)["']/.exec(attrs)?.[1];
+    if (href && SERVICE_ROUTE_PATH_RE.test(href.trim())) return true;
+  }
+  return false;
+}
 
 export interface AffiliateUsageResult {
   ok: boolean;
@@ -654,6 +702,11 @@ export function validateAffiliateUsage(
   let cleaned = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
   cleaned = cleaned.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
   cleaned = cleaned.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  // MDX expressions ({''}, {'[quote](/quote/)'}, {`## fake`}) render as
+  // ordinary text, never as markup — blank every balanced brace expression
+  // OUTSIDE quoted JSX attribute values (length-preserving) so structural
+  // scans (headings, CTA links, component positions) only see real source.
+  cleaned = blankMdxExpressions(cleaned);
   // Definitely-hidden markup never satisfies a reader-facing rule (a CTA a
   // reader cannot see is no CTA): elements carrying `hidden`, an inline
   // display:none, or a closed <details> body are blanked (length-preserving).
@@ -679,8 +732,8 @@ export function validateAffiliateUsage(
   if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
   const firstHeading = cleaned.search(/^#{2,3}\s/m);
   if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
-  if (!SERVICE_CTA_LINK_RE.test(cleaned.slice(0, positions[0]))) {
-    blockers.push('no Waves service CTA (<InlineCTA> or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
+  if (!hasServiceCtaBefore(cleaned.slice(0, positions[0]))) {
+    blockers.push('no Waves service CTA (<InlineCTA> leading to a service route, or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
   }
   // Page-class eligibility (fail closed): the post's post_type must be one
   // the referenced product row allows; protected local-service types never
@@ -692,14 +745,22 @@ export function validateAffiliateUsage(
   // post-type eligibility, and the row's placement allowlist (a placement
   // the resolver would silently downgrade to a plain link is a publish
   // blocker, not a surprise after the build).
+  // Invocations are read from the UNMASKED source so an expression-valued
+  // prop (product={"x"}, placement={p}) is seen and rejected: the registry
+  // checks only work on quoted literals, and the resolver would receive a
+  // value the gate never validated.
   const invRe = /<AffiliateLink\b([^>]*)>/g;
   let inv: RegExpExecArray | null;
   const checked = new Set<string>();
-  while ((inv = invRe.exec(cleaned)) !== null) {
+  const unmasked = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length)).replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length)).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  while ((inv = invRe.exec(unmasked)) !== null) {
     const attrs = inv[1];
     const id = /\bproduct\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
     const placement = /\bplacement\s*=\s*["']([^"']+)["']/.exec(attrs)?.[1];
-    if (!id) continue;
+    if (!id || !placement) {
+      blockers.push('every <AffiliateLink> needs quoted literal product="…" and placement="…" props — expression-valued or missing props cannot be validated against the registry');
+      continue;
+    }
     const key = `${id}::${placement ?? ''}`;
     if (checked.has(key)) continue;
     checked.add(key);
