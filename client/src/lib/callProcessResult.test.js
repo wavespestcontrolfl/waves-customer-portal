@@ -83,7 +83,13 @@ describe("describeProcessResult", () => {
     expect(describeProcessResult({ success: true }).text).toBe("Processed");
   });
 
-  it("a null/undefined body is treated as a plain run, not a crash", () => {
-    expect(describeProcessResult(null).severity).toBe("ok");
+  it("anything that is not an explicit success fails closed", () => {
+    // A malformed or regressed API response must never read as a completed
+    // run — that is the false success this whole module exists to stop.
+    for (const body of [null, undefined, {}, { extracted: { first_name: "PersonA" } }]) {
+      const v = describeProcessResult(body);
+      expect(v.didWork).toBe(false);
+      expect(v.severity).toBe("failed");
+    }
   });
 });

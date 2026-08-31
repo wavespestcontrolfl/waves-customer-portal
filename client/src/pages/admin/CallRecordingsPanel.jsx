@@ -632,12 +632,17 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   const [generatingSynopsis, setGeneratingSynopsis] = useState(false);
   const [processingOne, setProcessingOne] = useState(false);
   const [processVerdict, setProcessVerdict] = useState(null);
-  // Which recording the pane is showing RIGHT NOW. An in-flight process
+  // Which process request owns the pane RIGHT NOW. An in-flight process
   // resolves against whatever is selected when it returns, and list rows
   // stay clickable while it runs, so every state write below is fenced on
   // this — otherwise a slow request repaints the previous call's verdict,
   // and its follow-up fetch drags the previous recording back into the pane.
-  const selectedIdRef = useRef(recording?.id);
+  //
+  // A monotonic token, not the recording id: on A -> B -> A the id alone
+  // makes a stale first request look current again, letting it overwrite a
+  // newer request for the same recording. Every selection change and every
+  // new request takes the next token, so only the latest one can write.
+  const requestTokenRef = useRef(0);
   const [synopsisExpanded, setSynopsisExpanded] = useState(true);
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const extraction = parseExtraction(r);
@@ -649,7 +654,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   // over from the previous call would sit under the new call's Process
   // button and describe the wrong recording.
   useEffect(() => {
-    selectedIdRef.current = recording?.id;
+    requestTokenRef.current += 1;
     setR(recording);
     setProcessVerdict(null);
     // Reset the busy flag here rather than letting a fenced-out request do
@@ -660,7 +665,8 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
 
   const handleProcess = async () => {
     const requestedId = r.id;
-    const stillShowing = () => selectedIdRef.current === requestedId;
+    const token = (requestTokenRef.current += 1);
+    const stillShowing = () => requestTokenRef.current === token;
     setProcessingOne(true);
     setProcessVerdict(null);
     try {

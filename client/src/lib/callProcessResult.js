@@ -70,6 +70,18 @@ export function describeProcessResult(res) {
     // the whole point of this module.
     return { didWork: false, severity: 'blocked', text: BLOCKED_SKIP_COPY[reason] || `Nothing ran — ${reason}` };
   }
+  // FAIL CLOSED on anything that is not an explicit success. The processor's
+  // happy path always sets success: true, so a null body, an empty object, or
+  // a response missing the flag is a malformed or regressed API — and
+  // treating that as a completed run is precisely the false success this
+  // module exists to stop.
+  if (res?.success !== true) {
+    return {
+      didWork: false,
+      severity: 'failed',
+      text: 'Process failed — the server did not confirm the run.',
+    };
+  }
   const extracted = res?.extracted || {};
   const parts = [];
   const name = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ');
