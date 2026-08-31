@@ -822,20 +822,25 @@ export function validateAffiliateUsage(
   // expression so none can supply a CTA or heading (an expression can only
   // ever render a component, never Markdown).
   cleaned = blankMdxExpressions(cleaned);
-  // Definitely-hidden markup never satisfies a reader-facing rule (a CTA a
-  // reader cannot see is no CTA): elements carrying `hidden`, an inline
-  // display:none, or a closed <details> body are blanked (length-preserving).
-  cleaned = cleaned.replace(/<(\w+)\b[^>]*(?:\shidden(?=[\s>/=])|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
+  // COUNTING view = `cleaned` from here (hidden/expandable components still
+  // count — a link inside a closed <details> renders when expanded).
+  // STRUCTURAL view (CTA/heading rules) additionally blanks hidden markup:
+  // a CTA a reader cannot see is no CTA.
+  let structural = blankMdxExpressions(cleaned, { keepJsx: false });
+  // Definitely-hidden markup never satisfies a reader-facing rule: elements
+  // carrying `hidden`, an inline display:none, or a closed <details> body
+  // are blanked (length-preserving) — on the structural view only.
+  structural = structural.replace(/<(\w+)\b[^>]*(?:\shidden(?=[\s>/=])|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
-  cleaned = cleaned.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => {
+  structural = structural.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => {
     // Responsively-visible wrappers (class="hidden md:block") stay: mask
     // only elements hidden at EVERY breakpoint.
     return /\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(m.split('>')[0]) ? m : m.replace(/[^\n]/g, ' ');
   });
-  cleaned = cleaned.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
+  structural = structural.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
 
-  const structural = blankMdxExpressions(cleaned, { keepJsx: false });
+  const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
@@ -849,6 +854,15 @@ export function validateAffiliateUsage(
   if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
   const firstHeading = structural.search(/^#{2,3}\s/m);
   if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
+  // ctaHref is written straight into an anchor: an expression-valued or
+  // duplicated value cannot be validated against the https/root-relative
+  // rule, so it is a blocker wherever it appears (not only before the link).
+  for (const { attrs } of tagsNamed(unmasked, 'InlineCTA')) {
+    if (attrs !== null && /\bctaHref\s*=/.test(attrs) && literalAttr(attrs, 'ctaHref') === null) {
+      blockers.push('<InlineCTA ctaHref> must be a single quoted literal (root-relative path or https URL) — expression-valued destinations cannot be validated');
+      break;
+    }
+  }
   if (!hasServiceCtaBefore(structural.slice(0, positions[0]))) {
     blockers.push('no Waves service CTA (<InlineCTA> leading to a service route, or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
   }
@@ -867,7 +881,6 @@ export function validateAffiliateUsage(
   // checks only work on quoted literals, and the resolver would receive a
   // value the gate never validated.
   const checked = new Set<string>();
-  const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   for (const { attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
     const id = attrs === null ? null : literalAttr(attrs, 'product');
     const placement = attrs === null ? null : literalAttr(attrs, 'placement');
