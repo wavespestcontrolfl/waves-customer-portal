@@ -61,6 +61,31 @@ const ALLOWLIST = [
     reason: 'membership (tier) audience for upsell candidacy, not a monthly-lane selection',
   },
   {
+    file: 'routes/admin-billing-recovery.js',
+    match: 'parseFloat(r.monthly_rate || 0) > 0',
+    context: 'const isReview',
+    count: 1,
+    // OR-widened review triage, fail-safe direction: ANY rate-bearing visit
+    // (monthly or not) routes to a human before billing instead of one-click
+    // rebilling. It selects rows to hold back, not the monthly lane.
+    reason: 'OR-widened needs-review triage (fail-safe hold-back), not a lane selection',
+  },
+  {
+    file: 'services/billing-cadence.js',
+    match: '&& Number(customer.monthly_rate) > 0',
+    context: "includes(customer.pipeline_stage)",
+    count: 1,
+    // customerPreservesMonthlyMembership is itself a documented SHARED
+    // predicate (the single source of truth for "an estimate accept keeps
+    // this customer monthly", owner ruling Codex #2836 r3). Its explicit-mode
+    // handling matches resolveBillingLane exactly; the delta is deliberate
+    // pinned legacy semantics — a NULL-mode rate-bearing row preserves
+    // regardless of tier label (estimate-billed-note-lane.test.js pins
+    // tierless fixtures) — so re-basing it on the resolver is an owner call,
+    // not a guard fix.
+    reason: 'shared accept-preservation predicate with pinned legacy NULL-mode semantics (#2836 r3)',
+  },
+  {
     file: 'services/customer-offboarding.js',
     match: ".orWhere('monthly_rate', '>', 0)",
     context: "qb.whereNotNull('waveguard_tier')",
@@ -135,12 +160,27 @@ const KNEX_PREDICATE = /\.(?:where|andWhere|orWhere|having|andHaving|orHaving)\(
 // the `|| 0)` sits between the column and the operator.
 const RAW_PREDICATE = /\b(?:\w+\.)?monthly_rate(?:::numeric)?\s*>=?\s*'?0(?:\.0+)?'?\b/g;
 // row-level JS lane classifier: monthly_rate positivity (any of the
-// `Number(x.monthly_rate) > 0` / `(x.monthly_rate || 0) > 0` wrappings) on
-// the SAME line as a billing_mode comparison — a hand-rolled resolver
-// (Codex #3669 r3 P2). Positivity alone is a legitimate numeric test; the
-// billing_mode co-occurrence is what makes it lane classification.
+// `Number(x.monthly_rate) > 0` / `(x.monthly_rate || 0) > 0` wrappings)
+// with a billing_mode comparison in the SAME STATEMENT — a hand-rolled
+// resolver (Codex #3669 r3 P2). Positivity alone is a legitimate numeric
+// test; the billing_mode co-occurrence is what makes it lane
+// classification. The statement window spans a multiline expression (rate
+// test on one line, billing_mode on the next — Codex r4 P2): it extends
+// from the match line in both directions until a line ends the statement
+// (`;`, `{`, `}`), capped at 8 lines. Known limit: a positivity test
+// itself split mid-expression (`Number(\n x.monthly_rate\n ) > 0`) is not
+// recognized — no such formatting exists in the tree.
 const JS_POSITIVITY = /\bmonthly_rate\s*(?:\|\|\s*0\s*)?\)*\s*>\s*0/;
-const isJsLaneClassifier = (line) => JS_POSITIVITY.test(line) && line.includes('billing_mode');
+function statementWindow(lines, idx) {
+  const ends = (l) => /[;{}]\s*$/.test(l.trim());
+  let start = idx;
+  while (start > 0 && start > idx - 4 && !ends(lines[start - 1] || '')) start -= 1;
+  let end = idx;
+  while (end < lines.length - 1 && end < idx + 4 && !ends(lines[end])) end += 1;
+  return lines.slice(start, end + 1).join('\n');
+}
+const isJsLaneClassifier = (lines, idx) =>
+  JS_POSITIVITY.test(lines[idx]) && statementWindow(lines, idx).includes('billing_mode');
 
 const LANE_MARKER = 'MONTHLY_LANE_SQL';
 
@@ -185,11 +225,13 @@ function findOffenders() {
     lines.forEach((line, idx) => {
       KNEX_PREDICATE.lastIndex = 0;
       RAW_PREDICATE.lastIndex = 0;
-      const jsClassifier = isJsLaneClassifier(line);
+      const jsClassifier = isJsLaneClassifier(lines, idx);
       if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line)) return;
       if (seen.has(idx)) return;
       seen.add(idx);
-      const chain = chainAround(lines, idx);
+      // A JS classifier's "chain" is its statement window, so an ALLOWLIST
+      // context can key on surrounding statement text.
+      const chain = jsClassifier ? statementWindow(lines, idx) : chainAround(lines, idx);
       // A JS row classifier is never excused by a nearby MONTHLY_LANE_SQL —
       // rows in hand go through resolveBillingLane().
       if (!jsClassifier && chain.includes(LANE_MARKER)) return;
@@ -279,18 +321,31 @@ describe('monthly-lane source guard (#3140)', () => {
       const stripped = stripComments(s);
       expect(KNEX_PREDICATE.test(stripped) || RAW_PREDICATE.test(stripped)).toBe(false);
     }
-    // JS row-level classifier: rate positivity + billing_mode on one line.
+    // JS row-level classifier: rate positivity + billing_mode in the same
+    // statement — single-line and multiline (r4) forms. The helper takes
+    // (lines, idx of the positivity line).
+    const classifies = (src) => {
+      const lines = stripComments(src).split('\n');
+      const idx = lines.findIndex((l) => JS_POSITIVITY.test(l));
+      return idx >= 0 && isJsLaneClassifier(lines, idx);
+    };
     const classifierShapes = [
       "const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';",
       "const monthlyLane = Number(customer?.monthly_rate) > 0 && String(customer?.billing_mode || '') !== 'per_application';",
       "const m = (row.monthly_rate || 0) > 0 && row.billing_mode !== 'annual_prepay';",
+      // multiline: rate test first, billing_mode on the continuation line
+      "const monthlyLane = Number(customer.monthly_rate) > 0\n  && String(customer.billing_mode || '') !== 'per_application';",
+      // multiline, reversed order
+      "const monthlyLane = customer.billing_mode !== 'per_application'\n  && Number(customer.monthly_rate) > 0;",
     ];
-    for (const s of classifierShapes) expect(isJsLaneClassifier(s)).toBe(true);
+    for (const s of classifierShapes) expect(classifies(s)).toBe(true);
     const classifierNonShapes = [
       'const positive = Number(customer.monthly_rate) > 0;', // numeric only, no lane
       "const lane = resolveBillingLane(customer).mode === 'monthly_membership';",
       "update.billing_mode = 'monthly_membership'; update.monthly_rate = rate;",
+      // separate statements: the `;` ends the window before billing_mode
+      "const positive = Number(c.monthly_rate) > 0;\nconst mode = c.billing_mode;",
     ];
-    for (const s of classifierNonShapes) expect(isJsLaneClassifier(stripComments(s))).toBe(false);
+    for (const s of classifierNonShapes) expect(classifies(s)).toBe(false);
   });
 });
