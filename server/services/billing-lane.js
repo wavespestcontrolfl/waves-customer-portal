@@ -215,7 +215,30 @@ function predictCompletionBilling({
   // monthly_rate 0 and the sheet said only "nothing bills"). Same kind, same
   // amount, different `reason` — see UNBILLED_MONEY_GAP_REASONS.
   const noCharge = (reason) => ({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason });
-  if (payerBilled) return { kind: 'payer', amount: hasVisitPrice ? Number(estimatedPrice) : null, conflictStampedPrice: false };
+  if (payerBilled) {
+    // A payer says WHO owes, not HOW MUCH — so the amount still has to come
+    // from the canonical precedence, not from estimatedPrice alone. Reading
+    // only the stamped price made a payer visit that bills a monthly rate or
+    // an acceptance fee look amountless (Codex P1). Free-by-design payer work
+    // keeps its reason so it is never mistaken for a money gap either.
+    const payerFreeReason = isCallback
+      ? 'callback'
+      : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
+    const payerAmount = completionInvoiceAmount({
+      estimatedPrice,
+      isCallback,
+      perApplicationBilling: lane === 'per_application' || billingMode === 'per_application',
+      perApplicationFee,
+      monthlyRate,
+      billingMode,
+    });
+    return {
+      kind: 'payer',
+      amount: payerAmount > 0 ? payerAmount : (hasVisitPrice ? Number(estimatedPrice) : null),
+      conflictStampedPrice: false,
+      ...(payerFreeReason ? { reason: payerFreeReason } : {}),
+    };
+  }
   // Completion's numeric prepaid fallback covers ONLY out-of-band methods
   // (cash/Zelle) — an annual_prepay_invoice stamp is governed exclusively
   // by the term-validated gate, so a STALE annual stamp's amount must not
@@ -619,7 +642,12 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null }) {
   // mint at <= 0, so an UNPRICED payer-billed visit bills nobody — the
   // customer or the payer (Codex P0). A priced one carries its amount here
   // and is not a gap.
-  const payerWithoutAmount = prediction.kind === 'payer' && !(Number(prediction.amount) > 0);
+  // Free-by-design payer work (callback / always-free type) carries a reason
+  // and is never a gap — only a payer visit with no amount from ANY source is
+  // (Codex P1).
+  const payerWithoutAmount = prediction.kind === 'payer'
+    && !(Number(prediction.amount) > 0)
+    && !prediction.reason;
   if (!payerWithoutAmount) {
     if (prediction.kind !== 'no_charge') return null;
     if (!UNBILLED_MONEY_GAP_REASONS.has(prediction.reason)) return null;

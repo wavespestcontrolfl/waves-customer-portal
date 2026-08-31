@@ -125,19 +125,41 @@ describe('wallet context sharpens the message without widening the gap', () => {
 });
 
 describe('payer-billed visits', () => {
-  test('an UNPRICED payer visit is a gap — a payer says who owes, not how much', () => {
-    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true });
+  const payer = { ...unbilledShape, payerBilled: true };
+
+  test('an UNPRICED payer visit with no amount from ANY source is a gap', () => {
+    const p = predictCompletionBilling(payer);
     expect(p.kind).toBe('payer');
     expect(p.amount).toBeNull();
-    // Completion derives the amount from the visit price/rate alone and
-    // refuses to mint at <= 0, so this bills nobody.
+    // A payer says who owes, not how much; completion refuses to mint at <= 0,
+    // so this bills nobody — not the customer, not the payer.
     expect(unbilledCompletionGap({ prediction: p })).toMatchObject({ reason: 'no_amount_on_file' });
   });
 
-  test('a PRICED payer visit is not a gap', () => {
-    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true, estimatedPrice: 183 });
-    expect(p.kind).toBe('payer');
-    expect(p.amount).toBe(183);
-    expect(unbilledCompletionGap({ prediction: p })).toBeNull();
+  test('the payer amount follows the CANONICAL precedence, not the stamp alone (Codex P1)', () => {
+    // Reading estimatedPrice alone made these look amountless and warned falsely.
+    const rated = predictCompletionBilling({ ...payer, monthlyRate: 46.33 });
+    expect(rated.amount).toBe(46.33);
+    expect(unbilledCompletionGap({ prediction: rated })).toBeNull();
+
+    const perApp = predictCompletionBilling({
+      ...payer, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98,
+    });
+    expect(perApp.amount).toBe(98);
+    expect(unbilledCompletionGap({ prediction: perApp })).toBeNull();
+
+    const priced = predictCompletionBilling({ ...payer, estimatedPrice: 183 });
+    expect(priced.amount).toBe(183);
+    expect(unbilledCompletionGap({ prediction: priced })).toBeNull();
+  });
+
+  test('free-by-design payer work keeps its reason and never warns (Codex P1)', () => {
+    const cb = predictCompletionBilling({ ...payer, isCallback: true });
+    expect(cb).toMatchObject({ kind: 'payer', reason: 'callback' });
+    expect(unbilledCompletionGap({ prediction: cb })).toBeNull();
+
+    const free = predictCompletionBilling({ ...payer, serviceType: 'Pest Control Re-Service' });
+    expect(free).toMatchObject({ kind: 'payer', reason: 'always_free_service_type' });
+    expect(unbilledCompletionGap({ prediction: free })).toBeNull();
   });
 });
