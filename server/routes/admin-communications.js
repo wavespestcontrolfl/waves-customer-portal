@@ -500,6 +500,17 @@ router.post('/sms', async (req, res, next) => {
         }
       } catch (claimErr) {
         logger.warn(`[communications] inline review pre-send claim failed — aborting send (requestId=${reviewRequestId}): ${claimErr.message}`);
+        // A claim already won before the throw (e.g. the fence re-check
+        // errored) must be handed back, or the row sits 'sending' and blocks
+        // retries for the whole stale window.
+        if (claimedReviewRequestId) {
+          try {
+            await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
+          } catch (releaseErr) {
+            logger.warn(`[communications] inline review claim release failed (requestId=${claimedReviewRequestId}): ${releaseErr.message}`);
+          }
+          claimedReviewRequestId = null;
+        }
         return abortUnsent(503, 'Could not verify the inserted review link — try again in a moment.');
       }
     }
