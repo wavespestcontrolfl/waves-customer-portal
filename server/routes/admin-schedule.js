@@ -3196,6 +3196,66 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
   };
 }
 
+// Recurring bookings must land with a NUMBER on them. A hand-booked customer
+// (2026-08-31) took four recurring visits with no stamped price and
+// monthly_rate 0: every visit then completes at $0 and the plan runs free
+// forever. It is the repo's unpriced rule violated at schedule scale —
+// unpriced means NULL ("manual quote pending"), never 0 ("charge nothing").
+//
+// The verdict is the CANONICAL completion prediction, not a local rule list
+// (Codex 3×P0 on the first cut of this guard: a hand-rolled exemption list
+// diverged from predictCompletionBilling three ways — it honored a stale
+// monthly_rate that explicit per_visit/one_time lanes deliberately ignore,
+// waved through per_application customers without an acceptance fee, and
+// trusted a requested annual-prepay term the route can still downgrade). One
+// classifier, the same one the sheet and the completion path read.
+//
+// MUST be called with the FINAL persisted values: the price
+// buildAppointmentPricing resolved (which can come from services.base_price,
+// not just the operator's input) and the EFFECTIVE billing term after any
+// downgrade — never the raw request fields.
+function recurringWithoutBillableAmount({
+  isRecurring,
+  finalPrice,
+  customer,
+  effectiveBillingTerm,
+  prepaid,
+  payerId,
+  isCallback,
+  serviceType,
+}) {
+  if (!isRecurring) return null;
+  // Annual prepay's money is the term invoice, not the visit — and only once
+  // the route has actually settled on it.
+  if (effectiveBillingTerm === 'prepay_annual') return null;
+  if (prepaid && Number(prepaid.totalAmount) > 0) return null;
+  if (payerId) return null;
+
+  const lane = resolveBillingLane(customer);
+  const prediction = predictCompletionBilling({
+    lane: lane.mode,
+    billingMode: customer?.billing_mode || null,
+    // Settlement state (autopay, dues, stamps) cannot create or cure "no
+    // number exists"; the conservative defaults keep this a pure amount test.
+    autopayActive: false,
+    estimatedPrice: Number(finalPrice) > 0 ? Number(finalPrice) : null,
+    monthlyRate: customer?.monthly_rate,
+    perApplicationFee: customer?.per_application_fee,
+    isRecurring: true,
+    isCallback,
+    serviceType,
+    payerBilled: false,
+    prepaidAmount: null,
+    prepaidMethod: null,
+  });
+  if (!unbilledCompletionGap({ prediction })) return null;
+  return {
+    error: 'This recurring plan has no price and the customer has no billable rate — every visit would complete without billing. Set a monthly rate on the customer profile (or price the visit) before booking.',
+    code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
+    fix: { monthlyRate: true, visitPrice: true },
+  };
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -4923,6 +4983,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let finalPrice = pricing.finalPrice;
     if (zeroCallbackPrice) finalPrice = 0;
+    // Billable-amount gate, evaluated on the FINAL numbers: buildAppointmentPricing
+    // has resolved the price (server pricing included, so a booking that sent no
+    // explicit price is judged on what will actually persist) and
+    // bookingBillingTermEffective has absorbed any annual-prepay downgrade. Both
+    // orderings were Codex findings on the first cut — checking earlier read raw
+    // request fields and both over- and under-fired.
+    {
+      const unbillable = recurringWithoutBillableAmount({
+        isRecurring,
+        finalPrice,
+        customer,
+        effectiveBillingTerm: bookingBillingTermEffective,
+        prepaid: req.body.prepaid || null,
+        payerId: req.body.billedToPayerId || customer.payer_id || null,
+        isCallback: resolvedIsCallback,
+        serviceType,
+      });
+      if (unbillable) return res.status(409).json(unbillable);
+    }
+
     const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
     const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
     const createdAppointments = [];
@@ -16535,6 +16615,7 @@ router._test = {
   windowIntakeFromBody,
   noCardOnFileAlert,
   unbilledVisitAlert,
+  recurringWithoutBillableAmount,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,

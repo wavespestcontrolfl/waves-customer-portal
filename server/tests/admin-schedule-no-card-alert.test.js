@@ -77,3 +77,74 @@ describe('unbilledVisitAlert (day-view money-gap flag)', () => {
     expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: null })).toBeNull();
   });
 });
+
+describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', () => {
+  const { recurringWithoutBillableAmount } = adminScheduleRouter._test;
+
+  // A recurring plan with no resolved price and no billable rate: every visit
+  // completes at $0, forever (prod 2026-08-31).
+  const unbillable = {
+    isRecurring: true,
+    finalPrice: 0,
+    customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
+    effectiveBillingTerm: 'standard',
+    prepaid: null,
+    payerId: null,
+    isCallback: false,
+    serviceType: 'Monthly Pest Control Service',
+  };
+  const withCustomer = (patch) => ({ ...unbillable, customer: { ...unbillable.customer, ...patch } });
+
+  test('refuses a recurring plan with no number anywhere', () => {
+    const out = recurringWithoutBillableAmount(unbillable);
+    expect(out).toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(out.error).toMatch(/monthly rate/i);
+  });
+
+  test('a one-off visit is never blocked — booking stays instant', () => {
+    expect(recurringWithoutBillableAmount({ ...unbillable, isRecurring: false })).toBeNull();
+  });
+
+  test('the RESOLVED price satisfies it — including one the server derived', () => {
+    // finalPrice is post-buildAppointmentPricing, so a booking that sent no
+    // explicit price but priced off services.base_price passes (Codex P1).
+    expect(recurringWithoutBillableAmount({ ...unbillable, finalPrice: 46.33 })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...unbillable, finalPrice: 0 })).toBeTruthy();
+  });
+
+  test('a monthly rate satisfies it ONLY on a lane that actually consumes it (Codex P0)', () => {
+    // Inferred membership: real tier + positive rate → dues cover the visits.
+    expect(recurringWithoutBillableAmount(withCustomer({ monthly_rate: 46.33 }))).toBeNull();
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'monthly_membership', monthly_rate: 46.33 }))).toBeNull();
+    // Explicit per_visit / one_time lanes IGNORE a lingering monthly_rate —
+    // completionInvoiceAmount refuses that fallback, so the rate is not a
+    // billing arrangement and the series would still complete unbilled.
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_visit', monthly_rate: 46.33 }))).toBeTruthy();
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'one_time', monthly_rate: 46.33 }))).toBeTruthy();
+  });
+
+  test('per_application passes ONLY with an acceptance fee on file (Codex P0)', () => {
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: 98 }))).toBeNull();
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: null }))).toBeTruthy();
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: 0 }))).toBeTruthy();
+  });
+
+  test('annual prepay passes on the EFFECTIVE term, never the requested one (Codex P0)', () => {
+    expect(recurringWithoutBillableAmount({ ...unbillable, effectiveBillingTerm: 'prepay_annual' })).toBeNull();
+    // A request the route downgraded back to standard must NOT slip through.
+    expect(recurringWithoutBillableAmount({ ...unbillable, effectiveBillingTerm: 'standard' })).toBeTruthy();
+    // The annual_prepay LANE keeps its own exemption via the prediction.
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'annual_prepay' }))).toBeNull();
+  });
+
+  test('the remaining legitimate arrangements pass', () => {
+    expect(recurringWithoutBillableAmount({ ...unbillable, prepaid: { totalAmount: 900 } })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...unbillable, payerId: 'payer-1' })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...unbillable, isCallback: true })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...unbillable, serviceType: 'Pest Control Re-Service' })).toBeNull();
+  });
+
+  test('a zero-amount prepay is not an arrangement', () => {
+    expect(recurringWithoutBillableAmount({ ...unbillable, prepaid: { totalAmount: 0 } })).toBeTruthy();
+  });
+});
