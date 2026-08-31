@@ -1073,11 +1073,10 @@ export function TechLeaderboardBars({ leaderboard = [] }) {
 
 // ─── Empty state ──────────────────────────────────────────────────
 
-export function EmptyState({ children }) {
-  return (
-    <div className="py-10 text-center text-13 text-ink-secondary">{children}</div>
-  );
-}
+// EmptyState was promoted to the shared ui primitives (spec 3.11); this
+// re-export keeps the dashboard call sites' import path stable.
+import { EmptyState } from '../ui/EmptyState';
+export { EmptyState };
 
 // Capital allocation — channels banded by LTV:CAC so the owner can see at a glance
 // where to pour cash and where it's leaking. Traffic-light band colors mirror the

@@ -26,7 +26,7 @@
 //   not just locally. Otherwise we keep firing pushes to an
 //   endpoint the browser has revoked.
 import { useState, useEffect } from "react";
-import { Badge, Button, Card, CardBody, Switch, cn } from "../../components/ui";
+import { Badge, Button, Card, CardBody, Switch, cn, showAdminToast as showToast } from "../../components/ui";
 import {
   ensurePushSubscription,
   disablePush,
@@ -106,7 +106,6 @@ export default function PushSettingsV2() {
   const [catPrefs, setCatPrefs] = useState([]);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState("");
   const [pushError, setPushError] = useState("");
 
   useEffect(() => {
@@ -122,10 +121,6 @@ export default function PushSettingsV2() {
       });
   }, []);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 2500);
-  };
 
   const togglePush = async () => {
     setBusy(true);
@@ -364,11 +359,6 @@ export default function PushSettingsV2() {
           </div>
         )}
 
-        {toast && (
-          <div className="fixed bottom-6 right-6 px-4 py-2.5 bg-zinc-900 text-white rounded-md text-13 font-medium shadow-lg z-[300]">
-            {toast}
-          </div>
-        )}
       </CardBody>{" "}
     </Card>
   );

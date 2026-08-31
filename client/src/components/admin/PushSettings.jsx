@@ -5,6 +5,7 @@ import {
   isPushEnabled,
   sendTestPush,
 } from "../../lib/push-subscribe.js";
+import { showAdminToast as showToast } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -79,7 +80,6 @@ export default function PushSettings() {
   const [prefs, setPrefs] = useState([]);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState("");
   const [pushError, setPushError] = useState("");
 
   useEffect(() => {
@@ -89,10 +89,6 @@ export default function PushSettings() {
       .catch(() => setPrefs([]));
   }, []);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 2500);
-  };
 
   const togglePush = async () => {
     setBusy(true);
@@ -392,24 +388,6 @@ export default function PushSettings() {
           </div>{" "}
         </div>
       ))}
-      {toast && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 24,
-            right: 24,
-            padding: "10px 16px",
-            background: D.green,
-            color: D.white,
-            borderRadius: 8,
-            fontSize: 13,
-            fontWeight: 500,
-            boxShadow: "0 8px 20px rgba(0,0,0,0.15)",
-          }}
-        >
-          {toast}
-        </div>
-      )}
     </div>
   );
 }

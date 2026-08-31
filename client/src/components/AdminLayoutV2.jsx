@@ -35,6 +35,7 @@ import {
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
+import { AdminToastHost } from "./ui/Toast";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -677,6 +678,9 @@ export default function AdminLayoutV2() {
 
       {/* Global ⌘K palette */}
       <GlobalCommandPalette ref={paletteRef} />
+
+      {/* Admin toast stacks (spec §3.9) — showAdminToast() from ui/Toast */}
+      <AdminToastHost />
     </div>
   );
 }

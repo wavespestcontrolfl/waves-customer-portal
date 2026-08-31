@@ -8,7 +8,7 @@
 // The env gate (GATE_VOICE_AI_AGENT) is the hard master switch and is shown
 // read-only here — these toggles only tune behavior WHEN the gate is on.
 import { useState, useEffect } from "react";
-import { Badge, Button, Card, CardBody, Input, Switch, cn } from "../../components/ui";
+import { Badge, Button, Card, CardBody, Input, Switch, cn, showAdminToast as showToast } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -45,7 +45,6 @@ export default function CallRoutingSettingsV2() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState("");
 
   const loadStatus = () =>
     adminFetch("/admin/settings/call-routing/status").then(setStatus).catch(() => setStatus(null));
@@ -61,10 +60,6 @@ export default function CallRoutingSettingsV2() {
     loadStatus();
   }, []);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 2500);
-  };
 
   const setField = (key, value) => setConfig((c) => ({ ...c, [key]: value }));
   const setSched = (field, value) =>
@@ -249,11 +244,6 @@ export default function CallRoutingSettingsV2() {
           </Row>
         </div>
 
-        {toast && (
-          <div className="fixed bottom-6 right-6 px-4 py-2.5 bg-zinc-900 text-white rounded-md text-13 font-medium shadow-lg z-[300]">
-            {toast}
-          </div>
-        )}
       </CardBody>
     </Card>
   );
