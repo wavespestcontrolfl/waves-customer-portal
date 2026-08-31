@@ -166,7 +166,19 @@ function validateProduct(row) {
  * first-wins ambiguity). → [{ product_id, errors }]
  */
 function validateRegistry(registry = loadRegistry()) {
-  const rows = Array.isArray(registry?.products) ? registry.products : [];
+  // Top-level shape is validated EXPLICITLY — a registry without a products
+  // array must be a reported problem (so the sync script refuses to vendor
+  // it), never silently coerced to "no products, no errors".
+  if (!registry || typeof registry !== 'object' || Array.isArray(registry)) {
+    return [{ product_id: null, errors: ['registry must be a JSON object'] }];
+  }
+  if (!Number.isInteger(registry.version) || registry.version < 1) {
+    return [{ product_id: null, errors: ['registry.version must be a positive integer'] }];
+  }
+  if (!Array.isArray(registry.products)) {
+    return [{ product_id: null, errors: ['registry.products must be an array'] }];
+  }
+  const rows = registry.products;
   const counts = new Map();
   for (const row of rows) {
     const id = row?.product_id;

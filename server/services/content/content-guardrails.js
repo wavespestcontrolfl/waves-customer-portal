@@ -1743,10 +1743,13 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   }
 
   // New drafts: disclosure, density, and service-CTA placement.
+  // EXACT type only — the astro layout keys the rendered disclosure block
+  // (and the Amazon Associates statement) off disclosure.type ===
+  // 'affiliate'; free text mentioning "commission" renders nothing, and
+  // "we receive no commission" would pass a keyword test.
   const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
-  const dtype = String(disclosure.type || '').trim().toLowerCase();
-  if (dtype !== 'affiliate' && !/\b(affiliate|commission)\b/i.test(String(disclosure.text || ''))) {
-    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure must be type "affiliate" or its text must name the affiliate/commission relationship (FTC material-connection rule).');
+  if (String(disclosure.type || '').trim().toLowerCase() !== 'affiliate') {
+    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure.type must be exactly "affiliate" (the renderer emits the FTC material-connection disclosure from that type; free text is not a substitute).');
   }
   if (tags.length > AFFILIATE_LINK_MAX_PER_POST) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'count', `Draft carries ${tags.length} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post (affiliate is fallback monetization, never the point of the page).`);
@@ -1774,6 +1777,19 @@ const AFFILIATE_NETWORK_HOST_SUFFIXES = Object.freeze([
   'linksynergy.com', 'refersion.com', 'goaffpro.com',
 ]);
 
+// host + path (www-stripped, lowercased, trailing-slash-normalized) — the
+// part of a retailer URL that identifies the PRODUCT; query/fragment are
+// tracking and ordering noise.
+function affiliateUrlIdentity(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
+    return `${host}${path}`;
+  } catch { return null; }
+}
+
 function containsAffiliateMaterial(text) {
   const raw = String(text || '');
   if (!raw) return false;
@@ -1782,15 +1798,18 @@ function containsAffiliateMaterial(text) {
     for (const tag of eachTag(scan)) {
       if (!tag.isClose && tag.name === 'affiliatelink') return true;
     }
-    const registryNorms = new Set(
-      affiliateRegistryModule().registryUrls().map((u) => normalizeSourceUrl(u)).filter(Boolean),
+    // Registry URLs match on their PRODUCT identity (host + path), not the
+    // exact string: a reordered/extra query parameter or a fragment still
+    // lands on the same registered product page.
+    const registryIdentities = new Set(
+      affiliateRegistryModule().registryUrls().map(affiliateUrlIdentity).filter(Boolean),
     );
     const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
     let m;
     while ((m = urlRe.exec(scan)) !== null) {
       const rawUrl = m[0].replace(/[.,;:!?]+$/, '');
-      const norm = normalizeSourceUrl(rawUrl);
-      if (norm && registryNorms.has(norm)) return true;
+      const identity = affiliateUrlIdentity(rawUrl);
+      if (identity && registryIdentities.has(identity)) return true;
       try {
         const u = new URL(rawUrl);
         const host = u.hostname.toLowerCase().replace(/^www\./, '');

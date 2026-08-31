@@ -2,7 +2,7 @@
   "name": "@waves/affiliate-registry",
   "version": "0.1.0",
   "private": true,
-  "description": "Vendored affiliate product registry. Source of truth lives in wavespestcontrol-astro (the renderer resolves product IDs at build time). Do not edit registry.json here directly — run `npm run sync:affiliate-registry` from the admin repo root after the astro registry changes.",
+  "description": "Vendored affiliate product registry. Source of truth lives in wavespestcontrol-astro (the renderer resolves product IDs at build time). Do not edit registry.json here directly — run `npm run sync:affiliate-registry` from the admin repo root after the astro registry changes. SERVER-ONLY: index.js reads the filesystem (node:fs); never import it from client/ and do not add it to client/vite.config.js optimizeDeps/commonjsOptions (pre-bundling a node:fs consumer for the browser breaks the build — same posture as @waves/blog-schema).",
   "main": "index.js",
   "scripts": {
     "sync": "node scripts/sync-from-astro.js"

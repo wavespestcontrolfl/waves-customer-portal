@@ -442,6 +442,11 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(affiliateCodes(r)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
       const ok = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(ok)).toEqual([]);
+      // EXACT type only — free text naming a commission is not a disclosure
+      // the renderer emits ("we receive no commission" would pass a keyword
+      // test; pre-push Codex r1 P1).
+      const textOnly = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ disclosure: { type: 'regulatory', text: 'Some links earn Waves a commission.' } }) }, { targetIsBlog: true });
+      expect(affiliateCodes(textOnly)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
     });
   });
 
@@ -549,6 +554,10 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial(`x ${link('anything')} y`)).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com/dp/B000TEST01?tag=wavespest-20')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com/dp/B000TEST01')).toBe(true); // registry plain_url
+      // Registry match is by PRODUCT identity (host+path): reordered/extra
+      // query params, fragments, and www-stripping still match (Codex r1 P1).
+      expect(guardrails.containsAffiliateMaterial('see https://amazon.com/dp/B000TEST01/?utm_source=x&tag=wavespest-20#reviews')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/test-bait?ref=1&aff=waves')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://amzn.to/abc')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://shareasale.com/r.cfm?b=1')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);

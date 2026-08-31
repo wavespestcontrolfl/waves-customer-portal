@@ -116,6 +116,12 @@ describe('productIndex / validateRegistry / loadRegistry', () => {
       registry._resetCache();
     }
   });
+  test('a malformed top-level registry is a reported problem, never coerced to "no products, no errors" (Codex r1 P1)', () => {
+    for (const bad of [{}, [], null, { products: [] }, { version: 'x', products: [] }, { version: 1, products: {} }]) {
+      expect(registry.validateRegistry(bad).length).toBeGreaterThan(0);
+    }
+    expect(registry.validateRegistry({ version: 1, products: [] })).toEqual([]);
+  });
   test('the vendored registry.json in this repo validates clean', () => {
     registry._resetCache();
     expect(registry.validateRegistry(registry.loadRegistry())).toEqual([]);
