@@ -154,6 +154,13 @@
       "rationale": "Non-phone caller-ID sentinels are not usable keys (isLikelyE164 false); identity falls through to the email arm with exact name corroboration."
     },
     {
+      "id": "numeric-caller-id-sentinel-never-a-key",
+      "a": { "first_name": "Dario", "last_name": "Okonkwo", "phone": "+7378742833" },
+      "b": { "first_name": "Meredith", "last_name": "Ashworth-Vane", "phone": "+7378742833" },
+      "expected": "different",
+      "rationale": "Twilio substitutes digit sentinels for suppressed caller ID (+7378742833 spells RESTRICTED); isUsableContactPhone rejects them, so two blocked callers never merge onto one phantom key."
+    },
+    {
       "id": "no-shared-key-at-all",
       "a": { "first_name": "Petra", "last_name": "Havlicek", "phone": "541-555-0117", "email": "petra.h@example.com" },
       "b": { "first_name": "Petra", "last_name": "Havlicek", "phone": "541-555-0118", "email": "p.havlicek@example.com" },

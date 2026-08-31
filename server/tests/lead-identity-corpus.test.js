@@ -50,21 +50,24 @@ jest.mock('../config/twilio-numbers', () => ({
 }));
 
 const corpus = require('../fixtures/lead-identity-corpus.json');
-const { toE164, isLikelyE164 } = require('../utils/phone');
+const { toE164 } = require('../utils/phone');
 const { normalizeEmail } = require('../utils/contact-normalize');
 const { EMAIL_RE } = require('../utils/workable-lead-signal');
 const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
 const { _test } = require('../services/call-recording-processor');
 
-const { extractedNameMatchesCustomer, sameFirstName } = _test;
+const { extractedNameMatchesCustomer, sameFirstName, isUsableContactPhone } = _test;
 
-// The corpus's phone key: toE164-normalized, garbage (caller-ID sentinels,
-// prose) comes back raw from toE164 and is rejected by isLikelyE164 — never a
-// key. NOTE this is the #3137 TARGET semantic; production's
-// findReusableCallLead compares literally (see header + the gap test below).
+// The corpus's phone key: toE164-normalized, then the call path's OWN
+// usability predicate (isUsableContactPhone) — prose comes back raw from
+// toE164 and fails isLikelyE164 inside it, and the Twilio caller-ID digit
+// sentinels (+266696687 ANONYMOUS, +7378742833 RESTRICTED, …) are explicitly
+// rejected so two blocked callers never share a key. NOTE the normalization
+// is the #3137 TARGET semantic; production's findReusableCallLead compares
+// literally (see header + the gap test below).
 function phoneKey(value) {
   const e164 = toE164(value);
-  return e164 && isLikelyE164(e164) ? e164 : null;
+  return e164 && isUsableContactPhone(e164) ? e164 : null;
 }
 
 // findReusableCallLead's email gate: lowercased/trimmed AND a real email.
@@ -124,6 +127,14 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   // garbage-key rejection path). Anything containing a digit must be a FULLY
   // reserved NANP fictional number — see the guard below.
   const NON_PHONE_SENTINELS = new Set(['anonymous', 'call me', 'unknown']);
+  // The Twilio suppressed-caller-ID digit sentinels (PHONE_SENTINELS in
+  // call-recording-processor). Not real numbers — allowed so the corpus can
+  // pin isUsableContactPhone's rejection of them.
+  const NUMERIC_PHONE_SENTINELS = new Set(['266696687', '7378742833', '86282452253']);
+  // Non-email garbage the corpus may use in the email field. Same rule as
+  // phones: an explicit allowlist, so a real identifier copied in as a
+  // malformed email (missing its @domain) cannot slip past the guard.
+  const NON_EMAIL_SENTINELS = new Set(['unknown']);
 
   test('every contact value is synthetic: reserved NANP 555-01xx phones (or allowlisted non-phone sentinels), example.com emails', () => {
     for (const c of CASES) {
@@ -136,16 +147,19 @@ describe('lead identity corpus — shape and PII hygiene', () => {
           // number merely ending in 55501xx fails here by design.
           const ok = digits.length === 0
             ? NON_PHONE_SENTINELS.has(String(rec.phone).trim().toLowerCase())
-            : /^1?[2-9]\d\d55501\d\d$/.test(digits);
+            : NUMERIC_PHONE_SENTINELS.has(digits) || /^1?[2-9]\d\d55501\d\d$/.test(digits);
           expect({ id: c.id, phone: rec.phone, ok })
             .toEqual({ id: c.id, phone: rec.phone, ok: true });
         }
         if (rec.email != null) {
           const normalized = normalizeEmail(rec.email);
-          const isNonEmail = !normalized.includes('@');
-          // Reserved domains only: example.com or a subdomain of it (the
-          // typo'd-domain case uses typo.example.com — still reserved).
-          expect({ id: c.id, email: rec.email, ok: isNonEmail || /@(?:[a-z0-9-]+\.)*example\.com$/.test(normalized) })
+          // With an @: reserved domains only — example.com or a subdomain of
+          // it (the typo'd-domain case uses typo.example.com — still
+          // reserved). Without one: allowlisted sentinel strings only.
+          const ok = normalized.includes('@')
+            ? /@(?:[a-z0-9-]+\.)*example\.com$/.test(normalized)
+            : NON_EMAIL_SENTINELS.has(normalized);
+          expect({ id: c.id, email: rec.email, ok })
             .toEqual({ id: c.id, email: rec.email, ok: true });
         }
       }

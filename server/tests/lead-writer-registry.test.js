@@ -43,8 +43,13 @@ const INSERT_PATTERNS = [
 // Aliased-builder form: a `leads` query builder stored in a variable first
 // (`const leads = trx('leads'); ... leads.insert(...)`). The declaration must
 // NOT be awaited — `const rows = await db('leads')...` is an executed query,
-// not a stored builder. Covers `qb('leads')` and `qb.table('leads')` heads.
-const ALIAS_DECL_RE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\.\s*table)?\s*\(\s*['"`]leads['"`]\s*\)/g;
+// not a stored builder. Covers `qb('leads')` and `qb.table('leads')` heads,
+// including a schema-qualified head (`db.withSchema('public').table('leads')`)
+// via the same CHAIN of intermediate calls the direct patterns allow.
+const ALIAS_DECL_RE = new RegExp(
+  String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${Q}leads${Q}\s*\)`,
+  'g'
+);
 
 function aliasInsertPatterns(src) {
   const patterns = [];
@@ -115,6 +120,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['batchInsert', "await db.batchInsert('leads', rows);"],
     ['stored builder alias', "const leads = trx('leads');\nawait leads.insert({ a: 1 });"],
     ['stored table alias', "const t = db.table('leads');\nawait t.returning('id').insert({ a: 1 });"],
+    ['stored withSchema table alias', "const leads = db.withSchema('public').table('leads');\nawait leads.insert({ a: 1 });"],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
   });
@@ -174,16 +180,35 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     }
   });
 
-  test("'none' requires a reason; a named resolver must actually be referenced by the file", () => {
+  // The enclosing top-level statement's span: nearest column-0 opener line at
+  // or above the anchor, through the first column-0 closer at or after it.
+  // Scopes the "no paper resolvers" check to the top-level statement holding
+  // the registered insert — a function, or the containing object literal when
+  // the insert lives in a method (call-recording-processor). Coarser than a
+  // real AST scope but deterministic, and it rejects the failure Codex named:
+  // a resolver mentioned only in imports, comments, or a sibling top-level
+  // function is not evidence for THIS site.
+  function enclosingTopLevelSpan(lines, idx) {
+    let start = idx;
+    while (start > 0 && !/^[A-Za-z_$(]/.test(lines[start])) start--;
+    let end = idx;
+    while (end < lines.length - 1 && !/^[}\])]/.test(lines[end])) end++;
+    return lines.slice(start, end + 1).join('\n');
+  }
+
+  test("'none' requires a reason; a named resolver must be referenced within the insert's enclosing function", () => {
     for (const w of LEAD_WRITERS) {
       if (w.identityResolver === 'none') {
         expect({ site: key(w), reason: typeof w.reason }).toEqual({ site: key(w), reason: 'string' });
         expect(w.reason.length).toBeGreaterThan(10);
         continue;
       }
-      const src = fs.readFileSync(path.join(SERVER_ROOT, w.file), 'utf8');
+      const lines = fs.readFileSync(path.join(SERVER_ROOT, w.file), 'utf8').split('\n');
+      const anchorIdx = lines.findIndex((l) => l.trim() === w.anchor);
+      expect({ site: key(w), anchorFound: anchorIdx >= 0 }).toEqual({ site: key(w), anchorFound: true });
+      const span = enclosingTopLevelSpan(lines, anchorIdx);
       const identifier = w.identityResolver.split(/[\s(]/)[0];
-      const referenced = new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(src);
+      const referenced = new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(span);
       expect({ site: key(w), resolver: identifier, referenced }).toEqual({ site: key(w), resolver: identifier, referenced: true });
     }
   });
