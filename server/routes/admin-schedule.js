@@ -3254,13 +3254,19 @@ async function enrichBillingLaneWithWalletGap({ billingLane, customerId, achStat
 // trusted a requested annual-prepay term the route can still downgrade). One
 // classifier, the same one the sheet and the completion path read.
 //
-// MUST be called with the FINAL persisted values: the price
-// buildAppointmentPricing resolved (which can come from services.base_price,
-// not just the operator's input) and the EFFECTIVE billing term after any
-// downgrade — never the raw request fields.
+// MUST be called with the FINAL persisted values: the EFFECTIVE billing term
+// after any downgrade (never the requested one) and the recurring FLOOR
+// price — not the anchor's finalPrice. The anchor total includes every
+// add-on booked on it, while children and boosters recompute from
+// date-filtered add-ons: a series whose primary line is $0 and whose anchor
+// is priced only by a seasonal add-on passes an anchor check and then
+// generates children that calculateVisitFinancialsForAddons prices at null,
+// completing unbilled (Codex P0). The floor is what EVERY generated visit is
+// guaranteed to carry: the primary net plus only those add-on lines with no
+// cadence of their own, which lineDueOnRecurringDate puts on every date.
 function recurringWithoutBillableAmount({
   isRecurring,
-  finalPrice,
+  recurringFloorPrice,
   customer,
   effectiveBillingTerm,
   prepaid,
@@ -3286,7 +3292,7 @@ function recurringWithoutBillableAmount({
     // Settlement state (autopay, dues, stamps) cannot create or cure "no
     // number exists"; the conservative defaults keep this a pure amount test.
     autopayActive: false,
-    estimatedPrice: Number(finalPrice) > 0 ? Number(finalPrice) : null,
+    estimatedPrice: Number(recurringFloorPrice) > 0 ? Number(recurringFloorPrice) : null,
     monthlyRate: customer?.monthly_rate,
     perApplicationFee: customer?.per_application_fee,
     isRecurring: true,
@@ -5007,9 +5013,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // orderings were Codex findings on the first cut — checking earlier read raw
     // request fields and both over- and under-fired.
     {
+      // The floor EVERY generated visit is guaranteed to carry: primary net
+      // plus add-on lines that carry no cadence of their own (those are due
+      // on every date — lineDueOnRecurringDate returns true when a line has
+      // no pattern). Seasonal / one-time add-ons are excluded on purpose:
+      // they do not price the visits they are absent from.
+      const durableAddonLines = (pricing.addonLines || [])
+        .filter((line) => !(line?.recurringPattern || line?.recurring_pattern));
+      const recurringFloorPrice = zeroCallbackPrice
+        ? 0
+        : (calculateVisitFinancialsForAddons(pricing, durableAddonLines).price || 0);
       const unbillable = recurringWithoutBillableAmount({
         isRecurring,
-        finalPrice,
+        recurringFloorPrice,
         customer,
         effectiveBillingTerm: bookingBillingTermEffective,
         prepaid: req.body.prepaid || null,

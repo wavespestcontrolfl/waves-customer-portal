@@ -85,7 +85,7 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
   // completes at $0, forever (prod 2026-08-31).
   const unbillable = {
     isRecurring: true,
-    finalPrice: 0,
+    recurringFloorPrice: 0,
     customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
     effectiveBillingTerm: 'standard',
     prepaid: null,
@@ -105,11 +105,14 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     expect(recurringWithoutBillableAmount({ ...unbillable, isRecurring: false })).toBeNull();
   });
 
-  test('the RESOLVED price satisfies it — including one the server derived', () => {
-    // finalPrice is post-buildAppointmentPricing, so a booking that sent no
-    // explicit price but priced off services.base_price passes (Codex P1).
-    expect(recurringWithoutBillableAmount({ ...unbillable, finalPrice: 46.33 })).toBeNull();
-    expect(recurringWithoutBillableAmount({ ...unbillable, finalPrice: 0 })).toBeTruthy();
+  test('the RESOLVED floor price satisfies it — including one the server derived', () => {
+    // Post-buildAppointmentPricing, so a booking that sent no explicit price
+    // but priced off services.base_price passes (Codex P1).
+    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
+    // The FLOOR, not the anchor total: a series whose anchor is priced only
+    // by a seasonal add-on has a $0 floor, and its children — recomputed from
+    // date-filtered add-ons — would complete unbilled (Codex P0).
+    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 0 })).toBeTruthy();
   });
 
   test('a monthly rate satisfies it ONLY on a lane that actually consumes it (Codex P0)', () => {

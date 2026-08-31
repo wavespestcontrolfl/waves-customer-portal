@@ -193,7 +193,7 @@ const DETECTORS = Object.freeze([
           // selecting it threw in Postgres and made this detector unavailable
           // on EVERY sweep (Codex P1). Presence is not the verdict either —
           // resolveForInvoice below is.
-          'ss.payer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
+          'ss.payer_id', 'ss.customer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
           'c.billing_mode', 'c.monthly_rate', 'c.waveguard_tier', 'c.per_application_fee',
         );
       const truncated = visits.length > CLOSEOUT_VISIT_CAP;
@@ -218,12 +218,17 @@ const DETECTORS = Object.freeze([
       const { resolveForInvoice } = require('./payer');
       for (const v of evaluated) {
         if (invoicedIds.has(v.id)) continue;
-        // Canonical active-payer resolution, and only when there is something
-        // to resolve — a payer-billed visit bills the payer, not the customer,
-        // so it is never a gap. resolveForInvoice never throws.
-        const payerBilled = v.payer_id
-          ? !!(await resolveForInvoice({ database: db, scheduledServiceId: v.id })).payerId
-          : false;
+        // Canonical active-payer resolution for EVERY visit, with BOTH ids.
+        // Gating the call on ss.payer_id skipped visits that inherit an active
+        // customers.payer_id default, reporting payer-billed work as a
+        // no-amount gap (Codex P1); passing customerId is also what makes
+        // self_pay_override resolve the way completion resolves it.
+        // resolveForInvoice never throws.
+        const payerBilled = !!(await resolveForInvoice({
+          database: db,
+          scheduledServiceId: v.id,
+          customerId: v.customer_id,
+        })).payerId;
         const lane = resolveBillingLane({
           billing_mode: v.billing_mode,
           waveguard_tier: v.waveguard_tier,

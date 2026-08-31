@@ -43,6 +43,7 @@ jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 
 const db = require('../models/db');
+const { resolveForInvoice } = require('../services/payer');
 const sendgrid = require('../services/sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { auditChurnedAccountsLiveState } = require('../scripts/audit-churned-accounts-live-state');
@@ -310,10 +311,10 @@ describe('detector adapters', () => {
     // v3 = same shape as v1, but completion minted an invoice → settled.
     // v4 = priced visit → invoice predicted, no finding.
     mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
-      { id: 'v2', estimated_price: null, is_callback: true, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
-      { id: 'v3', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
-      { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
+      { id: 'v2', estimated_price: null, is_callback: true, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
+      { id: 'v3', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
+      { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
     ] });
     mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }] });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
@@ -323,10 +324,24 @@ describe('detector adapters', () => {
     // per-job column by name.
     const selected = mockTables.scheduled_services.select.mock.calls[0];
     expect(selected).toContain('ss.payer_id');
+    expect(selected).toContain('ss.customer_id');
     expect(selected).not.toContain('ss.billed_to_payer_id');
     expect(out.count).toBe(1);
     expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
     expect(out.detail).toMatchObject({ checked: 4, truncated: false });
+  });
+
+  test('unbilled_completed_visits: an inherited ACTIVE customer-default payer is not a gap (Codex P1)', async () => {
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    // No ss.payer_id on the row — the payer comes from customers.payer_id,
+    // which only resolveForInvoice knows about.
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'v1', customerId: 'c1' }));
+    expect(out.count).toBe(0);
   });
 
   test('unbilled_completed_visits: visits beyond the cap make the day a finding, never a silent pass', async () => {
