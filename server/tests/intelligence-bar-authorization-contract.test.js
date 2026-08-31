@@ -174,7 +174,9 @@ test('two-step previews surface their resolved facts as effects (capped) and fin
   const big = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`stop_${i}`, `addr ${i}`]));
   const c2 = buildContract({ toolName: 'optimize_all_routes', params: {}, displayParams: {}, preview: big });
   expect(c2.effects.filter((e) => e.label.startsWith('stop ')).length).toBe(12);
-  expect(c2.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^\(\+8 more preview fields/));
+  expect(c2.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^\(\+8 more — see "Show more"/));
+  // Nothing is concealed: the overflow rides in full under more_effects.
+  expect(c2.more_effects.map((e) => e.label)).toEqual(Array.from({ length: 8 }, (_, i) => `stop ${i + 12}: addr ${i + 12}`));
   // The cap is presentation only: a plan differing ONLY beyond the visible
   // lines still yields a different contract hash.
   const c3 = buildContract({ toolName: 'optimize_all_routes', params: {}, displayParams: {}, preview: { ...big, stop_19: 'addr 99' } });

@@ -106,6 +106,22 @@ function ContractView({ contract, dark }) {
           ))}
         </div>
       ))}
+      {Array.isArray(contract.more_effects) && contract.more_effects.length > 0 && (
+        // Complete text of every capped/overflow line — nothing the operator
+        // approves is hidden; the summary above is just the short form.
+        <details style={dark ? { marginTop: 4 } : undefined} className={dark ? undefined : "mt-1"}>
+          <summary style={dark ? { fontSize: 13, color: D.teal, cursor: "pointer" } : undefined}
+            className={dark ? undefined : "text-[13px] text-zinc-700 cursor-pointer underline"}>
+            Show more ({contract.more_effects.length} full detail{contract.more_effects.length > 1 ? "s" : ""})
+          </summary>
+          {contract.more_effects.map((e, i) => (
+            <div key={`more-${i}`} style={dark ? { fontSize: 13, color: D.text, wordBreak: "break-word", marginTop: 4 } : undefined}
+              className={dark ? undefined : "text-[13px] text-zinc-800 break-words mt-1"}>
+              • {e.label}
+            </div>
+          ))}
+        </details>
+      )}
     </div>
   );
 }

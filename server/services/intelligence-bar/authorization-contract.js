@@ -234,19 +234,28 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // created) — that resolution, not just the model's inputs, is what the
   // operator approves. Surface it (capped for the card; the fingerprint
   // below covers it exactly) alongside the display params.
+  // Overflow/long lines are NOT dropped: the complete text lives in
+  // more_effects (rendered under "Show more" on the card) and the whole
+  // preview is hashed via preview_fingerprint.
+  const moreEffects = [];
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
-    let hidden = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
       const d = describe(v, 1);
       if (d === null) continue;
-      if (shown >= PREVIEW_EFFECT_LINES) { hidden += 1; continue; }
       const line = `${humanKey(k)}: ${d}`;
-      push(kindFor(toolName, k), line.length > PREVIEW_EFFECT_CHARS ? `${line.slice(0, PREVIEW_EFFECT_CHARS - 1)}…` : line);
+      const kind = kindFor(toolName, k);
+      if (shown >= PREVIEW_EFFECT_LINES) { moreEffects.push({ kind, label: line }); continue; }
+      if (line.length > PREVIEW_EFFECT_CHARS) {
+        push(kind, `${line.slice(0, PREVIEW_EFFECT_CHARS - 1)}…`);
+        moreEffects.push({ kind, label: line });
+      } else {
+        push(kind, line);
+      }
       shown += 1;
     }
-    if (hidden) push('operational', `(+${hidden} more preview field${hidden > 1 ? 's' : ''} — pinned exactly; confirm re-checks them)`);
+    if (moreEffects.length) push('operational', `(+${moreEffects.length} more — see "Show more"; pinned exactly, confirm re-checks them)`);
   }
 
   // Every curated display line is an effect the operator is approving —
@@ -302,6 +311,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName),
     notifies_customer: notifiesCustomer,
     summary: summary || null,
+    ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     // The card caps/truncates preview lines for presentation only — the
     // contract (and so its hash) still covers the COMPLETE resolved preview
     // through this fingerprint, so two plans that share a visible prefix
