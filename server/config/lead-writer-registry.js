@@ -169,7 +169,11 @@ const LEAD_WRITERS = [
   {
     file: 'services/referral-engine.js',
     anchor: "const [lead] = await db('leads').insert({",
-    context: 'submitReferral — portal referral → lead for the referred contact',
+    // Reached from BOTH referral surfaces: the customer portal
+    // (routes/referrals-v2.js → POST /api/referrals/submit) and the admin
+    // portal (routes/admin-referrals-v2.js → POST /api/admin/referrals/submit,
+    // source: 'admin') — server/index.js:510,571.
+    context: 'submitReferral — referral → lead for the referred contact (portal /api/referrals + admin /api/admin/referrals entry points)',
     identityResolver: 'none',
     reason: PENDING_RULING_REASON,
   },

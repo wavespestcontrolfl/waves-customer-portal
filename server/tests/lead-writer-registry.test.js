@@ -30,7 +30,9 @@ const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 // `\s*` spans the newline).
 const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\([^()]*\))*`;
 const Q = '[\'"`]'; // quote class incl. backtick
-const LITERAL_LEADS = String.raw`${Q}leads${Q}`;
+// Optional schema qualifier INSIDE the literal too — knex accepts
+// `db('public.leads')` as a schema-qualified table name.
+const LITERAL_LEADS = String.raw`${Q}(?:[\w$]+\.)?leads${Q}`;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // The knex builder shapes, built for a given "table token": the quoted
@@ -175,6 +177,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['constant table name', "const TABLE = 'leads';\nawait db(TABLE).insert({ a: 1 });"],
     ['constant table name via batchInsert', "const TABLE = 'leads';\nawait db.batchInsert(TABLE, rows);"],
     ['constant table name through stored builder', "const TABLE = 'leads';\nconst b = trx(TABLE);\nawait b.insert({ a: 1 });"],
+    ['schema-qualified table literal', "await db('public.leads').insert({ a: 1 });"],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
   });

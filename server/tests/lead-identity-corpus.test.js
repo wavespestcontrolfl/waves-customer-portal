@@ -140,9 +140,11 @@ describe('lead identity corpus — shape and PII hygiene', () => {
         expect({ id: c.id, key: k, known: CASE_FIELDS.has(k) })
           .toEqual({ id: c.id, key: k, known: true });
       }
-      for (const k of Object.keys(c.checks || {})) {
-        expect({ id: c.id, checkKey: k, known: CHECK_FIELDS.has(k) })
-          .toEqual({ id: c.id, checkKey: k, known: true });
+      for (const [k, v] of Object.entries(c.checks || {})) {
+        // Boolean-only values — an object here would carry data no PII loop
+        // traverses, and the annotation tests skip non-boolean values.
+        expect({ id: c.id, checkKey: k, known: CHECK_FIELDS.has(k), boolean: typeof v === 'boolean' })
+          .toEqual({ id: c.id, checkKey: k, known: true, boolean: true });
       }
       for (const rec of [c.a, c.b]) {
         // Plain object with at least one non-empty identity field — an empty
