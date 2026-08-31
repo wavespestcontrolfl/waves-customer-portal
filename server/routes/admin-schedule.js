@@ -3268,6 +3268,7 @@ function recurringWithoutBillableAmount({
   isRecurring,
   recurringFloorPrice,
   customer,
+  effectiveBillingTerm,
   isCallback,
   serviceType,
 }) {
@@ -3292,10 +3293,25 @@ function recurringWithoutBillableAmount({
   // — the exact lost-AR case this gate exists to stop (Codex P0). A payer
   // still needs a price or a rate behind it.
 
-  const lane = resolveBillingLane(customer);
+  // The customer's EXISTING annual-prepay lane is not an exemption for a
+  // booking that is not itself annual prepay. An unpriced recurring booking
+  // for such a customer predicts 'annual_renewal_owned' — deliberately not a
+  // gap, because coverage belongs to the renewal flow — so it sailed through
+  // even when bookingBillingTermEffective had been downgraded to standard,
+  // leaving unstamped visits with no term coverage and no invoice (Codex P0).
+  //
+  // Note the ASYMMETRY, which is the whole point: the effective term can only
+  // REMOVE an exemption here, never grant one. Round 6 deleted the opposite
+  // use (trusting a requested prepay term to excuse a missing amount) because
+  // the term invoice is created post-commit and may never exist.
+  const bookingIsAnnualPrepay = effectiveBillingTerm === 'prepay_annual';
+  const customerForLane = !bookingIsAnnualPrepay && customer?.billing_mode === 'annual_prepay'
+    ? { ...customer, billing_mode: null }
+    : customer;
+  const lane = resolveBillingLane(customerForLane);
   const prediction = predictCompletionBilling({
     lane: lane.mode,
-    billingMode: customer?.billing_mode || null,
+    billingMode: customerForLane?.billing_mode || null,
     // Settlement state (autopay, dues, stamps) cannot create or cure "no
     // number exists"; the conservative defaults keep this a pure amount test.
     autopayActive: false,
@@ -5146,6 +5162,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         isRecurring,
         recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
         customer,
+        effectiveBillingTerm: bookingBillingTermEffective,
         isCallback: resolvedIsCallback,
         serviceType,
       });

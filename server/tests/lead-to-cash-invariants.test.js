@@ -321,6 +321,7 @@ describe('detector adapters', () => {
     // v4 is priced, so its invoice must exist or it is itself a finding under
     // the owed-but-never-minted arm.
     mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }, { scheduled_service_id: 'v4' }] });
+    mockTables.service_records = mockChain({ select: [] });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
     // The db is mocked, so a nonexistent column cannot fail the query here —
     // it shipped once as `ss.billed_to_payer_id`, which is a schedule-query
@@ -373,8 +374,33 @@ describe('detector adapters', () => {
       { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: null },
     ] });
     mockTables.invoices = mockChain({ select: [] });
+    // Outcomes are resolved from service_records in a SEPARATE query — the
+    // join was fanning visits out before the cap (non-unique FK).
+    mockTables.service_records = mockChain({ select: [
+      { scheduled_service_id: 'v1', visit_outcome: 'inspection_only' },
+      { scheduled_service_id: 'v2', visit_outcome: 'customer_declined' },
+      { scheduled_service_id: 'v3', visit_outcome: 'incomplete' },
+      // v3 also has a later recap row — newest must win, and it still says
+      // incomplete. v4 has no record at all: NOT an excuse.
+      { scheduled_service_id: 'v3', visit_outcome: 'incomplete' },
+    ] });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
     expect(out.ids).toEqual(['v4 [no_invoice_minted:invoice]']);
+  });
+
+  test('unbilled_completed_visits: the NEWEST completion record wins when several rails wrote (Codex P1)', async () => {
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    // Ordered ascending by created_at: an early 'incomplete' superseded by a
+    // real completion must NOT keep excusing the missing invoice.
+    mockTables.service_records = mockChain({ select: [
+      { scheduled_service_id: 'v1', visit_outcome: 'incomplete' },
+      { scheduled_service_id: 'v1', visit_outcome: 'completed' },
+    ] });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.ids).toEqual(['v1 [no_invoice_minted:invoice]']);
   });
 
   test('unbilled_completed_visits: a VOID invoice is not proof of billing (Codex P1)', async () => {

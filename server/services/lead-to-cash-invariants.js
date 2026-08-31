@@ -185,15 +185,15 @@ const DETECTORS = Object.freeze([
       // Re-runs the SAME prediction the sheet and the completion path use —
       // never a SQL re-derivation of the billing decision (the 2026-07
       // double-billing incident came from a second classifier).
+      // NO service_records join here. scheduled_service_id is explicitly
+      // non-unique (completion, project and recap rails can each leave a
+      // row), so joining it fans visits out BEFORE the limit: the cap would
+      // count duplicates, later visits would fall off the page, and the
+      // outcome read would be whichever row the planner happened to pick
+      // (Codex P1). Visits are capped first; outcomes are resolved in one
+      // follow-up query below.
       const visits = await db('scheduled_services as ss')
         .leftJoin('customers as c', 'c.id', 'ss.customer_id')
-        // The FROZEN completion outcome. Completion deliberately mints no
-        // invoice for a non-performed visit (inspection_only /
-        // customer_declined) or an incomplete closeout, so reporting those as
-        // unbilled would manufacture a daily incident out of correct behavior
-        // (Codex P1). service_records.structured_notes.visitOutcome is what
-        // the completion transaction actually froze.
-        .leftJoin('service_records as sr', 'sr.scheduled_service_id', 'ss.id')
         .where({ 'ss.status': 'completed', 'ss.scheduled_date': yesterday })
         .orderBy('ss.id')
         .limit(CLOSEOUT_VISIT_CAP + 1)
@@ -207,7 +207,6 @@ const DETECTORS = Object.freeze([
           'ss.payer_id', 'ss.customer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
           'c.billing_mode', 'c.monthly_rate', 'c.waveguard_tier', 'c.per_application_fee',
           'c.autopay_enabled', 'c.autopay_paused_until', 'c.autopay_payment_method_id', 'c.ach_status',
-          db.raw("sr.structured_notes->>'visitOutcome' as visit_outcome"),
         );
       const truncated = visits.length > CLOSEOUT_VISIT_CAP;
       const ids = [];
@@ -237,6 +236,19 @@ const DETECTORS = Object.freeze([
       const { resolveForInvoice } = require('./payer');
       const { monthlyDuesCollected } = require('./billing-lane');
       const { customerOnAutopay } = require('./autopay-eligibility');
+      // Authoritative completion outcome per visit, newest-first — the same
+      // "latest record wins" precedence closeout-status.js uses when several
+      // rails have written for one visit.
+      const outcomeByVisit = new Map();
+      if (evaluated.length) {
+        const records = await db('service_records')
+          .whereIn('scheduled_service_id', evaluated.map((v) => v.id))
+          .orderBy('created_at', 'asc')
+          .select('scheduled_service_id', db.raw("structured_notes->>'visitOutcome' as visit_outcome"));
+        // Ascending insert => the LAST write for a visit wins the map slot.
+        for (const r of records) outcomeByVisit.set(r.scheduled_service_id, r.visit_outcome);
+      }
+
       // Outcomes where completion is SUPPOSED to bill nothing. A null outcome
       // (older rows, or no service record) is not treated as an excuse —
       // fail toward reporting, since an unbilled visit is the thing being
@@ -244,7 +256,7 @@ const DETECTORS = Object.freeze([
       const NON_BILLING_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
       for (const v of evaluated) {
         if (invoicedIds.has(v.id)) continue;
-        if (NON_BILLING_OUTCOMES.has(v.visit_outcome)) continue;
+        if (NON_BILLING_OUTCOMES.has(outcomeByVisit.get(v.id))) continue;
         // Canonical active-payer resolution for EVERY visit, with BOTH ids.
         // Gating the call on ss.payer_id skipped visits that inherit an active
         // customers.payer_id default, reporting payer-billed work as a
