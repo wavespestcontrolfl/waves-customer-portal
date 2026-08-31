@@ -389,6 +389,11 @@ function GlobalCommandPalette(_props, ref) {
   useEffect(() => {
     if (!threadsAvailableRef.current) {
       threadEpochRef.current += 1;
+      // Unlike New chat/submit (deliberate detach — no re-resume), a
+      // context-driven invalidation should let the next palette open retry
+      // the resume probe; otherwise a route change during the inflight
+      // probe disables resume for the component's lifetime.
+      resumeAttemptedRef.current = false;
       setConversationHistory([]);
       setResponse(null);
       setPendingActions([]);

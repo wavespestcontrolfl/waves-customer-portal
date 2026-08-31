@@ -1816,9 +1816,13 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         // means a concurrent append (another tab) landed first, so this
         // exchange would interleave without having seen it; the append is
         // rejected and the client detaches instead.
+        // Malformed thread_id would raise a Postgres uuid cast error inside
+        // the transaction — treat it as no thread (fresh, seeded) instead.
+        const requestedThreadId = typeof req.body.thread_id === 'string' && UUID_RE.test(req.body.thread_id)
+          ? req.body.thread_id : null;
         const appended = await IbThreads.appendExchange({
           actorId: getAdminActorId(req),
-          threadId: req.body.thread_id ? String(req.body.thread_id) : null,
+          threadId: requestedThreadId,
           expectedSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
           context,
           userText: persistedUserTurn,
@@ -1828,7 +1832,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           // (gate flipped mid-chat, or a detach after a rejected append)
           // survives refresh instead of persisting an amnesiac thread. The
           // service validates roles/content and caps the seed.
-          seedTurns: req.body.thread_id ? null : conversationHistory.slice(-8),
+          seedTurns: requestedThreadId ? null : conversationHistory.slice(-8),
         });
         persistedThreadId = appended?.threadId || null;
         persistedThreadSeq = appended?.lastSeq ?? null;
@@ -2272,6 +2276,10 @@ router.get('/quick-actions', async (req, res, next) => {
 // Client-only endpoints, like /confirm-action — never model tools. Admin
 // actors only; every read is actor-bound inside the threads service.
 
+// Thread ids are uuid columns — validate shape at the request boundary so a
+// malformed id 404s instead of raising a Postgres cast error.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function threadsGuard(req, res) {
   if (!IbThreads.threadsEnabled()) {
     res.status(404).json({ error: 'Threads are not enabled' });
@@ -2309,6 +2317,7 @@ router.get('/threads', async (req, res, next) => {
 router.get('/threads/:id', async (req, res, next) => {
   try {
     if (!threadsGuard(req, res)) return;
+    if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Thread not found' });
     const thread = await IbThreads.getThread(getAdminActorId(req), String(req.params.id));
     if (!thread) return res.status(404).json({ error: 'Thread not found' });
     res.json({ thread });

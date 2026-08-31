@@ -290,6 +290,28 @@ describe('threads gate ON', () => {
     });
   });
 
+  test('a malformed thread_id starts a fresh seeded thread instead of a uuid cast error', async () => {
+    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
+    scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
+
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, {
+        prompt: 'hello', context: 'customers', thread_id: 'not-a-uuid', thread_seq: 2,
+      });
+      expect(status).toBe(200);
+      expect(mockAppendExchange.mock.calls[0][0].threadId).toBeNull();
+      expect(body.threadId).toBe(THREAD_ID);
+    });
+  });
+
+  test('/threads/:id 404s a malformed id without touching the service', async () => {
+    await withServer(async (baseUrl) => {
+      const { status } = await getPath(baseUrl, '/threads/not-a-uuid');
+      expect(status).toBe(404);
+      expect(mockGetThread).not.toHaveBeenCalled();
+    });
+  });
+
   test('/threads/:id is actor-bound through the service and 404s on a miss', async () => {
     mockGetThread.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
