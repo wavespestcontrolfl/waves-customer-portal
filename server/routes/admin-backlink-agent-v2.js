@@ -281,6 +281,9 @@ const REGISTRY_JOBS = Object.freeze({
   },
   gap: (opts) => require('../services/seo/link-registry-gap-ingest').ingestCompetitorGap(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
   enrich: (opts) => require('../services/seo/link-registry-enrich').enrichDomains(db, { dryRun: opts.dryRun, limit: opts.limit || 200, force: opts.force === true }),
+  // Step 3: fetches + one WORKHORSE call per domain; gated by
+  // GATE_LINK_INVESTIGATOR inside the service (reports `gated: true` when off).
+  investigate: (opts) => require('../services/seo/link-path-investigator').investigatePaths(db, { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) }),
 });
 router.post('/registry/jobs/:job', async (req, res, next) => {
   try {
@@ -306,7 +309,55 @@ router.get('/registry', async (req, res, next) => {
     const items = await query.clone()
       .orderByRaw("CASE discovery_priority WHEN 'owner_seed' THEN 0 ELSE 1 END") // owner seeds first (§3.5: investigate-first)
       .orderBy('created_at', 'desc').limit(lim).offset(offset);
+    // Best-path summary for the Registry table (§11: type · cost · expected rel).
+    const bestIds = items.map((d) => d.best_path_id).filter(Boolean);
+    if (bestIds.length) {
+      const paths = await db('seo_link_acquisition_paths').whereIn('id', bestIds)
+        .select('id', 'acquisition_type', 'submission_url', 'estimated_cost_cents', 'currency', 'expected_rel', 'confidence', 'payment_required');
+      const byId = new Map(paths.map((p) => [p.id, p]));
+      for (const d of items) d.best_path = byId.get(d.best_path_id) || null;
+    }
     res.json({ items });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/backlink-agent/registry/:id — one domain: active paths first,
+// provenance touches, placements summary (Registry row expand, §11).
+router.get('/registry/:id', async (req, res, next) => {
+  try {
+    const domain = await db('seo_link_domains').where({ id: req.params.id }).first();
+    if (!domain) return res.status(404).json({ error: 'not found' });
+    const [paths, touches, placements] = await Promise.all([
+      db('seo_link_acquisition_paths').where({ domain_id: domain.id })
+        .orderByRaw('CASE WHEN superseded_by IS NULL THEN 0 ELSE 1 END').orderBy('updated_at', 'desc'),
+      db('seo_link_domain_sources').where({ domain_id: domain.id }).orderBy('seen_at', 'asc'),
+      db('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'target_page', 'location_key', 'link_type', 'live_url'),
+    ]);
+    res.json({ domain, paths, touches, placements });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/backlink-agent/registry/:id — owner registry actions (§11:
+// Watch / Reject / Reopen). acquiring/acquired are lane-owned aggregates the
+// investigator/bridge recompute — never hand-set; "Acquire anyway" is step 4
+// (it needs a stamped authority, not a state flip).
+const REGISTRY_ACTIONS = Object.freeze({ watch: 'watching', reject: 'rejected', reopen: 'investigating' });
+router.patch('/registry/:id', async (req, res, next) => {
+  try {
+    const { action } = req.body || {};
+    const nextState = REGISTRY_ACTIONS[action];
+    if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
+    const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state');
+    if (!domain) return res.status(404).json({ error: 'not found' });
+    if (['acquiring', 'acquired'].includes(domain.agent_state)) {
+      return res.status(409).json({ error: `agent_state '${domain.agent_state}' is lane-owned; registry actions apply to pre-acquisition states only` });
+    }
+    const now = new Date();
+    const patch = { agent_state: nextState, updated_at: now };
+    patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+    await db('seo_link_domains').where({ id: domain.id }).update(patch);
+    logger.info(`[backlink-registry] admin ${action}: ${domain.domain} (${domain.agent_state} -> ${nextState})`);
+    res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: patch.watch_recheck_at });
   } catch (err) { next(err); }
 });
 

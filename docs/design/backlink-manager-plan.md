@@ -448,7 +448,7 @@ locations can neither select nor overwrite each other's login. Readable only by 
 runner's create/resume path, and **never** written to `seo_link_attempts.detail`, logs,
 evidence, or LLM prompts.
 The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
-(`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths — REFACTORED in step 3, not called as-is: today it is gated by `backlinkAgent`, reads `BACKLINK_AGENT_EMAIL` and writes only the retired `backlink_agent_queue`; the step-3 change points its IMAP read at the v2 inbox (`HERMES_SIGNUP_EMAIL`), gates it on the runner gate, and persists a found verification link into the v2 flow — the placement's `activate_verification` attempt/idempotency row + persisted session (§3.3b/§12) — so a verification message actually advances the acquisition instead of updating a table nothing reads.
+(`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths — REFACTORED in step 5 (the runner extension, with the sessions/attempt flow it writes into — the build order in §14 governs; an earlier draft said step 3), not called as-is: today it is gated by `backlinkAgent`, reads `BACKLINK_AGENT_EMAIL` and writes only the retired `backlink_agent_queue`; the step-5 change points its IMAP read at the v2 inbox (`HERMES_SIGNUP_EMAIL`), gates it on the runner gate, and persists a found verification link into the v2 flow — the placement's `activate_verification` attempt/idempotency row + persisted session (§3.3b/§12) — so a verification message actually advances the acquisition instead of updating a table nothing reads.
 
 ### 3.6b Approvals — `seo_link_approvals` (immutable terms snapshot)
 
