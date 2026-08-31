@@ -693,7 +693,8 @@ describe('the series creators consume the guard (source guards)', () => {
     // CORRECT catalog id/snapshot — label-only matching promoted a
     // duplicate parent + series beside it.
     expect(converterSrc).toContain('const reservedServiceKeyById = new Map();');
-    expect(converterSrc).toContain('const identityMatch = !!unit.catalogServiceKey && reservedKey === unit.catalogServiceKey;');
+    expect(converterSrc).toContain('const identityMatch = !!unit.catalogServiceKey');
+    expect(converterSrc).toContain('(reservedKey === unit.catalogServiceKey || retiredComboCover)');
     expect(converterSrc).toContain("String(row.service_key_snapshot || '')");
     // PALM units match by identity ONLY (codex r21 pre-push P0): the label
     // key collapses one-time/nutritional/semiannual, and a reserved

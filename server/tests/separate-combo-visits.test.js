@@ -110,6 +110,17 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining[0].visitsPerYear).toBeUndefined(); // 12 would seed 3 years of quarterly visits
   });
 
+  test('a stale count is stripped even when the cadence needs no restamp (audit P0)', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 12 },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ]);
+    expect(standalone).toHaveLength(1);
+    expect(remaining[0].frequency).toBe('quarterly');
+    expect(remaining[0].visitsPerYear).toBeUndefined();
+  });
+
   test('an AGREEING count survives the restamp', () => {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     const { remaining } = combineRecurringServicesForScheduling([
@@ -147,6 +158,15 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining.map((l) => recurringServiceKey(l)).sort()).toEqual(['pest_control', 'termite_bond_5yr']);
   });
 
+  test('a RETIRED combined identity maps to BOTH constituent families (adopted-row coverage)', () => {
+    const { comboRouteFamiliesFromCatalogKey } = require('../services/estimate-converter');
+    expect(comboRouteFamiliesFromCatalogKey('pest_termite_bait_quarterly').sort()).toEqual(['pest_control', 'termite_bait']);
+    expect(comboRouteFamiliesFromCatalogKey('lawn_tree_shrub_combo').sort()).toEqual(['lawn_care', 'tree_shrub']);
+    expect(comboRouteFamiliesFromCatalogKey('termite_bond_5yr')).toEqual(['termite_bond_5yr']);
+    expect(comboRouteFamiliesFromCatalogKey('tree_shrub_program')).toEqual(['tree_shrub']);
+    expect(comboRouteFamiliesFromCatalogKey('rodent_bait_quarterly')).toEqual([]); // not a combo-route family
+  });
+
   test('identity-aware reserved matching reads label AND durable catalog identity', () => {
     const converter = require('../services/estimate-converter');
     const { identityAwareComboMatches } = converter._test || converter;
@@ -179,6 +199,19 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     // …and the retired-pair detection counts a bait+bond COMBO as bait
     // coverage in BOTH the promotion and the lock pre-pass.
     expect(src.match(/combo\.route\.primaryKey === 'termite_bait'/g)).toHaveLength(2);
+    // T&S promotes only beside a lawn line with EQUAL explicit visits —
+    // in the promotion filter AND the lock pre-pass mirror.
+    expect(src.match(/seedingFamilyKey\(other\) === 'lawn_care'/g)).toHaveLength(2);
+    // Adopted rows with a retired combined identity cover their
+    // constituents; T&S catalog rows link identity-only (45→60 duration).
+    expect(src).toContain('const retiredComboCover =');
+    // Catalog-first under the gate: a row WITH identity never also matches
+    // by its (possibly stale) label.
+    expect(src).toContain("Catalog-first under GATE_SEPARATE_COMBO_VISITS");
+    // Suppression reads the POST-rewrite identity of rows the rider route
+    // is about to rewrite (legacy combined reservation keeps pest covered).
+    expect(src).toContain('pendingRewriteKeyByRowId.get(row.id)');
+    expect(src).toContain("...Object.values(TREE_SHRUB_CADENCE_CATALOG_KEYS),");
     expect(src.match(/PEST_CADENCE_CATALOG_KEYS\[/g)).toHaveLength(2); // promotion + lock pre-pass
     expect(src).toContain('prePassRetiredPestPair');
   });
