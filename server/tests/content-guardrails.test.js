@@ -558,6 +558,8 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       // An image or a heading inside code never satisfies structural rules (Codex #3646 r5).
       const imgCta = `Intro copy.\n\n## Measuring\n\n![Request a quote](/quote/)\n\nUse ${link('rain-gauge')}.`;
       expect(affiliateCodes(guardrails.evaluate({ body: imgCta, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const refDef = `Intro copy.\n\n## Measuring\n\n[cta]: /quote/\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: refDef, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
       const fakeHeading = 'Intro.\n\n```md\n## fake\n```\n\n[quote](/quote/) ' + link('rain-gauge') + '\n\n## Real\n\nMore.';
       expect(affiliateCodes(guardrails.evaluate({ body: fakeHeading, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
       // Mirrors the astro contract: the CTA must PRECEDE the first affiliate

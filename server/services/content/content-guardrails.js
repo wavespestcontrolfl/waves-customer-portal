@@ -1705,7 +1705,10 @@ function hasServiceCtaLink(body) {
   const prefix = firstAffiliate ? text.slice(0, firstAffiliate.start) : text;
   // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
   // images and raw <img> tags before collecting destinations.
-  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix)))
+  // Reference DEFINITIONS ([cta]: /quote/) render nothing — blanked too, so
+  // an unused definition can't satisfy the rule (a reference-style link
+  // whose definition is blanked simply has no destination: fail closed).
+  const rendered = blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix))))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => ' '.repeat(m.length))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   const isServiceRoute = (norm) => {
