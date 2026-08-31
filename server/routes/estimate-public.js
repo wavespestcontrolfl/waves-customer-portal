@@ -8275,6 +8275,12 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // read fails (FAIL CLOSED: unprovable evidence never waives a fee) — the
     // evidence is dropped and the quote repriced.
     let setupWaiverStale = false;
+    // The probe's verified families (non-rodent) — retained so a still-valid
+    // waiver reaches the authoritative reprice below (codex #3591 r77 P1):
+    // serverRecomputeFromEstimateData injects [] unless the deps carry the
+    // server-derived list, so preserving the stored field alone still
+    // re-added the $99 for a tierless-but-qualifying customer.
+    let verifiedWaiverKeys = null;
     if (frozenSetupWaiver) {
       try {
         const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
@@ -8287,6 +8293,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
         // the same ungated read the grant side uses.
         const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
         setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
+        if (!setupWaiverStale) verifiedWaiverKeys = liveKeys;
       } catch (probeErr) {
         // Validity UNKNOWN (codex #3591 r41 P1): neither keep the waiver
         // (could under-bill) nor drop it and reprice (fabricates non-member
@@ -8363,7 +8370,15 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // DB, not posted by a browser), so its quote-time T&S knob snapshot is
     // trustworthy and must be reused — a membership lapse must not also
     // re-price the T&S line off knobs flipped after the quote was sent.
-    const reprice = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true });
+    // The verified waiver rides the reprice (codex #3591 r77 P1): the
+    // recompute overwrites identity fields from deps unconditionally, so
+    // the strict probe's live families must be passed or a valid waiver is
+    // replaced with [] and the $99 re-added. Tier deps stay empty — the
+    // membership lapse deliberately reprices at non-member tier.
+    const reprice = await serverRecomputeFromEstimateData(estData, {
+      replaySavedPricingKnobs: true,
+      ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
+    });
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
       // A successful authoritative reprice supersedes any earlier fail-closed

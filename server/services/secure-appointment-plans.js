@@ -458,9 +458,16 @@ async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }
   if (!root) return null;
   const programKey = await authoritativeServiceKey(database, root);
   if (!isRodentBaitProgramKey(programKey)) return null;
+  // LIVE terms only (codex #3591 r77 P1): a lapsed/historical coverage
+  // prepay whose claim was never anchored must not be adopted by an
+  // unrelated later booking — the seeding path now anchors the claim to
+  // the covered root it creates, so an anchor-less claim under a live
+  // term means the covered series does not exist yet and this booking IS
+  // plausibly it.
   const terms = await database('annual_prepay_terms')
     .where({ customer_id: customerId })
     .whereNotNull('prepay_invoice_id')
+    .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
     .select('prepay_invoice_id', 'coverage_service_type');
   for (const term of terms || []) {
     if (recurringServiceKey({ name: term.coverage_service_type }) !== programKey) continue;
@@ -953,8 +960,14 @@ async function selectSecurePlan({ token, plan }) {
       // selection waives the fee — never stamp above what is owed NOW,
       // capped by the disclosure. Failure refuses (retryable), never a
       // silent stamp.
+      // Customer row FIRST (codex #3591 r77 P1): the booking creators
+      // serialize on it before inserting a qualifying series, so the
+      // re-derivation must wait behind an in-flight booking or it stamps a
+      // $99 the just-added family waives. This transaction takes no
+      // advisory lock, so the order is safe.
       let owedNowCap = null;
       if (context.setupFee && context.setupFee.waivedWithPrepay === false) {
+        await trx('customers').where({ id: visit.customer_id }).forUpdate().first('id');
         try {
           owedNowCap = await module.exports.resolveDirectRodentSetupObligation(trx, { id: visit.id });
         } catch (owedErr) {
@@ -1065,20 +1078,10 @@ async function selectSecurePlan({ token, plan }) {
       if (lockedSetup != null) {
         setupAmount = lockedSetup;
       }
-      // Re-derive under the transaction (codex #3591 r51 local P0): a
-      // family added since render waives the fee — bill min(disclosed,
-      // owed-now); failure refuses rather than minting a stale fee.
-      if (setupAmount > 0) {
-        let owedNow;
-        try {
-          owedNow = await module.exports.resolveDirectRodentSetupObligation(trx, { id: visit.id });
-        } catch (owedErr) {
-          logger.warn(`[secure-plans] in-trx setup re-derivation failed for visit ${visit.id}: ${owedErr.message}`);
-          throw fail('plan_unavailable');
-        }
-        setupAmount = cents(Math.min(setupAmount, Math.max(0, Number(owedNow) || 0)));
-      }
-      amount = cents(coverageAmount + setupAmount);
+      // The owed-now re-derivation moved BELOW the customer-row lock (codex
+      // #3591 r77 P1): the booking creators serialize on that row before
+      // inserting a qualifying series, so deriving here could read a stale
+      // "still owed" past an in-flight booking whose new family waives it.
       // Term starts at the first UPCOMING live visit of the series —
       // coverage must span the visits the customer is prepaying, not the
       // send date. Anchored on the series PARENT and derived INSIDE the
@@ -1128,6 +1131,24 @@ async function selectSecurePlan({ token, plan }) {
         .where({ id: visit.customer_id })
         .forUpdate()
         .first('id');
+      // Re-derive the setup obligation UNDER the customer-row lock (codex
+      // #3591 r51 local P0 · r77 P1): a family added since render waives
+      // the fee — bill min(disclosed, owed-now) — and the lock means an
+      // in-flight qualifying booking commits (or waits) before this read,
+      // so the derivation can never bill a fee the new family waives.
+      // Failure refuses rather than minting a stale fee. Lock order stays
+      // advisory-then-customer-row (the mint/funnel global order).
+      if (setupAmount > 0) {
+        let owedNow;
+        try {
+          owedNow = await module.exports.resolveDirectRodentSetupObligation(trx, { id: visit.id });
+        } catch (owedErr) {
+          logger.warn(`[secure-plans] in-trx setup re-derivation failed for visit ${visit.id}: ${owedErr.message}`);
+          throw fail('plan_unavailable');
+        }
+        setupAmount = cents(Math.min(setupAmount, Math.max(0, Number(owedNow) || 0)));
+      }
+      amount = cents(coverageAmount + setupAmount);
       const liveDate = liveVisit ? callBookingDateOnly(liveVisit.scheduled_date) : null;
       if (!liveVisit
         || !LIVE_VISIT_STATUSES.includes(liveVisit.status)

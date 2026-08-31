@@ -1365,6 +1365,29 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     }
   }
 
+  // Anchor the prepay's anchor-less setup claim to the covered series root
+  // (codex #3591 r77 P1): a Customer 360 coverage-only mint ledgered its
+  // claim before any series existed — once seeding creates (or finds) the
+  // covered root, the claim belongs HERE. Left anchor-less, a later
+  // unrelated rodent booking could adopt it and suppress its own setup.
+  // Best-effort (warn, never roll back the seeding): an unanchored claim is
+  // recoverable — the adoption path only reads claims of LIVE terms.
+  if (term?.prepay_invoice_id && createdParentId) {
+    try {
+      const claimless = await conn('setup_fee_claims')
+        .where({ invoice_id: term.prepay_invoice_id })
+        .whereNull('scheduled_service_id')
+        .first('id');
+      if (claimless) {
+        const { anchorSetupFeeClaim } = require('./secure-appointment-plans');
+        await anchorSetupFeeClaim(conn, { claimId: claimless.id, anchorId: createdParentId });
+        logger.info(`[annual-prepay] term ${term.id}: anchor-less setup claim ${claimless.id} anchored to covered series root ${createdParentId}`);
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id}: setup-claim anchoring skipped (${err.message}) — retried on the next term refresh`);
+    }
+  }
+
   // Register a durable 72h/24h reminder row for each newly-seeded visit in the
   // SAME transaction (a SAVEPOINT, so a reminder hiccup can never roll back the
   // prepay/payment this rides with). Every upcoming visit should get reminders,

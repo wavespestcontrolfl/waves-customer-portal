@@ -2430,7 +2430,13 @@ router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, 
       });
       return res.json({ keys: Array.isArray(evidence?.tierKeys) ? evidence.tierKeys : [] });
     }
-    const keys = await loadExistingQualifyingServiceKeys(db, req.params.id);
+    // No street: the client consumes this as ACCOUNT-WIDE SETUP-WAIVER
+    // evidence, so it must read like the waiver everywhere else (codex
+    // #3591 r77 P1): planGate: false (qualifying families, never the
+    // membership stamp — an unstamped qualifying row still waives) and
+    // strict (a failed read 500s retryably instead of previewing a $99 the
+    // authoritative save waives).
+    const keys = await loadExistingQualifyingServiceKeys(db, req.params.id, { strict: true, planGate: false });
     res.json({ keys: Array.isArray(keys) ? keys : [] });
   } catch (err) { next(err); }
 });

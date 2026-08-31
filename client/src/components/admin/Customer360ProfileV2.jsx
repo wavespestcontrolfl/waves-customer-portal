@@ -3868,15 +3868,28 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         // (codex #3591 r50 P1).
         const refusal = err?.body;
         if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0) {
-          const ok = window.confirm(
-            `${refusal.error}\n\nRecord the $${Number(refusal.setupFeeAmount).toFixed(2)} Bait Station Setup as its own line on this prepay?`,
-          );
+          const setupFee = Number(refusal.setupFeeAmount);
+          // A prefilled amount is COVERAGE-ONLY (the estimate suggestion
+          // uses resolveAnnualPrepayInvoiceTotal; the renewal default
+          // subtracts the prior setup claim), while the route reads
+          // `amount` as setup-INCLUSIVE (coverage = amount − setup). Add
+          // the setup for prefills so coverage is not silently shorted by
+          // $99 (codex #3591 r77 P1); a staff-typed amount is confirmed as
+          // the collected inclusive total instead.
+          const coverageOnlyPrefill = !amountTouched || amountFromEstimateRef.current;
+          const submittedTotal = coverageOnlyPrefill
+            ? Math.round((Number(amount) + setupFee) * 100) / 100
+            : Number(amount);
+          const ok = window.confirm(coverageOnlyPrefill
+            ? `${refusal.error}\n\nRecord $${Number(amount).toFixed(2)} coverage + $${setupFee.toFixed(2)} Bait Station Setup — total collected $${submittedTotal.toFixed(2)}?`
+            : `${refusal.error}\n\nRecord the $${setupFee.toFixed(2)} Bait Station Setup as its own line on this prepay? Confirm the $${Number(amount).toFixed(2)} you entered is the collected total INCLUDING the setup.`);
           if (!ok) throw new Error("Annual prepay not recorded — the bait-station setup must ride the invoice.");
           result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
             method: "POST",
             body: JSON.stringify({
               ...recordedPayload,
-              setupFeeAmount: Number(refusal.setupFeeAmount),
+              amount: submittedTotal,
+              setupFeeAmount: setupFee,
               ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
             }),
           });

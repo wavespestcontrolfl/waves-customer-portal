@@ -645,6 +645,37 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(migrationSrc).toMatch(/if \(migrationOwnsRuleCycle && ruleAudit\?\.old_value && rule && rule\.tier_qualifier === true && rule\.exclude_from_pct_discount === false\) \{/);
   });
 
+  test('waiver rechecks run under the customer lock · seeding anchors the coverage claim · verified waiver rides the reprice · prefilled prepay totals add the setup (codex #3591 r77 P1)', () => {
+    const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    // Prepay funnel: advisory lock → visit lock → CUSTOMER lock → owed-now
+    // re-derivation (a booking's new family commits before the read).
+    const advisoryAt = plansSrc.indexOf('await lockAndAssertNoAnnualPrepayOverlap(\n        trx, visit.customer_id');
+    const custLockAt = plansSrc.indexOf("await trx('customers')\n        .where({ id: visit.customer_id })\n        .forUpdate()", advisoryAt);
+    const rederiveAt = plansSrc.indexOf('owedNow = await module.exports.resolveDirectRodentSetupObligation(trx, { id: visit.id });', custLockAt);
+    expect(advisoryAt).toBeGreaterThan(-1);
+    expect(custLockAt).toBeGreaterThan(advisoryAt);
+    expect(rederiveAt).toBeGreaterThan(custLockAt);
+    // Per-application path: the customer lock precedes its re-derivation.
+    expect(plansSrc).toMatch(/await trx\('customers'\)\.where\(\{ id: visit\.customer_id \}\)\.forUpdate\(\)\.first\('id'\);\s+try \{\s+owedNowCap = await module\.exports\.resolveDirectRodentSetupObligation\(trx, \{ id: visit\.id \}\);/);
+    // Anchorless-claim adoption reads LIVE terms only; the seeder anchors
+    // the claim to the covered root it creates.
+    expect(plansSrc).toMatch(/\.whereIn\('status', \['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'\]\)\s+\.select\('prepay_invoice_id', 'coverage_service_type'\);/);
+    const renewalsSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
+    expect(renewalsSrc).toMatch(/if \(term\?\.prepay_invoice_id && createdParentId\) \{[\s\S]*?whereNull\('scheduled_service_id'\)[\s\S]*?anchorSetupFeeClaim\(conn, \{ claimId: claimless\.id, anchorId: createdParentId \}\);/);
+    // The strict probe's verified families reach the authoritative reprice.
+    const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(estimatePublicSrc).toMatch(/if \(!setupWaiverStale\) verifiedWaiverKeys = liveKeys;/);
+    expect(estimatePublicSrc).toMatch(/serverRecomputeFromEstimateData\(estData, \{\s+replaySavedPricingKnobs: true,\s+\.\.\.\(verifiedWaiverKeys \? \{ setupWaiverPriorQualifyingServices: verifiedWaiverKeys \} : \{\}\),\s+\}\)/);
+    // The admin no-street qualifying read is waiver evidence: ungated + strict.
+    const adminCustomersSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    expect(adminCustomersSrc).toMatch(/loadExistingQualifyingServiceKeys\(db, req\.params\.id, \{ strict: true, planGate: false \}\)/);
+    // The C360 recorded-prepay retry adds the setup to a coverage-only
+    // prefill instead of letting the route short the coverage by $99.
+    const c360Src = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'components', 'admin', 'Customer360ProfileV2.jsx'), 'utf8');
+    expect(c360Src).toMatch(/const coverageOnlyPrefill = !amountTouched \|\| amountFromEstimateRef\.current;/);
+    expect(c360Src).toMatch(/amount: submittedTotal,\s+setupFeeAmount: setupFee,/);
+  });
+
   test('legacy rodent config rows retired · tierless verified waivers survive the lapsed-member sanitizer · rodent never lot-gated (codex #3591 r76)', () => {
     const migrationSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260829000040_rodent_bait_bracket_realignment.js'), 'utf8');
     // The 20260414000026 seed rows join the audited retirement set — dead
