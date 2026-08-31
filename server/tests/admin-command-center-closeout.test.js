@@ -188,24 +188,30 @@ test('published report with exhausted delivery fires the report card; queued del
   expect((await run()).filter((a) => a.type === 'report_delivery_incomplete')).toEqual([]);
 });
 
-test('closeout loads are memoised for 90s per visit; outages are never memoised (GH r1)', async () => {
+test('closeout loads are memoised for 90s per visit; outages memoise for a SHORT TTL so a poll does not re-pay the probe fan-out (GH r1, pre-push r14)', async () => {
   installJobs([jobRow('svc-1')]);
   getCloseoutStatus.mockResolvedValue(closeout());
   await run(); await run();
   expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
   closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockRejectedValueOnce(new Error('down')).mockResolvedValue(closeout());
-  await run(); await run();
-  expect(getCloseoutStatus).toHaveBeenCalledTimes(3);
-  // A PARTIAL outage (found:true, unavailable populated) is never memoised either (codex r3).
+  await run(); await run(); // the failure is cached for the 20s error TTL
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
+  // A read with a MAPPED fact unknown is an outage too — short-TTL memo (codex r3, pre-push r14).
   closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockReset();
-  getCloseoutStatus.mockResolvedValue(closeout({ unavailable: [{ lookup: 'service_photos', error: 'timeout' }] }));
+  getCloseoutStatus.mockResolvedValue(closeout({ facts: { photos: fact('unknown', 'service_photos_lookup_failed') }, unavailable: [{ lookup: 'service_photos', error: 'timeout' }] }));
   await run(); await run();
-  expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
+  // An UNRELATED probe failing with all mapped facts known is fully read → 90s memo (pre-push r14).
+  closeoutAlertsPrivate.memo.clear();
+  getCloseoutStatus.mockReset();
+  getCloseoutStatus.mockResolvedValue(closeout({ unavailable: [{ lookup: 'billing_context', error: 'timeout' }] }));
+  await run(); await run();
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
 });
 
-test('closeout loads are bounded to 4 concurrent (codex r1)', async () => {
+test('closeout loads are bounded to 2 concurrent (codex r1)', async () => {
   installJobs(Array.from({ length: 12 }, (_, i) => jobRow(`svc-${i}`)));
   let inFlight = 0; let peak = 0;
   getCloseoutStatus.mockImplementation(async () => {
@@ -216,7 +222,7 @@ test('closeout loads are bounded to 4 concurrent (codex r1)', async () => {
   });
   await run();
   expect(getCloseoutStatus).toHaveBeenCalledTimes(12);
-  expect(peak).toBeLessThanOrEqual(4);
+  expect(peak).toBeLessThanOrEqual(2);
 });
 
 test('getCloseoutStatus throwing or found:false fires nothing (never fabricate a gap)', async () => {
