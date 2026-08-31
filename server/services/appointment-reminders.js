@@ -2159,6 +2159,39 @@ const AppointmentReminders = {
    * registers row-less windowless visits at 08:00 ARMED) from resurrecting
    * the 8 AM promise. Confirmation keeps its normal source-based handling.
    */
+  // The COMMITTED scheduled_services row is the truth for a reminder's
+  // time. Callers registering a reminder for a visit they just inserted
+  // hold an in-memory copy whose window can differ from what landed
+  // (defaulted by the insert, inherited from a parent, or simply not on
+  // the object) — and the reminder sync trigger only fires on UPDATE, so
+  // a row born at the wrong time never self-corrects (four series visits
+  // drifted this way 08-30; #3625 repaired the data, this closes the
+  // path). Reads the row back and prefers it; the caller's values are
+  // the fallback only when the row is not visible yet or unreadable. A
+  // windowless row keeps the 08:00 convention (the UPDATE trigger
+  // re-arms it once a real window is set). Returns null with no date.
+  async resolveCommittedVisitTime(scheduledServiceId, { date, windowStart } = {}, conn = db) {
+    let resolvedDate = date || null;
+    let resolvedStart = windowStart || null;
+    try {
+      const row = await conn('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('scheduled_date', 'window_start');
+      if (row) {
+        if (row.scheduled_date) {
+          resolvedDate = row.scheduled_date instanceof Date
+            ? row.scheduled_date.toISOString().slice(0, 10)
+            : String(row.scheduled_date).slice(0, 10);
+        }
+        if (row.window_start) resolvedStart = String(row.window_start).slice(0, 5);
+      }
+    } catch (err) {
+      logger.warn(`[appt-remind] could not read back visit ${scheduledServiceId} for its reminder time (${err.message}) — using the caller's values`);
+    }
+    if (!resolvedDate) return null;
+    return `${resolvedDate}T${resolvedStart || '08:00'}`;
+  },
+
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {
     try {
       const apptTime = parseETDateTime(appointmentTime);

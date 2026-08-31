@@ -1255,9 +1255,16 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
   if (!scheduledServiceId) return;
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
+    // Time comes from the committed row, not the caller's copy — see
+    // resolveCommittedVisitTime for why (UPDATE-only sync trigger).
+    const appointmentTime = await AppointmentReminders.resolveCommittedVisitTime(
+      scheduledServiceId,
+      { date: scheduledDate, windowStart: normalizeHHMM(windowStart) || null },
+    );
+    if (!appointmentTime) return;
     await AppointmentReminders.registerAppointment(
       scheduledServiceId, customerId,
-      `${scheduledDate}T${normalizeHHMM(windowStart) || '08:00'}`,
+      appointmentTime,
       serviceType, source,
       { sendConfirmation: false },
     );
@@ -5538,9 +5545,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const AppointmentReminders = require('../services/appointment-reminders');
       for (const appt of createdAppointments) {
         try {
+          // Committed row is the truth for the time (UPDATE-only sync
+          // trigger — a reminder born at the wrong time never heals).
+          const appointmentTime = await AppointmentReminders.resolveCommittedVisitTime(
+            appt.id, { date: appt.date, windowStart: windowStart || null },
+          ) || `${appt.date}T${windowStart || '08:00'}`;
           await AppointmentReminders.registerAppointment(
             appt.id, customerId,
-            `${appt.date}T${windowStart || '08:00'}`,
+            appointmentTime,
             serviceType, 'admin_manual',
             { sendConfirmation: !!appt.confirmation, deferConfirmation: true }
           );
