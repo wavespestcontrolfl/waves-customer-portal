@@ -477,7 +477,9 @@ async function triggerReviewRequest(input) {
     };
   } catch (err) {
     if (err && err.code === 'approved_phone_drift') {
-      return { error: 'The review-request recipient changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+      // The sender's own message discloses whether a queued ask was parked
+      // as part of the refusal — pass it through verbatim.
+      return { error: `${err.message} Ask again for a fresh card.`, preview_changed: true };
     }
     return { error: `Failed to create review request: ${err.message}` };
   }

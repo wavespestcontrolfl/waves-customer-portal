@@ -545,8 +545,17 @@ const ReviewService = {
       }
       const resendOutcome = await this.sendSMS(existing.id, { expectedPhone });
       if (resendOutcome && resendOutcome.refused === "approved_phone_drift") {
+        // Park the queued row too (pre-push r17 P1): left pending, the
+        // scheduler would later send it WITHOUT the pin — to the very
+        // number the operator just saw refused. Suppressed rows are never
+        // sent; the thrown message discloses the parking.
+        try {
+          await db("review_requests").where({ id: existing.id }).update({ status: "suppressed" });
+        } catch (supErr) {
+          logger.error(`[review] drift parking failed (requestId=${existing.id}) — manual check needed before the next scheduler run: ${supErr.message}`);
+        }
         throw Object.assign(
-          new Error("The review-request recipient changed after the card was shown — nothing was sent."),
+          new Error("The review-request recipient changed after the card was shown — nothing was sent, and the queued ask was parked so it cannot auto-send to the new number."),
           { statusCode: 409, code: "approved_phone_drift" },
         );
       }
