@@ -102,10 +102,11 @@ function VisitExtras({ extras }) {
   // The generic visit brief carries access/last_visit itself; the WDO
   // brief does not — its facts block (when the gate serves one) does.
   const servedVisitBrief = brief && brief.type !== 'wdo_inspection' ? brief.brief : null;
-  // Live facts WIN over a cached brief's access copy — the brief is a
-  // sweep-time snapshot and a code changed since then must show fresh.
+  // Live facts WIN over the cached brief's copies — the brief is a
+  // sweep-time snapshot; a code changed or a visit completed since then
+  // must show fresh.
   const access = brief?.facts?.access || servedVisitBrief?.access || null;
-  const lastVisit = servedVisitBrief?.last_visit || brief?.facts?.last_visit || null;
+  const lastVisit = brief?.facts?.last_visit || servedVisitBrief?.last_visit || null;
   const deposit = estimate?.linked ? estimate.deposit : null;
   const codeRows = access
     ? CODE_LABELS.map(([key, label]) => (access.codes?.[key] ? [label, access.codes[key]] : null)).filter(Boolean)
