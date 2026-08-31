@@ -940,19 +940,22 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     };
     rawLines.forEach(remember);
     // Stale-revision guard (GH codex P1): a revised draft rewrites
-    // data.result but leaves the OLD engineResult behind. A cadence class
-    // the mapped result already priced is therefore consume-only — an
-    // engine row either matches an existing charge (and enriches it) or is
-    // treated as a stale revision and dropped. Only cadence classes the
-    // mapped result did NOT price at all (the legitimate mixed shape) merge
-    // new lines.
-    const mappedCadences = new Set(rawLines.map((l) => l.cadence));
-    const merge = (extra, { consumeOnlyMappedCadences = false } = {}) => {
+    // data.result but leaves the OLD engineResult behind. The guard is
+    // scoped by SERVICE IDENTITY (family|cadence), not whole cadence
+    // classes — a service the mapped result already priced is consume-only
+    // (an engine row either price-matches and enriches, or is a stale
+    // revision of that same service and drops), while a service the mapped
+    // result never priced is the legitimate mixed shape and merges even
+    // when its cadence class exists elsewhere (codex pre-push P1: a
+    // cadence-wide guard silently dropped a valid recurring service stored
+    // only in engineResult.lineItems).
+    const mappedServiceKeys = new Set(rawLines.map(priceKey));
+    const merge = (extra, { consumeOnlyMappedServices = false } = {}) => {
       const survivors = [];
       for (const line of extra) {
         const entries = covered.get(priceKey(line)) || [];
         const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
-        if (matchIdx < 0 && consumeOnlyMappedCadences && mappedCadences.has(line.cadence)) continue;
+        if (matchIdx < 0 && consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))) continue;
         if (matchIdx >= 0) {
           // Consumed — but the discarded raw row may be the ONLY carrier of
           // cost/provenance metadata (explicitCogsCost, mosquito overrides,
@@ -1000,8 +1003,8 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
         merge([
           ...normalizeRecurringLines(data.engineResult),
           ...normalizeOneTimeLines(data.engineResult, setupOpts),
-        ], { consumeOnlyMappedCadences: true });
-        merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }), { consumeOnlyMappedCadences: true });
+        ], { consumeOnlyMappedServices: true });
+        merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }), { consumeOnlyMappedServices: true });
       }
     }
   }
