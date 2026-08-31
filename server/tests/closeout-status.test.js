@@ -130,7 +130,7 @@ describe('closeout-status: contract shape', () => {
       invoice: 'done', invoiceDelivery: 'done', comms: 'done', followUp: 'not_required',
     });
     expect(contradictions).toEqual([]);
-    expect(summarizeCloseout(facts, contradictions)).toEqual({ open: [], failed: [], unknown: [], contradictions: [], closedOut: true });
+    expect(summarizeCloseout(facts, contradictions)).toEqual({ open: [], failed: [], unknown: [], contradictions: [], unevaluated: [], closedOut: true });
   });
 });
 
@@ -180,6 +180,13 @@ describe('closeout-status: completion fact', () => {
   test('record marked incomplete → pending', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ record: { ...closedOutInputs().record, status: 'incomplete' } }));
     expect(facts.completion).toMatchObject({ state: 'pending', reason: 'record_marked_incomplete' });
+  });
+
+  test('completion-attempt lookup failure with no record → unknown, not a closeout gap (GH r1)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: null, attempt: null, attemptLookupFailed: true }));
+    expect(facts.completion).toMatchObject({ state: 'unknown', reason: 'completion_attempts_lookup_failed' });
+    const stillCompleted = deriveCloseoutFacts(closedOutInputs({ attempt: null, attemptLookupFailed: true }));
+    expect(stillCompleted.facts.completion.state).toBe('done');
   });
 
   test('service_records lookup failure → unknown, never pending', () => {
@@ -388,9 +395,21 @@ describe('closeout-status: invoice + invoice delivery', () => {
     expect(run({ liveInvoice: { ...paid, receipt_sent_at: '2026-08-30T18:10:00Z' } })).toMatchObject({ state: 'done', reason: 'paid_receipt_sent' });
   });
 
-  test('requiresCustomerNotice rides on the comms fact; requiresCustomerSignature is listed as unevaluated (no evidence store)', async () => {
-    const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: baseRequirements({ requiresCustomerNotice: true }) }));
+  test('requiresCustomerNotice rides on the comms fact; an unevaluated required signature blocks the rollup', async () => {
+    const { facts, contradictions } = deriveCloseoutFacts(closedOutInputs({ requirements: baseRequirements({ requiresCustomerNotice: true }) }));
     expect(facts.comms.customerNoticeRequired).toBe(true);
+    expect(summarizeCloseout(facts, contradictions, ['requiresCustomerSignature'])).toMatchObject({ unevaluated: ['requiresCustomerSignature'], closedOut: false });
+    expect(summarizeCloseout(facts, contradictions, []).closedOut).toBe(true);
+  });
+
+  test('projects lookup failure → photos unknown (evidence source undecidable) (GH r1)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: baseRequirements({ requiredPhotoCount: 2 }), photoCount: 2, projectLookupFailed: true }));
+    expect(facts.photos).toMatchObject({ state: 'unknown', reason: 'projects_lookup_failed_photo_source_undecidable' });
+  });
+
+  test('live invoice + failed billing input → invoice unknown but the row stays as evidence (GH r1)', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ autopayActive: null }));
+    expect(facts.invoice).toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', failed: ['autopay'], invoiceId: 'inv-1' });
   });
 
   test('prepaid (account-credit) invoice with no send timestamps is settled — nothing to deliver', () => {
@@ -607,8 +626,8 @@ describe('closeout-status: Agent D findings', () => {
       .toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', failed: ['autopay'] });
     expect(deriveCloseoutFacts(closedOutInputs({ ...noInvoice, duesLookupFailed: true })).facts.invoice.failed).toEqual(['monthly_dues']);
     expect(deriveCloseoutFacts(closedOutInputs({ ...noInvoice, payerBilled: null })).facts.invoice.failed).toEqual(['bill_to_payer']);
-    // A live invoice already on the visit is evidence regardless of input outages.
-    expect(deriveCloseoutFacts(closedOutInputs({ autopayActive: null })).facts.invoice.state).toBe('done');
+    // A live invoice is evidence but not a verdict while inputs are unreadable (GH r1).
+    expect(deriveCloseoutFacts(closedOutInputs({ autopayActive: null })).facts.invoice).toMatchObject({ state: 'unknown', invoiceId: 'inv-1' });
   });
 
   test('rescheduled visit is a phantom row → nothing owed', () => {
@@ -790,6 +809,13 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.facts.photos).toMatchObject({ state: 'unknown', reason: 'service_photos_lookup_failed', required: 2 });
     expect(result.summary.unknown).toEqual(['photos']);
     expect(result.summary.open).toEqual([]);
+  });
+
+  test('catalog requiresCustomerSignature → requirements.unevaluated + summary.closedOut false', async () => {
+    catalogRows[0].requires_customer_signature = true;
+    const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(healthyTables()), now: NOW });
+    expect(result.requirements.unevaluated).toEqual(['requiresCustomerSignature']);
+    expect(result.summary).toMatchObject({ unevaluated: ['requiresCustomerSignature'], closedOut: false });
   });
 
   test('a project linked through projects.scheduled_service_id drives report, delivery, and photos', async () => {

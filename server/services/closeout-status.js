@@ -214,6 +214,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.record = recordProbe.value || null;
   inputs.recordLookupFailed = Boolean(recordProbe.error);
   inputs.attempt = attemptProbe.value || null;
+  inputs.attemptLookupFailed = Boolean(attemptProbe.error);
   inputs.requirements = requirementsProbe.value || null;
   inputs.completedFormCount = formsProbe.value ? toNumber(formsProbe.value.n) : (formsProbe.error ? null : 0);
   inputs.packets = Array.isArray(packetProbe.value) ? packetProbe.value : (packetProbe.error ? null : []);
@@ -412,6 +413,8 @@ function deriveCloseoutFacts(inputs) {
   const attemptState = inputs.attempt?.state || null;
   if (inputs.recordLookupFailed && !record) {
     completion = fact('unknown', 'service_records_lookup_failed', { visitStatus: visit?.status || null, attemptState });
+  } else if (inputs.attemptLookupFailed && !record) {
+    completion = fact('unknown', 'completion_attempts_lookup_failed', { visitStatus: visit?.status || null });
   } else if (record && !visitCompleted) {
     contradictions.push({
       code: 'record_without_completed_visit',
@@ -473,7 +476,8 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) photos = awaiting();
   else if (!requirements) photos = fact('unknown', 'requirements_unavailable');
   else if (!(requiredPhotos > 0)) photos = fact('not_required', 'catalog_zero_required_photos', { ruleSource: 'catalog', requirementsSource: requirements.source, actual: inputs.photoCount ?? null });
-  else if (inputs.photoCount == null) photos = fact('unknown', 'service_photos_lookup_failed', { required: requiredPhotos });
+  else if (inputs.projectLookupFailed) photos = fact('unknown', 'projects_lookup_failed_photo_source_undecidable', { required: requiredPhotos });
+  else if (inputs.photoCount == null) photos = fact('unknown', `${inputs.photoSource || 'service_photos'}_lookup_failed`, { required: requiredPhotos });
   else if (inputs.photoCount >= requiredPhotos) photos = fact('done', 'photo_count_met', { required: requiredPhotos, actual: inputs.photoCount, source: inputs.photoSource || 'service_photos' });
   else photos = fact('pending', 'photo_count_short', { required: requiredPhotos, actual: inputs.photoCount, source: inputs.photoSource || 'service_photos' });
 
@@ -600,6 +604,13 @@ function deriveCloseoutFacts(inputs) {
     invoice = fact('pending', 'parked_manual_refunded_invoice', {
       refundedInvoiceId: reconciled.terminal.id, liveBesideInvoiceId: reconciled.liveBeside?.id || null,
       liveBesideStatus: reconciled.liveBeside?.status || null, expectation: expectation?.kind || null,
+    });
+  } else if (live && billingInputsFailed.length) {
+    // The row is evidence, but whether it SHOULD exist (covered / payer
+    // billed) is undecidable while a billing input is unreadable.
+    invoice = fact('unknown', 'billing_inputs_unavailable', {
+      failed: billingInputsFailed, invoiceId: live.id, invoiceNumber: live.invoice_number || null, status: live.status || null,
+      total: live.total != null ? Number(live.total) : null,
     });
   } else if (live) {
     invoice = fact('done', INVOICE_SETTLED_STATUSES.has(String(live.status)) ? 'invoice_paid' : 'invoice_exists', {
@@ -759,7 +770,7 @@ function deriveCloseoutFacts(inputs) {
 // which lookups were unavailable. Callers that need a single "attention"
 // signal read `open.length > 0 || unknown.length > 0` — the two are kept
 // apart on purpose so an outage never renders as a compliance gap.
-function summarizeCloseout(facts, contradictions = []) {
+function summarizeCloseout(facts, contradictions = [], unevaluated = []) {
   const open = [];
   const failed = [];
   const unknown = [];
@@ -773,9 +784,12 @@ function summarizeCloseout(facts, contradictions = []) {
   const contradictionCodes = (contradictions || []).map((c) => c.code);
   // A contradiction (record without completed visit, invoice on a covered
   // visit, …) is an exception in its own right — never hidden by a rollup.
+  const unevaluatedList = Array.isArray(unevaluated) ? unevaluated.filter(Boolean) : [];
   return {
-    open, failed, unknown, contradictions: contradictionCodes,
-    closedOut: open.length === 0 && unknown.length === 0 && contradictionCodes.length === 0,
+    open, failed, unknown, contradictions: contradictionCodes, unevaluated: unevaluatedList,
+    // A required item with no evidence store (requiresCustomerSignature)
+    // is an unknown closeout condition, never an all-green.
+    closedOut: open.length === 0 && unknown.length === 0 && contradictionCodes.length === 0 && unevaluatedList.length === 0,
   };
 }
 
@@ -793,6 +807,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
   }
   const derived = deriveCloseoutFacts(inputs);
   const { visit, record, requirements } = inputs;
+  const unevaluated = requirements?.requiresCustomerSignature === true ? ['requiresCustomerSignature'] : [];
   if (inputs.unavailable.length) {
     logger.info(`[closeout-status] ${serviceId}: ${inputs.unavailable.length} lookup(s) unavailable: ${inputs.unavailable.map((u) => u.lookup).join(', ')}`);
   }
@@ -832,11 +847,11 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
       // weekly time-summary sign-off), so it cannot be evaluated here and is
       // listed rather than silently dropped. requiresCustomerNotice rides on
       // facts.comms.customerNoticeRequired.
-      unevaluated: requirements.requiresCustomerSignature === true ? ['requiresCustomerSignature'] : [],
+      unevaluated,
     } : null,
     billing: derived.billing,
     facts: derived.facts,
-    summary: summarizeCloseout(derived.facts, derived.contradictions),
+    summary: summarizeCloseout(derived.facts, derived.contradictions, unevaluated),
     contradictions: derived.contradictions,
     unavailable: inputs.unavailable,
   };
