@@ -1865,6 +1865,9 @@ const AFFILIATE_QUERY_PARAMS = Object.freeze(new Set([
   'aff', 'affid', 'aff_id', 'affiliate', 'affiliate_id', 'affiliateid', 'afid',
   'awc', 'cjevent', 'cjdata', 'clickid', 'clickref', 'irclickid', 'irgwc',
   'ranmid', 'raneaid', 'ransiteid', 'sscid', 'rfsn', 'subid', 'sub_id',
+  // generic referral/partner keys used by in-house programs (parity with the
+  // astro raw-URL guard; fail closed)
+  'ref', 'referral', 'referrer', 'partner', 'partner_id', 'partnerid', 'aff_sub', 'afftrack', 'promo_code', 'coupon',
 ]));
 function hasAffiliateQueryParam(u) {
   for (const [k, v] of u.searchParams) {

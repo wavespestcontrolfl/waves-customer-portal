@@ -721,6 +721,36 @@ function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolea
   return out.join('');
 }
 
+// Length-preserving blanker for every element whose opening tag satisfies
+// `hidden(attrs, name)`, matched to its BALANCED closing tag (same-name
+// nesting counted, quote-aware) — a hidden <div> containing another <div>
+// is blanked to the outer close, never to the first inner one.
+function blankBalancedElements(src: string, hidden: (attrs: string, name: string) => boolean): string {
+  const out = src.split('');
+  const openRe = /<([A-Za-z][\w-]*)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(src)) !== null) {
+    const name = m[1];
+    const attrs = tagAttrsAt(src, m.index);
+    if (attrs === null) continue;
+    const openEnd = m.index + 1 + name.length + attrs.length; // index of '>'
+    if (attrs.trimEnd().endsWith('/')) continue; // self-closing: nothing to hide
+    if (!hidden(attrs, name.toLowerCase())) continue;
+    // Walk forward counting same-name opens/closes to the balanced close.
+    const tagRe = new RegExp(`<(\\/?)${name}\\b`, 'gi');
+    tagRe.lastIndex = openEnd + 1;
+    let depth = 1; let t: RegExpExecArray | null; let closeEnd = -1;
+    while ((t = tagRe.exec(src)) !== null) {
+      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = src.indexOf('>', t.index); closeEnd = gt === -1 ? src.length - 1 : gt; break; } }
+      else { const a = tagAttrsAt(src, t.index); if (a !== null && !a.trimEnd().endsWith('/')) depth += 1; }
+    }
+    if (closeEnd === -1) continue; // unbalanced — leave as is
+    for (let k = m.index; k <= closeEnd; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    openRe.lastIndex = closeEnd + 1;
+  }
+  return out.join('');
+}
+
 // Quote-aware attribute text of the tag opening at `start` (index of `<`):
 // a `>` inside a quoted value does not end the tag. null = unterminated.
 function tagAttrsAt(src: string, start: number): string | null {
@@ -830,20 +860,32 @@ export function validateAffiliateUsage(
   // Definitely-hidden markup never satisfies a reader-facing rule: elements
   // carrying `hidden`, an inline display:none, or a closed <details> body
   // are blanked (length-preserving) — on the structural view only.
-  structural = structural.replace(/<(\w+)\b[^>]*(?:\shidden(?=[\s>/=])|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
+  structural = blankBalancedElements(structural, (attrs) => /(?:^|\s)hidden(?=[\s>/=]|$)|display\s*:\s*none/i.test(attrs));
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
-  structural = structural.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => {
+  structural = blankBalancedElements(structural, (attrs) => {
+    const cls = /\bclass(?:Name)?\s*=\s*(["'])([^"']*)\1/i.exec(attrs)?.[2] || '';
+    if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
     // Responsively-visible wrappers (class="hidden md:block") stay: mask
     // only elements hidden at EVERY breakpoint.
-    return /\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(m.split('>')[0]) ? m : m.replace(/[^\n]/g, ' ');
+    return !/\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
   });
-  structural = structural.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
+  structural = blankBalancedElements(structural, (attrs, name) => name === 'details' && !/(?:^|\s)open(?=[\s>/=]|$)/i.test(attrs));
 
   const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
+
+  // ctaHref is written straight into an anchor: an expression-valued or
+  // duplicated value cannot be validated against the https/root-relative
+  // rule, so it is a blocker in EVERY post, affiliate or not.
+  for (const { attrs } of tagsNamed(unmasked, 'InlineCTA')) {
+    if (attrs !== null && /\bctaHref\s*=/.test(attrs) && literalAttr(attrs, 'ctaHref') === null) {
+      blockers.push('<InlineCTA ctaHref> must be a single quoted literal (root-relative path or https URL) — expression-valued destinations cannot be validated');
+      break;
+    }
+  }
 
   if (count === 0) {
     if (declared) blockers.push('disclosure.type is "affiliate" but the body contains no <AffiliateLink> — remove the disclosure or add the links');
@@ -854,15 +896,6 @@ export function validateAffiliateUsage(
   if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
   const firstHeading = structural.search(/^#{2,3}\s/m);
   if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
-  // ctaHref is written straight into an anchor: an expression-valued or
-  // duplicated value cannot be validated against the https/root-relative
-  // rule, so it is a blocker wherever it appears (not only before the link).
-  for (const { attrs } of tagsNamed(unmasked, 'InlineCTA')) {
-    if (attrs !== null && /\bctaHref\s*=/.test(attrs) && literalAttr(attrs, 'ctaHref') === null) {
-      blockers.push('<InlineCTA ctaHref> must be a single quoted literal (root-relative path or https URL) — expression-valued destinations cannot be validated');
-      break;
-    }
-  }
   if (!hasServiceCtaBefore(structural.slice(0, positions[0]))) {
     blockers.push('no Waves service CTA (<InlineCTA> leading to a service route, or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
   }
