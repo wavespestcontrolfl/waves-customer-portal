@@ -158,13 +158,16 @@ function AccessSection({ alerts, access }) {
   );
 }
 
-// Quote LINES only — deposit/payment posture is SERVICE-scoped (the
-// endpoint resolves both for the requested scheduledServiceId, honoring
-// per-job payer policy), so those render per member in MemberMoney and
-// never dedupe away with a shared estimate.
+// Quote lines + the ESTIMATE-LEVEL deposit ledger (paid / credit
+// remaining) — one deposit exists per estimate, so it renders once here
+// even when grouped siblings share the quote (repeating it per member
+// would make a single credit look available multiple times).
+// Service-scoped posture (payerBilled, the required/exempt verdict,
+// payment term) stays per member in MemberMoney.
 function QuotedSection({ estimate }) {
   if (!estimate?.linked) return null;
   const lines = Array.isArray(estimate.lines) ? estimate.lines : [];
+  const deposit = estimate.deposit || null;
   return (
     <>
       <SectionLabel>Quoted{estimate.estimateSlug ? ` · ${estimate.estimateSlug}` : ''}</SectionLabel>
@@ -177,6 +180,12 @@ function QuotedSection({ estimate }) {
           </p>
         );
       })}
+      {Number(deposit?.paid) > 0 && (
+        <p style={factRowStyle}>
+          Deposit paid {fmtMoney(deposit.paid)}
+          {Number(deposit.creditRemaining) > 0 ? ` · ${fmtMoney(deposit.creditRemaining)} credit remaining` : ''}
+        </p>
+      )}
     </>
   );
 }
@@ -187,11 +196,20 @@ function QuotedSection({ estimate }) {
 function MemberMoney({ service, estimate, showType }) {
   const summary = visitMoneySummary(service);
   const prepaid = prepaidLine(service);
-  // Deposit/payment posture is SERVICE-scoped (resolved per requested
-  // scheduledServiceId) — it renders here per member, never deduped with
-  // a shared estimate's lines.
+  // SERVICE-scoped posture only (resolved per requested
+  // scheduledServiceId): payerBilled, the required/exempt verdict, and
+  // the payment term. The estimate-level deposit LEDGER (paid/credit)
+  // renders once in QuotedSection — repeating it per member would make a
+  // single credit look available multiple times.
   const deposit = estimate?.linked ? estimate.deposit : null;
   const payment = estimate?.linked ? estimate.payment : null;
+  // billingTerm is the authority on whether an annual-prepay term is
+  // LIVE — buildEstimatePaymentContext keeps the annualPrepay object as
+  // historical context (refunded/dead terms) while setting billingTerm
+  // 'standard'. A dead term must read as standard billing, never as an
+  // active plan next to a Collect headline.
+  const prepayLive = payment?.billingTerm === 'prepay_annual' && payment?.annualPrepay;
+  const prepayDead = !!payment?.annualPrepay && payment.billingTerm !== 'prepay_annual';
   const rows = [];
   if (prepaid || summary.invoice?.settled) {
     rows.push(['Paid · prepaid', prepaid || summary.note, null]);
@@ -199,7 +217,7 @@ function MemberMoney({ service, estimate, showType }) {
   if (summary.headline) {
     rows.push(['Amount due today', summary.headline, summary.collectNeeded ? DARK.amber : null]);
   }
-  const hasDepositInfo = deposit?.payerBilled || Number(deposit?.paid) > 0 || deposit?.required
+  const hasDepositInfo = deposit?.payerBilled || deposit?.required
     || payment?.annualPrepay || payment?.billingTerm;
   if (!rows.length && !hasDepositInfo) return null;
   return (
@@ -215,19 +233,25 @@ function MemberMoney({ service, estimate, showType }) {
           Bills to a payer — do not collect from the homeowner.
         </p>
       )}
-      {Number(deposit?.paid) > 0 && (
-        <p style={factRowStyle}>
-          Deposit paid {fmtMoney(deposit.paid)}
-          {Number(deposit.creditRemaining) > 0 ? ` · ${fmtMoney(deposit.creditRemaining)} credit remaining` : ''}
-        </p>
-      )}
       {deposit?.required && !(Number(deposit?.paid) > 0) && (
         <p style={{ ...factRowStyle, color: DARK.amber }}>
           Deposit required{Number(deposit.policyAmount) > 0 ? ` (${fmtMoney(deposit.policyAmount)})` : ''}
         </p>
       )}
-      {payment?.annualPrepay && <p style={factRowStyle}>Annual prepay plan</p>}
-      {payment?.billingTerm && !payment?.annualPrepay && (
+      {prepayLive && (
+        <p style={factRowStyle}>
+          Annual prepay plan
+          {payment.annualPrepay.coversThisVisit === false ? (
+            <span style={{ color: DARK.amber, fontWeight: 600 }}> — does not cover this visit</span>
+          ) : null}
+        </p>
+      )}
+      {prepayDead && (
+        <p style={{ ...factRowStyle, color: DARK.amber }}>
+          Annual prepay {payment.annualPrepay.refunded ? 'refunded' : 'not active'} — bill normally
+        </p>
+      )}
+      {payment?.billingTerm && payment.billingTerm !== 'prepay_annual' && (
         <p style={factMutedStyle}>Billing: {String(payment.billingTerm).replace(/_/g, ' ')}</p>
       )}
       {summary.invoice && !summary.invoice.settled && summary.note && (
@@ -322,6 +346,11 @@ function BriefGuidanceSection({ brief, service, showType }) {
   if (!brief) return null;
   const guidance = brief.product_guidance || null;
   const lawn = guidance?.source === 'lawn_protocol_window' ? guidance : null;
+  // FAIL-CLOSED lawn guidance (unknown grass track, unresolved assigned
+  // protocol, no active protocol) arrives as available:false with a
+  // reason — silence would read as a gate-free visit, so it renders as
+  // an explicit hold/review warning instead of vanishing.
+  const lawnUnavailable = lawn && lawn.available === false;
   const historyProducts = guidance?.source === 'service_history' && Array.isArray(guidance.products)
     ? guidance.products.filter((p) => p?.name)
     : [];
@@ -336,7 +365,7 @@ function BriefGuidanceSection({ brief, service, showType }) {
   const hasContent = brief.open_scope || brief.customer_context
     || priorities.length || watchItems.length
     || fixed.length || conditional.length || protocolGates.length
-    || historyProducts.length || companions.length;
+    || historyProducts.length || companions.length || lawnUnavailable;
   if (!hasContent) return null;
   return (
     <>
@@ -346,6 +375,12 @@ function BriefGuidanceSection({ brief, service, showType }) {
       {brief.customer_context && <p style={factMutedStyle}>{brief.customer_context}</p>}
       {priorities.map((p, i) => <p key={`pr${i}`} style={factRowStyle}>• {p}</p>)}
       {watchItems.map((w, i) => <p key={`wi${i}`} style={{ ...factRowStyle, color: DARK.amber }}>• {w}</p>)}
+      {lawnUnavailable && (
+        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 600 }}>
+          ⚠ No protocol product guidance available
+          {lawn.reason ? ` (${String(lawn.reason).replace(/_/g, ' ')})` : ''} — confirm the plan before applying products.
+        </p>
+      )}
       {lawn?.window && (
         <p style={{ ...factRowStyle, fontWeight: 600 }}>
           {lawn.window.title || 'Protocol window'}
@@ -387,16 +422,22 @@ function BriefGuidanceSection({ brief, service, showType }) {
 }
 
 function LastVisitSection({ service, visitBrief, facts, showType }) {
-  // Deterministic products from whichever source answered; LLM prose only
-  // from a served brief. Day-row fallbacks use the LINE-SCOPED fields
-  // only (lastLineService*): the any-line lastService* fields would label
-  // another line's visit — a recent pest stop on a lawn visit — as this
-  // stop's history.
-  const briefLast = visitBrief?.last_visit || facts?.last_visit || null;
+  // LIVE facts win over the cached brief's sweep-time last_visit (a
+  // same-line visit completed after generation must show); the brief's
+  // LLM summary attaches only when it describes the SAME record as the
+  // chosen history — never paired with a newer visit's date. Day-row
+  // fallbacks use the LINE-SCOPED fields only (lastLineService*): the
+  // any-line lastService* fields would label another line's visit — a
+  // recent pest stop on a lawn visit — as this stop's history.
+  const briefLast = facts?.last_visit || visitBrief?.last_visit || null;
   const date = briefLast?.date || service.lastLineServiceDate || null;
   const type = briefLast?.type || service.lastLineServiceType || null;
   const notes = service.lastLineServiceNotes || null;
-  const summary = visitBrief?.last_visit?.summary || null;
+  const cachedLast = visitBrief?.last_visit || null;
+  const summary = cachedLast?.summary
+    && (!facts?.last_visit || String(cachedLast.date || '') === String(facts.last_visit.date || ''))
+    ? cachedLast.summary
+    : null;
   const products = Array.isArray(briefLast?.products) ? briefLast.products : [];
   if (!date && !notes && !products.length) return null;
   return (
@@ -433,6 +474,12 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
       {showType && (
         <p style={{ ...factMutedStyle, margin: '0 0 4px' }}>
           {service.serviceType || service.service_type || 'Service'}
+          {/* Member status so a partially fanned-out grouped transition
+              is visible per service (the collapsed row can only say
+              "mixed"). */}
+          <span style={{ textTransform: 'capitalize' }}>
+            {' · '}{String(service.status || 'pending').replace(/_/g, ' ')}
+          </span>
         </p>
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>

@@ -429,7 +429,12 @@ export default function TechHomePage() {
   // "nothing linked", not an error.
   const loadStopDetail = useCallback(async (stop) => {
     const key = stop.primary.id;
-    setStopDetail((d) => ({ ...d, [key]: { status: 'loading', byService: {} } }));
+    // A refresh keeps the previous data visible while it fetches — codes
+    // and money must not flicker away on reopen.
+    setStopDetail((d) => ({
+      ...d,
+      [key]: { status: 'loading', byService: d[key]?.byService || {} },
+    }));
     const soft = (path) => techRequest(path).catch((err) => {
       if (/not found/i.test(err?.message || '')) return null;
       throw err;
@@ -453,9 +458,13 @@ export default function TechHomePage() {
   }, []);
   const toggleStop = useCallback((stop) => {
     const id = stop.primary.id;
-    setExpandedStopId((cur) => (cur === id ? null : id));
-    if (!stopDetail[id]) loadStopDetail(stop);
-  }, [stopDetail, loadStopDetail]);
+    const expanding = expandedStopId !== id;
+    setExpandedStopId(expanding ? id : null);
+    // Refetch on EVERY expand (not just the first): a gate code change, a
+    // settled payment, or a billing-posture change mid-day must show on
+    // reopen — the previous data stays rendered while the refresh loads.
+    if (expanding) loadStopDetail(stop);
+  }, [expandedStopId, loadStopDetail]);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -1222,12 +1231,23 @@ function TimecardSignoffCard({ techName }) {
 function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead }) {
   const service = stop.primary;
   const status = service.status || 'pending';
-  const statusColor = {
+  // A grouped transition that only partially fanned out leaves live
+  // members on DIFFERENT statuses — labeling the whole stop with the
+  // primary's would hide the divergence, so the row says "mixed" (each
+  // member's own status shows in the expanded Actions rows).
+  const liveStatuses = new Set(
+    stop.services
+      .filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status))
+      .map((s) => s.status || 'pending'),
+  );
+  const mixedStatus = liveStatuses.size > 1;
+  const statusColor = mixedStatus ? '#f59e0b' : {
     completed: '#22c55e',
     on_site: DARK.teal,
     en_route: '#f59e0b',
     skipped: '#94a3b8',
   }[status] || DARK.muted;
+  const statusLabel = mixedStatus ? 'mixed' : status.replace(/_/g, ' ');
   const windowLabel = stop.isVisit ? serviceWindowLabel(stopWindow(stop)) : serviceWindowLabel(service);
   const indicator = stopAccessIndicator(stopPropertyAlerts(stop));
   // Aggregated across every member service — grouped siblings keep
@@ -1265,7 +1285,7 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
               {service.customer_name || service.customerName || 'Customer'}
             </p>
             <span style={{ fontSize: 12, fontWeight: 600, color: statusColor, textTransform: 'capitalize', flexShrink: 0 }}>
-              {status.replace(/_/g, ' ')}
+              {statusLabel}
               {windowLabel && <span style={{ color: DARK.muted, textTransform: 'none' }}> · {windowLabel}</span>}
             </span>
           </div>

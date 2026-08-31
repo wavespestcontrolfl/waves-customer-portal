@@ -370,6 +370,117 @@ describe('VisitBriefPanel', () => {
     expect(screen.queryByText('Last visit')).not.toBeInTheDocument();
   });
 
+  it('shared-estimate deposit ledger renders ONCE; a dead annual prepay reads as standard billing', () => {
+    const primary = { ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control', billingLane: null };
+    const sibling = { ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service', billingLane: { prediction: { kind: 'invoice', amount: 150 } } };
+    const stop = { key: 'visit:v1', isVisit: true, services: [primary, sibling], primary, liveCount: 2 };
+    const shared = {
+      ...LINKED_ESTIMATE,
+      deposit: { payerBilled: false, paid: 100, creditRemaining: 49 },
+      // Refunded term: annualPrepay kept as historical context, billingTerm standard.
+      payment: { billingTerm: 'standard', annualPrepay: { paid: false, refunded: true, coversThisVisit: false } },
+    };
+    render(
+      <VisitBriefPanel
+        stop={stop}
+        detail={detailFor({ 'svc-1': { estimate: shared }, 'svc-2': { estimate: shared } })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    // One deposit ledger for one estimate — never repeated per member.
+    expect(screen.getAllByText(/Deposit paid \$100 · \$49 credit remaining/)).toHaveLength(1);
+    // Dead term: no active-plan claim next to the Collect headline.
+    expect(screen.queryByText('Annual prepay plan')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Annual prepay refunded — bill normally').length).toBeGreaterThan(0);
+    expect(screen.getByText('Collect $150 today')).toBeInTheDocument();
+  });
+
+  it('a live annual prepay that does not cover THIS visit says so', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf({ ...BASE_SERVICE, billingLane: { prediction: { kind: 'invoice', amount: 95 } } })}
+        detail={detailFor({
+          'svc-1': {
+            estimate: {
+              ...LINKED_ESTIMATE,
+              payment: { billingTerm: 'prepay_annual', annualPrepay: { paid: true, coversThisVisit: false, refunded: false } },
+            },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/does not cover this visit/)).toBeInTheDocument();
+  });
+
+  it('live facts win over the cached brief\'s last visit; the stale summary is not paired with newer history', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf(BASE_SERVICE)}
+        detail={detailFor({
+          'svc-1': {
+            brief: {
+              brief: {
+                last_visit: { date: '2026-07-14', summary: 'Old cached summary of July visit', products: [{ name: 'Old Product' }] },
+              },
+              type: 'visit_brief_v1',
+              facts: {
+                access: null,
+                last_visit: { date: '2026-08-20', type: 'Quarterly Pest Control', products: [{ name: 'Talstar P' }] },
+              },
+            },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/2026-08-20 · Quarterly Pest Control/)).toBeInTheDocument();
+    expect(screen.queryByText('Old cached summary of July visit')).not.toBeInTheDocument();
+    expect(screen.getByText(/Talstar P/)).toBeInTheDocument();
+    expect(screen.queryByText(/Old Product/)).not.toBeInTheDocument();
+  });
+
+  it('fail-closed lawn guidance renders an explicit warning, never silence', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf({ ...BASE_SERVICE, serviceType: 'Lawn Care Service' })}
+        detail={detailFor({
+          'svc-1': {
+            brief: {
+              brief: {
+                product_guidance: {
+                  source: 'lawn_protocol_window',
+                  available: false,
+                  reason: 'unknown_grass_track',
+                  products: [],
+                  conditional_products: [],
+                },
+              },
+              type: 'visit_brief_v1',
+            },
+          },
+        })}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/No protocol product guidance available \(unknown grass track\)/)).toBeInTheDocument();
+  });
+
+  it('grouped Actions rows show each member\'s own status', () => {
+    const enRoute = { ...BASE_SERVICE, id: 'svc-1', serviceType: 'Quarterly Pest Control', status: 'en_route', billingLane: null };
+    const pending = { ...BASE_SERVICE, id: 'svc-2', serviceType: 'Lawn Care Service', status: 'pending', billingLane: null };
+    render(
+      <VisitBriefPanel
+        stop={{ key: 'visit:v1', isVisit: true, services: [enRoute, pending], primary: enRoute, liveCount: 2 }}
+        detail={detailFor({})}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    const pWithText = (re) => (content, el) => el?.tagName === 'P' && re.test(el.textContent || '');
+    expect(screen.getByText(pWithText(/Quarterly Pest Control · en route/))).toBeInTheDocument();
+    expect(screen.getByText(pWithText(/Lawn Care Service · pending/))).toBeInTheDocument();
+  });
+
   it('renders the per-service action buttons with the old ServiceRow logic preserved', () => {
     const onProject = vi.fn();
     const onZone = vi.fn();
