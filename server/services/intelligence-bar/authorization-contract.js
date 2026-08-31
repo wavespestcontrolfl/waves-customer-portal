@@ -502,17 +502,40 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', require('../customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);
   }
 
-  // An email change may immediately re-send the newsletter double-opt-in
-  // confirmation to the customer (updateCustomer → resendPendingConfirmation
-  // when the fan-out finds a pending confirmation) — a customer-facing send.
+  // Grouped-visit ripple of a reschedule (GH r12 P1): a pinned visit_id
+  // only reaches a card when the row is the SOLE open member of its visit
+  // (multi-member and frozen visits are refused at proposal) — the
+  // executor's post-move seam then detaches the row and dissolves the
+  // empty group. Disclosed here; visit_id rides the appointment
+  // fingerprint, so a membership change during the pending window drifts
+  // to preview_changed instead of executing undisclosed.
+  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment?.visit_id) {
+    push('operational', 'This service is the sole open member of a grouped visit — the move also detaches it from that visit and dissolves the now-empty group');
+  }
+
+  // An email change may re-send the newsletter double-opt-in confirmation
+  // to the customer (updateCustomer → resendPendingConfirmation when the
+  // fan-out finds a pending confirmation) — a customer-facing send. The
+  // re-send is post-commit fire-and-forget BY CONTRACT (#3084 r47), so the
+  // card must describe it as attempted, never promised (GH r12 P2): the
+  // helper declines on a superseded confirmation, a do-not-contact or
+  // suppression veto, a verification failure, or a delivery failure, and
+  // the tool result does not report its outcome.
   const emailChangeMayContact = (toolName === 'update_customer' || toolName === 'bulk_update_customers') && !!params?.updates?.email;
   if (emailChangeMayContact) {
-    push('comms', 'If a newsletter confirmation is pending for this customer, the double-opt-in email is re-sent to the NEW address immediately');
+    push('comms', 'If a newsletter confirmation is pending for this customer, a re-send of the double-opt-in email to the NEW address is attempted after commit — best-effort: a do-not-contact/suppression veto, a superseded confirmation, or a delivery failure each stop it, and the result does not report whether it sent');
   }
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
     : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailChangeMayContact);
-  if (notifiesCustomer) push('comms', 'Customer will be contacted');
+  // "Will" only for tools whose whole point is the send; the conditional
+  // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
+  // irreversibility derivation stay conservative either way.
+  if (notifiesCustomer) {
+    push('comms', CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || toolName === 'move_stops_to_day'
+      ? 'Customer will be contacted'
+      : 'Customer may be contacted (conditional double-opt-in re-send only)');
+  }
 
   // Canonical order (kind, then label) so the contract — and therefore its
   // hash — never depends on param key order. The card groups by kind anyway.

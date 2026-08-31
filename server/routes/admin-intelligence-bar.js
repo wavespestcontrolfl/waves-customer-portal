@@ -541,7 +541,7 @@ async function loadAppointmentPin(appointmentId) {
   const a = await db('scheduled_services as ss')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.id', appointmentId)
-    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id',
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id', 'ss.visit_id',
       // Tracker-lifecycle evidence for the derived track_rewind pin field
       // (see normalizeAppointmentPin) — the executor asserts the same
       // fingerprint on its own full-row read.
@@ -873,6 +873,28 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!pin) return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
       if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status))) {
         return { failed: true, modelResult: { error: `This appointment is already ${pin.status} and can't be moved.` } };
+      }
+      // Grouped-visit state (GH r12 P1): the executor's own move of a
+      // grouped row detaches it and can dissolve the remaining visit
+      // (handleChildStopChanged) — effects the card never showed. Resolve
+      // membership NOW, the same way the executor's assertRowMovableAlone
+      // verdict falls: a multi-member or frozen visit refuses the proposal
+      // (the executor would refuse the move anyway); a sole-open-member
+      // visit proceeds with the detach/dissolve DISCLOSED on the card
+      // (the contract builder adds the effect line off pin.visit_id).
+      // visit_id is in the fingerprint, so a row that joins a group during
+      // the pending window drifts to preview_changed instead of executing
+      // an undisclosed group change.
+      if (pin.visit_id) {
+        const VisitGroups = require('../services/visit-groups');
+        const members = await VisitGroups.openMembers(db, pin.visit_id);
+        if (members.length >= 2) {
+          return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first. Nothing was proposed.' } };
+        }
+        const verdict = await VisitGroups.frozenVisitVerdict(db, pin.visit_id);
+        if (verdict.frozen) {
+          return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was proposed.' } };
+        }
       }
       params._appointment_fingerprint = appointmentPinFingerprint(pin);
       preview = { ...preview, pinned_appointment: pin };
@@ -2605,6 +2627,26 @@ router.post('/confirm-action', async (req, res, next) => {
             adds: livePreview.adds,
             unit: livePreview.unit,
             stock_before: livePreview.stock_before,
+          };
+        }
+        // Same contract for the OTHER inventory writers (GH r12 P1):
+        // adjust_stock re-derives the movement from the freshly locked
+        // balance, and create_restock_request rereads current_stock/unit/
+        // vendor unlocked — either could apply/store values different
+        // from the card's. The verified preview's snapshot rides to the
+        // executor to re-assert under the product row lock.
+        if (action.tool_name === 'adjust_stock' && livePreview?.stock_after !== undefined) {
+          execParams._verified_adjustment = {
+            stock_before: livePreview.stock_before,
+            stock_after: livePreview.stock_after,
+            unit: livePreview.unit,
+          };
+        }
+        if (action.tool_name === 'create_restock_request' && livePreview?.preview === true) {
+          execParams._verified_request = {
+            current_stock: livePreview.current_stock ?? null,
+            unit: livePreview.unit,
+            vendor: livePreview.vendor ?? null,
           };
         }
       }

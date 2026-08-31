@@ -677,19 +677,23 @@ async function blockSender({ email_address, domain }) {
       email_address, domain, reason: 'Manual block (Intelligence Bar)',
     });
     if (result.error) return { error: result.error };
+    // An already-blocked sender reuses the existing row/filter (GH r12 P2)
+    // — say so instead of implying a new block was created.
+    const already = result.already_blocked ? 'Already blocked — the existing block was kept, no duplicate created. ' : '';
     return {
       success: true,
+      ...(result.already_blocked ? { already_blocked: true } : {}),
       // A missing Gmail filter breaks the card's promised effect — surface
       // it as a warning the card renders, never a bare Done (GH r9 P2).
       ...(result.warning ? { warning: result.warning } : {}),
       ...(result.blocked_domain
         ? {
           blocked_domain: result.blocked_domain,
-          note: `All future emails from ANY sender at @${result.blocked_domain} will be auto-trashed.`,
+          note: `${already}All future emails from ANY sender at @${result.blocked_domain} will be auto-trashed.`,
         }
         : {
           blocked_address: result.blocked_address,
-          note: `Future emails from ${result.blocked_address} will be auto-trashed. Other senders at that domain are unaffected.`,
+          note: `${already}Future emails from ${result.blocked_address} will be auto-trashed. Other senders at that domain are unaffected.`,
         }),
     };
   } catch (err) {

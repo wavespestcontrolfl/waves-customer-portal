@@ -1126,6 +1126,20 @@ async function adjustStock(input) {
     const locked = computeStockChange(fresh, { movementType, qty, setTotal, unit: input.unit });
     if (locked.error) return locked;
 
+    // The card's approved before/after totals bind under THIS lock (GH r12
+    // P1, same contract as the receive pin): the movement is re-derived
+    // from the freshly locked balance, so a concurrent inventory change
+    // must refuse rather than land totals the operator never saw.
+    const approvedAdjustment = input._verified_adjustment;
+    if (approvedAdjustment && (round4(locked.stockBefore) !== round4(toNumber(approvedAdjustment.stock_before) ?? NaN)
+      || round4(locked.stockAfter) !== round4(toNumber(approvedAdjustment.stock_after) ?? NaN)
+      || String(locked.inventoryUnit) !== String(approvedAdjustment.unit))) {
+      return {
+        error: 'The stock numbers changed after the card was shown (product or inventory level edited) — nothing was adjusted. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+
     await trx('products_catalog').where('id', fresh.id).update({
       inventory_on_hand: locked.stockAfter,
       inventory_unit: locked.inventoryUnit,
@@ -1206,33 +1220,59 @@ async function createRestockRequest(input) {
     };
   }
 
-  const [request] = await db('product_restock_requests').insert({
-    product_id: product.id,
-    status: 'open',
-    priority,
-    requested_quantity: qty,
-    unit,
-    current_stock: currentStock,
-    vendor,
-    needed_by: neededBy,
-    reason: input.reason || null,
-    source: 'intelligence_bar',
-    created_by_name: 'Intelligence Bar',
-  }).returning('*');
+  // The stored snapshot fields (current_stock, product-derived unit, vendor
+  // fallback) came from an unlocked read — re-derive them under the product
+  // row lock and, when a card approved this request, refuse if they no
+  // longer match what the operator saw (GH r12 P1, same contract as the
+  // receive pin).
+  return db.transaction(async (trx) => {
+    const fresh = await trx('products_catalog').where('id', product.id).forUpdate().first();
+    if (!fresh) return { error: 'Product not found' };
+    const lockedUnit = input.unit || fresh.inventory_unit;
+    if (!lockedUnit) return { error: 'unit is required — this product has no inventory unit set' };
+    if (!unitDefinition(lockedUnit)) return { error: `Unsupported unit "${lockedUnit}". Supported: fl_oz, gal, qt, pt, ml, l, oz, lb, g, kg` };
+    const lockedVendor = input.vendor || fresh.best_vendor || null;
+    const lockedStock = toNumber(fresh.inventory_on_hand);
 
-  return {
-    success: true,
-    request: {
-      id: request?.id || null,
-      product: product.name,
+    const approvedRequest = input._verified_request;
+    const sameStock = (a, b) => (a == null && b == null) || (a != null && b != null && round4(a) === round4(b));
+    if (approvedRequest && (!sameStock(lockedStock, toNumber(approvedRequest.current_stock))
+      || String(lockedUnit) !== String(approvedRequest.unit)
+      || String(lockedVendor ?? '') !== String(approvedRequest.vendor ?? ''))) {
+      return {
+        error: 'This product changed after the card was shown (stock level, unit, or vendor) — nothing was requested. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+
+    const [request] = await trx('product_restock_requests').insert({
+      product_id: product.id,
       status: 'open',
-      requested_quantity: qty,
-      unit,
       priority,
-      vendor,
+      requested_quantity: qty,
+      unit: lockedUnit,
+      current_stock: lockedStock,
+      vendor: lockedVendor,
       needed_by: neededBy,
-    },
-  };
+      reason: input.reason || null,
+      source: 'intelligence_bar',
+      created_by_name: 'Intelligence Bar',
+    }).returning('*');
+
+    return {
+      success: true,
+      request: {
+        id: request?.id || null,
+        product: product.name,
+        status: 'open',
+        requested_quantity: qty,
+        unit: lockedUnit,
+        priority,
+        vendor: lockedVendor,
+        needed_by: neededBy,
+      },
+    };
+  });
 }
 
 async function updateRestockRequest(input) {

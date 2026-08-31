@@ -225,9 +225,15 @@ test('live reschedule discloses the field-workflow reset; scheduled one does not
   expect(mk('scheduled').effects.some((e) => /field workflow/.test(e.label))).toBe(false);
 });
 
-test('email change on update_customer discloses the DOI re-send and marks contact/irreversible', () => {
+test('email change on update_customer discloses the DOI re-send as a conditional ATTEMPT and marks contact/irreversible (GH r12)', () => {
   const c = buildContract({ toolName: 'update_customer', params: { customer_id: 'c9', updates: { email: 'x@example.test' } }, displayParams: { customer_id: 'c9', updates: { email: 'x@example.test' } } });
-  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/double-opt-in email is re-sent/));
+  // The executor's re-send is post-commit fire-and-forget and can be vetoed
+  // (do-not-contact, suppression, superseded, delivery failure) — the card
+  // must say "attempted"/"may", never promise the send happened.
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/double-opt-in email to the NEW address is attempted/));
+  expect(c.effects.some((e) => /is re-sent .* immediately/.test(e.label))).toBe(false);
+  expect(c.effects.some((e) => e.label === 'Customer may be contacted (conditional double-opt-in re-send only)')).toBe(true);
+  expect(c.effects.some((e) => e.label === 'Customer will be contacted')).toBe(false);
   expect(c.notifies_customer).toBe(true);
   expect(c.irreversible).toBe(true);
   const noEmail = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
@@ -392,7 +398,7 @@ test('clearing an email (null) still discloses the email fan-out — presence, n
   const { EMAIL_FANOUT_DISCLOSURE } = require('../services/customer-email-fanout');
   expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringContaining(EMAIL_FANOUT_DISCLOSURE));
   // No DOI re-send claim for a clear — there is no new address to confirm.
-  expect(c.effects.some((e) => /double-opt-in email is re-sent/.test(e.label))).toBe(false);
+  expect(c.effects.some((e) => /double-opt-in/.test(e.label))).toBe(false);
 });
 
 test('pinned_customer names the target on single-target mutations and binds the hash (GH r8)', () => {
@@ -439,4 +445,24 @@ test('reschedule_appointment: evidence-only rewind disclosed on a DATE move of a
   expect(mk({ new_date: '2026-09-02' }).effects.some((e) => /stale tracker evidence/.test(e.label))).toBe(false);
   // Live rows keep the stronger field-workflow disclosure instead.
   expect(mk({ pin: { status: 'en_route' } }).effects.some((e) => /stale tracker evidence/.test(e.label))).toBe(false);
+});
+
+test('reschedule_appointment: sole-open-member grouped visit discloses detach/dissolve; visit_id binds the pin (GH r12 P1)', () => {
+  const mk = (visitId) => buildContract({
+    toolName: 'reschedule_appointment',
+    params: { appointment_id: 'ap1', new_date: '2026-09-04' },
+    displayParams: {},
+    preview: { pinned_appointment: { id: 'ap1', status: 'scheduled', scheduled_date: '2026-09-02', service_type: 'Pest', visit_id: visitId } },
+  });
+  // A pinned visit_id only reaches a card as the visit's sole open member
+  // (multi-member/frozen visits are refused at proposal) — the executor's
+  // post-move seam detaches the row and dissolves the empty group, so the
+  // card must say so.
+  expect(mk('v1').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/sole open member of a grouped visit/));
+  expect(mk(null).effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
+  // Joining/leaving a group during the pending window must drift the
+  // appointment fingerprint (preview_changed), never execute undisclosed.
+  const { appointmentPinFingerprint } = require('../services/intelligence-bar/proposal-pins');
+  const pin = { id: 'ap1', status: 'scheduled', scheduled_date: '2026-09-02', service_type: 'Pest', track_rewind: false };
+  expect(appointmentPinFingerprint({ ...pin, visit_id: 'v1' })).not.toBe(appointmentPinFingerprint(pin));
 });

@@ -232,6 +232,25 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
   }
   const filterFrom = blockEmail || `@${blockDomain}`;
 
+  // Reuse an existing block of the SAME scope instead of stacking a second
+  // row + Gmail filter (GH r12 P2, mirrors the auto path's existing-row
+  // check): duplicates make unblocking a lie — removing one row deletes one
+  // filter and leaves the sender still blocked by the other. A row whose
+  // filter is missing (recorded under the Gmail-unavailable warning) gets
+  // the filter re-applied onto the SAME row instead.
+  const existing = blockEmail
+    ? await db('blocked_email_senders').where('email_address', blockEmail).first()
+    : await db('blocked_email_senders').where('domain', blockDomain).first();
+  if (existing && existing.gmail_filter_id) {
+    logger.info(`[spam-blocker] Manual block requested for already-blocked ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`} — existing block kept`);
+    return {
+      success: true,
+      entry: existing,
+      already_blocked: true,
+      ...(blockEmail ? { blocked_address: blockEmail } : { blocked_domain: blockDomain }),
+    };
+  }
+
   let filterId = null;
   try {
     const gmailClient = require('./gmail-client');
@@ -249,6 +268,27 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     }
   } catch (err) {
     logger.warn(`[spam-blocker] manual Gmail filter creation failed: ${err.message}`);
+  }
+
+  if (existing) {
+    // Existing row, missing filter: repair in place — record the fresh
+    // filter (if Gmail was reachable) on the row every unblock path
+    // already knows about.
+    let entry = existing;
+    if (filterId) {
+      [entry] = await db('blocked_email_senders').where({ id: existing.id })
+        .update({ gmail_filter_id: filterId }).returning('*');
+    }
+    logger.info(`[spam-blocker] Manual re-block ${filterId ? 'repaired the missing Gmail filter for' : 'found no Gmail filter and could not create one for'} ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`}`);
+    return {
+      success: true,
+      entry,
+      already_blocked: true,
+      ...(blockEmail ? { blocked_address: blockEmail } : { blocked_domain: blockDomain }),
+      ...(filterId ? {} : {
+        warning: 'Blocklist row recorded, but the Gmail auto-trash filter could NOT be created (Gmail unavailable) — messages may stay visible in Gmail until the block is re-applied.',
+      }),
+    };
   }
 
   let entry = null;

@@ -42,6 +42,12 @@ function normalizeAppointmentPin(row) {
     // The visit's OWNER is part of the identity: a row re-pointed to a
     // different customer with identical schedule fields is drift.
     customer_id: row.customer_id ? String(row.customer_id) : null,
+    // Grouped-visit membership (GH r12 P1): moving a grouped row detaches
+    // it and can dissolve the remaining visit (handleChildStopChanged) —
+    // effects the card must disclose, so a row that joins or leaves a
+    // group during the pending window is drift, never an undisclosed
+    // detach/dissolve.
+    visit_id: row.visit_id ? String(row.visit_id) : null,
     // Tracker-lifecycle evidence, DERIVED (GH r8 on #3648): a date move of a
     // row with live status/track_state or leftover lifecycle stamps rewinds
     // the tracker (rebooker needsLifecycleRewind) — an effect the card must
@@ -57,6 +63,7 @@ function appointmentPinFingerprint(pin) {
     pin.estimated_duration_minutes ?? null, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
     pin.customer_id || null,
     pin.track_rewind === true,
+    pin.visit_id || null,
   ]);
 }
 

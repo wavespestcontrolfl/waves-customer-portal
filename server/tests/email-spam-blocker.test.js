@@ -302,12 +302,23 @@ describe('stale auto-block removal (sender became a customer)', () => {
 describe('manualBlockSender — the ONE operator-confirmed manual blocker (GH r9 on #3648)', () => {
   const { manualBlockSender } = require('../services/email/spam-blocker');
   let inserted;
+  let existingRow;
+  let updatedPatch;
   beforeEach(() => {
     db.mockReset();
     inserted = null;
+    existingRow = null;
+    updatedPatch = null;
     db.mockImplementation((table) => {
       if (table === 'blocked_email_senders') {
         return {
+          where: jest.fn(() => ({
+            first: jest.fn(async () => existingRow),
+            update: jest.fn((patch) => {
+              updatedPatch = patch;
+              return { returning: jest.fn(async () => [{ ...existingRow, ...patch }]) };
+            }),
+          })),
           insert: jest.fn((row) => {
             inserted = row;
             return { returning: jest.fn(async () => [{ id: 'row-1', ...row }]) };
@@ -349,5 +360,32 @@ describe('manualBlockSender — the ONE operator-confirmed manual blocker (GH r9
     expect((await manualBlockSender({ email_address: 'not-an-email' })).error).toMatch(/Invalid email/);
     expect((await manualBlockSender({ domain: 'not a domain' })).error).toMatch(/Invalid domain/);
     expect(inserted).toBeNull();
+  });
+
+  test('already-blocked sender reuses the existing row — no duplicate row or filter (GH r12 P2)', async () => {
+    existingRow = { id: 'row-old', email_address: 'person@example.test', domain: null, gmail_filter_id: 'flt-1' };
+    const res = await manualBlockSender({ email_address: 'person@example.test' });
+    expect(res.success).toBe(true);
+    expect(res.already_blocked).toBe(true);
+    expect(res.entry).toMatchObject({ id: 'row-old', gmail_filter_id: 'flt-1' });
+    expect(res.blocked_address).toBe('person@example.test');
+    // The whole point: no second row (unblocking would otherwise remove
+    // only one and leave the sender still blocked by the other).
+    expect(inserted).toBeNull();
+    expect(updatedPatch).toBeNull();
+  });
+
+  test('existing row with a MISSING Gmail filter re-applies onto the same row instead of duplicating (GH r12 P2)', async () => {
+    existingRow = { id: 'row-old', email_address: null, domain: 'example-seo-agency.test', gmail_filter_id: null };
+    const res = await manualBlockSender({ domain: 'example-seo-agency.test' });
+    expect(res.success).toBe(true);
+    expect(res.already_blocked).toBe(true);
+    expect(res.blocked_domain).toBe('example-seo-agency.test');
+    expect(inserted).toBeNull();
+    // getAuthClient is mocked to null → the repair could not create the
+    // filter either → the row is untouched and the broken-effect warning
+    // still surfaces (same contract as a fresh block without Gmail).
+    expect(updatedPatch).toBeNull();
+    expect(res.warning).toMatch(/Gmail auto-trash filter could NOT be created/);
   });
 });
