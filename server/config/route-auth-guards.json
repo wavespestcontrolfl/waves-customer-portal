@@ -9,8 +9,10 @@
     "Fields: name = exported (or file-local) identifier; module = file that",
     "defines it; local = defined in a route file rather than exported from",
     "server/middleware; factory = called with arguments to produce the guard",
-    "(linkWorkerAuth('claim')); exempts = router-relative 'METHOD /path' entries",
-    "the guard deliberately lets through (those routes must be in the allowlist)."
+    "(linkWorkerAuth('claim')); exempts = 'METHOD /path' entries the guard",
+    "deliberately lets through, with the path RELATIVE TO WHERE THE GUARD",
+    "EXECUTES (Express strips the mount prefix from req.path inside mounted",
+    "middleware); those routes must be in the allowlist."
   ],
   "guards": [
     { "name": "adminAuthenticate", "module": "server/middleware/admin-auth.js",

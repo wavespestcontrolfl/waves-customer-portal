@@ -579,6 +579,131 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual([]);
   });
 
+  test('registrations through a MEMBER-based router reference (holder.router) are not lost', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const holder = { router };',
+        "holder.router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a router stored in an object shape the scanner cannot model is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const deep = { nested: { router } };',
+        'void deep;',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('object shape the scanner cannot model'))).toBe(true);
+  });
+
+  test('a SHADOWED path constant resolves to an unresolved path, never the top-level value', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const PATH = '/approved';",
+        "function setup() { const PATH = '/leak'; router.get(PATH, (req, res) => res.json({})); }",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.some((r) => r.path.includes('/approved'))).toBe(false);
+    expect(res.problems.some((p) => p.includes('unresolvable path'))).toBe(true);
+  });
+
+  test('a nested registration gets NO credit from source-order use() guards', () => {
+    // install() runs before router.use(guardA) even though it is DECLARED
+    // after it — the scanner must not apply the guard by source position.
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'install();',
+        'router.use(guardA);',
+        "function install() { router.get('/leak', (req, res) => res.json({})); }",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+    expect(res.publicRoutes[0].conditional).toBe(true);
+  });
+
+  test('a static() NOT proven to come from Express is not trusted', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const helper = require('./services/lookalike');",
+        "app.use('/files', helper.static('dir'));",
+      ].join('\n')),
+      'server/services/lookalike.js': [
+        'function staticImpl() { return (req, res) => res.json({ secret: 1 }); }',
+        'module.exports = { static: staticImpl };',
+      ].join('\n'),
+    });
+    expect(res.routes.some((r) => r.method === 'STATIC')).toBe(false);
+    expect(res.problems.some((p) => p.includes('is not a router'))).toBe(true);
+  });
+
+  test("a guard's exempts match the path RELATIVE TO WHERE THE GUARD EXECUTES", () => {
+    // Guard with an exemption mounted ABOVE a nested router: at runtime the
+    // guard sees /oauth/callback even though the route is declared as
+    // /callback inside a child mounted at /oauth.
+    const registry = {
+      guards: [{
+        name: 'exceptCallback', module: 'server/middleware/e.js',
+        exempts: ['GET /oauth/callback'],
+      }],
+    };
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry,
+      files: {
+        'server/index.js': app([
+          "const { exceptCallback } = require('./middleware/e');",
+          "app.use('/api', exceptCallback, require('./routes/parent'));",
+        ].join('\n')),
+        'server/routes/parent.js': [
+          "const parent = require('express').Router();",
+          "parent.use('/oauth', require('./child'));",
+          'module.exports = parent;',
+        ].join('\n'),
+        'server/routes/child.js': [
+          "const child = require('express').Router();",
+          "child.get('/callback', (req, res) => res.json({}));",
+          "child.get('/other', (req, res) => res.json({}));",
+          'module.exports = child;',
+        ].join('\n'),
+      },
+    }).scan();
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/oauth/callback']);
+  });
+
+  test('a CONDITIONAL registration carries [conditional] in its allowlist identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "if (process.env.NODE_ENV !== 'production') {",
+        "  app.get('/debug', (req, res) => res.json({}));",
+        '}',
+      ].join('\n')),
+    });
+    expect(res.publicRoutes.map(routeKey)).toEqual(['server/index.js @ / :: GET /debug [conditional]']);
+  });
+
+  test('an optional-call registration (app?.get) on a known router is a reported problem', () => {
+    const res = scanOf({
+      'server/index.js': app("app?.get('/leak', (req, res) => res.json({}));"),
+    });
+    expect(res.problems.some((p) => p.includes('optional-call registration'))).toBe(true);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),

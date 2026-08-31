@@ -7,7 +7,10 @@
     "direction. To add a legitimate public route: get owner review, then add it",
     "here with a reason. Identity is router file + mount path (never line",
     "numbers); route entries are METHOD + full path as the scanner prints them",
-    "(node server/tests/route-surface/scan.js diffs the live surface)."
+    "(node server/tests/route-surface/scan.js diffs the live surface).",
+    "A '[conditional]' suffix is part of the identity: the registration sits",
+    "inside an if/function (e.g. a non-production branch). Moving it to an",
+    "unconditional top-level registration changes the key and forces re-review."
   ],
   "mounts": [
     {
@@ -56,17 +59,17 @@
       "mount": "/",
       "reason": "App shell: SPA entry + catch-all, service worker, /api/health liveness, public /report + /recap + /estimate + /quote HTML pages, client static assets; /debug-sentry only registers when NODE_ENV !== production",
       "routes": [
-        "GET /",
-        "GET /*",
+        "GET / [conditional]",
+        "GET /* [conditional]",
         "GET /api/health",
-        "GET /debug-sentry",
+        "GET /debug-sentry [conditional]",
         "GET /estimate",
         "GET /estimate/:token",
         "GET /quote",
-        "GET /sw.js",
-        "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i>",
-        "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i>",
-        "STATIC / (clientBuild)",
+        "GET /sw.js [conditional]",
+        "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i> [conditional]",
+        "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i> [conditional]",
+        "STATIC / (clientBuild) [conditional]",
         "STATIC / (path.join(__dirname, '..', 'client', 'public'))"
       ]
     },
@@ -452,10 +455,10 @@
         "GET /api/public/estimates/:token/available-slots",
         "POST /api/public/estimates/:token/ask",
         "POST /api/public/estimates/:token/card-hold-intent",
-        "POST /api/public/estimates/:token/deposit-finalize",
-        "POST /api/public/estimates/:token/deposit-intent",
-        "POST /api/public/estimates/:token/deposit-quote",
-        "POST /api/public/estimates/:token/deposit-reset",
+        "POST /api/public/estimates/:token/deposit-finalize [conditional]",
+        "POST /api/public/estimates/:token/deposit-intent [conditional]",
+        "POST /api/public/estimates/:token/deposit-quote [conditional]",
+        "POST /api/public/estimates/:token/deposit-reset [conditional]",
         "POST /api/public/estimates/:token/find-slots",
         "POST /api/public/estimates/:token/recurring-card-intent",
         "POST /api/public/estimates/:token/reserve"
