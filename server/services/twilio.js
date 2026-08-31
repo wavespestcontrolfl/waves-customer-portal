@@ -251,9 +251,11 @@ const TwilioService = {
    * post-accept log insert failure is swallowed by sendSMS). Answers
    * { found } when the provider could be consulted, { unavailable: true }
    * when it could not (no creds, API error) — callers must treat that as
-   * "unknown", never as "not sent".
+   * "unknown", never as "not sent". A search that hits the page bound is
+   * also reported unavailable — a truncated result set is not proof of
+   * absence either.
    */
-  async findOutboundMessageSince({ to, sentAfter, bodyFragment, limit = 50 }) {
+  async findOutboundMessageSince({ to, sentAfter, bodyFragment, limit = 1000 }) {
     const twilioClient = getClient();
     if (!twilioClient || !to) return { unavailable: true };
     try {
@@ -266,9 +268,12 @@ const TwilioService = {
       const found = messages.some(
         (m) => m.direction !== "inbound" && String(m.body || "").toLowerCase().includes(frag),
       );
-      return { found };
+      if (found) return { found: true };
+      if (messages.length >= limit) return { unavailable: true, truncated: true };
+      return { found: false };
     } catch (err) {
-      logger.warn(`[twilio] outbound message reconcile failed: ${err.message}`);
+      // Twilio error text can echo the destination number — log the class/code only.
+      logger.warn(`[twilio] outbound message reconcile failed (code=${err?.code || err?.status || err?.name || "unknown"})`);
       return { unavailable: true };
     }
   },

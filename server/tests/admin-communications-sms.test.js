@@ -559,6 +559,40 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('a case-mangled token PATH does not verify — that is a dead link, not the ask', async () => {
+    const ReviewService = require('../services/review-request');
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tokAbC123',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      return { where: jest.fn(function () { return this; }), first };
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          // Host case is fine; the TOKEN was lowercased — the link is dead.
+          body: 'Review us: Portal.wavespestcontrol.com/rate/tokabc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
+    });
+  });
+
   test('a fully validated review claim sends and marks the row delivered', async () => {
     const ReviewService = require('../services/review-request');
     sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });

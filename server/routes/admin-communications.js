@@ -429,13 +429,23 @@ router.post('/sms', async (req, res, next) => {
         }
         const { existingShortUrlFor } = require('../services/short-url');
         const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
-        // Canonical match (scheme-stripped, case-insensitive) — the client
-        // tracks links the same way, so a host-case edit of a still-live URL
-        // must not read here as "link gone" and 409 a valid send.
-        const bodyLower = cleanBody.toLowerCase();
-        const linkInBody = [short, rr.token]
-          .filter(Boolean)
-          .some((frag) => bodyLower.includes(String(frag).replace(/^https?:\/\//i, '').toLowerCase()));
+        // Canonical match: scheme dropped and the HOST compared case-
+        // insensitively (a host-case edit of a still-live URL must not read
+        // as "link gone" and 409 a valid send), but the PATH exactly — review
+        // tokens and short codes are case-sensitive, so a case-mangled path
+        // is a dead link and must not verify as the ask.
+        const bodyCarriesLink = (frag) => {
+          const bare = String(frag).replace(/^https?:\/\//i, '');
+          const slash = bare.indexOf('/');
+          if (slash < 0) return cleanBody.includes(bare); // bare token — exact
+          const host = bare.slice(0, slash).toLowerCase();
+          const path = bare.slice(slash);
+          for (let at = cleanBody.indexOf(path); at >= 0; at = cleanBody.indexOf(path, at + 1)) {
+            if (at >= host.length && cleanBody.slice(at - host.length, at).toLowerCase() === host) return true;
+          }
+          return false;
+        };
+        const linkInBody = [short, rr.token].filter(Boolean).some(bodyCarriesLink);
         if (!linkInBody) {
           // The client forgets the tracked entry when the operator deletes
           // the line — an id arriving without its link is an anomaly, not a
