@@ -543,6 +543,12 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       const hidden = `Intro copy.\n\n## Measuring\n\n{/* [quote](/quote/) */}\n\n\`[quote](/quote/)\`\n\nUse ${link('rain-gauge')} for this.`;
       const r3 = guardrails.evaluate({ body: hidden, frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r3)).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Mirrors the astro contract: the CTA must PRECEDE the first affiliate
+      // link, and a rendered <InlineCTA> counts (Codex PR3 r1 P1).
+      const after = `Intro copy.\n\n## Measuring\n\nUse ${link('rain-gauge')} for this. Then get a [free quote](/quote/).`;
+      expect(affiliateCodes(guardrails.evaluate({ body: after, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const inline = `Intro copy.\n\n## Measuring\n\n<InlineCTA />\n\nUse ${link('rain-gauge')} for this.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: inline, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
       // A real city-service page satisfies it too.
       const cityCta = `Intro copy.\n\n## Measuring\n\nSee [lawn care](/lawn-care-bradenton-fl/). Use ${link('rain-gauge')}.`;
       const r2 = guardrails.evaluate({ body: cityCta, frontmatter: fm() }, { targetIsBlog: true });

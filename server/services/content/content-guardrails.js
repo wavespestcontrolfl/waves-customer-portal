@@ -1694,10 +1694,18 @@ function affiliateTagCountsByProduct(text) {
 // CTA route or a real /{service}-{city}-fl/ page (validated against the
 // published-city set, same as internalRouteFinding).
 function hasServiceCtaLink(body) {
-  // Only a RENDERED link counts: comments, code, and definitely-hidden
-  // spans are masked first so `{/* [quote](/quote/) */}` cannot satisfy
-  // the requirement (Codex r6 P1).
-  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(String(body || ''))));
+  // Mirrors the astro publish gate (validateAffiliateUsage): the CTA must
+  // appear BEFORE the first <AffiliateLink>, and a rendered <InlineCTA>
+  // counts (Codex PR3 r1 P1). Only RENDERED content counts: comments,
+  // code, and definitely-hidden spans are masked first so
+  // `{/* [quote](/quote/) */}` cannot satisfy the requirement (Codex r6 P1).
+  const text = String(body || '');
+  const firstAffiliate = collectAffiliateLinkTags(text)[0];
+  const prefix = firstAffiliate ? text.slice(0, firstAffiliate.start) : text;
+  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix)));
+  for (const tag of eachTag(rendered)) {
+    if (!tag.isClose && tag.name === 'inlinecta') return true;
+  }
   for (const { norm } of collectInternalDestinations(rendered)) {
     if (SERVICE_CTA_ROUTES.has(norm)) return true;
     const m = CITY_SERVICE_LINK_RE.exec(norm);
@@ -1798,7 +1806,7 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
   }
   if (!hasServiceCtaLink(body)) {
-    push('P1', 'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', '', 'Draft carries affiliate links but no Waves service CTA link — every affiliate post keeps an internal service/quote/calculator link (affiliate is fallback monetization; the service CTA stays primary).');
+    push('P1', 'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', '', 'Draft carries affiliate links but no Waves service CTA (<InlineCTA> or an internal service/quote/calculator/city-service link) BEFORE the first affiliate link — affiliate is fallback monetization; the service CTA stays primary.');
   }
   return findings;
 }
