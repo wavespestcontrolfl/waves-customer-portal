@@ -4939,11 +4939,13 @@ function fieldEvidenceFromRecord(record, field) {
   // makes a unit count real.
   // Shaped records carry ARRAY evidence; already-merged records carry the
   // OBJECT shape — accept either so a re-merge keeps a real count.
-  if (field === 'unitCount') {
-    const uc = record._fieldEvidence?.unitCount;
-    if (!(Array.isArray(uc) ? uc[0] : uc)) return null;
-  }
-  const existing = record._fieldEvidence?.[field]?.[0];
+  // Normalize the entry shape ONCE and reuse it: reading `[0]` on the merged
+  // OBJECT shape yielded undefined, so a re-merge of a county-backed record
+  // fell back to _aiSourceType and a lower-authority listing count could
+  // overwrite the county count (pre-push codex P1 r3).
+  const entry = record._fieldEvidence?.[field];
+  const existing = Array.isArray(entry) ? entry[0] : entry;
+  if (field === 'unitCount' && !existing) return null;
   const sourceType = existing?.sourceType || record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
   const sourceWeight = existing?.sourceQuality || record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown;
   const confidence = existing?.providerConfidence || record._aiConfidence;

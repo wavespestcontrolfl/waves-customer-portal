@@ -133,4 +133,27 @@ describe('shapeAsPropertyRecord unitCount', () => {
     expect(merged.unitCount).toBe(48);
     expect(merged._fieldEvidence?.unitCount).toMatchObject({ value: 48, sourceType: 'county' });
   });
+
+  test('re-merging an ALREADY-MERGED county record keeps its provenance against a listing (pre-push codex P1 r3)', () => {
+    // Merged records carry OBJECT-shaped evidence; fieldEvidenceFromRecord
+    // used to read `[0]` on it and fall back to _aiSourceType, so a
+    // second merge let a listing's 200 outrank the county's 48.
+    const county = {
+      ..._private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: null, source: null }, ADDRESS, 'manatee_pao'),
+      _source: 'county',
+      unitCount: 48,
+      _fieldEvidence: {
+        unitCount: [{
+          field: 'unitCount', value: 48, provider: 'manatee_pao', url: null,
+          sourceType: 'county', sourceQuality: 100, providerConfidence: 'high',
+        }],
+      },
+    };
+    const firstPass = _private.mergePropertyRecords([county], ADDRESS);
+    expect(Array.isArray(firstPass._fieldEvidence?.unitCount)).toBe(false);
+    const listing = _private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: 200 }, ADDRESS, 'gemini');
+    const remerged = _private.mergePropertyRecords([firstPass, listing], ADDRESS);
+    expect(remerged.unitCount).toBe(48);
+    expect(remerged._fieldEvidence?.unitCount).toMatchObject({ value: 48, sourceType: 'county' });
+  });
 });
