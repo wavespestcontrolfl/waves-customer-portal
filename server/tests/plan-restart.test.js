@@ -163,6 +163,7 @@ function builder(table) {
     return b;
   };
   b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[norm(col)]))); return b; };
+  b.whereNot = (col, val) => { conds.push((r) => String(r[norm(col)]) !== String(val)); return b; };
   b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
   b.orderBy = () => b;
   b.leftJoin = () => b;
@@ -325,14 +326,21 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates.find((r) => r.id === 'est-stale').archived_at).not.toBeNull();
   });
 
-  test('an expired or archived prior restart estimate does not block a fresh mint', async () => {
+  test('an expired or archived prior restart estimate does not block a fresh mint — and the expired one is archived, not left revivable', async () => {
     tables.estimates.push(
       { id: 'est-old', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'old', expires_at: '2020-01-01', archived_at: null },
       { id: 'est-arch', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'arch', expires_at: '2099-01-01', archived_at: '2026-08-01' },
+      // Accepted rows are history and must survive the sweep.
+      { id: 'est-done', customer_id: 'cust-1', source: 'plan_restart', status: 'accepted', token: 'done', expires_at: '2020-01-01', archived_at: null },
     );
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
     expect(result.reused).toBe(false);
     expect(recompute).toHaveBeenCalledTimes(1);
+    // Codex GH r6 P1: an expired-but-unarchived restart quote stays
+    // revivable through /extension-request for 7 days — the replacement
+    // mint must retire the whole unaccepted lineage.
+    expect(tables.estimates.find((r) => r.id === 'est-old').archived_at).not.toBeNull();
+    expect(tables.estimates.find((r) => r.id === 'est-done').archived_at).toBeNull();
   });
 
   test('refuses an account that is not cancelled (row re-read under the lock)', async () => {

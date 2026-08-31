@@ -135,7 +135,7 @@ async function familyScopedServiceIds(customerId, families) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const ids = new Set();
   for (const row of rows) {
     const family = familyOfServiceRow(row);
@@ -179,7 +179,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const owned = [];
   for (const row of rows) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;

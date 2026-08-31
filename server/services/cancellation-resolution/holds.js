@@ -67,7 +67,7 @@ async function familyUpcomingVisits(customerId, familyKey) {
     })
     .whereRaw("(s.track_state IS NULL OR s.track_state NOT IN ('complete', 'en_route', 'on_property'))")
     .orderBy('s.scheduled_date', 'asc')
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   return rows.filter((row) => familyOfServiceRow(row) === familyKey);
 }
 

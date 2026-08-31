@@ -1877,7 +1877,7 @@ const InvoiceService = {
     const visit = await dbh("scheduled_services as s")
       .leftJoin("services as sv", "s.service_id", "sv.id")
       .where("s.id", scheduledServiceId)
-      .first("s.service_type", "s.is_recurring", "s.recurring_ongoing", "s.is_callback", "s.source", "sv.service_key", "sv.service_name");
+      .first("s.service_type", "s.is_recurring", "s.recurring_ongoing", "s.is_callback", "s.source", "sv.service_key", "sv.name as service_name");
     if (!visit) return null;
     if (visit.is_callback === true) return null;
     if (!(visit.is_recurring === true || visit.recurring_ongoing === true)) return null;

@@ -6572,6 +6572,11 @@ function BillingTab({ customer, refreshCustomer }) {
                       Pay {money(primaryOpenInvoice.amountDue)} now
                     </a>
                   )}
+                  {/* Cancelled accounts have no card management: the setup-
+                      intent route is not on the cancelled allowlist, so this
+                      second entry point must hide with the section (the pay
+                      link above still works — /pay is tokenized). */}
+                  {!cancelledAccount && (
                   <button type="button" onClick={() => {
                     document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     handleAddCard();
@@ -6579,6 +6584,7 @@ function BillingTab({ customer, refreshCustomer }) {
                     minHeight: 36, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
                     background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                   }}>Update Payment Method</button>
+                  )}
                 </div>
               )}
             </div>

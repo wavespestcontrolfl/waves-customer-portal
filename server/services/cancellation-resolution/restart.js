@@ -102,7 +102,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     })
     .orderBy('s.cancelled_at', 'desc')
     .limit(50)
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   if (latest && latest.created_at) {
     // Slack window: the H0 request path runs the processor BEFORE it writes
     // the case row, so this attempt's rows carry cancelled_at slightly
@@ -158,8 +158,12 @@ async function ownedResidualFamilies(dbh, customerId) {
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
-    .limit(200)
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    // No LIMIT: this is ownership EVIDENCE, and an arbitrary truncation
+    // could drop an entire residual family (recurring_ongoing rides on
+    // every historical row of a series) and let restart re-sell an owned
+    // service (codex GH r6 P1). Both reads are already narrowed by their
+    // status/flag predicates below and scoped to one customer.
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const [nonTerminalRows, ongoingAnchorRows] = await Promise.all([
     residualBase().whereNotIn('s.status', TERMINAL_STATUSES).where('s.is_recurring', true),
     residualBase().where('s.recurring_ongoing', true),
@@ -312,8 +316,19 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       if (sameScope) {
         return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
       }
-      await trx('estimates').where({ id: live.id }).update({ archived_at: nowDate, updated_at: nowDate });
     }
+    // Minting a replacement: archive the WHOLE unaccepted restart lineage
+    // first — not just a scope-mismatched live row. An EXPIRED restart quote
+    // left unarchived stays revivable for seven days through
+    // /extension-request (restart mints stamp sent_at), which would put an
+    // older price or cancellation scope back in the wild beside the new
+    // quote (codex GH r6 P1). Query-shaped (not the limit-10 id list) so no
+    // straggler row survives; accepted rows are history and stay.
+    await trx('estimates')
+      .where({ customer_id: fresh.id, source: SOURCE })
+      .whereNull('archived_at')
+      .whereNot('status', 'accepted')
+      .update({ archived_at: nowDate, updated_at: nowDate });
 
     // Property context: profile first, then the SAME cache-only lookup +
     // accepted-estimate seed discipline the portal offer surfaces price
