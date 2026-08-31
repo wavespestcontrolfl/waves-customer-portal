@@ -23,15 +23,21 @@ const SKIP_DIRS = new Set(['node_modules', 'tests', 'coverage']);
 const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 
 // Every knex spelling of "insert into leads" seen in this repo plus the ones
-// a new writer could plausibly reach for. `\s*` between the builder and
-// `.insert` covers the multi-line `db('leads')\n  .insert({` form.
+// a new writer could plausibly reach for. CHAIN allows intermediate chained
+// calls between the `leads` builder head and `.insert(` — e.g.
+// `db('leads').returning('*').insert(...)` — with paren-free arguments; it
+// also covers the multi-line `db('leads')\n  .insert({` form (zero segments,
+// `\s*` spans the newline).
+const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\([^()]*\))*`;
+const Q = '[\'"`]'; // quote class incl. backtick
 const INSERT_PATTERNS = [
-  /\b[A-Za-z_$][\w$]*\(\s*['"`]leads['"`]\s*\)\s*\.\s*insert\s*\(/g,
-  /\b[A-Za-z_$][\w$]*\s*\.\s*table\s*\(\s*['"`]leads['"`]\s*\)\s*\.\s*insert\s*\(/g,
+  new RegExp(String.raw`\b[A-Za-z_$][\w$]*\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  // `.table('leads')` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
+  new RegExp(String.raw`\.\s*table\s*\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
   /\.into\(\s*['"`]leads['"`]\s*\)/g,
   /\binsert\s*\(\s*['"`]leads['"`]\s*\)/g,
   /\bbatchInsert\s*\(\s*['"`]leads['"`]/g,
-  /\bfrom\(\s*['"`]leads['"`]\s*\)\s*\.\s*insert\s*\(/g,
+  new RegExp(String.raw`\bfrom\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
 ];
 
 // Aliased-builder form: a `leads` query builder stored in a variable first
@@ -46,7 +52,7 @@ function aliasInsertPatterns(src) {
   let decl;
   while ((decl = ALIAS_DECL_RE.exec(src))) {
     const name = decl[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    patterns.push(new RegExp(`\\b${name}\\s*\\.\\s*insert\\s*\\(`, 'g'));
+    patterns.push(new RegExp(String.raw`\b${name}${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
   }
   return patterns;
 }
@@ -63,35 +69,64 @@ function walk(dir, out = []) {
   return out;
 }
 
-// [{ file, line, anchor }] — anchor is the trimmed text of the line where the
-// match begins, which is what the registry keys on.
+// [{ line, anchor }] for one file's source — anchor is the trimmed text of
+// the line where the match begins, which is what the registry keys on.
+function scanSourceForLeadInserts(src) {
+  const lines = src.split('\n');
+  const seen = new Set();
+  const sites = [];
+  for (const pattern of [...INSERT_PATTERNS, ...aliasInsertPatterns(src)]) {
+    pattern.lastIndex = 0;
+    let m;
+    while ((m = pattern.exec(src))) {
+      const line = src.slice(0, m.index).split('\n').length;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      sites.push({ line, anchor: lines[line - 1].trim() });
+    }
+  }
+  return sites;
+}
+
 function scanLeadInsertSites() {
   const sites = [];
   for (const abs of walk(SERVER_ROOT).sort()) {
     const rel = path.relative(SERVER_ROOT, abs).split(path.sep).join('/');
     if (SKIP_FILES.has(rel)) continue;
-    const src = fs.readFileSync(abs, 'utf8');
-    const lines = src.split('\n');
-    const seen = new Set();
-    for (const pattern of [...INSERT_PATTERNS, ...aliasInsertPatterns(src)]) {
-      pattern.lastIndex = 0;
-      let m;
-      while ((m = pattern.exec(src))) {
-        const line = src.slice(0, m.index).split('\n').length;
-        if (seen.has(line)) continue;
-        seen.add(line);
-        sites.push({
-          file: rel,
-          line,
-          anchor: lines[line - 1].trim(),
-        });
-      }
+    for (const site of scanSourceForLeadInserts(fs.readFileSync(abs, 'utf8'))) {
+      sites.push({ file: rel, ...site });
     }
   }
   return sites;
 }
 
 const key = (site) => `${site.file} :: ${site.anchor}`;
+
+describe('lead insert scanner — supported knex chain shapes (synthetic fixtures)', () => {
+  const found = (src) => scanSourceForLeadInserts(src).map((s) => s.anchor);
+
+  test.each([
+    ['direct insert', "const [l] = await db('leads').insert({ a: 1 });"],
+    ['multi-line insert', "const [l] = await db('leads')\n  .insert({ a: 1 });"],
+    ['chained before insert', "await db('leads').returning('*').insert({ a: 1 });"],
+    ['table builder', "await db.table('leads').insert({ a: 1 });"],
+    ['withSchema + table', "await db.withSchema('public').table('leads').insert({ a: 1 });"],
+    ['into form', "await knex.insert({ a: 1 }).into('leads');"],
+    ['batchInsert', "await db.batchInsert('leads', rows);"],
+    ['stored builder alias', "const leads = trx('leads');\nawait leads.insert({ a: 1 });"],
+    ['stored table alias', "const t = db.table('leads');\nawait t.returning('id').insert({ a: 1 });"],
+  ])('detects: %s', (_name, src) => {
+    expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test.each([
+    ['awaited read is not a builder alias', "const rows = await db('leads').where({ id });\nrows.insert = noop;"],
+    ['read-only query', "const open = await db('leads').where({ status: 'new' }).select('id');"],
+    ['insert into another table', "await db('lead_activities').insert({ a: 1 });"],
+  ])('ignores: %s', (_name, src) => {
+    expect(found(src)).toEqual([]);
+  });
+});
 
 describe('lead-writer registry (#3137 groundwork)', () => {
   const scanned = scanLeadInsertSites();

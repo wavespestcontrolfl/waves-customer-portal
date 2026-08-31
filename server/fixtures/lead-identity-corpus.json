@@ -100,14 +100,14 @@
     {
       "id": "typo-email-domain-no-phone",
       "a": { "first_name": "Ravindra", "last_name": "Moorcroft", "email": "ravi.moorcroft@example.com" },
-      "b": { "first_name": "Ravindra", "last_name": "Moorcroft", "email": "ravi.moorcroft@exmaple.com" },
+      "b": { "first_name": "Ravindra", "last_name": "Moorcroft", "email": "ravi.moorcroft@typo.example.com" },
       "expected": "different",
       "rationale": "Typo'd domain is a different email key and there is no phone to fall back on — fail closed; a human would merge later."
     },
     {
       "id": "typo-email-domain-but-phone-matches",
       "a": { "first_name": "Ravindra", "last_name": "Moorcroft", "phone": "541-555-0112", "email": "ravi.moorcroft@example.com" },
-      "b": { "first_name": "Ravindra", "last_name": "Moorcroft", "phone": "(541) 555-0112", "email": "ravi.moorcroft@exmaple.com" },
+      "b": { "first_name": "Ravindra", "last_name": "Moorcroft", "phone": "(541) 555-0112", "email": "ravi.moorcroft@typo.example.com" },
       "expected": "same",
       "rationale": "Phone is the sole identity key when present: the typo'd email is never consulted, and the names agree."
     },

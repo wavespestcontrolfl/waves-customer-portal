@@ -133,7 +133,9 @@ describe('lead identity corpus — shape and PII hygiene', () => {
         if (rec.email != null) {
           const normalized = normalizeEmail(rec.email);
           const isNonEmail = !normalized.includes('@');
-          expect({ id: c.id, email: rec.email, ok: isNonEmail || /@(?:example|exmaple)\.com$/.test(normalized) })
+          // Reserved domains only: example.com or a subdomain of it (the
+          // typo'd-domain case uses typo.example.com — still reserved).
+          expect({ id: c.id, email: rec.email, ok: isNonEmail || /@(?:[a-z0-9-]+\.)*example\.com$/.test(normalized) })
             .toEqual({ id: c.id, email: rec.email, ok: true });
         }
       }
