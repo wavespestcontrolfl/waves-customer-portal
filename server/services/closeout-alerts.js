@@ -39,6 +39,11 @@ const CLOSEOUT_ALERT_TYPES = Object.freeze({
   reportDelivery: 'report_delivery_incomplete',
   application: 'missing_required_material_log',
   photos: 'missing_required_photos',
+  // Not a fact: requirements.unevaluated (GH codex r3 P2). The signature
+  // requirement has NO evidence store in the schema, so this card can never
+  // auto-clear — the operator verifies on paper and dismisses it (the
+  // admin_alerts lifecycle persists the dismissal per visit:type identity).
+  signature: 'customer_signature_unverified',
 });
 const CLOSEOUT_ALERT_LABELS = Object.freeze({
   completion_not_committed: 'Completion not committed',
@@ -46,7 +51,11 @@ const CLOSEOUT_ALERT_LABELS = Object.freeze({
   report_delivery_incomplete: 'Report delivery incomplete',
   missing_required_material_log: 'Missing required material log',
   missing_required_photos: 'Missing required photos',
+  customer_signature_unverified: 'Customer signature unverified',
 });
+// The five closeout FACTS the mapper reads (signature is a requirement, not
+// a fact — it has no state and never counts toward readability).
+const MAPPED_FACT_KEYS = Object.freeze(['completion', 'report', 'reportDelivery', 'application', 'photos']);
 // Report-delivery reasons that are in flight or held BY DESIGN — not an
 // operator gap (the queue / payment hold / send window owns them).
 const TRANSIENT_DELIVERY_REASONS = new Set([
@@ -61,8 +70,7 @@ const TRANSIENT_DELIVERY_REASONS = new Set([
 function factsFullyKnown(status) {
   if (!status || !status.found) return false;
   const facts = status.facts || {};
-  return Object.keys(CLOSEOUT_ALERT_TYPES)
-    .every((k) => facts[k]?.state !== 'unknown');
+  return MAPPED_FACT_KEYS.every((k) => facts[k]?.state !== 'unknown');
 }
 
 async function memoisedCloseoutStatus(serviceId, now) {
@@ -175,6 +183,19 @@ function closeoutIssuesForVisit(status) {
       requiredPhotoCount,
       actualPhotoCount,
       summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
+    });
+  }
+  // Unevaluated requirement (GH codex r3 P2): a catalog service with
+  // requires_customer_signature keeps summary.closedOut false even when every
+  // fact is done — closeout-status lists it as requirements.unevaluated
+  // because no signature evidence store exists. Surface it so the visit is
+  // not presented as fully closed out; the operator verifies and dismisses.
+  if ((status.requirements?.unevaluated || []).includes('requiresCustomerSignature')) {
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.signature,
+      fact: 'requirements',
+      reason: 'requires_customer_signature_unevaluated',
+      summary: 'This service requires a customer signature, which the portal cannot verify — confirm it was captured, then dismiss.',
     });
   }
   return issues;

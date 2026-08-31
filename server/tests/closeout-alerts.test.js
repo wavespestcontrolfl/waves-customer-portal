@@ -60,6 +60,20 @@ describe('closeoutIssuesForVisit', () => {
       expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', r) }))).toEqual([]);
     }
   });
+  test('unevaluated signature requirement is an operator issue with its own type (GH codex r3)', () => {
+    const status = { ...base(), requirements: { unevaluated: ['requiresCustomerSignature'] } };
+    const issues = closeoutIssuesForVisit(status);
+    expect(issues).toEqual([expect.objectContaining({
+      type: 'customer_signature_unverified',
+      fact: 'requirements',
+      reason: 'requires_customer_signature_unevaluated',
+      summary: expect.stringMatching(/signature/),
+    })]);
+    // Not listed → no issue; stuck completion still short-circuits to ONE issue.
+    expect(closeoutIssuesForVisit({ ...base(), requirements: { unevaluated: [] } })).toEqual([]);
+    const stuck = { ...base({ completion: fact('failed', 'completed_visit_without_record') }), requirements: { unevaluated: ['requiresCustomerSignature'] } };
+    expect(closeoutIssuesForVisit(stuck).map((i) => i.type)).toEqual([CLOSEOUT_ALERT_TYPES.completion]);
+  });
 });
 
 describe('loadCloseoutStatuses', () => {
