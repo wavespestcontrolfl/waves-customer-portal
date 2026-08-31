@@ -109,6 +109,14 @@ function identityVerdict(a, b) {
 const CASES = corpus.cases;
 
 describe('lead identity corpus — shape and PII hygiene', () => {
+  // Exact key allowlists — a fixture cannot smuggle real lead data in an
+  // uninspected field (street_address, company_name, notes, a nested
+  // payload): every key must be known to the hygiene guards below, and
+  // every contact value must be a scalar string.
+  const CASE_FIELDS = new Set(['id', 'a', 'b', 'expected', 'rationale', 'checks']);
+  const CHECK_FIELDS = new Set(['firstNameVariant', 'sameStreet']);
+  const CONTACT_FIELDS = new Set(['first_name', 'last_name', 'phone', 'email', 'address']);
+
   test('at least 20 cases, unique ids, both verdicts represented, rationale on every case', () => {
     expect(CASES.length).toBeGreaterThanOrEqual(20);
     const ids = CASES.map((c) => c.id);
@@ -120,6 +128,26 @@ describe('lead identity corpus — shape and PII hygiene', () => {
       expect(c.rationale.length).toBeGreaterThan(20);
       expect(c.a && typeof c.a).toBe('object');
       expect(c.b && typeof c.b).toBe('object');
+    }
+  });
+
+  test('no unknown fields: case, checks, and contact keys are exact allowlists; contact values are scalar strings (or null — the nameless-shell cases)', () => {
+    for (const c of CASES) {
+      for (const k of Object.keys(c)) {
+        expect({ id: c.id, key: k, known: CASE_FIELDS.has(k) })
+          .toEqual({ id: c.id, key: k, known: true });
+      }
+      for (const k of Object.keys(c.checks || {})) {
+        expect({ id: c.id, checkKey: k, known: CHECK_FIELDS.has(k) })
+          .toEqual({ id: c.id, checkKey: k, known: true });
+      }
+      for (const rec of [c.a, c.b]) {
+        for (const [k, v] of Object.entries(rec)) {
+          const scalar = typeof v === 'string' || v === null;
+          expect({ id: c.id, field: k, known: CONTACT_FIELDS.has(k), scalar })
+            .toEqual({ id: c.id, field: k, known: true, scalar: true });
+        }
+      }
     }
   });
 

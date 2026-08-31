@@ -38,11 +38,12 @@ const INSERT_PATTERNS = [
   /\binsert\s*\(\s*['"`]leads['"`]\s*\)/g,
   /\bbatchInsert\s*\(\s*['"`]leads['"`]/g,
   new RegExp(String.raw`\bfrom\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  // Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting. Word
+  // Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting, with
+  // an optional schema qualifier (`public.leads`, `"public"."leads"`). Word
   // characters after `leads` (lead_activities etc.) break the \b and don't
   // match. Also fires on a comment SAYING "insert into leads" — that's fine,
   // registering (or rewording) it is cheaper than an unscanned writer form.
-  new RegExp(String.raw`\binsert\s+into\s+${Q}?leads\b`, 'gi'),
+  new RegExp(String.raw`\binsert\s+into\s+(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`, 'gi'),
 ];
 
 // Aliased-builder form: a `leads` query builder stored in a variable first
@@ -128,6 +129,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['stored withSchema table alias', "const leads = db.withSchema('public').table('leads');\nawait leads.insert({ a: 1 });"],
     ['raw SQL insert', "await db.raw('INSERT INTO leads (name) VALUES (?)', [name]);"],
     ['raw SQL insert, template + quoted table', 'await db.raw(`insert into "leads" (name) values (?)`, [name]);'],
+    ['raw SQL insert, schema-qualified', "await db.raw('INSERT INTO public.leads (name) VALUES (?)', [name]);"],
+    ['raw SQL insert, quoted schema-qualified', 'await db.raw(`insert into "public"."leads" (name) values (?)`, [name]);'],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
   });
@@ -220,7 +223,24 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     return lines.slice(start, end + 1).join('\n');
   }
 
-  test("'none' requires a reason; a named resolver must be referenced within the insert's enclosing function", () => {
+  // Strip comments and string/template literals so `// TODO: use
+  // findReusableCallLead` or a log string is not resolver evidence — only an
+  // identifier in live code counts. Regex-based, not a lexer: `://` inside a
+  // string survives the line-comment pass (the (^|[^:]) guard), and any
+  // over-stripping only makes the check STRICTER, never lets evidence in.
+  // The evidence bar stays "identifier appears in code", not "call
+  // expression" — two registered resolvers (dedupEmail, nameConflicts) are
+  // variables driving inline lookups, not callables.
+  function stripCommentsAndStrings(code) {
+    return code
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/[^\n]*/gm, '$1')
+      .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
+      .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
+      .replace(/`(?:\\.|[^`\\])*`/g, '``');
+  }
+
+  test("'none' requires a reason; a named resolver must be referenced in live code within the insert's enclosing function", () => {
     for (const w of LEAD_WRITERS) {
       if (w.identityResolver === 'none') {
         expect({ site: key(w), reason: typeof w.reason }).toEqual({ site: key(w), reason: 'string' });
@@ -230,7 +250,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       const lines = fs.readFileSync(path.join(SERVER_ROOT, w.file), 'utf8').split('\n');
       const anchorIdx = lines.findIndex((l) => l.trim() === w.anchor);
       expect({ site: key(w), anchorFound: anchorIdx >= 0 }).toEqual({ site: key(w), anchorFound: true });
-      const span = enclosingFunctionSpan(lines, anchorIdx);
+      const span = stripCommentsAndStrings(enclosingFunctionSpan(lines, anchorIdx));
       const identifier = w.identityResolver.split(/[\s(]/)[0];
       const referenced = new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(span);
       expect({ site: key(w), resolver: identifier, referenced }).toEqual({ site: key(w), resolver: identifier, referenced: true });
