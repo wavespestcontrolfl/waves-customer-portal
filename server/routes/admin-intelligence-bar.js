@@ -529,21 +529,12 @@ async function loadAppointmentPin(appointmentId) {
   const a = await db('scheduled_services as ss')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.id', appointmentId)
-    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'c.first_name', 'c.last_name');
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id', 'c.first_name', 'c.last_name');
   if (!a) return null;
   return {
     ...normalizeAppointmentPin(a),
     customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim() || null,
   };
-}
-
-// Email reply pin covers WHO the reply goes to AND what it is a reply to —
-// a re-threaded or re-attributed email during the pending window is drift.
-function emailPinFingerprint(email) {
-  return crypto.createHash('sha256').update(JSON.stringify([
-    String(email.id), email.from_address || null, email.subject || null, email.gmail_thread_id || null,
-    email.customer_id ? String(email.customer_id) : null,
-  ])).digest('hex');
 }
 
 // Mirrors replyViaSms's own resolution order (email → customer_id → sender
@@ -574,6 +565,7 @@ const {
   normalizeAppointmentPin,
   appointmentPinFingerprint,
   priceApprovalFingerprint,
+  emailPinFingerprint,
 } = require('../services/intelligence-bar/proposal-pins');
 
 async function loadPriceApprovalPin(approvalId) {
@@ -848,10 +840,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
       if (!email) return { failed: true, modelResult: { error: 'Email not found — nothing was proposed.' } };
       if (!email.from_address) return { failed: true, modelResult: { error: 'Email has no sender address to reply to.' } };
+      // The FULL pin (address+subject+thread+customer) rides into the
+      // executor — sendEmailReply asserts it on the row it actually sends
+      // from (codex r5 P1).
       params._pinned_email = emailPinFingerprint(email);
-      // Carried INTO the executor: sendEmailReply refuses at the send
-      // boundary if the sender address no longer matches the card.
-      params._pinned_email_address = email.from_address;
       preview = {
         ...preview,
         pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null },
@@ -936,6 +928,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       params.dry_run = false;
       params.lead_ids = matchedIds;
+      // Executor-enforced exactness (codex r5): bulkUpdateLeads refuses
+      // inside its own transaction if any pinned lead left current_status.
+      params._expect_full_set = true;
       // Every pinned lead's name for the card's "Show more" (the count and
       // first ten alone can't distinguish two sets — codex P1 on #3648).
       // FAIL CLOSED (codex r4): the card's complete-target list is the

@@ -32,6 +32,9 @@ function normalizeAppointmentPin(row) {
     estimated_duration_minutes: row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
     technician_id: row.technician_id || null,
     service_type: row.service_type || null,
+    // The visit's OWNER is part of the identity: a row re-pointed to a
+    // different customer with identical schedule fields is drift.
+    customer_id: row.customer_id ? String(row.customer_id) : null,
   };
 }
 
@@ -39,6 +42,17 @@ function appointmentPinFingerprint(pin) {
   return sha([
     String(pin.id), pin.status, pin.scheduled_date, pin.time_window, pin.window_start || null, pin.window_end || null,
     pin.estimated_duration_minutes ?? null, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
+    pin.customer_id || null,
+  ]);
+}
+
+// ── Email reply ─────────────────────────────────────────────────────────
+// Everything the send depends on: recipient address, subject, thread,
+// attributed customer. Works on the raw emails row and the route pin alike.
+function emailPinFingerprint(email) {
+  return sha([
+    String(email.id), email.from_address || null, email.subject || null, email.gmail_thread_id || null,
+    email.customer_id ? String(email.customer_id) : null,
   ]);
 }
 
@@ -53,4 +67,4 @@ function priceApprovalFingerprint(a) {
   ]);
 }
 
-module.exports = { normalizeAppointmentPin, appointmentPinFingerprint, priceApprovalFingerprint };
+module.exports = { normalizeAppointmentPin, appointmentPinFingerprint, priceApprovalFingerprint, emailPinFingerprint };

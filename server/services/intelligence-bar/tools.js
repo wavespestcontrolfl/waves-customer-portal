@@ -1851,20 +1851,12 @@ async function createAppointment(input) {
     throw err;
   }
 
-  // Card-confirmed bookings are approved credit-free (W0B): skip the
-  // immediate redemption entirely so this Confirm can never mint credit —
-  // an offer created after the card is applied by the hourly sweep, the
-  // documented ambient path, never by this click (codex r4 P1).
-  if (input._inspection_credit_amount !== undefined) {
-    return {
-      success: true,
-      appointment_id: appointment.id,
-      date: appointment.scheduled_date,
-      service_type: appointment.service_type,
-      ...(overlapAdvisory ? { overlap_advisory: overlapAdvisory } : {}),
-    };
-  }
-
+  // Card-confirmed bookings are approved credit-free (W0B): skip ONLY the
+  // immediate redemption so this Confirm can never mint credit — an offer
+  // created after the card is applied by the hourly sweep, the documented
+  // ambient path. Reminder registration below still runs (codex r5 P1: an
+  // earlier early-return here silently skipped it).
+  if (input._inspection_credit_amount === undefined) {
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book
     // paths (Codex #3178 r26 P2): the marker alone leaves the credit
@@ -1877,6 +1869,7 @@ async function createAppointment(input) {
       createdBy: 'system:inspection_credit_ib_booking',
     });
   } catch { /* redemption is best-effort; the booking stands */ }
+  }
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —

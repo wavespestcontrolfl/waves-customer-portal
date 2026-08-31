@@ -619,9 +619,38 @@ async function bulkUpdateLeads(input) {
   const updates = { status: new_status, updated_at: new Date() };
   if (lost_reason) updates.lost_reason = lost_reason;
 
-  const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
-    .update(updates, ['id']);
-  const ids = updatedRows.map(r => r.id);
+  // W0B exact-set enforcement (codex r5): a card that listed N leads must
+  // move ALL N or none. Inside one transaction: lock the still-matching
+  // rows, refuse if any pinned lead left current_status, then update the
+  // locked set. Non-pinned callers keep the legacy intersect behavior.
+  let ids;
+  if (input._expect_full_set && Array.isArray(lead_ids) && lead_ids.length) {
+    try {
+      ids = await db.transaction(async (trx) => {
+        const rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+          .transacting(trx).forUpdate().select('id');
+        if (rows.length !== lead_ids.length) {
+          const err = new Error('bulk_set_changed');
+          err.previewChanged = true;
+          throw err;
+        }
+        const updated = await trx('leads').whereIn('id', rows.map(r => r.id)).update(updates, ['id']);
+        return updated.map(r => r.id);
+      });
+    } catch (err) {
+      if (err && err.previewChanged) {
+        return {
+          error: 'One or more of the approved leads changed status after the card was shown — nothing was updated. Ask again for a fresh card.',
+          preview_changed: true,
+        };
+      }
+      throw err;
+    }
+  } else {
+    const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+      .update(updates, ['id']);
+    ids = updatedRows.map(r => r.id);
+  }
   if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
