@@ -361,10 +361,36 @@ describe('closeout-status: invoice + invoice delivery', () => {
     expect(deriveCloseoutFacts(closedOutInputs({
       liveInvoice: draft, record: { ...closedOutInputs().record, structured_notes: { completionSmsStatus: 'deferred' } },
     })).facts.invoiceDelivery).toMatchObject({ state: 'pending', reason: 'deferred_send_window' });
-    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: { ...draft, status: 'paid' } })).facts.invoiceDelivery)
-      .toMatchObject({ state: 'done', reason: 'paid' });
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: { ...draft, status: 'paid', receipt_sent_at: '2026-08-30T18:10:00Z' } })).facts.invoiceDelivery)
+      .toMatchObject({ state: 'done', reason: 'paid_receipt_sent' });
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: draft })).facts.invoiceDelivery)
       .toMatchObject({ state: 'pending', reason: 'invoice_draft_unsent' });
+  });
+
+  test('human intentionally_free disposition outranks the live prediction AND a frozen required mint', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      liveInvoice: null,
+      record: { ...closedOutInputs().record, structured_notes: { backfillMintRequired: true, backfillMintAmountCents: 12000, completionSmsStatus: 'sent' } },
+      disposition: { id: 'disp-1', disposition: 'intentionally_free', reason: 'goodwill re-treat', created_at: '2026-08-30T20:00:00Z' },
+    }));
+    expect(facts.invoice).toMatchObject({ state: 'not_required', reason: 'disposition_intentionally_free', ruleSource: 'billing_disposition', dispositionReason: 'goodwill re-treat' });
+    expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, dispositionLookupFailed: true })).facts.invoice.state).toBe('unknown');
+  });
+
+  test('paid ≠ receipted: unstamped paid invoice follows the receipt job (queued → pending, failed → failed, completed → done, none → pending)', () => {
+    const paid = { id: 'inv-1', status: 'paid', total: 120, sent_at: null, sms_sent_at: null, receipt_sent_at: null, payer_id: null };
+    const run = (o) => deriveCloseoutFacts(closedOutInputs({ liveInvoice: paid, ...o })).facts.invoiceDelivery;
+    expect(run({ receiptJob: { id: 'rj', status: 'retry_scheduled', attempts: 2, next_attempt_at: '2026-08-31T16:00:00Z' } })).toMatchObject({ state: 'pending', reason: 'receipt_retry_scheduled' });
+    expect(run({ receiptJob: { id: 'rj', status: 'failed', attempts: 5, last_error: 'to bob@example.com' } })).toMatchObject({ state: 'failed', reason: 'receipt_delivery_exhausted', lastError: 'to [email]' });
+    expect(run({ receiptJob: { id: 'rj', status: 'completed' } })).toMatchObject({ state: 'done', reason: 'paid_receipt_job_completed' });
+    expect(run({})).toMatchObject({ state: 'pending', reason: 'paid_receipt_not_sent' });
+    expect(run({ receiptJobLookupFailed: true })).toMatchObject({ state: 'unknown' });
+    expect(run({ liveInvoice: { ...paid, receipt_sent_at: '2026-08-30T18:10:00Z' } })).toMatchObject({ state: 'done', reason: 'paid_receipt_sent' });
+  });
+
+  test('requiresCustomerNotice rides on the comms fact; requiresCustomerSignature is listed as unevaluated (no evidence store)', async () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: baseRequirements({ requiresCustomerNotice: true }) }));
+    expect(facts.comms.customerNoticeRequired).toBe(true);
   });
 
   test('prepaid (account-credit) invoice with no send timestamps is settled — nothing to deliver', () => {
@@ -732,6 +758,8 @@ describe('closeout-status: loader against a fake knex', () => {
     payers: [],
     projects: [],
     project_photos: [],
+    visit_billing_dispositions: [],
+    receipt_delivery_jobs: [],
   });
 
   beforeEach(() => {
@@ -748,6 +776,7 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.unavailable).toEqual([]);
     expect(result.summary.closedOut).toBe(true);
     expect(result.requirements.asOf).toBe('current_catalog');
+    expect(result.requirements.unevaluated).toEqual([]);
     expect(result.visit).toMatchObject({ status: 'completed', serviceType: 'Quarterly Pest Control', isCallback: false });
     expect(result.record).toMatchObject({ id: REC, backfill: false, posture: 'auto_send' });
   });

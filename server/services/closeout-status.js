@@ -238,7 +238,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
 
   const [
     activeAppsProbe, retractedAppsProbe, photosProbe, deliveryProbe, liveInvoiceProbe, terminalInvoiceProbe,
-    autopayProbe, followupProbe, childProbe,
+    autopayProbe, followupProbe, childProbe, dispositionProbe,
   ] = await Promise.all([
     probe('property_application_history (active)', unavailable, () => (recordId
       ? knex('property_application_history').where({ service_record_id: recordId }).whereNull('retracted_at').count('* as n').first()
@@ -276,6 +276,11 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
       .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
       .orderBy('scheduled_date', 'asc')
       .first('id', 'status', 'scheduled_date')),
+    // Human billing ruling from the Billing Recovery workbench — durable,
+    // one row per visit ('billed' | 'intentionally_free').
+    probe('visit_billing_dispositions', unavailable, () => knex('visit_billing_dispositions')
+      .where({ scheduled_service_id: serviceId })
+      .first('id', 'disposition', 'reason', 'invoice_id', 'created_at')),
   ]);
 
   inputs.activeApplicationCount = activeAppsProbe.value ? toNumber(activeAppsProbe.value.n) : null;
@@ -292,6 +297,20 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.followup = followupProbe.error ? undefined : (followupProbe.value || null);
   inputs.followupChild = childProbe.value || null;
   inputs.followupChildLookupFailed = Boolean(childProbe.error);
+  inputs.disposition = dispositionProbe.value || null;
+  inputs.dispositionLookupFailed = Boolean(dispositionProbe.error);
+
+  // Paid-receipt delivery is a queue (receipt_delivery_jobs); the invoice's
+  // receipt_sent_at is stamped only on confirmed delivery.
+  const liveInvoiceId = inputs.liveInvoice?.id || null;
+  if (liveInvoiceId && INVOICE_SETTLED_STATUSES.has(String(inputs.liveInvoice.status)) && !inputs.liveInvoice.receipt_sent_at) {
+    const receiptProbe = await probe('receipt_delivery_jobs', unavailable, () => knex('receipt_delivery_jobs')
+      .where({ invoice_id: liveInvoiceId })
+      .orderBy('created_at', 'desc')
+      .first('id', 'status', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at'));
+    inputs.receiptJob = receiptProbe.value || null;
+    inputs.receiptJobLookupFailed = Boolean(receiptProbe.error);
+  }
 
   // Billing prediction inputs — same shape the appointment card assembles
   // (routes/admin-schedule.js), so "no invoice needed" here agrees with the
@@ -593,6 +612,15 @@ function deriveCloseoutFacts(inputs) {
         detail: `invoice ${live.id} exists but the lane predicts ${expectation.kind} (${expectation.why}); lane prediction only — an estimate-first invoice attached before completion can be legitimate`,
       });
     }
+  } else if (inputs.dispositionLookupFailed) {
+    invoice = fact('unknown', 'billing_disposition_lookup_failed', { expectation: expectation?.kind || null });
+  } else if (inputs.disposition?.disposition === 'intentionally_free') {
+    // A human ruled this visit free in the Billing Recovery workbench —
+    // that durable disposition outranks any live prediction or frozen mint.
+    invoice = fact('not_required', 'disposition_intentionally_free', {
+      ruleSource: 'billing_disposition', dispositionId: inputs.disposition.id, decidedAt: isoOrNull(inputs.disposition.created_at),
+      dispositionReason: inputs.disposition.reason ? String(inputs.disposition.reason).slice(0, 120) : null,
+    });
   } else if (notes.backfillMintRequired === true) {
     // The completion FROZE a required-mint posture (+ amount) on the record
     // because billing fields are mutable — a later lane change must not
@@ -631,7 +659,19 @@ function deriveCloseoutFacts(inputs) {
     const smsSentAt = isoOrNull(live.sms_sent_at);
     const receiptSentAt = isoOrNull(live.receipt_sent_at);
     const evidence = { invoiceId: live.id, status, sentAt, smsSentAt, receiptSentAt };
-    if (INVOICE_SETTLED_STATUSES.has(status)) invoiceDelivery = fact('done', receiptSentAt ? 'paid_receipt_sent' : status, evidence);
+    if (status === 'prepaid') invoiceDelivery = fact('done', 'prepaid', evidence);
+    else if (INVOICE_SETTLED_STATUSES.has(status)) {
+      // Paid ≠ receipted: receipt_sent_at is stamped only on confirmed
+      // delivery; the queue row says where an unstamped receipt stands.
+      const job = inputs.receiptJob || null;
+      const jobStatus = job ? String(job.status || '').toLowerCase() : null;
+      if (receiptSentAt) invoiceDelivery = fact('done', 'paid_receipt_sent', evidence);
+      else if (inputs.receiptJobLookupFailed) invoiceDelivery = fact('unknown', 'receipt_job_lookup_failed', evidence);
+      else if (jobStatus === 'completed') invoiceDelivery = fact('done', 'paid_receipt_job_completed', { ...evidence, receiptJobId: job.id });
+      else if (jobStatus === 'failed') invoiceDelivery = fact('failed', 'receipt_delivery_exhausted', { ...evidence, receiptJobId: job.id, attempts: toNumber(job.attempts), lastError: scrubErrorText(job.last_error) });
+      else if (jobStatus) invoiceDelivery = fact('pending', `receipt_${jobStatus}`, { ...evidence, receiptJobId: job.id, nextAttemptAt: isoOrNull(job.next_attempt_at) });
+      else invoiceDelivery = fact('pending', 'paid_receipt_not_sent', evidence);
+    }
     else if (live.payer_id) invoiceDelivery = fact(sentAt ? 'done' : 'pending', sentAt ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);
     else if (sentAt || smsSentAt || INVOICE_DELIVERED_STATUSES.has(status)) invoiceDelivery = fact('done', 'invoice_delivered', evidence);
     else if (smsStatus === 'deferred') invoiceDelivery = fact('pending', 'deferred_send_window', { ...evidence, completionSmsStatus: smsStatus });
@@ -655,6 +695,12 @@ function deriveCloseoutFacts(inputs) {
   else if (smsStatus === 'blocked') comms = fact('not_required', 'completion_sms_blocked_consent', { ruleSource: 'consent', completionSmsStatus: smsStatus });
   else if (reportDelivery.state === 'done') comms = fact('done', projectBacked ? 'project_report_delivered' : 'report_email_delivered', { channel: projectBacked ? null : 'email' });
   else comms = fact('unknown', 'no_comms_marker_on_record', { completionSmsStatus: smsStatus, hint: 'legacy or recap-lane record without a completionSmsStatus stamp' });
+  if (requirements && completed) {
+    // The catalog's requiresCustomerNotice is satisfied by the completion
+    // comms above (post-application notice = the completion SMS / report
+    // email). Surface the requirement on the fact rather than a tenth one.
+    comms.customerNoticeRequired = requirements.requiresCustomerNotice === true;
+  }
 
   // ---- 9. follow-up -----------------------------------------------------------------------
   let followUp;
@@ -781,6 +827,12 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
       // No frozen requirement snapshot exists — see header. A catalog edit
       // retroactively changes these for historical visits.
       asOf: 'current_catalog',
+      // requiresCustomerSignature has NO evidence store in the schema (the
+      // only "signature" columns are the tree/shrub review hash and the
+      // weekly time-summary sign-off), so it cannot be evaluated here and is
+      // listed rather than silently dropped. requiresCustomerNotice rides on
+      // facts.comms.customerNoticeRequired.
+      unevaluated: requirements.requiresCustomerSignature === true ? ['requiresCustomerSignature'] : [],
     } : null,
     billing: derived.billing,
     facts: derived.facts,
