@@ -351,7 +351,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // Fail closed on mutation forms the scanner cannot read: raw SQL that
       // updates/inserts this table's status, or indirect builder forms. Any
       // hit means the scanner (and the doc) must be extended first.
-      if (new RegExp(`(?:UPDATE|INSERT\\s+INTO)\\s+${TABLE}[\\s\\S]{0,400}?\\bstatus\\b`, 'i').test(src)) {
+      if (new RegExp(`(?:UPDATE|INSERT\\s+INTO)\\s+(?:["'\`]?\\w+["'\`]?\\.)?["'\`]?${TABLE}["'\`]?[\\s\\S]{0,400}?["'\`]?\\bstatus\\b`, 'i').test(src)) {
         unscannable.push(`${rel}: raw SQL UPDATE/INSERT touching ${TABLE} status`);
       }
       if (new RegExp(`\\.table\\(\\s*['"]${TABLE}`).test(src)) {
