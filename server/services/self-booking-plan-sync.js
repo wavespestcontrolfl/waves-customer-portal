@@ -883,6 +883,7 @@ async function scheduledServiceRowsForCustomer(database, customerId) {
         's.*',
         'svc.service_key',
         'svc.name as service_name',
+        'svc.billing_type as catalog_billing_type',
       ));
   } catch (err) {
     logger.warn(`[self-booking-plan-sync] joined service row lookup failed for ${customerId}: ${err.message}`);
@@ -1088,6 +1089,14 @@ function isNonBaitRodentServiceRow(row = {}) {
   // or a non-rodent one (the catalog-family prune handles those), still
   // classify from every text field as before.
   const catalogText = catalogTextForServiceRow(row);
+  // Authoritative one-time catalog metadata excludes the row outright (codex
+  // #3591 r63 P1): services.billing_type decides before either text branch,
+  // because catalog names do not reliably carry a one-time token —
+  // lawn_fungicide reads as recurring lawn and termite_cartridge_replacement
+  // as termite-bait coverage by text — and the bait-token scan below would
+  // otherwise keep a recurring-flagged row repointed to one-time work in the
+  // tier/setup-waiver evidence.
+  if (catalogText && catalogBillingTypeIsOneTime(row)) return true;
   if (catalogText && textIsRodentLed(catalogText)) return !textHasRodentBaitToken(catalogText);
   // A NON-rodent catalog identity wins over a stale rodent label (codex
   // #3591 r61 P1): a row repointed to an authoritative pest/lawn/etc.
@@ -1098,6 +1107,13 @@ function isNonBaitRodentServiceRow(row = {}) {
   // detectWaveGuardPlanKeys/qualifyingKeysForRow ever see the row.
   if (catalogText && catalogResolvesNonRodentQualifyingFamily(catalogText)) return false;
   return !rodentRowTextFields(row).some(textHasRodentBaitToken);
+}
+
+// services.billing_type on the joined row; the one-time text regex below
+// stays only as the fallback for rows the plain-select degrade left unjoined.
+function catalogBillingTypeIsOneTime(row = {}) {
+  const value = row.catalog_billing_type ?? row.catalogBillingType ?? row.billing_type ?? row.billingType;
+  return String(value || '').trim().toLowerCase() === 'one_time';
 }
 
 // One-time / non-plan catalog identities must never anchor the override

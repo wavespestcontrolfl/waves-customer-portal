@@ -426,6 +426,31 @@ describe('self-booking plan sync helpers', () => {
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_inspection', service_name: 'Lawn Inspection' })).toBe(true);
     // …while genuinely recurring catalog identities still win the override.
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly' })).toBe(false);
+    // Catalog billing_type is the AUTHORITATIVE one-time signal (codex #3591
+    // r63 P1): lawn_fungicide and termite_cartridge_replacement are
+    // billing_type 'one_time' in the catalog but carry no one-time token, so
+    // by text alone they read as recurring lawn / termite-bait coverage.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_fungicide', service_name: 'Lawn Fungicide Treatment', catalog_billing_type: 'one_time' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'termite_cartridge_replacement', service_name: 'Termite Bait Station Cartridge Replacement', catalog_billing_type: 'one_time' })).toBe(true);
+    // …even with a stale BAIT label, which the token scan would otherwise keep.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service', service_key: 'termite_cartridge_replacement', service_name: 'Termite Bait Station Cartridge Replacement', catalog_billing_type: 'one_time' })).toBe(true);
+    // The same identities flagged recurring by the catalog keep the override.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly', catalog_billing_type: 'recurring' })).toBe(false);
+    // And metadata beats a recurring-looking name even without any token.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly', catalog_billing_type: 'one_time' })).toBe(true);
+  });
+
+  test('every loader that feeds isNonBaitRodentServiceRow joins services.billing_type as catalog_billing_type (codex #3591 r63 P1)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const read = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+    expect(read('services', 'self-booking-plan-sync.js')).toMatch(/'svc\.billing_type as catalog_billing_type',\s*\)\);/);
+    expect(read('services', 'waveguard-existing-services.js')).toMatch(/\.select\('s\.id', 'svc\.service_key', 'svc\.name as service_name', 'svc\.billing_type as catalog_billing_type'\)/);
+    expect(read('scripts', 'align-waveguard-portal-records.js')).toMatch(/\.select\('s\.\*', 'svc\.service_key', 'svc\.name as service_name', 'svc\.billing_type as catalog_billing_type'\)/);
+    const schedule = read('routes', 'schedule.js');
+    expect(schedule).toMatch(/'catalog_svc\.billing_type as catalog_billing_type'/);
+    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(2);
+    expect(read('routes', 'admin-schedule.js')).toMatch(/catalog_billing_type: serviceRecord\?\.billing_type,/);
   });
 
   test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {

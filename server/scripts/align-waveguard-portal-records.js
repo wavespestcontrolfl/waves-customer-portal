@@ -507,7 +507,7 @@ async function scheduledRowsForCustomer(customerId) {
       .where({ 's.customer_id': customerId })
       .whereNotIn('s.status', TERMINAL_STATUSES)
       .orderBy('s.scheduled_date', 'asc')
-      .select('s.*', 'svc.service_key', 'svc.name as service_name');
+      .select('s.*', 'svc.service_key', 'svc.name as service_name', 'svc.billing_type as catalog_billing_type');
   } catch (_err) {
     return db('scheduled_services')
       .where({ customer_id: customerId })

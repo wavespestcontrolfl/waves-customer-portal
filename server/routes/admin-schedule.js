@@ -1849,6 +1849,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
     service_type: serviceType,
     service_key: serviceRecord?.service_key,
     service_name: serviceRecord?.name,
+    catalog_billing_type: serviceRecord?.billing_type,
   };
   if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
   // Through the LIVE family mapper (codex #3591 r23 P1): a detected
@@ -5443,12 +5444,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // failure is a live double-bill hazard, so it warns the operator
       // instead of failing silently. CAS on the exact stamped amount so a
       // concurrently frozen/consumed stamp is never clobbered.
+      // A zero-row CAS is NOT success (codex #3591 r63 P1): Knex returns 0
+      // when the stamp was already consumed/frozen (a completion charged it,
+      // or the secure-plan flow froze a different figure) while the
+      // acceptance was billing its own setup invoice — that is the
+      // double-charge case, so it is reported like a thrown retire.
       const retireRodentSetupStampAfterAcceptance = async () => {
         if (!(directRodentSetupStamp > 0)) return;
         try {
-          await db('scheduled_services')
+          const retired = await db('scheduled_services')
             .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
             .update({ pending_setup_fee: null, updated_at: new Date() });
+          if (Number(retired) !== 1) {
+            const live = await db('scheduled_services').where({ id: svc.id }).first('pending_setup_fee');
+            logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} was ${live?.pending_setup_fee ?? 'null'} (expected ${directRodentSetupStamp}) when estimate acceptance tried to retire it — the stamp was consumed or refrozen while the acceptance billed the setup; reconcile the two setup charges`);
+            bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed — check the customer for a second setup charge and clear or refund it.');
+            return;
+          }
           directRodentSetupStamp = 0;
         } catch (e) {
           logger.error(`[schedule] FIX: could not retire the rodent setup stamp on ${svc.id} after estimate acceptance — first completion would bill a setup the acceptance already covered: ${e.message}`);

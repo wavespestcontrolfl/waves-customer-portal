@@ -93,7 +93,8 @@ router.get('/', async (req, res, next) => {
         'scheduled_services.*',
         'technicians.name as technician_name',
         'catalog_svc.service_key as catalog_service_key',
-        'catalog_svc.name as catalog_service_name'
+        'catalog_svc.name as catalog_service_name',
+        'catalog_svc.billing_type as catalog_billing_type'
       )
       .orderBy('scheduled_services.scheduled_date', 'asc');
 
@@ -174,6 +175,7 @@ router.get('/', async (req, res, next) => {
           service_type: s.service_type,
           service_key: s.catalog_service_key,
           service_name: s.catalog_service_name,
+          catalog_billing_type: s.catalog_billing_type,
         }),
         // The RESOLVED family key (codex #3591 r58 P1): the portal's plan
         // cards consume this instead of re-classifying a stale label —
@@ -182,6 +184,7 @@ router.get('/', async (req, res, next) => {
           service_type: s.service_type,
           service_key: s.catalog_service_key,
           service_name: s.catalog_service_name,
+          catalog_billing_type: s.catalog_billing_type,
         }),
         // Self-serve deep link (same page the reminder texts link) — the
         // portal's Reschedule buttons open this instead of drafting an SMS

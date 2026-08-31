@@ -434,9 +434,13 @@ describe('source contracts — where the lifecycle is wired', () => {
     // …and BOTH acceptance-success paths (main accept and the overlap-race
     // standard downgrade) retire it, CAS'd on the exact stamped amount.
     expect((adminSchedule.match(/await retireRodentSetupStampAfterAcceptance\(\);/g) || []).length).toBe(2);
-    expect(adminSchedule).toMatch(/\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
+    expect(adminSchedule).toMatch(/const retired = await db\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
     // A retire failure must warn about the double-bill hazard, never fail silently.
     expect(adminSchedule).toMatch(/retireRodentSetupStampAfterAcceptance = async \(\) => \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
+    // A ZERO-row CAS is the consumed/refrozen-stamp race, not success (codex
+    // #3591 r63 P1): it must warn and leave the local stamp un-cleared.
+    const retireBody = adminSchedule.slice(adminSchedule.indexOf('const retireRodentSetupStampAfterAcceptance = async'), adminSchedule.indexOf('await retireRodentSetupStampAfterAcceptance();'));
+    expect(retireBody).toMatch(/if \(Number\(retired\) !== 1\) \{[\s\S]*?logger\.error\([\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed[\s\S]*?return;\s*\}\s*directRodentSetupStamp = 0;/);
   });
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');

@@ -270,7 +270,7 @@ async function loadCatalogFieldsByRowId(database, customerId) {
     const catalogRows = await database('scheduled_services as s')
       .leftJoin('services as svc', 's.service_id', 'svc.id')
       .where({ 's.customer_id': customerId })
-      .select('s.id', 'svc.service_key', 'svc.name as service_name');
+      .select('s.id', 'svc.service_key', 'svc.name as service_name', 'svc.billing_type as catalog_billing_type');
     return new Map(catalogRows.map((row) => [row.id, row]));
   } catch {
     return null;
