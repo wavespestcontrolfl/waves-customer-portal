@@ -260,13 +260,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
   test('PENDING_RULING_REASON is frozen text (a new writer must bring its own justification)', () => {
     expect(PENDING_RULING_REASON).toBe('pre-existing — dedup pending #3137 ruling');
     const pending = LEAD_WRITERS.filter((w) => w.reason === PENDING_RULING_REASON);
-    // Snapshot of the pre-existing resolver-less population, frozen by FULL
-    // site key (file :: anchor). Entries may be REMOVED as writers adopt a
-    // resolver; adding a key — a new file, OR a rewritten/moved insert in a
-    // listed file keeping PENDING_RULING_REASON — is a policy violation, not
-    // a fix for a red run (a rewrite is a re-review; a new writer brings its
-    // own justification).
-    expect(pending.map(key).sort()).toEqual([
+    // The pre-existing resolver-less population, frozen by FULL site key
+    // (file :: anchor). The pending set must stay a SUBSET of this list:
+    // entries LEAVE it as writers adopt a resolver (that's the #3137
+    // rollout, and it must go green, not red); any key OUTSIDE it — a new
+    // file, OR a rewritten/moved insert in a listed file keeping
+    // PENDING_RULING_REASON — is a policy violation, not a fix for a red run
+    // (a rewrite is a re-review; a new writer brings its own justification).
+    const FROZEN_PENDING_KEYS = new Set([
       "routes/admin-leads.js :: const [lead] = await db('leads').insert({",
       "routes/public-lawn-assessment.js :: const [lead] = await trx('leads').insert({",
       "routes/public-lawn-diagnostic.js :: const [lead] = await trx('leads').insert({",
@@ -277,5 +278,6 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       "routes/tech-lawn-diagnostic.js :: const [lead] = await trx('leads').insert({",
       "services/referral-engine.js :: const [lead] = await db('leads').insert({",
     ]);
+    expect(pending.map(key).filter((k) => !FROZEN_PENDING_KEYS.has(k))).toEqual([]);
   });
 });

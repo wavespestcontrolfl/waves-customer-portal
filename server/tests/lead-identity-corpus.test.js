@@ -142,6 +142,13 @@ describe('lead identity corpus — shape and PII hygiene', () => {
           .toEqual({ id: c.id, checkKey: k, known: true });
       }
       for (const rec of [c.a, c.b]) {
+        // Plain object with at least one non-empty identity field — an empty
+        // (or array) contact would sail through every hygiene loop and count
+        // toward the corpus minimum while exercising nothing.
+        expect({ id: c.id, isArray: Array.isArray(rec) }).toEqual({ id: c.id, isArray: false });
+        const hasIdentity = ['first_name', 'last_name', 'phone', 'email']
+          .some((k) => typeof rec[k] === 'string' && rec[k].trim().length > 0);
+        expect({ id: c.id, hasIdentity }).toEqual({ id: c.id, hasIdentity: true });
         for (const [k, v] of Object.entries(rec)) {
           const scalar = typeof v === 'string' || v === null;
           expect({ id: c.id, field: k, known: CONTACT_FIELDS.has(k), scalar })
@@ -181,11 +188,14 @@ describe('lead identity corpus — shape and PII hygiene', () => {
         }
         if (rec.email != null) {
           const normalized = normalizeEmail(rec.email);
-          // With an @: reserved domains only — example.com or a subdomain of
-          // it (the typo'd-domain case uses typo.example.com — still
-          // reserved). Without one: allowlisted sentinel strings only.
+          // With an @: the ENTIRE value must be one syntactically valid
+          // address on a reserved domain — example.com or a subdomain of it
+          // (the typo'd-domain case uses typo.example.com — still reserved).
+          // Fully anchored, single @, no whitespace: a value smuggling a real
+          // address alongside a reserved suffix fails. Without an @:
+          // allowlisted sentinel strings only.
           const ok = normalized.includes('@')
-            ? /@(?:[a-z0-9-]+\.)*example\.com$/.test(normalized)
+            ? /^[a-z0-9._%+-]+@(?:[a-z0-9-]+\.)*example\.com$/.test(normalized)
             : NON_EMAIL_SENTINELS.has(normalized);
           expect({ id: c.id, email: rec.email, ok })
             .toEqual({ id: c.id, email: rec.email, ok: true });
