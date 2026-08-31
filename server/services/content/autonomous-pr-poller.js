@@ -307,9 +307,17 @@ async function headBlogFileContent(run, pr, gh) {
   try { brief = await briefCategorySignalsForRun(run); } catch (_) { return null; }
   const candidates = blogFileCandidatesForRun(run, brief);
   if (!candidates) return null;
+  let parse;
+  try { ({ parse } = require('../content-astro/frontmatter')); } catch (_) { return null; }
   for (const path of candidates.paths) {
     const found = await gh.getFile(path, pr.head?.ref);
-    if (found && typeof found.content === 'string') return found.content;
+    if (!found || typeof found.content !== 'string') continue;
+    // Same adoption rule as recheckTopicTargeting: a file whose frontmatter
+    // slug renders a DIFFERENT route is not this post's file.
+    let existingSlug = '';
+    try { existingSlug = parse(found.content)?.data?.slug || ''; } catch (_) { existingSlug = ''; }
+    if (existingSlug && candidates.slugKey(existingSlug) !== candidates.routeKey) continue;
+    return found.content;
   }
   return null;
 }
@@ -1484,6 +1492,12 @@ async function maybeAutoMerge(run, pr) {
       if (!aff.ok) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
         return { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+      }
+      // The head fetch above was more async work — an operator
+      // dismiss/requeue landing during it must still block the merge.
+      if (!(await queueRowStillParked(run))) {
+        logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the affiliate belt (operator action)`);
+        return { pending: true, reason: 'queue_row_moved_during_gating' };
       }
       mergeRes = await doMerge();
     }

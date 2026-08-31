@@ -188,8 +188,16 @@ function validateProduct(row, { now = new Date() } = {}) {
   }
   const url = parseHttpsUrl(row.approved_affiliate_url);
   if (!url) errors.push('approved_affiliate_url must be an https URL');
-  if (row.plain_url !== undefined && row.plain_url !== null && !parseHttpsUrl(row.plain_url)) {
-    errors.push('plain_url, when present, must be an https URL');
+  if (row.plain_url !== undefined && row.plain_url !== null) {
+    const plain = parseHttpsUrl(row.plain_url);
+    if (!plain) errors.push('plain_url, when present, must be an https URL');
+    else if (isAmazonHost(plain.hostname) || /\bamazon\b/i.test(String(row.merchant || ''))) {
+      // The UNTRACKED fallback: a direct amazon.com page with no associate
+      // parameters (a tagged plain_url would monetize a paused product).
+      const h = plain.hostname.toLowerCase();
+      if (h !== 'amazon.com' && h !== 'www.amazon.com') errors.push('amazon plain_url must be a direct amazon.com URL — never amzn.to, redirects, or cloak domains');
+      if (plain.searchParams.has('tag') || plain.searchParams.has('ascsubtag')) errors.push('amazon plain_url must carry no tag=/ascsubtag (it is the untracked fallback)');
+    }
   }
   // Amazon policy keys off the URL and a normalized merchant, never the
   // free-form spelling alone ("Amazon US", "Amazon.com"): any amazon.* or

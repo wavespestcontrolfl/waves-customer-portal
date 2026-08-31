@@ -54,6 +54,11 @@ describe('validateProduct', () => {
     expect(registry.validateProduct(green({ merchant: 'Some Store', approved_affiliate_url: 'https://www.amazon.com/dp/B1' })).join(' ')).toMatch(/tag=/);
     expect(registry.validateProduct({ product_id: 'pro-x', status: 'prohibited', risk_class: 'red', merchant: 'x', plain_url: 'https://example.com/p' }).join(' ')).toMatch(/must not carry plain_url/);
   });
+  test('amazon plain_url is the UNTRACKED fallback: direct amazon.com, no tag/ascsubtag (Codex PR3 r4)', () => {
+    expect(registry.validateProduct(green({ plain_url: 'https://amzn.to/x' })).join(' ')).toMatch(/plain_url must be a direct amazon\.com/);
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20' })).join(' ')).toMatch(/no tag=/);
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01' }))).toEqual([]);
+  });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {
       expect(registry.validateProduct(green({ allowed_post_types: ['protocol', pt] })).join(' ')).toMatch(/protected local-service/);
