@@ -9,7 +9,7 @@ const {
   updateAlert,
   listEvents,
 } = require('../services/admin-alerts');
-const { resolveCloseoutRequirementsForJobs } = require('../services/service-closeout-requirements');
+const { getCloseoutStatus } = require('../services/closeout-status');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -205,92 +205,90 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
   }
 
   if (completedJobIds.length) {
-    const completedJobs = rows
-      .filter((r) => completedJobIds.includes(r.sourceRecordId))
-      .map((r) => ({
-        id: r.sourceRecordId,
-        service_id: r.metadata.serviceId,
-        service_type: r.metadata.serviceType,
-      }));
-    const requirementsByJob = await resolveCloseoutRequirementsForJobs(completedJobs);
-    const formRows = await db('job_form_submissions')
-      .whereIn('scheduled_service_id', completedJobIds)
-      .whereNotNull('completed_at')
-      .select('scheduled_service_id')
-      .catch(() => []);
-    const withForms = new Set(formRows.map((r) => r.scheduled_service_id));
-
-    const appRows = await db('property_application_history as pah')
-      .leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
-      .whereIn('sr.scheduled_service_id', completedJobIds)
-      // A job whose only ledger rows were retracted (recap correction)
-      // has NO active applications — the required-material-log alert must
-      // fire for it (codex P1, PR #3419).
-      .whereNull('pah.retracted_at')
-      .select('sr.scheduled_service_id')
-      .catch(() => []);
-    const withApplications = new Set(appRows.map((r) => r.scheduled_service_id));
-
-    const serviceRecordRows = await db('service_records')
-      .whereIn('scheduled_service_id', completedJobIds)
-      .select('id', 'scheduled_service_id')
-      .catch(() => []);
-    const serviceRecordByJobId = new Map(serviceRecordRows.map((r) => [r.scheduled_service_id, r]));
-    const serviceRecordIds = serviceRecordRows.map((r) => r.id).filter(Boolean);
-    const photoRows = serviceRecordIds.length
-      ? await db('service_photos')
-        .whereIn('service_record_id', serviceRecordIds)
-        .groupBy('service_record_id')
-        .select('service_record_id')
-        .count('* as count')
-        .catch(() => [])
-      : [];
-    const photoCountByServiceRecordId = new Map(photoRows.map((r) => [r.service_record_id, Number(r.count || 0)]));
+    // Closeout truth comes from the canonical service (#3647): ten separate
+    // facts per visit, with `unknown` for lookup outages — an outage or a
+    // legitimate not_required (frozen internal_only posture, backfill,
+    // non-performed outcome, catalog rule) never renders as "missing" the
+    // way the previous inline `.catch(() => [])` queries did. Alert types,
+    // ids, labels, and severities stay byte-identical so the admin_alerts
+    // lifecycle rows carry over.
+    const statuses = await Promise.all(completedJobIds.map(
+      (id) => getCloseoutStatus(id).catch(() => null),
+    ));
+    const statusByJobId = new Map(completedJobIds.map((id, i) => [id, statuses[i]]));
+    // Open = required and unmet. `awaiting_completion` (no completion yet)
+    // and in-flight sends are transient, not gaps; unknown is an outage.
+    const openFact = (f) => Boolean(f)
+      && (f.state === 'pending' || f.state === 'failed')
+      && !['awaiting_completion', 'recap_sms_in_flight'].includes(f.reason);
 
     for (const row of rows.filter((r) => completedJobIds.includes(r.sourceRecordId))) {
-      const closeoutRequirements = requirementsByJob.get(row.sourceRecordId) || {};
-      if (closeoutRequirements.requiresServiceReport && !withForms.has(row.sourceRecordId)) {
+      const status = statusByJobId.get(row.sourceRecordId);
+      if (!status || !status.found) continue; // service unavailable — never fabricate a gap
+      const closeoutRequirements = status.requirements || {};
+      const facts = status.facts || {};
+
+      // A completed visit with no committed completion record (or a
+      // terminal failed completion attempt) is ONE card, not three — the
+      // downstream facts are all unknowable until the record exists.
+      if (facts.completion?.reason === 'completed_visit_without_record' || facts.completion?.state === 'failed') {
         attention.push(issue({
           ...row,
           id: `${row.sourceRecordId}_missing_required_service_report`,
           type: 'missing_required_service_report',
           severity: 'medium',
           label: 'Missing required service report',
-          summary: 'Completed job is missing the required closeout report.',
-          metadata: { ...row.metadata, closeoutRequirements },
+          summary: 'Completed job has no completion record — closeout never committed.',
+          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'completion', closeoutReason: facts.completion.reason },
+        }));
+        continue;
+      }
+
+      if (openFact(facts.report)) {
+        attention.push(issue({
+          ...row,
+          id: `${row.sourceRecordId}_missing_required_service_report`,
+          type: 'missing_required_service_report',
+          severity: 'medium',
+          label: 'Missing required service report',
+          summary: facts.report.state === 'failed'
+            ? 'Service report delivery failed after retries.'
+            : 'Completed job is missing the required closeout report.',
+          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'report', closeoutReason: facts.report.reason },
         }));
       }
-      if (closeoutRequirements.requiresApplicationLog && !withApplications.has(row.sourceRecordId)) {
+      if (openFact(facts.application)) {
         attention.push(issue({
           ...row,
           id: `${row.sourceRecordId}_missing_required_material_log`,
           type: 'missing_required_material_log',
           severity: 'medium',
           label: 'Missing required material log',
-          summary: 'Completed job is missing the required chemical or material application record.',
-          metadata: { ...row.metadata, closeoutRequirements },
+          summary: facts.application.reason === 'all_application_rows_retracted'
+            ? 'Every application row on this job was retracted — the required material log is empty.'
+            : 'Completed job is missing the required chemical or material application record.',
+          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'application', closeoutReason: facts.application.reason },
         }));
       }
-      const requiredPhotoCount = Number(closeoutRequirements.requiredPhotoCount || 0);
-      if (requiredPhotoCount > 0) {
-        const serviceRecord = serviceRecordByJobId.get(row.sourceRecordId);
-        const actualPhotoCount = serviceRecord?.id ? Number(photoCountByServiceRecordId.get(serviceRecord.id) || 0) : 0;
-        if (actualPhotoCount < requiredPhotoCount) {
-          attention.push(issue({
-            ...row,
-            id: `${row.sourceRecordId}_missing_required_photos`,
-            type: 'missing_required_photos',
-            severity: 'medium',
-            label: 'Missing required photos',
-            summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
-            metadata: {
-              ...row.metadata,
-              closeoutRequirements,
-              actualPhotoCount,
-              requiredPhotoCount,
-            },
-          }));
-        }
+      if (openFact(facts.photos)) {
+        const requiredPhotoCount = Number(facts.photos.required || 0);
+        const actualPhotoCount = Number(facts.photos.actual || 0);
+        attention.push(issue({
+          ...row,
+          id: `${row.sourceRecordId}_missing_required_photos`,
+          type: 'missing_required_photos',
+          severity: 'medium',
+          label: 'Missing required photos',
+          summary: `Completed job has ${actualPhotoCount} of ${requiredPhotoCount} required closeout photo${requiredPhotoCount === 1 ? '' : 's'}.`,
+          metadata: {
+            ...row.metadata,
+            closeoutRequirements,
+            closeoutFact: 'photos',
+            closeoutReason: facts.photos.reason,
+            actualPhotoCount,
+            requiredPhotoCount,
+          },
+        }));
       }
     }
   }
@@ -651,3 +649,4 @@ router.get('/alerts/:id/events', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.__private = { getJobsNeedingAttention };
