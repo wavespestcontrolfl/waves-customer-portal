@@ -110,7 +110,8 @@ function chainAfter(src, start) {
 
 function statusWriteExpressions(src) {
   const out = [];
-  const chainRe = new RegExp(`\\(['"]${TABLE}['"]\\)`, 'g');
+  // Matches aliased builders too: ('annual_prepay_terms as t').
+  const chainRe = new RegExp(`\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
   // Value runs to the next `, key:` or the end of the object body — a ternary
   // (`a ? 'x' : b`) has no comma, so it survives whole.
   const objectStatuses = (body) => {
@@ -151,6 +152,36 @@ function resolveStatusExpression(expr) {
   }
   return set.size ? [...set] : null;
 }
+
+describe('the write scanner itself (negative fixtures — alternate write forms cannot escape)', () => {
+  test('catches a plain literal write', () => {
+    expect(statusWriteExpressions("await db('annual_prepay_terms').where({ id }).update({ status: 'canceled', updated_at: now });"))
+      .toEqual(["'canceled'"]);
+  });
+
+  test('catches an ALIASED builder write', () => {
+    expect(statusWriteExpressions("await trx('annual_prepay_terms as apt').where({ id }).update({ status: 'refunded' });"))
+      .toEqual(["'refunded'"]);
+  });
+
+  test('catches an object-variable write and a multi-line chain with an inner callback semicolon', () => {
+    const src = [
+      "const payload = { status: 'refunded', updated_at: now };",
+      "await conn('annual_prepay_terms')",
+      '  .where(function avail() { this.whereNull(col).orWhere(col, "<", cutoff); })',
+      '  .update(payload)',
+      "  .returning('*');",
+    ].join('\n');
+    expect(statusWriteExpressions(src)).toEqual(["'refunded'"]);
+  });
+
+  test('an unknown value source resolves to null (fails the lockstep test) instead of passing silently', () => {
+    expect(resolveStatusExpression('computeSomething(row)')).toBeNull();
+    expect(resolveStatusExpression("cond ? 'active' : mysteryVar")).toBeNull();
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update(mystery);"))
+      .toEqual(['<unresolved object mystery>']);
+  });
+});
 
 describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
   test('the DB CHECK is exactly the written stages plus the two legacy names', () => {
@@ -339,6 +370,15 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       expect(claimQuery.whereIn).toHaveBeenCalledWith('status', ACTIVE_STATUSES);
       expect(claimQuery.whereNull).toHaveBeenCalledWith('renewal_decision');
       expect(claimQuery.whereNull).toHaveBeenCalledWith('notice_30_sent_at');
+      // Claim-availability predicate: unclaimed OR the claim is stale (15-min
+      // TTL). Without both branches, two workers could claim concurrently and
+      // send duplicate renewal notices.
+      expect(claimQuery.whereNull).toHaveBeenCalledWith('notice_30_claimed_at');
+      expect(claimQuery.orWhere).toHaveBeenCalledWith('notice_30_claimed_at', '<', expect.any(Date));
+      const cutoff = claimQuery.orWhere.mock.calls.find((c) => c[0] === 'notice_30_claimed_at')[2];
+      const ttlMs = Date.now() - cutoff.getTime();
+      expect(ttlMs).toBeGreaterThanOrEqual(15 * 60 * 1000 - 5000);
+      expect(ttlMs).toBeLessThanOrEqual(15 * 60 * 1000 + 60000);
       expect(claimQuery.update).toHaveBeenCalledWith(expect.objectContaining({
         status: 'renewal_pending',
         notice_30_claimed_at: expect.any(Date),
