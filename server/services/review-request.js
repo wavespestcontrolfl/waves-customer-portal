@@ -1822,7 +1822,7 @@ const ReviewService = {
     const claimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
       .whereNull("sms_sent_at")
-      .update({ status: "sending", updated_at: new Date() });
+      .update({ status: "sending", claimed_at: new Date() });
     if (claimed > 0) return true;
 
     // Not pending — a stale abandoned claim is the only other claimable
@@ -1831,8 +1831,8 @@ const ReviewService = {
     const row = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
-      .where("updated_at", "<", staleBefore)
-      .first("id", "token", "customer_id", "updated_at");
+      .where("claimed_at", "<", staleBefore)
+      .first("id", "token", "customer_id", "claimed_at");
     if (!row) return false;
 
     // Any outbound sms_log row carrying this ask's link (long token or its
@@ -1877,7 +1877,7 @@ const ReviewService = {
     for (const frag of frags) {
       const provider = await TwilioService.findOutboundMessageSince({
         to,
-        sentAfter: row.updated_at,
+        sentAfter: row.claimed_at,
         bodyFragment: frag,
       });
       if (provider.unavailable) return false;
@@ -1889,8 +1889,8 @@ const ReviewService = {
     const reclaimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
-      .where("updated_at", "<", staleBefore)
-      .update({ updated_at: new Date() });
+      .where("claimed_at", "<", staleBefore)
+      .update({ claimed_at: new Date() });
     return reclaimed > 0;
   },
 
@@ -1922,7 +1922,7 @@ const ReviewService = {
     await db("review_requests")
       .where({ id: requestId, status: "sending" })
       .whereNull("sms_sent_at")
-      .update({ status: "pending", updated_at: new Date() });
+      .update({ status: "pending", claimed_at: null });
   },
 
   /**

@@ -614,7 +614,7 @@ describe('review request follow-up flow', () => {
     const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
     rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
     rrQuery.first.mockResolvedValueOnce({
-      id: 'rr-inline', token: 'tok-64chars', customer_id: 'cust-1', updated_at: new Date('2026-06-03T13:00:00.000Z'),
+      id: 'rr-inline', token: 'tok-64chars', customer_id: 'cust-1', claimed_at: new Date('2026-06-03T13:00:00.000Z'),
     });
     smsLogQuery.first.mockResolvedValue(undefined);
     const customersQuery = chain({ first: jest.fn().mockResolvedValue({ phone: '+19415550123' }) });
