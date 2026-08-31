@@ -495,21 +495,25 @@ async function getMrrTrend(months) {
 
   // Payment-pending annual-prepay ids: those customers sit on billing_mode
   // 'per_application' until the prepay invoice is PAID, so the lane predicate
-  // alone would drop them from the current-month recompute while the
+  // alone would drop them from the CURRENT-month recompute while the
   // completed-month snapshots and the live headline (computeMrrBreakdown)
   // both union them — the chart's current point would sit below both sources
-  // whenever an annual invoice awaits payment (Codex #3669 r3 P1). Fail-soft
-  // set, shared with the snapshot writer.
+  // whenever an annual invoice awaits payment (Codex #3669 r3 P1). The union
+  // is TODAY's transient set, so it applies only to the current window — a
+  // historical fallback month gets the plain lane predicate, or today's
+  // pending customers would inflate months they weren't pending (or even
+  // prepay) in (Codex r4). Fail-soft set, shared with the snapshot writer.
   const pendingIds = await pendingPrepayIds(db);
 
-  function customersActiveAsOf(endIso) {
+  function customersActiveAsOf(endIso, { includePendingUnion = false } = {}) {
+    const unionIds = includePendingUnion ? pendingIds : [];
     return excludeInternalCustomers(
       db({ c: 'customers' })
         .where('c.created_at', '<=', endIso)
         .where('c.monthly_rate', '>', 0)
         // Monthly LANE, not merely rate-bearing (#3140) — see fallback note
         // above. Pending-prepay union per the note on pendingIds.
-        .where(function laneOrPendingPrepay() { this.whereRaw(MONTHLY_LANE_SQL); if (pendingIds.length) this.orWhereIn('c.id', pendingIds); })
+        .where(function laneOrPendingPrepay() { this.whereRaw(MONTHLY_LANE_SQL); if (unionIds.length) this.orWhereIn('c.id', unionIds); })
         .where(function () {
           this.where('c.active', true).orWhereNotNull('c.churned_at');
         })
@@ -540,13 +544,14 @@ async function getMrrTrend(months) {
       };
     }
     const endIso = w.end.toISOString();
+    const isCurrentMonth = w.startDay === currentMonthStart;
     const [mrrRow, byTier] = await Promise.all([
-      customersActiveAsOf(endIso)
+      customersActiveAsOf(endIso, { includePendingUnion: isCurrentMonth })
         .select(
           db.raw('SUM(c.monthly_rate) as mrr'),
           db.raw('COUNT(*) as customer_count'),
         ).first(),
-      customersActiveAsOf(endIso)
+      customersActiveAsOf(endIso, { includePendingUnion: isCurrentMonth })
         .select('c.waveguard_tier', db.raw('SUM(c.monthly_rate) as mrr'), db.raw('COUNT(*) as count'))
         .groupBy('c.waveguard_tier'),
     ]);

@@ -5,6 +5,7 @@
 
 const db = require('../models/db');
 const { computeMrrBreakdown } = require('./mrr-breakdown');
+const { tierBreakdown, pendingPrepayIds } = require('./mrr-snapshot');
 const logger = require('./logger');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { whereLiveCustomer, CONVERSION_DATE_SQL } = require('./customer-stages');
@@ -26,16 +27,19 @@ async function executeBITool(toolName, input) {
       const lastMonthStart = etMonthStart(new Date(), -1);
       const lastMonthEnd = etMonthEnd(new Date(), -1);
 
-      const [revMTD, revLastMonth, mrr, oneTime, overdue, tierRevenue] = await Promise.all([
+      // Headline MRR + tier rows both come from the shared breakdown
+      // population (monthly lane ∪ payment-pending prepay, internal
+      // excluded) over ONE pending-prepay set, so byTier sums to mrr and
+      // tier counts reconcile to recurringCustomers within a single tool
+      // result (Codex #3669 r3+r4).
+      const pendingIds = await pendingPrepayIds(db);
+      const [revMTD, revLastMonth, mrr, oneTime, overdue, tierRows] = await Promise.all([
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).sum('amount as total').first(),
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', lastMonthStart).where('payment_date', '<=', lastMonthEnd).sum('amount as total').first(),
-        // Headline MRR = the shared breakdown (monthly lane ∪ payment-pending
-        // prepay, internal excluded) — one definition with the dashboard tile
-        // and the snapshot (Codex #3669 r3).
-        computeMrrBreakdown(db),
+        computeMrrBreakdown(db, todayDate, pendingIds),
         db('payments').where({ status: 'paid' }).where('payment_date', '>=', somDate).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
         db('payments').whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id').sum('amount as total').first(),
-        db('customers').where({ active: true }).whereNull('deleted_at').select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
+        tierBreakdown(db, pendingIds),
       ]);
 
       const mrrVal = parseFloat(mrr?.total || 0);
@@ -51,7 +55,7 @@ async function executeBITool(toolName, input) {
         revenueChange: revLMVal > 0 ? Math.round((revMTDVal - revLMVal) / revLMVal * 100) : 0,
         oneTimeRevenueMTD: parseFloat(oneTime?.total || 0),
         outstandingAR: parseFloat(overdue?.total || 0),
-        byTier: tierRevenue.map(t => ({ tier: t.waveguard_tier || 'None', count: parseInt(t.count), monthly: parseFloat(t.revenue || 0) })),
+        byTier: tierRows.map(t => ({ tier: t.tier, count: t.count, monthly: t.mrr })),
       };
     }
 

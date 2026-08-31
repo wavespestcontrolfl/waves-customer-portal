@@ -23,7 +23,7 @@ function makeChain(table) {
     calls: [],
     log(method, args) { this.calls.push({ method, args }); recorded.push({ table: this.table, method, args }); return this; },
   };
-  const methods = ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'select', 'groupBy', 'orderBy', 'limit', 'sum', 'count', 'modify'];
+  const methods = ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNotNull', 'whereBetween', 'select', 'groupBy', 'orderBy', 'limit', 'sum', 'count', 'modify'];
   for (const m of methods) {
     chain[m] = (...args) => {
       chain.log(m, args);
@@ -48,17 +48,20 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 
-describe('get_mrr_trend pending-prepay union (Codex #3669 r3 P1)', () => {
-  test('the live recompute ORs the pending ids beside MONTHLY_LANE_SQL', async () => {
+describe('get_mrr_trend pending-prepay union (Codex #3669 r3 P1, r4 P2)', () => {
+  test('the CURRENT-month recompute ORs the pending ids beside MONTHLY_LANE_SQL; historical fallback months do not', async () => {
     recorded.length = 0;
     await executeDashboardTool('get_mrr_trend', { months: 2 });
 
+    // 2 windows × 2 queries (sum + by-tier), every one lane-scoped…
     const customerCalls = recorded.filter((r) => String(r.table).includes('customers'));
-    expect(customerCalls.length).toBeGreaterThan(0);
     const laneRaws = customerCalls.filter((r) => r.method === 'whereRaw' && r.args[0] === MONTHLY_LANE_SQL);
-    expect(laneRaws.length).toBeGreaterThan(0);
+    expect(laneRaws.length).toBe(4);
+    // …but the union is TODAY's transient set: current window only (r4 —
+    // today's pending customers must not inflate months they weren't
+    // pending in).
     const unions = customerCalls.filter((r) => r.method === 'orWhereIn' && r.args[0] === 'c.id');
-    expect(unions.length).toBe(laneRaws.length); // every lane predicate carries the union
+    expect(unions.length).toBe(2);
     for (const u of unions) expect(u.args[1]).toEqual(['pp-1', 'pp-2']);
   });
 

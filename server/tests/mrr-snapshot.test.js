@@ -204,7 +204,10 @@ describe('recordMrrSnapshot', () => {
     });
     const out = await recordMrrSnapshot('2026-06-01', db);
 
-    expect(computeMrrBreakdown).toHaveBeenCalledWith(db, expect.any(String));
+    // ONE pending-prepay set fetched up front and shared with the breakdown
+    // (and tierBreakdown) so the persisted aggregate cannot be internally
+    // inconsistent across a transient lookup failure (Codex #3669 r4).
+    expect(computeMrrBreakdown).toHaveBeenCalledWith(db, expect.any(String), expect.any(Array));
     // aggregate
     expect(capture.conflict).toBe('period_month');
     expect(capture.merged).toBe(true);

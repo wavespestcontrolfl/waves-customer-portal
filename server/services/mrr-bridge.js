@@ -29,6 +29,19 @@
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const ymOf = (monthKey) => String(monthKey).slice(0, 7); // 'YYYY-MM-01' → 'YYYY-MM'
 
+// #3669: customer_mrr_snapshots months before this boundary were captured
+// with the old wide `monthly_rate > 0` population; months from the boundary
+// on hold the corrected monthly-lane population. Historical rows are
+// PRESERVED (never rewritten — deleting them would zero valid history under
+// the retention cohort, Codex r4 P0), so a diff that CROSSES the boundary
+// would misread every residue row as churned MRR. Cross-boundary month
+// pairs therefore degrade to the customers-table approximation, exactly
+// like months with no snapshot; wide-vs-wide pairs inside history stay
+// diffable (internally consistent). First full month on the corrected
+// population: 2026-09. If this ships later than September, bump the
+// boundary to the first month fully captured post-deploy.
+const LANE_DEFINITION_BOUNDARY = '2026-09-01';
+
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function monthLabelOf(monthKey) {
   const ym = ymOf(monthKey);
@@ -50,14 +63,16 @@ function buildBridgeMonths({
   conversionMonthById = new Map(),
   degradedByMonth = new Map(),
   currentMonthKey = null,
+  laneBoundaryKey = LANE_DEFINITION_BOUNDARY,
 } = {}) {
   return monthKeys.map((key, i) => {
     const prevKey = i > 0 ? monthKeys[i - 1] : prevMonthKey(key);
     const curr = snapshotsByMonth.get(key);
     const prev = snapshotsByMonth.get(prevKey);
     const inProgress = key === currentMonthKey;
+    const crossesLaneBoundary = !!laneBoundaryKey && prevKey < laneBoundaryKey && key >= laneBoundaryKey;
 
-    if (!curr || !prev) {
+    if (!curr || !prev || crossesLaneBoundary) {
       // Degrade, don't hide: two-sided customers-table approximation.
       const d = degradedByMonth.get(key) || { newMrr: 0, newCount: 0, churnedMrr: 0, churnedCount: 0 };
       return {
@@ -194,12 +209,18 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
 
   // In-progress month: recompute from live rates via the SAME population query
   // the snapshot cron writes from (customerRateRows — active, not-deleted,
-  // rate > 0, internal excluded), so today's adds/churns/reprices show now
-  // instead of after the next 6:05am upsert. Falls back to the snapshot rows.
-  try {
-    const { customerRateRows } = require('./mrr-snapshot');
-    overlayLiveCurrentMonth(snapshotsByMonth, currentMonthKey, await customerRateRows(db));
-  } catch { /* live read failed — keep the (possibly stale) snapshot rows */ }
+  // rate > 0, monthly lane, internal excluded), so today's adds/churns/reprices
+  // show now instead of after the next 6:05am upsert. Falls back to the
+  // snapshot rows. Suppressed for a PRE-BOUNDARY current month (deploy lands
+  // mid-month): the live read is the corrected narrow population while that
+  // month's frozen neighbors are wide — overlaying would manufacture the
+  // cross-population churn surge inside a nominally diffable pair.
+  if (currentMonthKey >= LANE_DEFINITION_BOUNDARY) {
+    try {
+      const { customerRateRows } = require('./mrr-snapshot');
+      overlayLiveCurrentMonth(snapshotsByMonth, currentMonthKey, await customerRateRows(db));
+    } catch { /* live read failed — keep the (possibly stale) snapshot rows */ }
+  }
 
   // Conversion months for customers ENTERING a diffable month (new vs
   // reactivated split). One query over just those ids.
@@ -226,8 +247,9 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   // the exit, else deleted month. Valued at CURRENT rates — that's the
   // documented approximation, not an error.
   const degradedKeys = monthKeys.filter((key, i) => {
-    const prev = snapshotsByMonth.get(i > 0 ? monthKeys[i - 1] : prevMonthKey(key));
-    return !snapshotsByMonth.get(key) || !prev;
+    const prevKey = i > 0 ? monthKeys[i - 1] : prevMonthKey(key);
+    const crossesLaneBoundary = prevKey < LANE_DEFINITION_BOUNDARY && key >= LANE_DEFINITION_BOUNDARY;
+    return !snapshotsByMonth.get(key) || !snapshotsByMonth.get(prevKey) || crossesLaneBoundary;
   });
   const degradedByMonth = new Map();
   if (degradedKeys.length) {
@@ -298,4 +320,4 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   };
 }
 
-module.exports = { buildBridgeMonths, computeMrrBridge, overlayLiveCurrentMonth, prevMonthKey, periodKeyOf, monthLabelOf };
+module.exports = { buildBridgeMonths, computeMrrBridge, overlayLiveCurrentMonth, prevMonthKey, periodKeyOf, monthLabelOf, LANE_DEFINITION_BOUNDARY };

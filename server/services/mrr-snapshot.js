@@ -24,9 +24,14 @@ async function pendingPrepayIds(conn) {
 // re-implemented, so the two can't drift), so the snapshot's tiers reconcile
 // to its total AND match the live trend population.
 // db is lazy-required so this module (and its tests) load without knex.
-async function tierBreakdown(conn) {
+// `pendingIds`: pre-fetched pending-prepay ids — recordMrrSnapshot fetches
+// ONE set and passes it to both this and computeMrrBreakdown, so a transient
+// lookup failure between the two reads can't persist a snapshot whose
+// by_tier disagrees with its own total_mrr (Codex #3669 r4). Omitted =
+// fetched here (standalone callers).
+async function tierBreakdown(conn, pendingIds = null) {
   conn = conn || require('../models/db');
-  const rows = await mrrPopulationQuery(conn, await pendingPrepayIds(conn))
+  const rows = await mrrPopulationQuery(conn, pendingIds != null ? pendingIds : await pendingPrepayIds(conn))
     .select('c.waveguard_tier as waveguard_tier', conn.raw('SUM(c.monthly_rate) as mrr'), conn.raw('COUNT(*) as count'))
     .groupBy('c.waveguard_tier');
   return rows.map((r) => ({
@@ -122,8 +127,10 @@ async function recordCustomerMrrSnapshots(periodMonth, conn) {
  */
 async function recordMrrSnapshot(periodMonth = etMonthStart(), conn) {
   conn = conn || require('../models/db');
-  const breakdown = await computeMrrBreakdown(conn, etDateString());
-  const by_tier = await tierBreakdown(conn);
+  // ONE pending-prepay set for the whole snapshot write — see tierBreakdown.
+  const pendingIds = await pendingPrepayIds(conn);
+  const breakdown = await computeMrrBreakdown(conn, etDateString(), pendingIds);
+  const by_tier = await tierBreakdown(conn, pendingIds);
 
   await conn('mrr_snapshots')
     .insert({
