@@ -11,6 +11,26 @@ const {
 } = require('../services/admin-alerts');
 const { getCloseoutStatus } = require('../services/closeout-status');
 
+// In-process memo for closeout loads. The dashboard polls GET / every 3
+// minutes and each closeout load is ~20-28 indexed probes; a 90s memo makes
+// the steady-state refresh cost ~zero while a just-completed visit is still
+// re-checked within two refreshes. Single-instance service; the memo holds
+// only ids/states/reasons (no PII) and is bounded by today's completed set.
+const CLOSEOUT_MEMO_TTL_MS = 90 * 1000;
+const CLOSEOUT_MEMO_MAX = 500;
+const closeoutMemo = new Map();
+async function memoisedCloseoutStatus(serviceId, now = Date.now()) {
+  const hit = closeoutMemo.get(serviceId);
+  if (hit && now - hit.at < CLOSEOUT_MEMO_TTL_MS) return hit.value;
+  const value = await getCloseoutStatus(serviceId).catch(() => null);
+  // Never memoise an outage — the next refresh must retry.
+  if (value && value.found) {
+    if (closeoutMemo.size >= CLOSEOUT_MEMO_MAX) closeoutMemo.delete(closeoutMemo.keys().next().value);
+    closeoutMemo.set(serviceId, { at: now, value });
+  }
+  return value;
+}
+
 router.use(adminAuthenticate, requireAdmin);
 
 const DEFAULTS = {
@@ -218,7 +238,7 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
     const statusByJobId = new Map();
     for (let i = 0; i < completedJobIds.length; i += CLOSEOUT_CONCURRENCY) {
       const slice = completedJobIds.slice(i, i + CLOSEOUT_CONCURRENCY);
-      const loaded = await Promise.all(slice.map((id) => getCloseoutStatus(id).catch(() => null)));
+      const loaded = await Promise.all(slice.map((id) => memoisedCloseoutStatus(id)));
       slice.forEach((id, j) => statusByJobId.set(id, loaded[j]));
     }
     // Open = required and unmet. `awaiting_completion` (no completion yet)
@@ -258,17 +278,25 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
         continue;
       }
 
-      if (openFact(facts.report)) {
+      // The report artifact and its DELIVERY are separate facts: a published
+      // report whose delivery exhausted its retries is a failed closeout too.
+      // Pending/in-flight deliveries (queued, sending, held) stay silent.
+      const deliveryFailed = facts.reportDelivery?.state === 'failed';
+      if (openFact(facts.report) || deliveryFailed) {
         attention.push(issue({
           ...row,
           id: `${row.sourceRecordId}_missing_required_service_report`,
           type: 'missing_required_service_report',
           severity: 'medium',
           label: 'Missing required service report',
-          summary: facts.report.state === 'failed'
-            ? 'Service report delivery failed after retries.'
+          summary: deliveryFailed && !openFact(facts.report)
+            ? 'Service report was published but its delivery failed after retries.'
             : 'Completed job is missing the required closeout report.',
-          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'report', closeoutReason: facts.report.reason },
+          metadata: {
+            ...row.metadata, closeoutRequirements,
+            closeoutFact: openFact(facts.report) ? 'report' : 'reportDelivery',
+            closeoutReason: openFact(facts.report) ? facts.report.reason : facts.reportDelivery.reason,
+          },
         }));
       }
       if (openFact(facts.application)) {
@@ -663,4 +691,4 @@ router.get('/alerts/:id/events', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports.__private = { getJobsNeedingAttention };
+module.exports.__private = { getJobsNeedingAttention, closeoutMemo };

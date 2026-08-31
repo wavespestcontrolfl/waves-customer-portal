@@ -89,6 +89,7 @@ const run = () => __private.getJobsNeedingAttention({ date: DATE, technicianId: 
 
 beforeEach(() => {
   jest.clearAllMocks();
+  __private.closeoutMemo.clear();
 });
 
 test('fully closed-out visit fires no closeout alerts', async () => {
@@ -168,10 +169,33 @@ test('stuck resumable completion is the single closeout card (codex r1)', async 
   expect(alerts).toHaveLength(1);
   expect(alerts[0].summary).toMatch(/stuck mid-commit/);
   // A RUNNING completion stays silent — transient, not a gap.
+  __private.closeoutMemo.clear();
   getCloseoutStatus.mockResolvedValue(closeout({
     facts: { completion: fact('pending', 'completion_running'), report: fact('pending', 'awaiting_completion') },
   }));
   expect((await run()).filter((a) => String(a.type).startsWith('missing_required'))).toEqual([]);
+});
+
+test('published report with exhausted delivery fires the report card; queued delivery stays silent (GH r1)', async () => {
+  installJobs([jobRow('svc-1')]);
+  getCloseoutStatus.mockResolvedValue(closeout({ facts: { reportDelivery: fact('failed', 'delivery_exhausted', { attempts: 5 }) } }));
+  const alerts = (await run()).filter((a) => a.type === 'missing_required_service_report');
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]).toMatchObject({ summary: expect.stringMatching(/delivery failed after retries/), metadata: expect.objectContaining({ closeoutFact: 'reportDelivery' }) });
+  __private.closeoutMemo.clear();
+  getCloseoutStatus.mockResolvedValue(closeout({ facts: { reportDelivery: fact('pending', 'delivery_queued') } }));
+  expect((await run()).filter((a) => a.type === 'missing_required_service_report')).toEqual([]);
+});
+
+test('closeout loads are memoised for 90s per visit; outages are never memoised (GH r1)', async () => {
+  installJobs([jobRow('svc-1')]);
+  getCloseoutStatus.mockResolvedValue(closeout());
+  await run(); await run();
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
+  __private.closeoutMemo.clear();
+  getCloseoutStatus.mockRejectedValueOnce(new Error('down')).mockResolvedValue(closeout());
+  await run(); await run();
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(3);
 });
 
 test('closeout loads are bounded to 4 concurrent (codex r1)', async () => {
