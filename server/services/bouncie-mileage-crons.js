@@ -5,7 +5,7 @@
  * Uses node-cron with America/New_York timezone.
  */
 
-const cron = require('node-cron');
+const cron = require('../utils/scheduled-cron');
 const db = require('../models/db');
 const logger = require('./logger');
 const mileageService = require('./bouncie-mileage');

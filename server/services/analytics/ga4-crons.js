@@ -5,7 +5,7 @@
  * Call initGA4Crons() from the main scheduler or startup.
  */
 
-const cron = require('node-cron');
+const cron = require('../../utils/scheduled-cron');
 const logger = require('../logger');
 const GA4 = require('./google-analytics');
 

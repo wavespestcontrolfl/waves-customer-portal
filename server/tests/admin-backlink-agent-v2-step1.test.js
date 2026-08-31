@@ -102,7 +102,7 @@ describe('POST /opportunities/bulk (intake skeleton)', () => {
     const block = s.slice(s.indexOf('const linkRegistryCatchup'), s.indexOf('setInterval(linkRegistryCatchup'));
     expect(block).toMatch(/runExclusive\('link-registry-catchup'/);
     expect(block.indexOf('backfillLegacyBoard(db')).toBeLessThan(block.indexOf('backfillLegacyAttempts(db'));
-    expect(s).toMatch(/setTimeout\(linkRegistryCatchup, 90 \* 1000\)\.unref\(\)/);
-    expect(s).toMatch(/setInterval\(linkRegistryCatchup, 6 \* 60 \* 60 \* 1000\)\.unref\(\)/);
+    expect(s).toMatch(/scheduledCron\.scheduleTimeout\(linkRegistryCatchup, 90 \* 1000\)\.unref\(\)/);
+    expect(s).toMatch(/scheduledCron\.scheduleInterval\(linkRegistryCatchup, 6 \* 60 \* 60 \* 1000\)\.unref\(\)/);
   });
 });

@@ -14,6 +14,9 @@ jest.mock('../utils/cron-lock', () => ({
   isLocked: jest.fn(async () => false),
   recordJobStart: jest.fn(async () => {}),
   recordJobEnd: jest.fn(async () => {}),
+  // Real predicate, not a stub: the lock-busy tests below assert on it.
+  wasLockSkipped: (result) => !!(result && result.skipped === true
+    && ['lease_held', 'no_connection'].includes(result.reason)),
 }));
 
 const ReviewIncentives = require('../services/review-incentives');
