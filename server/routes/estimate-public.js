@@ -12653,7 +12653,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // Accept-SMS recipient: the estimate's own phone; when the estimate has
     // none but the linked customer row does — or, for a secondary-property
     // row without one, the account primary (same person; #1995) — that
-    // number. Fail-open to "no phone" (today's behavior), never a guess.
+    // number. Fail-open to "no phone", never a guess.
     let acceptSmsPhone = String(estimate.customer_phone || '').trim();
     if (!acceptSmsPhone && customerId) {
       try {
@@ -12665,12 +12665,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.warn(`[estimate-accept] accept SMS phone resolution failed for customer ${customerId}: ${phoneErr.message}`);
       }
     }
-    if (acceptSmsPhone && !billByInvoice && treatAsOneTime) {
+    // Gated on the accept SHAPE, not on a phone (pre-push Codex P1): a
+    // phoneless one-time accept with an email on the account (or its
+    // primary) still owes the appointment confirmation — the SMS legs
+    // below no-op without a number and deliverConfirmationByChannel then
+    // reaches the email. A customer-less accept has no prefs/email row to
+    // resolve, so it still needs a phone to enter.
+    if (!billByInvoice && treatAsOneTime && (acceptSmsPhone || customerId)) {
       try {
         if (treatAsOneTime) {
           const primarySvc = oneTimeBookingService || bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
           const confirmedServiceLabel = confirmationServiceLabel(oneTimeList, estimate, acceptedOneTimeServiceLabel || primarySvc.label);
-          if (bookingUrl) {
+          if (bookingUrl && !acceptSmsPhone) {
+            // Booking link rides SMS only; the onboarding email above
+            // carries the customer's next steps.
+            logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; skipping booking-link SMS`);
+          } else if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
               { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
@@ -12776,7 +12786,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               customerId: customerId || undefined,
               scheduledServiceId: confirmedAppointmentRow?.id,
               serviceLabel: confirmedServiceLabel,
+              // No number at all: the text cannot deliver, ever — route the
+              // default-'sms' channel to the confirmation email fallback.
+              smsPermanentlyBlocked: !acceptSmsPhone,
               smsAttempt: async () => {
+                if (!acceptSmsPhone) {
+                  logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; confirmation goes by email`);
+                  return false;
+                }
                 const customerBody = await renderCustomerConfirmationBody();
                 if (!customerBody) {
                   logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
