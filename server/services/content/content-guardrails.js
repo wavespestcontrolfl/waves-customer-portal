@@ -1619,14 +1619,27 @@ const AFFILIATE_LINK_MAX_PER_POST = 3;
 // Post types whose product rows may declare eligibility live in
 // @waves/affiliate-registry (PROTECTED_POST_TYPES is the deny side).
 // Service-CTA presence (affiliate is FALLBACK monetization — the Waves CTA
-// stays primary): any of these internal routes, or a real city-service
-// page, counts.
-const SERVICE_CTA_ROUTES = new Set([
-  '/book/', '/contact/', '/quote/', '/pest-control-quote/',
-  '/pest-control-calculator/', '/pest-control-services/',
-  '/waveguard-memberships/', '/termite-inspection/', '/termite-control/',
-  '/pest-inspection/',
-]);
+// stays primary). VERBATIM astro parity (packages/blog-schema/schema.ts
+// SERVICE_ROUTE_PATH_RE / WAVES_HUB_HOSTS / isServiceCtaHref): the astro
+// gate requires the exact trailing-slash route and, for absolute URLs,
+// https on a hub host with no explicit port — a looser portal test
+// (normalized paths, http, spoke hosts, extra cities) sends drafts into
+// affiliate review that the astro gate then rejects (Codex #3646 r10 P1).
+const SERVICE_ROUTE_PATH_RE =
+  /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
+const WAVES_HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+function isServiceCtaHref(href) {
+  const t = String(href || '').trim();
+  if (t.startsWith('/')) return SERVICE_ROUTE_PATH_RE.test(t);
+  if (!/^https:\/\//i.test(t)) return false;
+  try {
+    const u = new URL(t);
+    if (!WAVES_HUB_HOSTS.has(u.hostname.toLowerCase().replace(/\.$/, ''))) return false;
+    // URL normalizes :443 away on https — any remaining port is non-default.
+    if (u.port !== '') return false;
+    return SERVICE_ROUTE_PATH_RE.test(`${u.pathname}${u.search}${u.hash}`);
+  } catch { return false; }
+}
 
 function affiliateRegistryModule() {
   return require('../../../packages/affiliate-registry');
@@ -1735,24 +1748,25 @@ function hasServiceCtaLink(body) {
   // component, never a Markdown CTA, and must not satisfy the rule.
   const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(prefix))))))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
-  const isServiceRoute = (norm) => {
-    if (SERVICE_CTA_ROUTES.has(norm)) return true;
-    const m = CITY_SERVICE_LINK_RE.exec(norm);
-    return !!(m && PAGE_CITY_SLUGS.has(m[1]));
-  };
   for (const tag of eachTag(rendered)) {
     if (tag.isClose || tag.name !== 'inlinecta') continue;
     // An InlineCTA counts only when it leads to a Waves service route: no
     // ctaHref (the component defaults to the quote page) or a quoted
     // literal service route. A dynamic or non-service destination is not
-    // the required CTA (fail closed).
+    // the required CTA, and a spread can override the destination at
+    // render time (fail closed — astro hasInlineCtaService parity).
+    if (hasAttrSpreadAfter(tag.attrs)) continue;
     if (!/\bctaHref\s*=/.test(tag.attrs)) return true;
     const href = literalAttribute(tag.attrs, 'ctaHref');
-    const norm = href ? normalizeInternalPath(href) : null;
-    if (norm && isServiceRoute(norm)) return true;
+    if (href && isServiceCtaHref(href)) return true;
   }
-  for (const { norm } of collectInternalDestinations(rendered)) {
-    if (isServiceRoute(norm)) return true;
+  // Markdown-link destinations only, judged RAW by the astro classifier —
+  // no path normalization (the astro gate takes `/quote` literally and
+  // rejects it), and no raw <a href> shapes (they satisfy no astro rule).
+  const mdLink = /\]\(\s*(\/[^)\s]*|https?:\/\/[^)\s]+)\s*\)/gi;
+  let m;
+  while ((m = mdLink.exec(rendered)) !== null) {
+    if (isServiceCtaHref(m[1])) return true;
   }
   return false;
 }
@@ -1808,7 +1822,18 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     push('P0', 'AFFILIATE_LINK_IN_META', '', 'Draft carries an <AffiliateLink> in an editable meta field — affiliate links are body-only; metas stay informational.');
   }
   const tags = collectAffiliateLinkTags(body);
-  if (tags.length === 0) return findings;
+  // Disclosure is a BICONDITIONAL, exact-compare on both sides (astro
+  // validateAffiliateUsage parity — Codex #3646 r10 P1): the renderer keys
+  // the FTC block off disclosure.type === 'affiliate' EXACTLY, and a
+  // declared disclosure whose links were removed is an astro publish
+  // blocker — catch both here, before publishing or human review.
+  const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
+  if (tags.length === 0) {
+    if (disclosure.type === 'affiliate') {
+      push('P0', 'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', '', 'Frontmatter declares disclosure.type "affiliate" but the body carries no <AffiliateLink> — the astro gate blocks the mismatch; remove the disclosure or restore the links.');
+    }
+    return findings;
+  }
 
   // Exact 'true' at CALL time — the feature-gates `affiliateLinks` entry
   // documents the flag; reading the env here (reserviceReportCopy pattern)
@@ -1883,11 +1908,18 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // New drafts: disclosure, density, and service-CTA placement.
   // EXACT type only — the astro layout keys the rendered disclosure block
   // (and the Amazon Associates statement) off disclosure.type ===
-  // 'affiliate'; free text mentioning "commission" renders nothing, and
-  // "we receive no commission" would pass a keyword test.
-  const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
-  if (String(disclosure.type || '').trim().toLowerCase() !== 'affiliate') {
-    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure.type must be exactly "affiliate" (the renderer emits the FTC material-connection disclosure from that type; free text is not a substitute).');
+  // 'affiliate' with NO trimming or case folding: "Affiliate" or a
+  // whitespace-padded value renders nothing and the astro gate rejects it.
+  if (disclosure.type !== 'affiliate') {
+    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure.type must be exactly "affiliate" (lowercase, unpadded; the renderer emits the FTC material-connection disclosure from that exact type — free text, case variants, and padding are not substitutes).');
+  }
+  // Hub-only during the pilot (astro parity — Codex #3646 r10 P1): a
+  // spoke-targeted affiliate draft would park for owner review and then be
+  // rejected by the astro gate; block it before the review item exists.
+  const domainsDeclared = (Array.isArray(frontmatter?.domains) && frontmatter.domains.length > 0)
+    || (Array.isArray(frontmatter?.tracking?.domains) && frontmatter.tracking.domains.length > 0);
+  if (domainsDeclared) {
+    push('P0', 'AFFILIATE_POST_NOT_HUB_ONLY', '', 'Draft carries affiliate links and declares frontmatter domains/tracking.domains — affiliate posts are hub-only during the pilot; remove the domains targeting or every affiliate link.');
   }
   if (tags.length > AFFILIATE_LINK_MAX_PER_POST) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'count', `Draft carries ${tags.length} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post (affiliate is fallback monetization, never the point of the page).`);

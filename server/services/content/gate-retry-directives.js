@@ -39,7 +39,9 @@ const GATE_RETRY_INSTRUCTIONS = {
   // ever references product IDs its BRIEF supplies — it never invents one,
   // never pastes a retailer URL, and never adds affiliate links unasked.
   UNREGISTERED_AFFILIATE_LINK: 'Remove every <AffiliateLink> whose product id your brief did not explicitly supply — never invent a product id, compute the prop, or paste a retailer/tracking URL; if the brief supplied no affiliate products, this post carries none.',
-  AFFILIATE_LINK_WITHOUT_DISCLOSURE: 'This post carries an <AffiliateLink>, so frontmatter.disclosure must be type "affiliate" (FTC material-connection rule) — set it, or remove every affiliate component.',
+  AFFILIATE_LINK_WITHOUT_DISCLOSURE: 'This post carries an <AffiliateLink>, so frontmatter.disclosure must be type "affiliate" — exactly that lowercase string, no padding (FTC material-connection rule; the renderer keys off the exact value) — set it, or remove every affiliate component.',
+  AFFILIATE_DISCLOSURE_WITHOUT_LINKS: 'frontmatter.disclosure.type is "affiliate" but the body carries no <AffiliateLink> — remove the disclosure (use the post type\'s normal disclosure, if any) or restore the affiliate links the disclosure describes; the two must match exactly.',
+  AFFILIATE_POST_NOT_HUB_ONLY: 'Affiliate posts are hub-only during the pilot — remove frontmatter.domains and tracking.domains entirely from this post, or remove every <AffiliateLink>; never target an affiliate post at spoke sites.',
   AFFILIATE_LINK_IN_META: 'Remove every <AffiliateLink> (and any retailer URL) from title/meta fields — affiliate links are body-only; metas stay informational.',
   AFFILIATE_LINK_ADDED_ON_REFRESH: 'A refresh may preserve the affiliate links the live body already carries but may NEVER add one — remove every <AffiliateLink> the live body does not already contain, occurrence for occurrence.',
   AFFILIATE_LINK_ON_PROTECTED_PAGE: 'This post type never carries affiliate links (it captures local service intent) — remove every <AffiliateLink>; keep the Waves service CTA as the only call to action.',

@@ -488,6 +488,32 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       // test; pre-push Codex r1 P1).
       const textOnly = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ disclosure: { type: 'regulatory', text: 'Some links earn Waves a commission.' } }) }, { targetIsBlog: true });
       expect(affiliateCodes(textOnly)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
+      // EXACT compare, both directions (astro biconditional — Codex #3646 r10):
+      // case variants and padding render nothing astro-side...
+      for (const type of ['Affiliate', ' affiliate ', 'AFFILIATE']) {
+        const r2 = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ disclosure: { type } }) }, { targetIsBlog: true });
+        expect(affiliateCodes(r2)).toContain('P0:AFFILIATE_LINK_WITHOUT_DISCLOSURE');
+      }
+      // ...and a declared affiliate disclosure with NO links is the reverse blocker.
+      const orphan = guardrails.evaluate({ body: 'Plain prose.\n\n## Section\n\nNo products here.', frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(orphan)).toContain('P0:AFFILIATE_DISCLOSURE_WITHOUT_LINKS');
+      const noDisc = guardrails.evaluate({ body: 'Plain prose.\n\n## Section\n\nNo products here.', frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(affiliateCodes(noDisc)).toEqual([]);
+    });
+  });
+
+  test('affiliate posts are hub-only: declared domains/tracking.domains ⇒ P0 AFFILIATE_POST_NOT_HUB_ONLY (Codex #3646 r10)', () => {
+    withAffiliateEnv(() => {
+      const spoke = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ domains: ['bradentonpestcontrol.com'] }) }, { targetIsBlog: true });
+      expect(affiliateCodes(spoke)).toContain('P0:AFFILIATE_POST_NOT_HUB_ONLY');
+      const tracked = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ tracking: { domains: ['bradentonpestcontrol.com'] } }) }, { targetIsBlog: true });
+      expect(affiliateCodes(tracked)).toContain('P0:AFFILIATE_POST_NOT_HUB_ONLY');
+      // Empty arrays declare nothing; a domainless affiliate post stays clean.
+      const clean = guardrails.evaluate({ body: goodBody(), frontmatter: fm({ domains: [], tracking: { domains: [] } }) }, { targetIsBlog: true });
+      expect(affiliateCodes(clean)).toEqual([]);
+      // Domains without affiliate links are the ordinary (non-affiliate) case.
+      const plain = guardrails.evaluate({ body: 'Prose.\n\n## Section\n\nNothing linked.', frontmatter: { post_type: 'protocol', domains: ['bradentonpestcontrol.com'] } }, { targetIsBlog: true });
+      expect(affiliateCodes(plain)).toEqual([]);
     });
   });
 
@@ -598,6 +624,28 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       // destination collector — balanced image masking (Codex #3646 r9 P1).
       const nestedImg = `Intro copy.\n\n## Measuring\n\n![Request [a quote]](/quote/)\n\nUse ${link('rain-gauge')}.`;
       expect(affiliateCodes(guardrails.evaluate({ body: nestedImg, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Astro classifier parity (Codex #3646 r10): the exact trailing-slash
+      // route, https-only, hub hosts only, no explicit port — anything the
+      // astro gate rejects must not satisfy the portal rule either.
+      for (const dest of [
+        '/quote', // no trailing slash — astro takes the path literally
+        '/quote/extra/',
+        'http://wavespestcontrol.com/quote/', // http
+        'https://wavespestcontrol.com:444/quote/', // non-default port
+        'https://bradentonpestcontrol.com/quote/', // spoke host
+        'https://wavespestcontrol.com.evil.example/quote/',
+      ]) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a [quote](${dest}).\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+      // An absolute https hub-host spelling of a service route counts, with
+      // or without www (and an InlineCTA to one does too).
+      for (const dest of ['https://wavespestcontrol.com/quote/', 'https://www.wavespestcontrol.com/pest-control-calculator/']) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a [quote](${dest}).\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      }
+      const absInline = `Intro copy.\n\n## Measuring\n\n<InlineCTA ctaHref="https://wavespestcontrol.com/quote/" />\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: absInline, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
     });
   });
 
@@ -717,6 +765,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
+      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }
