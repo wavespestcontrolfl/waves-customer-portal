@@ -338,3 +338,66 @@ describe('W0B cancellation money effects', () => {
     });
   });
 });
+
+describe('W0B two-step execution pin', () => {
+  const { previewFingerprint } = jest.requireActual('../services/intelligence-bar/authorization-contract');
+  const PREVIEW = { preview: true, would_create: { first_name: 'Test', phone: '9415550100' }, generated_at: 'x' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'create_customer', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+
+  test('proposal pins the resolved preview and the card discloses it', async () => {
+    mockExecuteTool.mockResolvedValue(PREVIEW);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_customer', input: { first_name: 'Test', phone: '9415550100' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'add', context: 'customers' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._two_step_preview_fingerprint).toBe(previewFingerprint(PREVIEW));
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual('would create: { first name: Test; phone: 9415550100 }');
+      expect(body.pendingActions[0].params._two_step_preview_fingerprint).toBeUndefined();
+    });
+  });
+
+  test('/confirm-action re-runs the preview and executes only when it still matches', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'create_customer', params: { first_name: 'Test', phone: '9415550100', _two_step_preview_fingerprint: previewFingerprint(PREVIEW) } },
+    });
+    mockExecuteTool
+      .mockResolvedValueOnce({ ...PREVIEW, generated_at: 'later' }) // re-preview (volatile field differs — fine)
+      .mockResolvedValueOnce({ success: true, customer_id: 'c1' }); // confirmed run
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledTimes(2);
+      expect(mockExecuteTool.mock.calls[0][1].confirmed).toBeUndefined();
+      expect(mockExecuteTool.mock.calls[1][1]).toEqual({ first_name: 'Test', phone: '9415550100', confirmed: true });
+    });
+  });
+
+  test('/confirm-action refuses when the re-run preview resolves differently', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'create_customer', params: { first_name: 'Test', phone: '9415550100', _two_step_preview_fingerprint: previewFingerprint(PREVIEW) } },
+    });
+    mockExecuteTool.mockResolvedValueOnce({ ...PREVIEW, would_create: { first_name: 'Test', phone: '9415550199' } });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.preview_changed).toBe(true);
+      expect(mockExecuteTool).toHaveBeenCalledTimes(1); // preview only — never the confirmed run
+    });
+  });
+});

@@ -604,8 +604,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   let preview;
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // Two-step executors are contract-tested to be mutation-free without
-    // confirmed — run them for the rich preview.
-    preview = await executeToolByName(toolUse.name, params, null);
+    // confirmed — run them for the rich preview (on a copy: the stored
+    // params gain execution pins after this call).
+    preview = await executeToolByName(toolUse.name, { ...params }, null);
     if (isToolFailure(preview)) {
       return { failed: true, modelResult: preview };
     }
@@ -741,6 +742,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
+  } else if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
+    // W0B execution pin for every other two-step write: the confirmed run
+    // re-resolves its target from the stored params, so pin the resolved
+    // preview and let /confirm-action refuse if a re-run resolves
+    // differently (product, stop order, record, before/after state).
+    params._two_step_preview_fingerprint = AuthorizationContract.previewFingerprint(preview);
   }
   // Phone identifiers are MUTABLE — a newer estimate for the same phone can
   // appear between preview and Confirm, and the confirmed re-resolve would
@@ -2127,6 +2134,25 @@ router.post('/confirm-action', async (req, res, next) => {
       }
     }
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
+      // W0B execution pin: re-run the (mutation-free) preview and refuse if
+      // it no longer resolves to what the card showed.
+      const approvedTwoStep = execParams._two_step_preview_fingerprint;
+      delete execParams._two_step_preview_fingerprint;
+      if (approvedTwoStep) {
+        const livePreview = await executeToolByName(action.tool_name, { ...execParams }, techContextForExecution(req), {
+          isAdmin: req.techRole === 'admin',
+          technicianId: req.technicianId || req.technician?.id || null,
+          confirmed: false,
+        });
+        if (isToolFailure(livePreview) || AuthorizationContract.previewFingerprint(livePreview) !== approvedTwoStep) {
+          const result = {
+            error: 'What this action would do changed after the card was shown. Ask again for a fresh confirmation card.',
+            preview_changed: true,
+          };
+          await PendingActions.recordResult(action.id, result);
+          return res.status(409).json(result);
+        }
+      }
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.
       execParams.confirmed = true;

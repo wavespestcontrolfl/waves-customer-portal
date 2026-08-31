@@ -152,6 +152,31 @@ test('bulk_update_customers with an email change discloses the per-customer emai
   expect(labels.some((l) => l.includes(CONTACT_FANOUT_DISCLOSURE))).toBe(false);
 });
 
+test('two-step previews surface their resolved facts as effects (capped) and fingerprint exactly', () => {
+  const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+  const preview = {
+    preview: true, product: 'Termidor SC 20oz', current_stock: 4, new_stock: 2, would_adjust: -2,
+    generated_at: '2026-08-31T03:00:00Z', _internal: 'x',
+  };
+  const c = buildContract({ toolName: 'adjust_stock', params: { sku: 'T-20', delta: -2 }, displayParams: { sku: 'T-20', delta: -2 }, preview });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual('product: Termidor SC 20oz');
+  expect(labels).toContainEqual('current stock: 4');
+  expect(labels).toContainEqual('new stock: 2');
+  expect(labels.some((l) => /generated at|internal/.test(l))).toBe(false);
+
+  const fp = previewFingerprint(preview);
+  expect(previewFingerprint({ ...preview, generated_at: 'later', _internal: 'y' })).toBe(fp); // volatile/internal ignored
+  expect(previewFingerprint({ ...preview, new_stock: 1 })).not.toBe(fp); // real drift moves it
+  expect(previewFingerprint({ ...preview, product: 'Termidor SC 78oz' })).not.toBe(fp);
+
+  // Many-field previews are capped on the card but still pinned exactly.
+  const big = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`stop_${i}`, `addr ${i}`]));
+  const c2 = buildContract({ toolName: 'optimize_all_routes', params: {}, displayParams: {}, preview: big });
+  expect(c2.effects.filter((e) => e.label.startsWith('stop ')).length).toBe(12);
+  expect(c2.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^\(\+8 more preview fields/));
+});
+
 test('hash is order-independent and sensitive to any effect change', () => {
   const a = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { appointment_id: 'ap1', reason: 'rain' } });
   const b = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { reason: 'rain', appointment_id: 'ap1' } });

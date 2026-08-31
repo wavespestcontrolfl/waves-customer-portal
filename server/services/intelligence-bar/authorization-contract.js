@@ -32,6 +32,18 @@ const {
 
 const CONTRACT_VERSION = 1;
 
+// Preview keys that are plumbing, not effects (the model-facing wrapper
+// and the pins the contract already reads directly).
+const PREVIEW_NOISE_KEYS = new Set([
+  'proposal', 'tool', 'params', 'preview', 'pending_confirmation', 'note', 'success', 'error',
+  'pinned_recipient', 'pinned_technician', 'pinned_lead', 'matches', 'action', 'cancellation',
+]);
+// Keys that legitimately differ between two identical previews (clocks,
+// timings) — excluded from both the card and the fingerprint.
+const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|duration|took|_ms$|latency|request_id|trace)/i;
+const PREVIEW_EFFECT_LINES = 12;
+const PREVIEW_EFFECT_CHARS = 200;
+
 // Tools whose commit cannot be undone from the portal (a message leaves,
 // money moves, a public reply posts). Everything else is editable after.
 const IRREVERSIBLE_TOOL_NAMES = new Set([
@@ -217,6 +229,26 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     }
   }
 
+  // Two-step tools resolve the REAL target/state in their preview (the
+  // product and before/after stock, the ordered stops, the record to be
+  // created) — that resolution, not just the model's inputs, is what the
+  // operator approves. Surface it (capped for the card; the fingerprint
+  // below covers it exactly) alongside the display params.
+  if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+    let shown = 0;
+    let hidden = 0;
+    for (const [k, v] of Object.entries(preview)) {
+      if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
+      const d = describe(v, 1);
+      if (d === null) continue;
+      if (shown >= PREVIEW_EFFECT_LINES) { hidden += 1; continue; }
+      const line = `${humanKey(k)}: ${d}`;
+      push(kindFor(toolName, k), line.length > PREVIEW_EFFECT_CHARS ? `${line.slice(0, PREVIEW_EFFECT_CHARS - 1)}…` : line);
+      shown += 1;
+    }
+    if (hidden) push('operational', `(+${hidden} more preview field${hidden > 1 ? 's' : ''} — pinned exactly; confirm re-checks them)`);
+  }
+
   // Every curated display line is an effect the operator is approving —
   // one level of plain-object params flattens to its own lines (so an
   // update_customer card says WHAT changes), deeper structure is described
@@ -287,11 +319,39 @@ function contractHash(contract) {
   return crypto.createHash('sha256').update(stableStringify(contract)).digest('hex');
 }
 
+// Strip plumbing + volatile keys (recursively) so two previews of the same
+// resolved effect set hash identically, and any real difference (target,
+// order, amount, before/after state) does not.
+function normalizePreview(value, depth = 0) {
+  if (Array.isArray(value)) return value.map((v) => normalizePreview(v, depth + 1));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
+      if (depth === 0 && PREVIEW_NOISE_KEYS.has(k) && k !== 'matches' && k !== 'preview' && k !== 'action') continue;
+      out[k] = normalizePreview(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Execution pin for two-step writes: the confirmed run re-resolves its
+ * target from stored params, so the proposal-time preview is fingerprinted
+ * and /confirm-action re-runs the preview and refuses on drift — one
+ * approval = one exact resolved effect set (owner ruling 8).
+ */
+function previewFingerprint(preview) {
+  return crypto.createHash('sha256').update(stableStringify(normalizePreview(preview || {}))).digest('hex');
+}
+
 module.exports = {
   CONTRACT_VERSION,
   tierFor,
   buildContract,
   contractHash,
+  previewFingerprint,
   IRREVERSIBLE_TOOL_NAMES,
   CUSTOMER_CONTACT_TOOL_NAMES,
 };
