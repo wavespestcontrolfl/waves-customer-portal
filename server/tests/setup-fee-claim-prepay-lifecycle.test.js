@@ -554,6 +554,13 @@ describe('source contracts — where the lifecycle is wired', () => {
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
 
+  test('wizard waiver lookup is strict; renewals seed prices from the immutable claim first (codex #3591 r71 P1)', () => {
+    const publicQuoteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuoteSrc).toMatch(/loadExistingQualifyingServiceKeys\(db, existingForWaiver\.id, \{ strict: true \}\)/);
+    const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
+    expect(renewals).toMatch(/conn\('setup_fee_claims'\)\.where\(\{ invoice_id: term\.prepay_invoice_id \}\)\.first\('amount'\);[\s\S]*?if \(!\(setupTotal > 0\)\) \{[\s\S]*?\/\\bsetup\\b\/i/);
+  });
+
   test('every accept-side mint keys its claim to the estimate; the column ships guarded both ways (codex #3591 r70 P1)', () => {
     const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
     expect((estimatePublicSrc.match(/await plans\.recordSetupFeeClaimForInvoice\(trx, \{[\s\S]*?estimateId: estimate\.id,\s+\}\);/g) || []).length).toBe(2);
@@ -774,9 +781,20 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     await expect(InvoiceService.retireRodentSetupObligationForRevivedPrepay(busy, 'inv-prepay'))
       .rejects.toThrow(/completion mid-claim/);
     expect(busy.writes.filter((w) => w.op === 'update')).toEqual([]);
-    const noSetup = revivalConn({ invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Annual Prepay', amount: 486.4 }] } });
+    // No setup line AND no restored stamp = genuinely no setup → no-op.
+    const noSetup = revivalConn({ stamp: null, invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Annual Prepay', amount: 486.4 }] } });
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(noSetup, 'inv-prepay')).toBeNull();
     expect(noSetup.writes).toEqual([]);
+  });
+
+  test('a RENAMED setup line still retires the restored stamp — the stamp is the surviving claim provenance (codex #3591 r71 P1)', async () => {
+    const renamed = revivalConn({ invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Station install (edited)', unit_price: 99, amount: 99 }] } });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(renamed, 'inv-prepay'))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99, retired: true });
+    expect(renamed.writes).toEqual([
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'root-rb', amount: 99 } }),
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
+    ]);
   });
 
   test('a dead-series replacement draft is VOIDED on revival; a sent/paid replacement pages a human instead (codex #3591 r46 P1)', async () => {

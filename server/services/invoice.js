@@ -5191,8 +5191,7 @@ const InvoiceService = {
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
-    const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
-    if (!setupLine || !(amount > 0)) return null;
+    let amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
     const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require("./secure-appointment-plans");
     let anchorId = null;
     if (invoiceRow.scheduled_service_id) {
@@ -5204,20 +5203,43 @@ const InvoiceService = {
         : own;
       if (root && require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) anchorId = root.id;
     }
+    let accountBaitRoots = [];
     if (!anchorId) {
       const roots = await conn("scheduled_services")
         .where({ customer_id: invoiceRow.customer_id })
         .whereNull("recurring_parent_id")
         .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
-        .select("id", "service_type", "service_id");
-      const baitRoots = [];
+        .select("id", "service_type", "service_id", "pending_setup_fee");
       for (const root of roots || []) {
-        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) accountBaitRoots.push(root);
       }
       // A UNIQUE match only (codex #3591 r51 local P0): a customer with
       // multiple rodent series must never have an unrelated series'
       // stamp/claim mutated — ambiguity stays anchor-less/paged.
-      if (baitRoots.length === 1) anchorId = baitRoots[0];
+      if (accountBaitRoots.length === 1) anchorId = accountBaitRoots[0].id;
+    }
+    if (!setupLine || !(amount > 0)) {
+      // Renamed/repriced setup line (codex #3591 r71 P1): the refund's
+      // restore stamped the anchor with the consumed claim's EXACT amount —
+      // that restored stamp is the surviving provenance, so the revival
+      // retires it (and re-ledgers the claim) from the stamp instead of
+      // returning early and leaving both the stamp and the revived
+      // invoice's setup collectible.
+      let stampedAmount = null;
+      if (anchorId) {
+        const probe = await conn("scheduled_services").where({ id: anchorId }).first("pending_setup_fee");
+        const v = Number(probe?.pending_setup_fee);
+        if (v > 0) stampedAmount = Math.round(v * 100) / 100;
+      } else {
+        const stampedRoots = accountBaitRoots.filter((root) => Number(root.pending_setup_fee) > 0);
+        if (stampedRoots.length === 1) {
+          anchorId = stampedRoots[0].id;
+          stampedAmount = Math.round(Number(stampedRoots[0].pending_setup_fee) * 100) / 100;
+        }
+      }
+      if (!(stampedAmount > 0)) return null;
+      logger.warn(`[invoice] revived prepay ${prepayInvoiceId}: setup line missing/renamed — retiring the restored $${stampedAmount.toFixed(2)} stamp on series ${anchorId} from claim provenance`);
+      amount = stampedAmount;
     }
     // (sibling-completion retire happens after anchor resolution below)
     // The marker sweep runs regardless of an anchor (codex #3591 r47 P1):

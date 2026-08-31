@@ -778,16 +778,27 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // One-time setup lines (rodent bait-station setup, owner 2026-08-29)
       // ride the prepay invoice but are NOT per-visit coverage money —
       // subtract them before dividing, or the voided-prepay fallback price
-      // rebills every visit with a slice of the setup fee.
+      // rebills every visit with a slice of the setup fee. The IMMUTABLE
+      // setup_fee_claims record decides first (codex #3591 r71 P1) — a
+      // staff-renamed line would otherwise inflate every seeded fallback
+      // price by the setup's slice while a later reversal also restores the
+      // setup itself; the text scan stays only for pre-ledger invoices.
+      let setupTotal = 0;
       try {
-        const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
-        if (Array.isArray(lines)) {
-          const setupTotal = lines
-            .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
-            .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
-          if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
-        }
-      } catch { /* unparseable line_items — keep the subtotal basis */ }
+        const claimRow = await conn('setup_fee_claims').where({ invoice_id: term.prepay_invoice_id }).first('amount');
+        setupTotal = Math.round((Number(claimRow?.amount) || 0) * 100) / 100;
+      } catch { /* unreadable ledger — fall back to the line scan */ }
+      if (!(setupTotal > 0)) {
+        try {
+          const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
+          if (Array.isArray(lines)) {
+            setupTotal = lines
+              .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
+              .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
+          }
+        } catch { /* unparseable line_items — keep the subtotal basis */ }
+      }
+      if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
       if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
     } catch (err) {
       logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);

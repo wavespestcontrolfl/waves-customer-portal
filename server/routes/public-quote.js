@@ -1244,8 +1244,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (services.rodentBait) {
       try {
         const existingForWaiver = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+        // STRICT (codex #3591 r71 P1): the default loader converts a failed
+        // membership/catalog read into [] — this catch's 503 would never run
+        // and /calculate would price and persist a $99 the customer's other
+        // service waives.
         engineInput.setupWaiverPriorQualifyingServices = existingForWaiver
-          ? await require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys(db, existingForWaiver.id)
+          ? await require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys(db, existingForWaiver.id, { strict: true })
           : [];
       } catch (lookupErr) {
         logger.error(`[public-quote] rodent setup-waiver account lookup failed: ${lookupErr.message}`);
