@@ -159,7 +159,7 @@ function chainGuards(chain) {
   const head = upTo === -1 ? chain : chain.slice(0, upTo);
   // orWhere* included: appending an OR branch loosens a guard and must
   // change the pinned array.
-  return [...head.matchAll(/\.((?:orW|w)here(?:In|NotIn|Null|NotNull|Not)?)\(([^)]*)/g)]
+  return [...head.matchAll(/\.((?:orW|w)here[A-Za-z]*)\(([^)]*)/g)]
     .map((g) => `${g[1]}(${g[2].replace(/\s+/g, ' ').trim()})`);
 }
 
