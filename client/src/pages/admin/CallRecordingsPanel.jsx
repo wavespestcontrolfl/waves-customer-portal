@@ -673,12 +673,20 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
       // identical to a successful run, which is how a stuck call read as
       // processed on 2026-08-31.
       setProcessVerdict(describeProcessResult(res));
-      const fresh = await adminFetch(
-        `/admin/call-recordings/recording/${requestedId}`,
-      );
-      if (!stillShowing()) return;
-      if (fresh?.recording) setR(fresh.recording);
-      if (onUpdate) onUpdate();
+      // The refresh is fail-soft and OUTSIDE the verdict's catch: the
+      // process already happened, and letting a failed re-read overwrite an
+      // accurate verdict with "Process failed" would invite the very
+      // reprocess this change exists to prevent.
+      try {
+        const fresh = await adminFetch(
+          `/admin/call-recordings/recording/${requestedId}`,
+        );
+        if (!stillShowing()) return;
+        if (fresh?.recording) setR(fresh.recording);
+        if (onUpdate) onUpdate();
+      } catch {
+        /* the row just won't repaint until the next load */
+      }
     } catch (e) {
       if (!stillShowing()) return;
       setProcessVerdict({
