@@ -401,7 +401,11 @@ async function sendCancellationReceived({
       submitted_at: displayDate(submittedAt),
       outcome_line: outcomeLine,
     },
-    idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}`,
+    // The outcome class is part of the identity: a repaired retry reuses the
+    // SAME request, and its completed confirmation must not dedupe against
+    // the earlier partial "closing out by hand" send — each class sends at
+    // most once per request.
+    idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}:${processed === true ? 'completed' : 'received'}`,
     categories: ['cancellation_received'],
     metadata: {
       service_request_id: request.id,

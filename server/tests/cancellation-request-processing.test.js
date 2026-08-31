@@ -84,6 +84,14 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
 }));
 
+// Plan-rate ledger: the repair-only retry VERIFIES the first run's scoped
+// wind-down through loadComponents; default = clean (no residual component).
+const mockLoadComponents = jest.fn(async () => []);
+jest.mock('../services/plan-rate-ledger', () => ({
+  loadComponents: (...a) => mockLoadComponents(...a),
+  resetLedgerToScalar: jest.fn(async () => {}),
+}));
+
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -978,6 +986,15 @@ describe('processCancellationRequest', () => {
       // The account was NOT churned and nothing new was cancelled.
       expect(db.__tables.customers[0].active).toBe(true);
 
+      // Run 1's WIND-DOWN failed (the ledger still carries the family):
+      // the retry must NOT report wound-down — the tier/rate would keep
+      // billing the cancelled family while the run read clean.
+      mockLoadComponents.mockResolvedValueOnce([{ family_key: 'lawn_care', monthly_rate: '60.00' }]);
+      const unwound = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
+      expect(unwound.scopedWoundDown).toBe(false);
+      expect(unwound.ok).toBe(false);
+      expect(unwound.errors).toContain('scoped_wind_down');
+
       // No prior-cancelled rows for the reason → the refusal stands.
       db.__tables.job_status_history = [];
       const refused = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r2', requestId: 'r2', families: ['lawn_care'] });
@@ -1005,6 +1022,19 @@ describe('processCancellationRequest', () => {
       expect(ApptCardRequests.handleAppointmentCardCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1', waiveFee: true });
       expect(result.lateFeeWaived).toBe(true);
       expect(db.__tables.customer_interactions[0].body).toContain('Scheduled-visit fee waived');
+    });
+
+    test('a waiver answered by anything but released:true (e.g. a PARKED hold) is never reported waived', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      // A parked hold is DEFERRED collection, not a waived fee — the shape
+      // carries no released field at all.
+      CardHolds.handleCardHoldCancellation.mockResolvedValueOnce({ handled: true, parked: true, reason: 'waived_cancel_park' });
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r9', requestId: 'r9', waiveLateFee: true });
+      expect(result.lateFeeWaived).toBe(false);
+      expect(result.errors).toContain('card_hold:s1');
     });
 
     test('a card-hold release race ({released:false}, NO reason) is unresolved money — flagged, and the waiver is NOT reported', async () => {

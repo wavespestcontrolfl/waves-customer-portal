@@ -506,6 +506,18 @@ describe('POST /:id/cancel-plan', () => {
     expect(body.processed).toBe(true);
     expect(body.errors).toContain('visits_pulled_beyond_preview');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+
+    // IDENTITIES, not counts: an approved visit completing mid-run while a
+    // minted occurrence is swept keeps the count equal — the swapped id is
+    // still an exception.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 3, cancelledIds: ['v1', 'v2', 'vNEW'] });
+    const swap = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    expect(swap.errors).toContain('visits_pulled_beyond_preview');
+
+    // The exact approved set reads clean.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 3, cancelledIds: ['v1', 'v2', 'v3'] });
+    const clean = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    expect(clean.errors).toEqual([]);
     buildCancellationImpact.mockResolvedValue(base);
   }));
 

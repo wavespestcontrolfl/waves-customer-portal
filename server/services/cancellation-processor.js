@@ -717,6 +717,11 @@ async function processCancellationRequest({
 
   // 3. Cancel the customer's upcoming cancellable visits.
   let cancelledCount = 0;
+  // The IDs this run actually flipped — the caller reconciles them against
+  // the operator-approved preview identities, not just the count (a
+  // completed-approved-visit + minted-occurrence swap keeps the count equal
+  // while pulling an appointment nobody approved).
+  const cancelledIds = [];
   const processed = new Set();
 
   function sweepCancellable() {
@@ -840,6 +845,7 @@ async function processCancellationRequest({
           return;
         }
         cancelledCount += 1;
+        cancelledIds.push(svc.id);
       }
     }
 
@@ -902,18 +908,23 @@ async function processCancellationRequest({
     // ambiguous Stripe result, post-charge write failure).
     try {
       const CardHolds = require('./estimate-card-holds');
-      // waiveLateFee (C3, office-initiated waive): the hold rail releases
-      // instead of judging the fee window — 'offboard' intent on a
-      // whole-account cancel (a leaving customer's hold never parks), a
-      // plain waived cancel when the account stays (scoped).
+      // waiveLateFee (C3, office-initiated waive): the hold rail RELEASES
+      // instead of judging the fee window — 'offboard' intent on scoped
+      // cancels too: the visit's family is ending either way, and with the
+      // park-on-cancel gate a plain waived cancel would PARK the hold
+      // ({parked:true}, no released field) while the records claim the fee
+      // was waived — a parked hold is deferred collection, not a waiver.
       const holdResult = await CardHolds.handleCardHoldCancellation({
         scheduledServiceId: svc.id,
-        ...(lateFeeWaived ? { waiveFee: true, ...(scoped ? {} : { intent: 'offboard' }) } : {}),
+        ...(lateFeeWaived ? { waiveFee: true, intent: 'offboard' } : {}),
       });
       // released === false is unresolved money even with NO reason (a lost
       // release race returns exactly that shape) — same rule as the
-      // appointment-card rail below.
-      if (holdResult && (CARD_HOLD_REVIEW_REASONS.has(holdResult.reason) || holdResult.released === false)) {
+      // appointment-card rail below. A WAIVER is confirmed only by an
+      // explicit released:true on an existing hold — parked or any other
+      // shape is not a waived fee.
+      if (holdResult && (CARD_HOLD_REVIEW_REASONS.has(holdResult.reason) || holdResult.released === false
+        || (lateFeeWaived && holdResult.reason !== 'no_hold' && holdResult.released !== true))) {
         errors.push(`card_hold:${svc.id}`);
         if (lateFeeWaived) feeWaiverConfirmed = false;
         logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason || 'released:false with no reason'}`);
@@ -1021,10 +1032,28 @@ async function processCancellationRequest({
   // front, so this cannot fail on attribution; a write failure is reported
   // and leaves the visits cancelled — the office repairs the rate, never the
   // reverse).
-  // Repair-only retries report the wind-down as settled: run 1 either
-  // applied it or belled its failure ('scoped_wind_down'), and with the
-  // families gone from the live rows no new plan can be built here.
-  let scopedWoundDown = scopedRepairOnly;
+  // Repair-only retries VERIFY the first run's wind-down instead of assuming
+  // it: run 1 may have failed applyScopedWindDown after pulling the visits,
+  // and with the families gone from the live rows no new plan can be built —
+  // reporting wound-down anyway would close the retry clean while the
+  // tier/rate/ledger still bill the cancelled family. Monthly-lane proof =
+  // no live component left for a scoped family (applyScopedWindDown deletes
+  // them; a held family's parked component is 0). Residual or unverifiable →
+  // 'scoped_wind_down' stays on the run and the office repairs the rate by
+  // hand — the same bell run 1 raised, never a silent overcharge.
+  let scopedWoundDown = false;
+  if (scopedRepairOnly) {
+    try {
+      const { loadComponents } = require('./plan-rate-ledger');
+      const components = await loadComponents(db, customerId);
+      const residual = (components || []).filter((c) => scopedFamilies.includes(c.family_key) && Number(c.monthly_rate) > 0);
+      scopedWoundDown = residual.length === 0;
+    } catch (verifyErr) {
+      logger.error(`[cancellation-processor] repair-retry wind-down verification failed for ${customerId}: ${verifyErr.message}`);
+      scopedWoundDown = false;
+    }
+    if (!scopedWoundDown) errors.push('scoped_wind_down');
+  }
   if (scoped && scopedPlan?.ok) {
     try {
       await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed });
@@ -1080,7 +1109,7 @@ async function processCancellationRequest({
   );
 
   return {
-    cancelledCount, recurrenceStopped, churned, ok, errors,
+    cancelledCount, cancelledIds, recurrenceStopped, churned, ok, errors,
     // C3 facts the caller records on the case: what was kept, and whether
     // the requested waiver was CONFIRMED by every applicable fee rail —
     // never the raw request while a fee may still charge.

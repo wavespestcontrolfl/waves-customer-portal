@@ -814,13 +814,17 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // exposure changes what pressing Confirm does, and it must not silently
   // commit different numbers. Checked before any write.
   let approvedPulled = null;
+  let approvedPulledIds = null;
   if (suppliedFingerprint) {
     const { liveImpact, fingerprint } = await liveApprovedFacts();
     if (fingerprint !== suppliedFingerprint) {
       throw new CancelPlanError(409, 'preview_changed',
         'The cancellation facts changed since this preview (a visit completed or appeared, or the prepay term was edited). Re-open the preview and approve the current numbers.');
     }
-    approvedPulled = liveImpact && Array.isArray(liveImpact.pulledVisitKeys) ? liveImpact.pulledVisitKeys.length : null;
+    if (liveImpact && Array.isArray(liveImpact.pulledVisitKeys)) {
+      approvedPulled = liveImpact.pulledVisitKeys.length;
+      approvedPulledIds = new Set(liveImpact.pulledVisitKeys.map((k) => String(k).split(':')[0]));
+    }
   }
 
   let caseSnapshot = null;
@@ -881,14 +885,21 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   }
   const processed = !!(result && result.ok && (result.churned || result.scopedWoundDown));
   if (result && Array.isArray(result.errors)) errors.push(...result.errors);
-  // Approved-facts reconcile after the sweep (codex r8 P2): the recurrence
-  // stop's straggler re-sweep can catch an occurrence minted after the
-  // fingerprint check — correctly cancelled (its series is ending), but a
-  // visit the operator never saw. More rows pulled than approved is an
-  // exception for office eyes, not a clean "Done."
-  if (processed && approvedPulled != null && Number(result?.cancelledCount) > approvedPulled) {
-    errors.push('visits_pulled_beyond_preview');
-    logger.warn(`[admin-cancellation] request ${request.id} pulled ${result.cancelledCount} visits but the approved preview showed ${approvedPulled}`);
+  // Approved-facts reconcile after the sweep (codex r8 P2, r10 P2): the
+  // recurrence stop's straggler re-sweep can catch an occurrence minted
+  // after the fingerprint check — correctly cancelled (its series is
+  // ending), but a visit the operator never saw. IDENTITIES, not counts: a
+  // completed-approved-visit + minted-occurrence swap keeps the count equal
+  // while pulling a different appointment. Any pull outside the approved
+  // set is an exception for office eyes, not a clean "Done."
+  if (processed && approvedPulled != null) {
+    const beyond = approvedPulledIds && Array.isArray(result?.cancelledIds)
+      ? result.cancelledIds.some((id) => !approvedPulledIds.has(String(id)))
+      : Number(result?.cancelledCount) > approvedPulled;
+    if (beyond) {
+      errors.push('visits_pulled_beyond_preview');
+      logger.warn(`[admin-cancellation] request ${request.id} pulled visits outside the approved preview (${result?.cancelledCount} pulled vs ${approvedPulled} approved)`);
+    }
   }
 
   // Annual-prepay term disposition (whole-account only) — GATED on a
