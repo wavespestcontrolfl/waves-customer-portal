@@ -646,6 +646,20 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       }
       const absInline = `Intro copy.\n\n## Measuring\n\n<InlineCTA ctaHref="https://wavespestcontrol.com/quote/" />\n\nUse ${link('rain-gauge')}.`;
       expect(affiliateCodes(guardrails.evaluate({ body: absInline, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      // Real-link walker parity with astro markdownLinkDests (Codex #504
+      // r13): a titled destination still renders an anchor and counts...
+      for (const cta of ['[quote](/quote/ "Request service")', '[quote](https://wavespestcontrol.com/quote/ "Request service")', '[quote](</quote/>)']) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a ${cta}.\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      }
+      // ...while an escaped opener renders literal text, never an anchor,
+      // and an escaped image marker leaves a REAL link that counts.
+      for (const cta of ['\\[quote](/quote/)', '\\[quote](https://wavespestcontrol.com/quote/)']) {
+        const b = `Intro copy.\n\n## Measuring\n\nGet a ${cta}.\n\nUse ${link('rain-gauge')}.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+      const escapedImg = `Intro copy.\n\n## Measuring\n\n\\![Request [a quote]](/quote/)\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: escapedImg, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
     });
   });
 

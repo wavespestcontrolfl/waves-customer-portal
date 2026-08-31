@@ -1760,13 +1760,20 @@ function hasServiceCtaLink(body) {
     const href = literalAttribute(tag.attrs, 'ctaHref');
     if (href && isServiceCtaHref(href)) return true;
   }
-  // Markdown-link destinations only, judged RAW by the astro classifier —
-  // no path normalization (the astro gate takes `/quote` literally and
-  // rejects it), and no raw <a href> shapes (they satisfy no astro rule).
-  const mdLink = /\]\(\s*(\/[^)\s]*|https?:\/\/[^)\s]+)\s*\)/gi;
-  let m;
-  while ((m = mdLink.exec(rendered)) !== null) {
-    if (isServiceCtaHref(m[1])) return true;
+  // REAL Markdown-link destinations only, judged RAW by the astro
+  // classifier (markdownLinkDests parity): no path normalization (the
+  // astro gate takes `/quote` literally and rejects it), no raw <a href>
+  // shapes (they satisfy no astro rule), no escaped openers (\[q](/quote/)
+  // renders literal text — eachMarkdownLink deliberately still scans those
+  // for the citation rules, so the escape check lives here), and the
+  // CommonMark destination (bare or <>-wrapped) split from any title.
+  for (const span of eachMarkdownLink(rendered)) {
+    if (span.kind !== 'inline' || span.isImage) continue;
+    if (backslashRunBefore(rendered, span.labelStart) % 2 === 1) continue;
+    const inner = rendered.slice(span.destStart, span.destEnd + 1).trim();
+    const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
+    const dest = dm ? (dm[1] !== undefined ? dm[1] : dm[2]).trim() : '';
+    if (dest && isServiceCtaHref(dest)) return true;
   }
   return false;
 }

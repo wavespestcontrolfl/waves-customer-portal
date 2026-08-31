@@ -631,11 +631,6 @@ export function validateMarkdownComponents(
 // ─────────────────────────────────────────────────────────────
 
 export const AFFILIATE_LINK_MAX_PER_POST = 3;
-// Exact routes only: the path must END after the trailing slash (an
-// optional ?query/#fragment, then the closing paren) — "/quote/anything/"
-// is not the quote page (Codex PR3 r8 P1).
-const SERVICE_CTA_LINK_RE =
-  /\]\(\s*\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#][^)\s]*)?\s*\)|\]\(\s*\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#][^)\s]*)?\s*\)/;
 
 // Length-preserving blanker for balanced `{…}` MDX expressions, quote-aware
 // inside tags (an attribute value like title="a {b}" is not an expression)
@@ -730,20 +725,45 @@ function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolea
   return out.join('');
 }
 
+// Length-preserving blank of every string literal that sits inside a brace
+// span — the BALANCING view for blankBalancedElements: tag-shaped text
+// inside an MDX expression string ({'</div>'}) is rendered TEXT, so the
+// open/close walk must never count it as markup. Quotes outside braces
+// (prose apostrophes, plain attr values) are untouched; an unterminated
+// string is left alone.
+function blankExpressionStrings(src: string): string {
+  const out = src.split('');
+  let depth = 0;
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === '\\') { i += 1; continue; }
+    if (c === '{') { depth += 1; continue; }
+    if (c === '}') { if (depth > 0) depth -= 1; continue; }
+    if (depth > 0 && (c === '"' || c === "'" || c === '`')) {
+      let j = i + 1;
+      for (; j < src.length; j += 1) { if (src[j] === '\\') { j += 1; continue; } if (src[j] === c) break; }
+      if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; }
+    }
+  }
+  return out.join('');
+}
+
 // Length-preserving blanker for every element whose opening tag satisfies
 // `hidden(attrs, name)`, matched to its BALANCED closing tag (same-name
 // nesting counted, quote-aware) — a hidden <div> containing another <div>
 // is blanked to the outer close, never to the first inner one.
 // `scanSrc` (same length as `src` — every view is length-preserving) is
-// the view TAGS AND ATTRS are read from: predicates must see expression
-// values (style={{display:'none'}}, open={false}) that the structural
-// view has already blanked, so scanning happens on the pre-expression
-// view while the blanking applies to `src`.
+// the view ATTRS are read from: predicates must see expression values
+// (style={{display:'none'}}, open={false}) that the structural view has
+// already blanked. TAG POSITIONS are walked on blankExpressionStrings(
+// scanSrc) so a quoted '</div>' inside an MDX expression never closes a
+// wrapper early and un-hides what follows it.
 function blankBalancedElements(src: string, hidden: (attrs: string, name: string) => boolean, scanSrc: string = src): string {
   const out = src.split('');
+  const balanceSrc = blankExpressionStrings(scanSrc);
   const openRe = /<([A-Za-z][\w-]*)\b/g;
   let m: RegExpExecArray | null;
-  while ((m = openRe.exec(scanSrc)) !== null) {
+  while ((m = openRe.exec(balanceSrc)) !== null) {
     const name = m[1];
     const attrs = tagAttrsAt(scanSrc, m.index);
     if (attrs === null) continue;
@@ -754,8 +774,8 @@ function blankBalancedElements(src: string, hidden: (attrs: string, name: string
     const tagRe = new RegExp(`<(\\/?)${name}\\b`, 'gi');
     tagRe.lastIndex = openEnd + 1;
     let depth = 1; let t: RegExpExecArray | null; let closeEnd = -1;
-    while ((t = tagRe.exec(scanSrc)) !== null) {
-      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = scanSrc.indexOf('>', t.index); closeEnd = gt === -1 ? scanSrc.length - 1 : gt; break; } }
+    while ((t = tagRe.exec(balanceSrc)) !== null) {
+      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = balanceSrc.indexOf('>', t.index); closeEnd = gt === -1 ? balanceSrc.length - 1 : gt; break; } }
       else { const a = tagAttrsAt(scanSrc, t.index); if (a !== null && !a.trimEnd().endsWith('/')) depth += 1; }
     }
     if (closeEnd === -1) continue; // unbalanced — leave as is
@@ -846,6 +866,9 @@ function maskMarkdownImages(src: string): string {
   const out = src.split('');
   let i = 0;
   while (i < src.length - 1) {
+    // A backslash escapes the next char: \![…](…) renders a literal `!`
+    // followed by a NORMAL link (CommonMark) — never an image opener.
+    if (src[i] === '\\') { i += 2; continue; }
     if (src[i] !== '!' || src[i + 1] !== '[') { i += 1; continue; }
     let depth = 1; let j = i + 2;
     for (; j < src.length && depth > 0; j += 1) {
@@ -867,6 +890,41 @@ function maskMarkdownImages(src: string): string {
   return out.join('');
 }
 
+// Every REAL inline Markdown link destination in `src`: the opener must be
+// an unescaped `[` (CommonMark renders \[…](…) as literal text, which a
+// bare `](`-anchored regex would false-match), labels may nest balanced
+// brackets and destinations balanced parens (same walk as
+// maskMarkdownImages), and an optional quoted link TITLE after the
+// destination ([q](/quote/ "Request service")) is split off. Images must
+// be masked before this runs.
+function* markdownLinkDests(src: string): Generator<string> {
+  let i = 0;
+  while (i < src.length) {
+    if (src[i] === '\\') { i += 2; continue; }
+    if (src[i] !== '[') { i += 1; continue; }
+    let depth = 1; let j = i + 1;
+    for (; j < src.length && depth > 0; j += 1) {
+      if (src[j] === '\\') { j += 1; continue; }
+      if (src[j] === '[') depth += 1;
+      else if (src[j] === ']') depth -= 1;
+    }
+    if (depth !== 0 || src[j] !== '(') { i += 1; continue; }
+    let pd = 1; let k = j + 1;
+    for (; k < src.length && pd > 0; k += 1) {
+      if (src[k] === '\\') { k += 1; continue; }
+      if (src[k] === '(') pd += 1;
+      else if (src[k] === ')') pd -= 1;
+    }
+    if (pd !== 0) { i += 1; continue; }
+    const inner = src.slice(j + 1, k - 1).trim();
+    // CommonMark destination: the first token — <>-wrapped or bare — with
+    // anything after whitespace being the (ignored) title.
+    const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
+    if (dm) yield (dm[1] ?? dm[2] ?? '').trim();
+    i = k;
+  }
+}
+
 // True when the (masked) prefix carries a Waves service CTA: a markdown
 // link to a service route, or an <InlineCTA> that LEADS to one — no
 // ctaHref (the component defaults to the quote page) or a quoted literal
@@ -882,11 +940,10 @@ function hasServiceCtaBefore(prefix: string): boolean {
   // renders no anchor — mask attr quotes for the Markdown scans only
   // (hasInlineCtaService reads quoted ctaHref values, so it gets p2).
   const p3 = maskJsxAttrQuotes(p2);
-  if (SERVICE_CTA_LINK_RE.test(p3)) return true;
-  // An absolute-URL markdown link on a hub host counts like its path form.
-  const absLink = /\]\(\s*(https:\/\/[^)\s]+)\s*\)/gi;
-  let am: RegExpExecArray | null;
-  while ((am = absLink.exec(p3)) !== null) if (isServiceCtaHref(am[1])) return true;
+  // ONE classifier for every real link destination, relative or absolute
+  // (isServiceCtaHref) — a walker over real links, never a `](`-anchored
+  // regex that escaped or residual bracket text can satisfy.
+  for (const dest of markdownLinkDests(p3)) if (isServiceCtaHref(dest)) return true;
   return hasInlineCtaService(p2);
 }
 
@@ -903,6 +960,47 @@ function stripQuotedAttrValues(attrs: string): string {
 }
 function hasJsxSpread(attrs: string): boolean {
   return JSX_SPREAD_RE.test(stripQuotedAttrValues(attrs));
+}
+
+// Sequential quote/brace-aware attribute walk (one nesting level of braces
+// for style objects) shared by the visibility predicates below — a value
+// merely CONTAINING "display:none" or "open" (aria-label={"display:none"},
+// title="open") is that attribute's value, never a style or open prop.
+const JSX_ATTR_WALK_RE = /\s*([^\s=/>"'{}]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\{(?:[^{}]|\{[^{}]*\})*\})|([^\s"'{}]+)))?/y;
+
+// True when a literal `style` attribute itself hides the element —
+// display:none in a CSS string or a JSX style object. An attr text the
+// walker cannot parse fails CLOSED (treated as hiding: over-blanking only
+// discounts a CTA, never manufactures one).
+function styleHidesElement(attrs: string): boolean {
+  const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
+  let styleValue: string | null = null;
+  let m: RegExpExecArray | null;
+  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
+    if (m[0].length === 0) return true; // unparseable residue — fail closed
+    if (m[1].toLowerCase() !== 'style') continue;
+    styleValue = m[2] ?? m[3] ?? m[4] ?? m[5] ?? null; // last occurrence wins (JSX)
+  }
+  return styleValue !== null && /display\s*['"]?\s*:\s*['"]?\s*none/i.test(styleValue);
+}
+
+// True when a <details> renders OPEN: bare `open`, a non-empty string
+// value, an unquoted value, or exactly {true}. Absent, ""/'' (React omits
+// a falsey boolean attribute), {false}/{null}/{0}/{''} and every dynamic
+// expression render closed or cannot be determined (fail closed — a CTA a
+// reader must expand for is no CTA). Last occurrence wins (JSX).
+function detailsRendersOpen(attrs: string): boolean {
+  const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
+  let open = false;
+  let m: RegExpExecArray | null;
+  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
+    if (m[0].length === 0) return false; // unparseable residue — fail closed
+    if (m[1].toLowerCase() !== 'open') continue;
+    if (m[4] !== undefined) open = /^\{\s*true\s*\}$/.test(m[4]);
+    else if (m[2] !== undefined || m[3] !== undefined) open = (m[2] ?? m[3] ?? '') !== '';
+    else open = true; // bare `open` or an unquoted value
+  }
+  return open;
 }
 
 // Length-preserving mask of every quoted span inside JSX opening tags:
@@ -987,10 +1085,11 @@ export function validateAffiliateUsage(
   // open={false}, which renders closed — are blanked (length-preserving),
   // on the structural view only.
   structural = blankBalancedElements(structural, (attrs) => {
-    // display:none in a CSS string OR a JSX style object ({display:'none'})
-    // hides regardless of the hidden attribute's value — the value lives
-    // inside quotes/braces, so test the FULL attribute text.
-    if (/display\s*['"]?\s*:\s*['"]?\s*none/i.test(attrs)) return true;
+    // display:none in the STYLE attribute's CSS string or JSX style object
+    // hides regardless of the hidden attribute's value — read the style
+    // attr's own value; another attr merely containing the text
+    // (aria-label={"display:none"}) is not a style.
+    if (styleHidesElement(attrs)) return true;
     // A wrapper spread ({...props}) can inject hidden/style at render time
     // — visibility cannot be determined, so fail closed (blank it). Quote-
     // stripped, so a string prop mentioning {...} is not a spread.
@@ -1010,7 +1109,7 @@ export function validateAffiliateUsage(
     return !/\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
   }, unmasked);
   structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
-    && (!/(?:^|\s)open(?=[\s>/=]|$)/i.test(attrs) || /(?:^|\s)open\s*=\s*\{\s*false\s*\}/i.test(attrs)), unmasked);
+    && !detailsRendersOpen(attrs), unmasked);
   const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
