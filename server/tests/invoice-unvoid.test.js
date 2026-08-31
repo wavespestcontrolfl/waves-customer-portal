@@ -107,9 +107,18 @@ function mockHappyPath({ restored, deferredRows = [] } = {}) {
 }
 
 describe('InvoiceService.unvoidInvoice', () => {
+  // The rodent-setup reinstatement cleanup runs UNCONDITIONALLY since codex
+  // #3591 r74 P1 (its own provenance probes no-op ordinary invoices; it has
+  // its own suite in setup-fee-claim-prepay-lifecycle.test.js). Spied here
+  // so this suite's strict db() slot sequences stay about unvoid itself.
+  let mockRetireReinstated;
   beforeEach(() => {
     jest.clearAllMocks();
     db.transaction = jest.fn(async (fn) => fn(db));
+    mockRetireReinstated = jest.spyOn(InvoiceService, 'retireRodentSetupObligationForReinstatedInvoice').mockResolvedValue(null);
+  });
+  afterEach(() => {
+    mockRetireReinstated.mockRestore();
   });
 
   test('restores a voided invoice to draft and clears the archive/session/schedule stamps', async () => {
@@ -133,6 +142,10 @@ describe('InvoiceService.unvoidInvoice', () => {
       }),
     );
     expect(mockReconcile).toHaveBeenCalledWith(restored);
+    // Unconditional and STRICT (codex #3591 r74 P1): never gated on the
+    // editable line text — a renamed setup line must still retire the
+    // void-restored stamp / replacement draft.
+    expect(mockRetireReinstated).toHaveBeenCalledWith(db, 'inv-1', { strict: true });
   });
 
   test('cancels queued deferred pay-link/dunning sms_log rows atomically with the restore (Codex #3493)', async () => {

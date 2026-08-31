@@ -4732,13 +4732,15 @@ const InvoiceService = {
       // The void restored the rodent setup obligation (stamp or replacement
       // draft) — unvoiding makes THIS invoice's setup line collectible
       // again, so those artifacts are retired with the restore or the fee
-      // collects twice (codex #3591 r47 P1). Gated on the row in hand (no
-      // queries for ordinary invoices); propagates → unvoid rolls back.
-      let unvoidLines = updated.line_items;
-      if (typeof unvoidLines === "string") { try { unvoidLines = JSON.parse(unvoidLines); } catch { unvoidLines = []; } }
-      if ((Array.isArray(unvoidLines) ? unvoidLines : []).some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) {
-        await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true });
-      }
+      // collects twice (codex #3591 r47 P1). UNCONDITIONAL (codex #3591
+      // r74 P1): the old exact-description gate skipped the cleanup when
+      // staff had renamed the setup line, leaving the restored stamp or
+      // replacement draft collectible beside the reinstated invoice. The
+      // helper's own provenance probes (immutable claim, then the durable
+      // rebill marker) early-return null for ordinary invoices; unvoids
+      // are rare staff actions, so the extra lookups are cheap. Errors
+      // propagate → unvoid rolls back.
+      await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true });
       let owningTermNow = null;
       try {
         owningTermNow = await trx("annual_prepay_terms")
@@ -5238,8 +5240,17 @@ const InvoiceService = {
       logger.warn(`[invoice] reversed invoice ${invoiceRow.id}: rodent setup NOT re-stamped on series ${anchorId} (stamp occupied) — obligation already tracked`);
       return null;
     }
-    if (completionClaimToConsume) await conn("setup_fee_claims").where({ id: completionClaimToConsume }).delete();
-    logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed`);
+    // The claim is KEPT on the stamp path (codex #3591 r74 P1): unlike the
+    // rebill branch (whose replacement invoice carries the durable
+    // rodentSetupRebillMarker), a restored stamp leaves no other provenance
+    // linking it to this invoice — a later refund failure/unvoid on a
+    // STAFF-RENAMED setup line could then never retire the restored stamp
+    // and both charges would go live. The kept row is inert while the
+    // invoice is terminal (settledSetupClaimForInvoice and the anchor-claim
+    // probes apply the live-invoice rule), re-entry stays idempotent (the
+    // occupied-stamp CAS above refuses), and the reinstatement retires the
+    // stamp from exactly this record.
+    logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed (claim kept as reinstatement provenance)`);
       return { scheduledServiceId: anchorId, amount };
   },
 
@@ -5491,9 +5502,30 @@ const InvoiceService = {
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
     const lineAmount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
     const claimAmount = claimRecord ? Math.round(Number(claimRecord.amount) * 100) / 100 : NaN;
-    const amount = Number.isFinite(claimAmount) && claimAmount > 0 ? claimAmount : lineAmount;
+    // No claim and no recognizable line (codex #3591 r74 P1): the dead-series
+    // reversal consumed the claim after minting its replacement draft, and a
+    // staff-renamed line hides the setup from the editable text — but the
+    // replacement carries the durable rodentSetupRebillMarker keyed to THIS
+    // invoice. A live replacement is the surviving provenance: retire from
+    // its line amount so the reinstated invoice becomes the only carrier.
+    // (The stamp-restore path keeps its claim since r74, so it resolves
+    // through claimRecord above.)
+    let markerRebillAmount = null;
+    if (!setupLine && !claimRecord) {
+      const markerRebill = await conn("invoices")
+        .where("notes", "like", `%${rodentSetupRebillMarker(invoiceRow.id)}%`)
+        .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+        .first("id", "line_items");
+      if (!markerRebill) return null;
+      let rbLines = markerRebill.line_items;
+      if (typeof rbLines === "string") { try { rbLines = JSON.parse(rbLines); } catch { rbLines = []; } }
+      const rbAmount = Math.round(Number(rbLines?.[0]?.amount ?? rbLines?.[0]?.unit_price) * 100) / 100;
+      if (rbAmount > 0) markerRebillAmount = rbAmount;
+    }
+    const amount = Number.isFinite(claimAmount) && claimAmount > 0
+      ? claimAmount
+      : (markerRebillAmount ?? lineAmount);
     if (!(amount > 0)) return null;
-    if (!setupLine && !claimRecord) return null;
     if (claimRecord) {
       // Term-backed prepay claims are the term sync's revival's job; a
       // COMPLETION invoice's own claim rides its reinstatement here

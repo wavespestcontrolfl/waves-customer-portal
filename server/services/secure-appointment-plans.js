@@ -410,7 +410,15 @@ async function estimateSetupCarriedElsewhere(database, estimateId, excludeRootId
   if (!ids.length) return false;
   // An immutable collected claim on any root of the estimate counts
   // regardless of that root's status — the fee was billed once already.
-  return !!(await database('setup_fee_claims').whereIn('scheduled_service_id', ids).first('id'));
+  // LIVE-invoice rule (codex #3591 r74 P1): the reversal now KEEPS the
+  // claim of a stamp-restored invoice as reinstatement provenance, so a
+  // claim whose invoice is void/refunded is an open obligation (the
+  // restored stamp is checked above), never proof of collection.
+  const rootClaims = await database('setup_fee_claims').whereIn('scheduled_service_id', ids).select('id', 'invoice_id');
+  for (const rc of rootClaims || []) {
+    if (await settledSetupClaimForInvoice(database, rc.invoice_id)) return true;
+  }
+  return false;
 }
 
 // The positive booking-time stamp on the visit's series anchor, or null —

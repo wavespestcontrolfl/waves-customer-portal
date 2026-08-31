@@ -76,6 +76,8 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
       if (table === 'setup_fee_claims') {
         if (q._where && 'estimate_id' in q._where) return claimsByEstimate;
         if (q._where && 'scheduled_service_id' in q._where) return siblingClaim ? [siblingClaim] : [];
+        // estimateSetupCarriedElsewhere's root-claims scan (whereIn ids).
+        if (q._whereIn) return claim ? [claim] : [];
         return [];
       }
       return [];
@@ -186,9 +188,15 @@ describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00', status: 'cancelled' }], scheduledService: null }), 'est-1', 'root-new')).toBe(false);
     // …unless a live child can still complete it.
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00', status: 'completed' }], scheduledService: { id: 'child-live' } }), 'est-1', 'root-new')).toBe(true);
-    // A collected claim on a dead root still counts (billed once already).
-    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null, status: 'cancelled' }], claim: { id: 'claim-a' } }), 'est-1', 'root-new')).toBe(true);
-    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: { id: 'claim-a' } }), 'est-1', 'root-new')).toBe(true);
+    // A collected claim on a dead root still counts (billed once already) —
+    // LIVE-invoice rule since r74: only a claim whose invoice is live/paid
+    // proves collection.
+    const paidClaim = { id: 'claim-a', invoice_id: 'inv-paid' };
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null, status: 'cancelled' }], claim: paidClaim, invoice: { status: 'paid' } }), 'est-1', 'root-new')).toBe(true);
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: paidClaim, invoice: { status: 'paid' } }), 'est-1', 'root-new')).toBe(true);
+    // A claim the reversal KEPT on a voided invoice (codex #3591 r74 P1) is
+    // an open obligation, never proof the fee was collected.
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: paidClaim, invoice: { status: 'void' } }), 'est-1', 'root-new')).toBe(false);
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: null }), 'est-1', 'root-new')).toBe(false);
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [] }), 'est-1', 'root-new')).toBe(false);
     expect(await estimateSetupCarriedElsewhere(conn(), null)).toBe(false);
@@ -955,12 +963,17 @@ describe('retireRodentSetupObligationForReinstatedInvoice — a bounced refund r
     ...over,
   });
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function reinstConn({ stamp = '99.00', invoiceRow = stdInvoice(), claimRow = null, rebills = [], prepayTerm = null } = {}) {
+  function reinstConn({ stamp = '99.00', invoiceRow = stdInvoice(), claimRow = null, rebills = [], prepayTerm = null, markerRebill = null } = {}) {
     const inner = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp }, claim: claimRow, prepayTerm });
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
-        q.first = async () => invoiceRow;
+        // The r74 marker probe is a 3-arg where('notes', 'like', …) —
+        // route it to the markerRebill fixture, everything else to the row.
+        let notesProbe = false;
+        const origWhere = q.where;
+        q.where = (...args) => { if (args[0] === 'notes') { notesProbe = true; return q; } return origWhere(args[0]); };
+        q.first = async () => (notesProbe ? markerRebill : invoiceRow);
         q.select = async () => rebills;
       }
       return q;
@@ -1006,6 +1019,26 @@ describe('retireRodentSetupObligationForReinstatedInvoice — a bounced refund r
     const plain = reinstConn({ invoiceRow: stdInvoice({ line_items: [{ description: 'First service application', amount: 128 }] }) });
     expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(plain, 'inv-std')).toBeNull();
     expect(plain.writes).toEqual([]);
+  });
+
+  test('a STAFF-RENAMED line with the claim consumed still retires via the live rebill marker; without any provenance it stays a no-op (codex #3591 r74 P1)', async () => {
+    const renamed = stdInvoice({ line_items: [{ description: 'Rodent program setup (edited)', amount: 99 }] });
+    const liveRebill = { id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null, line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
+    // Dead-series reversal path: claim consumed, replacement draft carries
+    // the durable marker — the reinstatement voids it from that provenance.
+    const viaMarker = reinstConn({ stamp: null, invoiceRow: renamed, markerRebill: liveRebill, rebills: [liveRebill] });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(viaMarker, 'inv-std')).toEqual({ retired: false, voidedRebills: 1 });
+    expect(viaMarker.writes).toEqual([
+      expect.objectContaining({ table: 'invoices', op: 'update', patch: expect.objectContaining({ status: 'void' }) }),
+    ]);
+    // Stamp-restore path: the reversal now KEEPS the claim, so a renamed
+    // line retires the restored stamp through claimRecord as before.
+    const viaKeptClaim = reinstConn({ invoiceRow: renamed, claimRow: { id: 'claim-c', amount: '99.00', scheduled_service_id: 'root-rb' } });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(viaKeptClaim, 'inv-std')).toEqual({ retired: true, voidedRebills: 0 });
+    // No claim, no line, no live marker rebill → genuinely ordinary → no-op.
+    const bare = reinstConn({ invoiceRow: renamed, markerRebill: null });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(bare, 'inv-std')).toBeNull();
+    expect(bare.writes).toEqual([]);
   });
 
   test('wired into every webhook flip that LEAVES refunded (source contract)', () => {
@@ -1056,13 +1089,15 @@ describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid reti
     ]);
   });
 
-  test('unvoid retires the restored setup state, gated on the setup line (source contract)', () => {
+  test('unvoid retires the restored setup state UNCONDITIONALLY — never gated on the editable line text (codex #3591 r74 P1)', () => {
     const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
     const unvoidAt = invoiceSrc.indexOf('async unvoidInvoice(id) {');
-    const gateAt = invoiceSrc.indexOf('Bait Station Setup — one-time setup fee', unvoidAt);
     const callAt = invoiceSrc.indexOf('retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true })', unvoidAt);
-    expect(gateAt).toBeGreaterThan(unvoidAt);
-    expect(callAt).toBeGreaterThan(gateAt);
+    expect(unvoidAt).toBeGreaterThan(-1);
+    expect(callAt).toBeGreaterThan(unvoidAt);
+    // A staff-renamed setup line must not skip the cleanup: no
+    // exact-description gate may stand between unvoid and the call.
+    expect(invoiceSrc.slice(unvoidAt, callAt)).not.toContain('Bait Station Setup — one-time setup fee');
   });
 });
 
@@ -1118,8 +1153,10 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const c = revConn();
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(c, stdInvoice()))
       .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
-    // The record is consumed AFTER the successful re-stamp (r53: ambiguity keeps the evidence).
-    expect(c.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['scheduled_services:update', 'setup_fee_claims:delete']);
+    // The record is KEPT on the stamp path (codex #3591 r74 P1): it is the
+    // only provenance a later reinstatement of a staff-renamed invoice has
+    // to retire the restored stamp from.
+    expect(c.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['scheduled_services:update']);
     const prepay = revConn({ termBacked: { id: 'term-1' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, stdInvoice())).toBeNull();
     expect(prepay.writes).toEqual([]);
