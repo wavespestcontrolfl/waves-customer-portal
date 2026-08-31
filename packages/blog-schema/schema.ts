@@ -351,7 +351,14 @@ export const componentPropSchemas = {
     ctaLabel: z.string().optional(),
     // Rendered as an anchor href: root-relative path or https URL only —
     // never an executable scheme (javascript:, data:, vbscript:).
-    ctaHref: z.string().regex(/^(?:\/(?!\/)[^\s]*|https:\/\/[^\s]+)$/, 'ctaHref must be a root-relative path or an https URL').optional(),
+    ctaHref: z
+      .string()
+      .refine((v) => {
+        if (/^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-9._~\-/?#=&%+]*)?$/.test(v) && !/(^|\/)\.\.(\/|$)/.test(v)) return true;
+        if (!/^https:\/\//i.test(v)) return false;
+        try { const u = new URL(v); return u.protocol === 'https:' && !!u.hostname && !/[\s"'<>]/.test(v); } catch { return false; }
+      }, 'ctaHref must be a well-formed root-relative path (no dot segments) or an https URL')
+      .optional(),
     phone: z.string().optional(),
     tel: z.string().regex(/^(?:tel:)?\+?[\d\-().\s]{7,20}$/, 'tel must be a phone number (optionally tel:-prefixed)').optional(),
     eyebrow: z.string().optional(),
@@ -647,6 +654,11 @@ export function validateAffiliateUsage(
   let cleaned = body_mdx.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
   cleaned = cleaned.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
   cleaned = cleaned.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  // Definitely-hidden markup never satisfies a reader-facing rule (a CTA a
+  // reader cannot see is no CTA): elements carrying `hidden`, an inline
+  // display:none, or a closed <details> body are blanked (length-preserving).
+  cleaned = cleaned.replace(/<(\w+)\b[^>]*\b(?:hidden\b|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
+  cleaned = cleaned.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
 
   const positions: number[] = [];
   const re = /<AffiliateLink\b/g;
