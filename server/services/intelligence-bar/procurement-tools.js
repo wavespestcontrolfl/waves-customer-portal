@@ -1325,9 +1325,13 @@ async function updateRestockRequest(input) {
     // different amount than the operator saw.
     const approvedReceive = input._verified_receive;
     if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
-      || String(inventoryUnit) !== String(approvedReceive.unit))) {
+      || String(inventoryUnit) !== String(approvedReceive.unit)
+      // The card shows exact before/after totals — the starting balance
+      // binds too (pre-push r11 P1), so a concurrent movement refuses
+      // rather than landing an unapproved final balance.
+      || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
       return {
-        error: 'The receive amount changed after the card was shown (request or product edited) — nothing was received. Ask again for a fresh confirmation card.',
+        error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
         preview_changed: true,
       };
     }

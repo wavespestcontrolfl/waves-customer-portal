@@ -1436,6 +1436,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors.push({ customer_id: customerId, error: 'Customer not found' });
       continue;
     }
+    // Same live-customer bar as every other IB customer writer (pre-push
+    // r11 P1): a soft-deleted/merged row must not be edited, fanned out,
+    // or emailed by the per-row branch.
+    if (before.deleted_at) {
+      errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+      continue;
+    }
     let emailSync = null;
     let rowLaneStamp = null;
     try {
@@ -1454,8 +1461,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
         if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
           await lockCustomerComms(trx, customerId);
         }
-        // Same row-lock serialization as the single-edit path.
-        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+        // Same row-lock serialization AND locked liveness re-assert as the
+        // single-edit path (GH r10 / pre-push r11 P1).
+        const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first();
+        if (!lockedBefore || lockedBefore.deleted_at) {
+          const err = new Error('customer_no_longer_live');
+          err.customerNoLongerLive = true;
+          throw err;
+        }
         const lockedMerged = { ...lockedBefore, ...clean };
         if (emailSubmitted && clean.email) {
           const emailLc = String(clean.email).trim().toLowerCase();
@@ -1496,6 +1509,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
         }
       });
     } catch (e) {
+      if (e && e.customerNoLongerLive) {
+        errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+        continue;
+      }
       if (e && e.code === '23505') {
         errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
         continue;

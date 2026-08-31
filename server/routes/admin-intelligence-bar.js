@@ -1056,11 +1056,14 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         return { failed: true, modelResult: { error: 'One or more customer_ids are not valid ids — nothing was proposed.' } };
       }
       params.customer_ids = ids;
-      const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
+      // Live rows only (pre-push r11 P1): a soft-deleted/merged customer
+      // must never ride a proposal — the executors refuse or skip them,
+      // but the card must not name them as approved targets either.
+      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name');
       const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
       const missing = ids.filter((id) => !nameById.has(id));
       if (missing.length) {
-        return { failed: true, modelResult: { error: `${missing.length} of the listed customer ids do not resolve — nothing was proposed. Re-select the customers and retry.` } };
+        return { failed: true, modelResult: { error: `${missing.length} of the listed customer ids do not resolve to a live customer — nothing was proposed. Re-select the customers and retry.` } };
       }
       preview = { ...preview, all_customer_names: ids.map((id) => nameById.get(id)) };
     }
@@ -2508,6 +2511,12 @@ router.post('/confirm-action', async (req, res, next) => {
         const est = await resolveEstimateByIdentifier(String(execParams.estimate_identifier || ''));
         const flag = action.tool_name === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
         drifted = !est || estimatePinFingerprint(est, flag) !== pinnedEstimate;
+        // The approved CURRENT value rides to the executor (pre-push r11
+        // P1): this check ran on an unlocked read, so the executor's write
+        // must be conditional on the state the card showed — a concurrent
+        // toggle in between otherwise turns the approved transition into a
+        // silent inversion or overwrite.
+        if (!drifted && est) execParams._expected_flag_value = !!est[flag];
       }
       if (!drifted && action.tool_name === 'bulk_update_leads' && Array.isArray(execParams.lead_ids)) {
         // The card promised EVERY listed lead transitions. Re-run the match
@@ -2588,7 +2597,15 @@ router.post('/confirm-action', async (req, res, next) => {
         // or product edited after this preflight could otherwise add a
         // different amount than the card showed.
         if (action.tool_name === 'update_restock_request' && livePreview?.adds !== undefined) {
-          execParams._verified_receive = { adds: livePreview.adds, unit: livePreview.unit };
+          // stock_before rides too (pre-push r11 P1): the card shows exact
+          // before/after totals, so a concurrent inventory movement must
+          // refuse rather than apply the approved delta to a different
+          // starting balance.
+          execParams._verified_receive = {
+            adds: livePreview.adds,
+            unit: livePreview.unit,
+            stock_before: livePreview.stock_before,
+          };
         }
       }
       // Server-derived confirmation: the operator clicked Confirm. This is

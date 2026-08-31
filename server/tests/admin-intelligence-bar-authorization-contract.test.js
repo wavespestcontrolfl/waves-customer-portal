@@ -28,7 +28,12 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 
 jest.mock('../models/db', () => jest.fn(() => ({
   insert: mockDbInsert,
-  whereIn: (...whereArgs) => ({ select: () => mockDbWhereInSelect(...whereArgs) }),
+  whereIn: (...whereArgs) => ({
+    // Live-rows-only resolution (pre-push r11 P1): the route chains
+    // whereNull('deleted_at') before select.
+    whereNull: () => ({ select: () => mockDbWhereInSelect(...whereArgs) }),
+    select: () => mockDbWhereInSelect(...whereArgs),
+  }),
 })));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
@@ -535,7 +540,9 @@ describe('W0B estimate toggle pin', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(ok.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('toggle_show_one_time_option', { estimate_identifier: 'e1', enabled: true });
+      // The approved CURRENT value rides to the executor for the
+      // conditional UPDATE (pre-push r11 P1).
+      expect(mockExecuteTool).toHaveBeenCalledWith('toggle_show_one_time_option', { estimate_identifier: 'e1', enabled: true, _expected_flag_value: false });
     });
   });
 });

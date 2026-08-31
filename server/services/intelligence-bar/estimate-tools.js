@@ -3531,7 +3531,7 @@ async function setEstimatePresentation(input, actionContext = {}) {
   };
 }
 
-async function toggleEstimateV2View({ estimate_identifier, enabled }) {
+async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_flag_value }) {
   if (!estimate_identifier) {
     return { error: 'estimate_identifier required (UUID, token, or phone)' };
   }
@@ -3542,7 +3542,18 @@ async function toggleEstimateV2View({ estimate_identifier, enabled }) {
   }
 
   const next = typeof enabled === 'boolean' ? enabled : !estimate.use_v2_view;
-  await db('estimates').where({ id: estimate.id }).update({ use_v2_view: next });
+  // Card confirms carry the approved CURRENT value (pre-push r11 P1): the
+  // UPDATE is conditional on it, so a concurrent toggle between the confirm
+  // preflight and this write refuses instead of silently inverting or
+  // overwriting newer state. COALESCE covers a NULL flag.
+  const expected = typeof _expected_flag_value === 'boolean' ? _expected_flag_value : undefined;
+  const updated = await db('estimates')
+    .where({ id: estimate.id })
+    .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
+    .update({ use_v2_view: next });
+  if (expected !== undefined && !updated) {
+    return { error: 'This estimate\'s view flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
 
   logger.info(`[estimate-v2] Toggled use_v2_view for estimate ${estimate.id} → ${next}`);
 
@@ -3555,7 +3566,7 @@ async function toggleEstimateV2View({ estimate_identifier, enabled }) {
   };
 }
 
-async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
+async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected_flag_value }) {
   if (!estimate_identifier) {
     return { error: 'estimate_identifier required (UUID, token, or phone)' };
   }
@@ -3577,7 +3588,16 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
     });
     if (deliveryError) return { error: deliveryError };
   }
-  await db('estimates').where({ id: estimate.id }).update({ show_one_time_option: next });
+  // Conditional on the approved current value — same contract as
+  // toggleEstimateV2View (pre-push r11 P1).
+  const expected = typeof _expected_flag_value === 'boolean' ? _expected_flag_value : undefined;
+  const updated = await db('estimates')
+    .where({ id: estimate.id })
+    .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
+    .update({ show_one_time_option: next });
+  if (expected !== undefined && !updated) {
+    return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
 
   logger.info(`[estimate-v2] Toggled show_one_time_option for estimate ${estimate.id} → ${next}`);
 
