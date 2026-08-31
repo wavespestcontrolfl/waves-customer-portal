@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
   const qb = {};
   qb.where = jest.fn(() => qb);
   qb.whereIn = jest.fn(() => qb);
+  qb.whereNull = jest.fn(() => qb);
   qb.forUpdate = jest.fn(() => qb);
   qb.first = jest.fn();
   // The bulk fast path pre-reads before-rows (FOR UPDATE) whenever tier or
@@ -159,6 +160,10 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
 });
 
 test('a bulk NON-address edit skips per-customer fanout (one transaction, no address machinery)', async () => {
+  // The scalar path now resolves the LIVE pinned set first (GH r9 on
+  // #3648) — the first select is that live-row read; later selects (lane
+  // beforeRows) keep the empty default.
+  db.__qb.select.mockResolvedValueOnce([{ id: 'cust-a' }, { id: 'cust-b' }]);
   const result = await executeTool('bulk_update_customers', {
     customer_ids: ['cust-a', 'cust-b'],
     updates: { waveguard_tier: 'gold' },

@@ -1016,6 +1016,12 @@ async function updateCustomer(customerId, updates) {
 
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };
+  // A customer merged/soft-deleted during the card's pending window must
+  // not be edited back to life — the proposal-time resolution was the only
+  // live check before this (GH r9 P1).
+  if (before.deleted_at) {
+    return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
@@ -1315,20 +1321,35 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // explicitly in the same transaction. Per-row decision, since each
     // row's before-state differs under one shared update payload.
     const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
-    const { count, laneStampIds } = await db.transaction(async (trx) => {
+    const { count, laneStampIds, skippedRows } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
+      // The card promised EVERY listed customer transitions or is reported
+      // (GH r9 P1): resolve the live pinned set under row locks FIRST, so a
+      // customer deleted/merged while the card was pending surfaces as a
+      // warning instead of silently shrinking a single whereIn UPDATE.
+      const liveRows = await trx('customers')
+        .whereIn('id', customerIds)
+        .whereNull('deleted_at')
+        .forUpdate()
+        .select('id', 'first_name', 'last_name');
+      const liveIds = new Set(liveRows.map((r) => String(r.id)));
+      const skipped = customerIds
+        .filter((cid) => !liveIds.has(String(cid)))
+        .map((cid) => ({ customer_id: String(cid) }));
+      const targetIds = [...liveIds];
+      if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped };
       if (laneStampRelevant) {
         // Membership-affecting bulk writes join the customer-comms
         // serialization (codex #3426 r6 P2) — same reason as updateCustomer.
         // Comms locks BEFORE the row locks below, and in a STABLE (sorted)
         // order so two concurrent bulk writers over overlapping id sets
         // acquire in the same sequence instead of deadlocking.
-        for (const cid of [...customerIds].map(String).sort()) {
+        for (const cid of [...targetIds].map(String).sort()) {
           await lockCustomerComms(trx, cid);
         }
         const beforeRows = await trx('customers')
-          .whereIn('id', customerIds)
+          .whereIn('id', targetIds)
           .forUpdate()
           .select('id', 'monthly_rate', 'billing_mode', 'waveguard_tier');
         if (clean.monthly_rate !== undefined) {
@@ -1342,7 +1363,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
           .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
-      const updated = await trx('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+      const updated = await trx('customers').whereIn('id', targetIds).update({ ...clean, ...stageStamp });
       if (stampIds.length) {
         await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
       }
@@ -1352,15 +1373,24 @@ async function bulkUpdateCustomers(customerIds, updates) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return { count: updated, laneStampIds: stampIds };
+      return { count: updated, laneStampIds: stampIds, skippedRows: skipped };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
+    if (!count && skippedRows.length) {
+      return { error: 'None of the approved customers are still live (deleted or merged while the card was pending) — nothing was updated.', skipped_customers: skippedRows };
+    }
     return {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
       ...bulkLaneStampResult(laneStampIds),
+      // Skipped rows surface on the card, never a silent Done (same
+      // contract as the per-row address/email path; GH r9 P1).
+      ...(skippedRows.length ? {
+        skipped_customers: skippedRows,
+        warning: `${skippedRows.length} approved customer(s) were NOT updated — no longer live (deleted or merged while the card was pending).`,
+      } : {}),
     };
   }
 
@@ -1753,6 +1783,12 @@ async function createAppointment(input) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
+  // Same live-customer bar as update_customer (GH r9 P1): a profile
+  // merged/soft-deleted while the card was pending must not receive a new
+  // appointment after its records were repointed.
+  if (customer.deleted_at) {
+    return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
+  }
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
   // unordered ILIKE silently picked an arbitrary tech on multiple matches,
@@ -2203,12 +2239,16 @@ async function rescheduleAppointment(input) {
   // Rebooker-parity side effects of the live → confirmed flip above:
   // job_status_history audit row, tech_status release, customer tracker
   // refresh. Best-effort: the move is committed — a side-effect failure
-  // must not report the move itself as failed.
+  // must not report the move itself as failed, but the card promised the
+  // release, so a failure surfaces as a warning, never a bare Done
+  // (GH r9 P1).
+  let lifecycleWarning = null;
   if (wasLive) {
     try {
       await applyLiveMoveSideEffects(db, appt);
     } catch (err) {
       logger.error(`[intelligence-bar] live-move side effects failed for ${appointment_id}: ${err.message}`);
+      lifecycleWarning = 'The move committed, but releasing the technician/tracker state failed — check the tech pointer and lifecycle history for this visit.';
     }
   } else if (trackRewound) {
     // No status transition happened (status was never live), so no history
@@ -2219,6 +2259,7 @@ async function rescheduleAppointment(input) {
       await applyLiveMovePostCommitEffects(appt, { toStatus: appt.status });
     } catch (err) {
       logger.error(`[intelligence-bar] track-rewind side effects failed for ${appointment_id}: ${err.message}`);
+      lifecycleWarning = 'The move committed, but the stale-tracker cleanup failed — check the tech pointer for this visit.';
     }
   }
 
@@ -2262,8 +2303,11 @@ async function rescheduleAppointment(input) {
     old_date: oldDate,
     new_date: dateStr,
     service_type: appt.service_type,
-    // Advisory occupancy-overlap note (gated probe) — the move stands.
-    ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
+    // ONE warning key (card renders result.warning only): advisory overlap
+    // note + lifecycle-cleanup failure COMBINE, never overwrite.
+    ...(overlapAdvisory || lifecycleWarning
+      ? { warning: [overlapAdvisory, lifecycleWarning].filter(Boolean).join(' ') }
+      : {}),
   };
 }
 

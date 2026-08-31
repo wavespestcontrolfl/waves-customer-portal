@@ -332,6 +332,11 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
       note: result.googlePosted
         ? 'Reply posted to Google.'
         : 'Google Business Profile is not configured in this environment — the reply was saved locally only.',
+      // The card presents this as an irreversible PUBLIC post — a
+      // local-only save surfaces as a warning the card renders (GH r9 P2).
+      ...(result.googlePosted ? {} : {
+        warning: 'The reply was saved locally only — it was NOT posted to Google (Business Profile not configured in this environment).',
+      }),
     };
   } catch (err) {
     if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
@@ -459,6 +464,11 @@ async function triggerReviewRequest(input) {
       note: fresh?.sms_sent_at
         ? 'Review request SMS sent through the centralized messaging policy.'
         : 'Review request created; status reflects whether it is queued, blocked, or awaiting retry.',
+      // The card promised "Send review request" — an unsent SMS surfaces as
+      // a warning the card renders, never only a note (GH r9 P2).
+      ...(fresh?.sms_sent_at ? {} : {
+        warning: 'The review request was recorded, but the SMS has NOT been sent (queued, blocked, or awaiting retry) — check the request status.',
+      }),
     };
   } catch (err) {
     return { error: `Failed to create review request: ${err.message}` };

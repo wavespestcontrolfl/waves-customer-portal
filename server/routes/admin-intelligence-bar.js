@@ -559,14 +559,20 @@ async function loadAppointmentPin(appointmentId) {
 async function resolveReplyViaSmsRecipient({ email_id, customer_name }) {
   if (email_id) {
     const email = await db('emails').where('id', String(email_id)).first('customer_id', 'from_address');
-    if (email?.customer_id) {
+    // A supplied email_id MUST resolve (GH r9 P2): the card discloses the
+    // source-email inbox update, so a missing/deleted row must refuse the
+    // proposal — never fall through to a typed name and send an SMS whose
+    // disclosed inbox effect touches zero rows.
+    if (!email) return { error: 'That email could not be found — nothing was proposed.' };
+    if (email.customer_id) {
       const c = await db('customers').where('id', email.customer_id).first('id', 'first_name', 'last_name', 'phone');
       if (c) return c;
     }
-    if (email?.from_address) {
+    if (email.from_address) {
       const c = await db('customers').where('email', email.from_address).first('id', 'first_name', 'last_name', 'phone');
       if (c) return c;
     }
+    return null;
   }
   if (customer_name) return resolveCommsCustomer({ customer_name });
   return null;
@@ -751,6 +757,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // params gain execution pins after this call).
     preview = await executeToolByName(toolUse.name, { ...params }, null);
     if (isToolFailure(preview)) {
+      return { failed: true, modelResult: preview };
+    }
+    // A duplicate phone/email makes create_customer a no-op: the preview
+    // returns already_exists rather than an error, and confirming would
+    // insert nothing while the card reports Done (GH r9 P2). Refuse the
+    // card; the model relays the existing match to the operator.
+    if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
     }
   } else {

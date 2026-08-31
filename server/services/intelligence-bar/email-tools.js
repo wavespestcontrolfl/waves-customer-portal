@@ -506,13 +506,19 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
       return { error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' };
     }
 
-    // Mark the email as responded via SMS
+    // Mark the email as responded via SMS. The card disclosed this inbox
+    // update — a zero-row update (email deleted while the card was pending)
+    // must surface as a warning, never a silent Done (GH r9 P2).
+    let inboxWarning = null;
     if (email_id) {
-      await db('emails').where('id', email_id).update({
+      const marked = await db('emails').where('id', email_id).update({
         auto_action: db.raw("COALESCE(auto_action, '') || ',replied_via_sms'"),
         is_read: true,
         updated_at: new Date(),
       });
+      if (!marked) {
+        inboxWarning = 'The SMS was sent, but the source email no longer exists — it could not be marked read/replied.';
+      }
     }
 
     // Log internal ids, not the customer name/phone (PII stays out of logs).
@@ -524,6 +530,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
       customer: custName,
       message,
       note: `SMS sent to ${custName} at ${phone} instead of email reply.`,
+      ...(inboxWarning ? { warning: inboxWarning } : {}),
     };
   } catch (err) {
     logger.error('[intelligence-bar:email] reply_via_sms failed:', err);
@@ -670,17 +677,21 @@ async function blockSender({ email_address, domain }) {
       email_address, domain, reason: 'Manual block (Intelligence Bar)',
     });
     if (result.error) return { error: result.error };
-    return result.blocked_domain
-      ? {
-        success: true,
-        blocked_domain: result.blocked_domain,
-        note: `All future emails from ANY sender at @${result.blocked_domain} will be auto-trashed.`,
-      }
-      : {
-        success: true,
-        blocked_address: result.blocked_address,
-        note: `Future emails from ${result.blocked_address} will be auto-trashed. Other senders at that domain are unaffected.`,
-      };
+    return {
+      success: true,
+      // A missing Gmail filter breaks the card's promised effect — surface
+      // it as a warning the card renders, never a bare Done (GH r9 P2).
+      ...(result.warning ? { warning: result.warning } : {}),
+      ...(result.blocked_domain
+        ? {
+          blocked_domain: result.blocked_domain,
+          note: `All future emails from ANY sender at @${result.blocked_domain} will be auto-trashed.`,
+        }
+        : {
+          blocked_address: result.blocked_address,
+          note: `Future emails from ${result.blocked_address} will be auto-trashed. Other senders at that domain are unaffected.`,
+        }),
+    };
   } catch (err) {
     logger.error('[intelligence-bar:email] block_sender failed:', err);
     return { error: err.message };

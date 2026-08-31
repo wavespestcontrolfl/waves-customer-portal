@@ -212,13 +212,14 @@ async function blockSpamSender(email) {
 const MANUAL_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MANUAL_DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
 
-// Operator-confirmed manual block (IB block_sender card). Unlike the
-// auto-classifier path above — which blocks only the exact sender and
-// silently declines vendors/customers/open leads — a manual block honors
-// the operator's approved scope exactly: an email_address blocks that one
-// sender; a domain (only when no address is given) blocks the whole domain,
-// refused for protected/shared provider domains (same rule as the admin
-// email route's POST /block).
+// Operator-confirmed manual block — the ONE manual sender/domain blocker
+// (GH r9 P1: admin-email POST /block and the IB block_sender card both call
+// this; never grow a parallel copy). Unlike the auto-classifier path above
+// — which blocks only the exact sender and silently declines vendors/
+// customers/open leads — a manual block honors the operator's approved
+// scope exactly: an email_address blocks that one sender; a domain (only
+// when no address is given) blocks the whole domain, refused for
+// protected/shared provider domains.
 async function manualBlockSender({ email_address, domain, reason } = {}) {
   const blockEmail = email_address ? normalizeAddress(email_address) : null;
   const blockDomain = !blockEmail && domain
@@ -250,14 +251,15 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     logger.warn(`[spam-blocker] manual Gmail filter creation failed: ${err.message}`);
   }
 
+  let entry = null;
   try {
-    await db('blocked_email_senders').insert({
+    [entry] = await db('blocked_email_senders').insert({
       email_address: blockEmail,
       domain: blockDomain,
       gmail_filter_id: filterId,
       reason: reason || 'Manual block',
       blocked_count: 0,
-    });
+    }).returning('*');
   } catch (insertErr) {
     // Same orphan-filter rollback contract as the auto path: a filter with
     // no record is invisible to every unblock path.
@@ -276,9 +278,17 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     throw insertErr;
   }
   logger.info(`[spam-blocker] Manually blocked ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`}`);
-  return blockEmail
-    ? { success: true, blocked_address: blockEmail }
-    : { success: true, blocked_domain: blockDomain };
+  return {
+    success: true,
+    entry,
+    ...(blockEmail ? { blocked_address: blockEmail } : { blocked_domain: blockDomain }),
+    // The card's effect promises "Gmail filter + blocklist row" — a missing
+    // filter must surface, never a bare Done (GH r9 P2). The blocklist row
+    // still trash-routes via app-level processing once sync runs.
+    ...(filterId ? {} : {
+      warning: 'Blocklist row recorded, but the Gmail auto-trash filter could NOT be created (Gmail unavailable) — messages may stay visible in Gmail until the block is re-applied.',
+    }),
+  };
 }
 
 async function unblockSender(id) {

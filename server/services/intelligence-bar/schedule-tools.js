@@ -435,12 +435,21 @@ async function assignTechnician(input) {
   // — otherwise a reassignment made during the pending window is silently
   // overwritten by a card that named the OLD assignments (GH r8 P1).
   const approvedStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
+  const approvedDateStr = (v) => (v instanceof Date
+    ? v.toISOString().slice(0, 10)
+    : (v ? String(v).slice(0, 10) : null));
   if (approvedStops) {
     const approvedById = new Map(approvedStops.map((s) => [String(s.id), s]));
     const drifted = approvedStops.length !== services.length
       || services.some((s) => {
         const a = approvedById.get(String(s.id));
-        return !a || String(a.current_tech || 'Unassigned') !== String(s.current_tech_name || 'Unassigned');
+        // Date binds too (GH r9 P1): a stop moved to another day after the
+        // confirm re-preview would otherwise pass the tech compare, and the
+        // transaction would lock/validate the NEW day rather than the
+        // approved one.
+        return !a
+          || String(a.current_tech || 'Unassigned') !== String(s.current_tech_name || 'Unassigned')
+          || approvedDateStr(a.scheduled_date) !== s.scheduled_date_str;
       });
     if (drifted) {
       return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
@@ -707,6 +716,10 @@ async function moveStopsToDay(input) {
   // Moved rows whose requested customer text did NOT go out — reported so
   // the operator learns the move committed but someone wasn't notified.
   const notificationFailures = [];
+  // Moved rows whose promised tech/tracker release or cleanup failed
+  // post-commit (GH r9 P1) — the card disclosed that release, so a failure
+  // surfaces as a warning, never a bare Done.
+  const lifecycleCleanupFailures = [];
   let textedCount = 0;
   for (const s of movable) {
     const oldDate = s.scheduled_date;
@@ -874,6 +887,7 @@ async function moveStopsToDay(input) {
         await applyLiveMoveSideEffects(db, s);
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
+        lifecycleCleanupFailures.push(s.id);
       }
     } else if (trackRewound) {
       // Tracker rewind without a status transition: cleanup only, no
@@ -882,6 +896,7 @@ async function moveStopsToDay(input) {
         await applyLiveMovePostCommitEffects(s, { toStatus: s.status });
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] track-rewind side effects failed for ${s.id}: ${err.message}`);
+        lifecycleCleanupFailures.push(s.id);
       }
     }
     // Audit row matching the rebooker's reschedule_log conventions.
@@ -1032,7 +1047,10 @@ async function moveStopsToDay(input) {
   const conflictNote = skippedConflict.length
     ? `${skippedConflict.length} approved stop(s) were NOT moved (changed or became grouped while the card was pending): ${skippedConflict.map((c) => c.status).slice(0, 3).join('; ')}${skippedConflict.length > 3 ? '…' : ''}`
     : null;
-  const combinedWarning = [overlapNote, notifyNote, conflictNote].filter(Boolean).join(' ');
+  const lifecycleNote = lifecycleCleanupFailures.length
+    ? `${lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
+    : null;
+  const combinedWarning = [overlapNote, notifyNote, conflictNote, lifecycleNote].filter(Boolean).join(' ');
 
   return {
     success: true,
