@@ -976,25 +976,52 @@ async function swapTechAssignments(input) {
   // is nullable for unassigned stops), then redirect B's to A and the parked
   // A-set to B. Earlier code parked on a hard-coded UUID, which violated the
   // technician_id FK if the swap ever ran.
-  const aIds = aServices.map(s => s.id);
-  const bIds = bServices.map(s => s.id);
-  await db.transaction(async trx => {
-    // Tech-day fence before any membership write — both real tech-days plus
-    // the transient 'unassigned' day the A-set parks on (see
-    // tech-day-lock.js; keys must match the other holders').
-    const { lockTechDays } = require('../scheduling/tech-day-lock');
-    await lockTechDays(trx, [
-      { techId: techA.id, date },
-      { techId: techB.id, date },
-      { techId: null, date },
-    ]);
+  // The stop sets the operator approved: the route's verified re-preview
+  // (`_verified_stops`, W0B) when this is a card confirm, else this call's
+  // own pre-lock read. Reloaded and compared UNDER the tech-day locks so a
+  // concurrent move between read and lock can't swap an unseen set.
+  const sameSet = (a, b) => a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i]);
+  const expectedA = (input._verified_stops?.[techA.name] || aServices).map((s) => s.id);
+  const expectedB = (input._verified_stops?.[techB.name] || bServices).map((s) => s.id);
+  let aIds = expectedA;
+  let bIds = expectedB;
+  const liveStops = async (trx, techId) => trx('scheduled_services')
+    .where({ scheduled_date: date, technician_id: techId })
+    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
+    .forUpdate()
+    .pluck('id');
+  try {
+    await db.transaction(async trx => {
+      // Tech-day fence before any membership write — both real tech-days plus
+      // the transient 'unassigned' day the A-set parks on (see
+      // tech-day-lock.js; keys must match the other holders').
+      const { lockTechDays } = require('../scheduling/tech-day-lock');
+      await lockTechDays(trx, [
+        { techId: techA.id, date },
+        { techId: techB.id, date },
+        { techId: null, date },
+      ]);
+      const [liveA, liveB] = [await liveStops(trx, techA.id), await liveStops(trx, techB.id)];
+      if (!sameSet(liveA, expectedA) || !sameSet(liveB, expectedB)) {
+        const err = new Error('swap_set_changed');
+        err.previewChanged = true;
+        throw err;
+      }
+      aIds = liveA;
+      bIds = liveB;
     // route_order: null on both real reassignments — each stop's sequence
     // number belonged to its OLD tech's run; carrying it into the new tech's
     // day would interleave stale numbers (consumers append NULLs last).
-    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
-    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
-    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
-  });
+      if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
+      if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
+      if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
+    });
+  } catch (err) {
+    if (err && err.previewChanged) {
+      return { error: 'The stops on one of these days changed after the card was shown — nothing was swapped. Ask again for a fresh card.', preview_changed: true };
+    }
+    throw err;
+  }
 
   // Visit-group seam (codex #3590 r9): a whole-day swap moves every child
   // but not service_visits.technician_id — run the repair per row so each

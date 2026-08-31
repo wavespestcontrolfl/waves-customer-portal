@@ -1840,11 +1840,19 @@ async function createAppointment(input) {
         throw err;
       }
     }
-    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
-      customerId: customer_id,
-      scheduledServiceId: created.id,
-      source: 'intelligence_bar',
-    });
+    // The marker is what makes a booking eligible for credit redemption
+    // (immediate AND the hourly sweep). A card-approved credit-FREE booking
+    // is never marked: the READ COMMITTED projection above cannot see an
+    // offer committed concurrently, and an unmarked booking is the only
+    // thing that keeps "no credit is redeemed by this booking" true without
+    // a lock shared with offer creation.
+    if (input._inspection_credit_amount === undefined) {
+      await require('../inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId: customer_id,
+        scheduledServiceId: created.id,
+        source: 'intelligence_bar',
+      });
+    }
   });
   } catch (err) {
     if (err && err.previewChanged) {
@@ -1916,9 +1924,12 @@ async function createAppointment(input) {
   // Ids only — customer names/phones/addresses never go to logs (PII rule).
   logger.info(`[intelligence-bar] Created appointment ${appointment.id} for customer ${customer_id} on ${dateStr}`);
 
+  // One `warning` key — both the reminder failure and the occupancy advisory
+  // must survive when they coincide (the card renders result.warning).
+  const warnings = [reminderWarning, overlapAdvisory].filter(Boolean);
   return {
     success: true,
-    ...(reminderWarning ? { warning: reminderWarning } : {}),
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
     appointment_id: appointment.id,
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,
@@ -1926,8 +1937,6 @@ async function createAppointment(input) {
     // The RESOLVED tech's canonical name — never the raw input, which can be
     // absent on an id-only retry or disagree with the id it rode in with.
     technician: resolvedTechnicianName || 'Unassigned',
-    // Advisory occupancy-overlap note (gated probe) — the booking stands.
-    ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
   };
 }
 

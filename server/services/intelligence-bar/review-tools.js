@@ -406,17 +406,17 @@ async function triggerReviewRequest(input) {
     }).first();
   }
   if (!customer) return { error: 'Customer not found' };
-  if (!customer.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
+  // The effective SMS recipient is what the centralized sender resolves
+  // (service contact when consented, else the account holder) — validate
+  // THAT, not the bare primary phone, so a service-contact-only account is
+  // neither refused here nor promised a card that cannot execute.
+  const { getServiceContactSmsRecipient } = require('../customer-contact');
+  const target = getServiceContactSmsRecipient(customer);
+  if (!target.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
   // W0B pinned recipient: the operator approved THIS phone on the card —
-  // resolved the way the centralized sender resolves it (service-contact
-  // SMS recipient, not the bare billing phone) and enforced here before
-  // ReviewService.create.
-  if (input._pinned_phone) {
-    const { getServiceContactSmsRecipient } = require('../customer-contact');
-    const target = getServiceContactSmsRecipient(customer);
-    if (String(target?.phone || '') !== String(input._pinned_phone)) {
-      return { error: 'The review-request recipient changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
-    }
+  // enforced here before ReviewService.create.
+  if (input._pinned_phone && String(target.phone) !== String(input._pinned_phone)) {
+    return { error: 'The review-request recipient changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
   }
 
   // Check if already sent recently. "Last 30 days" is a rolling DURATION, not a

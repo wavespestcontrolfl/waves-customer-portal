@@ -2470,6 +2470,10 @@ router.post('/confirm-action', async (req, res, next) => {
           await PendingActions.recordResult(action.id, result);
           return res.status(409).json(result);
         }
+        // The fingerprint just bound this preview to the card, so its stop
+        // sets ARE the approved ones — hand them to the executor to reassert
+        // under its locks (swap_tech_assignments). `_`-prefixed: never shown.
+        if (livePreview?.stops) execParams._verified_stops = livePreview.stops;
       }
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.
