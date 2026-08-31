@@ -592,6 +592,7 @@ function protocolFor(line) {
 function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOverride = null } = {}) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
+  let membershipEmitted = false;
   for (const item of items) {
     // A quote-required row was never PRICED — it goes to manual quoting,
     // so a $0 line would mint phantom zero-revenue/COGS entries (codex
@@ -727,7 +728,11 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // (the mapper normally converts it to the one-time membership fee) —
     // omitting it dropped $99 of delivered revenue (GH codex P1).
     const initialFee = Number.isFinite(numOrNaN(initialFeeOverride)) ? numOrNaN(initialFeeOverride) : num(item.initialFee);
-    if (emitInitialFee && Number.isFinite(initialFee) && initialFee > 0) {
+    // ONE membership line per estimate — the frozen override applies to
+    // the whole quote, not per engine row (codex pre-push P1).
+    if (!membershipEmitted && emitInitialFee && Number.isFinite(initialFee) && initialFee > 0
+      && (Number.isFinite(num(item.initialFee)) || Number.isFinite(numOrNaN(initialFeeOverride)))) {
+      membershipEmitted = true;
       lines.push({
         serviceKey: 'waveguard_membership',
         label: 'WaveGuard Membership',

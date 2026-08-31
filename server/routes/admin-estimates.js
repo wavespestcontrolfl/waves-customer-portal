@@ -1782,21 +1782,27 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   }
 
   try {
-    // NO re-read (GH codex P1, same rule as the sibling/race paths): a
-    // customer can accept between the guarded send update and a re-read,
-    // and the acceptance rewrite would be stored as send-time truth. The
-    // pre-delivery claimed row + THIS delivery's built bundle IS the
-    // delivered quote; status/sent_at/expiry override to published values.
-    let preDeliveryData = estimate.estimate_data;
-    if (typeof preDeliveryData === 'string') { try { preDeliveryData = JSON.parse(preDeliveryData); } catch { preDeliveryData = {}; } }
+    // The audit basis must be UNCONTAMINATED by acceptance yet include a
+    // proposal save that legitimately committed mid-send (GH codex P1 both
+    // ways): freshForSnapshot — the same row the delivery itself rendered
+    // from — is the basis UNLESS acceptance already rewrote it, in which
+    // case the pre-delivery claimed row is; this delivery's built bundle
+    // is grafted either way, and status/sent_at/expiry reflect the
+    // published values.
+    const acceptedMidSend = !!freshForSnapshot.accepted_at
+      || freshForSnapshot.status === 'accepted'
+      || !!freshForSnapshot.price_locked_at;
+    const basisRow = acceptedMidSend ? estimate : freshForSnapshot;
+    let basisData = basisRow.estimate_data;
+    if (typeof basisData === 'string') { try { basisData = JSON.parse(basisData); } catch { basisData = {}; } }
     const auditAnchor = {
-      ...estimate,
-      status: estimate.viewed_at ? 'viewed' : 'sent',
+      ...basisRow,
+      status: basisRow.viewed_at ? 'viewed' : 'sent',
       sent_at: now,
       expires_at: nextExpiresAt,
       estimate_data: builtSendSnapshot
-        ? { ...(preDeliveryData || {}), sendSnapshot: builtSendSnapshot }
-        : (preDeliveryData || {}),
+        ? { ...(basisData || {}), sendSnapshot: builtSendSnapshot }
+        : (basisData || {}),
     };
     await saveEstimatePricingAuditSnapshot(auditAnchor, {
       trigger: 'send',
