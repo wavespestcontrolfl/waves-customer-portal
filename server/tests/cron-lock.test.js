@@ -274,7 +274,8 @@ describe('cron-lock runExclusive', () => {
       // A second tick coalesces behind the first (deadline fixed at ITS
       // arrival, ~1s after the first).
       const secondBody = jest.fn(async () => 'billed-late');
-      const second = runExclusive('billing-monthly', secondBody, { recordHealth: false, waitForSlot: true });
+      const secondArrivedAt = Date.now();
+      const second = runExclusive('billing-monthly', secondBody, { waitForSlot: true });
 
       // Both deadlines pass with the cap still full; the first times out.
       await jest.advanceTimersByTimeAsync(10 * 60 * 1000);
@@ -283,6 +284,12 @@ describe('cron-lock runExclusive', () => {
       // deadline has passed too, so it must NOT start a fresh 10-minute
       // wait and run whenever a slot opens.
       await expect(second).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+      // …and its failure record is stamped with its ORIGINAL arrival, not
+      // the retry time — so a replica that handled the occurrence near the
+      // tick is still recognised as newer and not overwritten.
+      const [, bindings] = db.raw.mock.calls.find(([q]) => typeof q === 'string' && q.includes('job_health'));
+      expect(bindings[0]).toBe('billing-monthly');
+      expect(bindings[1].getTime()).toBe(secondArrivedAt);
 
       release('swept');
       await expect(Promise.all(herd)).resolves.toEqual(Array(10).fill('swept'));
@@ -314,6 +321,10 @@ describe('cron-lock runExclusive', () => {
       const [sql, bindings] = db.raw.mock.calls.find(([q]) => typeof q === 'string' && q.includes('job_health'));
       expect(sql).toContain("last_status = 'failed'");
       expect(sql).toMatch(/last_started_at < EXCLUDED\.last_started_at/);
+      // The guarded update advances last_started_at so a second pod / a
+      // coalesced retry for the same occurrence dedups instead of bumping
+      // the failure streak again.
+      expect(sql).toMatch(/DO UPDATE SET\s+last_started_at = EXCLUDED\.last_started_at/);
       expect(bindings[0]).toBe('billing-monthly');
       expect(bindings.at(-1)).toContain('no lock slot');
 

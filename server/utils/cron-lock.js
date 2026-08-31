@@ -116,6 +116,7 @@ async function recordMissedTick(jobName, tickStartedAtMs, message, conn) {
                  (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_error, consecutive_failures, updated_at)
                VALUES (?, ?, ?, ?, 'failed', ?, 1, CURRENT_TIMESTAMP)
                ON CONFLICT (job_name) DO UPDATE SET
+                 last_started_at = EXCLUDED.last_started_at,
                  last_finished_at = EXCLUDED.last_finished_at,
                  last_duration_ms = EXCLUDED.last_duration_ms,
                  last_status = 'failed',
@@ -310,7 +311,11 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = is
       releaseLockSlot();
     }
   }
-  return runScheduled(jobName, lockKey, fn, recordHealth, tickDeadline());
+  // Arrival time and deadline are fixed HERE and travel through every
+  // coalesced retry: a retry is still this tick, so its health record and
+  // its cutoff are measured from when it arrived, not from when it retried.
+  const arrivedAtMs = Date.now();
+  return runScheduled(jobName, lockKey, fn, recordHealth, tickDeadline(arrivedAtMs), arrivedAtMs);
 }
 
 // A tick may wait at most SLOT_WAIT_MAX_MS — and never into the next ET
@@ -323,7 +328,7 @@ function tickDeadline(now = Date.now()) {
   return Math.min(now + SLOT_WAIT_MAX_MS, nextEtMidnight);
 }
 
-async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt) {
+async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tickStartedAtMs) {
   // Coalesce behind an in-flight (waiting or running) tick of this job
   // rather than queueing a replay — but only until that run's LEASE
   // outcome is known, never until it finishes: a hung body would otherwise
@@ -338,12 +343,11 @@ async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt) {
   if (prior) {
     const decision = await prior;
     if (!decision.held && decision.reason === 'no_connection') {
-      return runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt);
+      return runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt, tickStartedAtMs);
     }
     logger.info(`[cron-lock] ${jobName}: covered by a concurrent run — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
   }
-  const tickStartedAtMs = Date.now();
   let decideLease;
   const leaseDecided = new Promise((resolve) => { decideLease = resolve; });
   const lease = {
