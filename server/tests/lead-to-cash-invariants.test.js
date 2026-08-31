@@ -40,6 +40,7 @@ jest.mock('../services/stale-visit-sweep', () => ({ _private: { findStaleVisits:
 jest.mock('../services/estimate-conversion-guard', () => ({ convertedOpenEstimatesQuery: jest.fn() }));
 jest.mock('../config/completion-lane-registry', () => ({ ALL_LISTS: { A: ['known_key', 'gone_key'] }, classifyCatalogRow: jest.fn() }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
@@ -316,6 +317,13 @@ describe('detector adapters', () => {
     ] });
     mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }] });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    // The db is mocked, so a nonexistent column cannot fail the query here —
+    // it shipped once as `ss.billed_to_payer_id`, which is a schedule-query
+    // ALIAS and threw in Postgres on every sweep (Codex P1). Pin the real
+    // per-job column by name.
+    const selected = mockTables.scheduled_services.select.mock.calls[0];
+    expect(selected).toContain('ss.payer_id');
+    expect(selected).not.toContain('ss.billed_to_payer_id');
     expect(out.count).toBe(1);
     expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
     expect(out.detail).toMatchObject({ checked: 4, truncated: false });

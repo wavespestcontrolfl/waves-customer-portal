@@ -3196,6 +3196,50 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
   };
 }
 
+// Wallet read + money-gap enrichment for an appointment payload. Shared by
+// the DAY and WEEK feeds because Dispatch's 5-Day/Week rows open the SAME
+// MobileAppointmentDetailSheet — enriching only the day feed left week rows
+// showing the original ambiguous "nothing bills" text with no warning and no
+// card-link action (Codex P1). One helper, so a third feed cannot drift.
+//
+// Fails toward NOT flagging, like the reads it wraps: an unreadable wallet
+// yields noPaymentMethod null (never a false "no card on file"), and any
+// lookup error leaves the payload exactly as it was.
+async function enrichBillingLaneWithWalletGap({ billingLane, customerId, achStatus, alerts }) {
+  const needsWallet = billingLane?.prediction?.kind === 'invoice'
+    || !!unbilledCompletionGap({ prediction: billingLane?.prediction });
+  if (!needsWallet) return billingLane;
+  let hasChargeableMethod = true;
+  try {
+    const methods = await db('payment_methods')
+      .where({ customer_id: customerId, processor: 'stripe' })
+      .whereNotNull('stripe_payment_method_id')
+      .select('method_type', 'ach_status', 'exp_month', 'exp_year');
+    hasChargeableMethod = methods.some((m) => {
+      if (isBankMethodType(m.method_type)) {
+        if (achStatus && achStatus !== 'active') return false;
+        return !['pending_verification', 'verification_failed'].includes(m.ach_status);
+      }
+      // Legacy rows carry 2-digit years — normalize BEFORE the expiry check,
+      // as the default-swap route does, or a valid '12/32' card reads as
+      // year 32 and isExpiredCardMethod fails closed.
+      const rawYear = parseInt(m.exp_year, 10);
+      return !isExpiredCardMethod({
+        ...m,
+        exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
+      });
+    });
+  } catch { hasChargeableMethod = true; }
+  if (Array.isArray(alerts)) {
+    const noCardAlert = noCardOnFileAlert({ hasChargeableMethod, prediction: billingLane.prediction });
+    if (noCardAlert) alerts.push(noCardAlert);
+    const unbilledAlert = unbilledVisitAlert({ hasChargeableMethod, prediction: billingLane.prediction });
+    if (unbilledAlert) alerts.push(unbilledAlert);
+  }
+  billingLane.unbilledGap = unbilledCompletionGap({ prediction: billingLane.prediction, hasChargeableMethod });
+  return billingLane;
+}
+
 // Recurring bookings must land with a NUMBER on them. A hand-booked customer
 // (2026-08-31) took four recurring visits with no stamped price and
 // monthly_rate 0: every visit then completes at $0 and the plan runs free
@@ -3220,7 +3264,7 @@ function recurringWithoutBillableAmount({
   customer,
   effectiveBillingTerm,
   prepaid,
-  payerId,
+  payerBilled,
   isCallback,
   serviceType,
 }) {
@@ -3229,7 +3273,11 @@ function recurringWithoutBillableAmount({
   // the route has actually settled on it.
   if (effectiveBillingTerm === 'prepay_annual') return null;
   if (prepaid && Number(prepaid.totalAmount) > 0) return null;
-  if (payerId) return null;
+  // An ACTIVE payer, resolved by the same authority completion uses. A raw
+  // id is not enough: completion's resolveForInvoice falls back to self-pay
+  // for a deactivated payer (and honors self_pay_override), so trusting the
+  // id exempted series that then complete at $0 (Codex P0).
+  if (payerBilled) return null;
 
   const lane = resolveBillingLane(customer);
   const prediction = predictCompletionBilling({
@@ -3582,52 +3630,12 @@ router.get('/', async (req, res, next) => {
       // just any payment_methods row. Fail toward NOT flagging, like the
       // reads above: a wrong badge on a covered customer teaches the tech
       // to ignore it.
-      // Wallet read now also covers the unbilled-gap prediction: the warning
-      // says "and no card on file", so it needs the same chargeable-method
-      // truth the no_card badge uses rather than a second, looser test.
-      if (billingLane.prediction?.kind === 'invoice'
-        || unbilledCompletionGap({ prediction: billingLane.prediction })) {
-        let hasChargeableMethod = true;
-        try {
-          const methods = await db('payment_methods')
-            .where({ customer_id: s.customer_id, processor: 'stripe' })
-            .whereNotNull('stripe_payment_method_id')
-            .select('method_type', 'ach_status', 'exp_month', 'exp_year');
-          hasChargeableMethod = methods.some((m) => {
-            if (isBankMethodType(m.method_type)) {
-              // Both ACH gates the collection paths enforce: the customer-
-              // level health block (billing-v2 default-swap) and the row's
-              // own unverified/failed state (customer-autopay).
-              if (s.ach_status && s.ach_status !== 'active') return false;
-              return !['pending_verification', 'verification_failed'].includes(m.ach_status);
-            }
-            // Legacy rows carry 2-digit years — normalize BEFORE the expiry
-            // check, as the default-swap route does, or a valid '12/32' card
-            // reads as year 32 and isExpiredCardMethod fails closed.
-            const rawYear = parseInt(m.exp_year, 10);
-            return !isExpiredCardMethod({
-              ...m,
-              exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
-            });
-          });
-        } catch { hasChargeableMethod = true; }
-        const noCardAlert = noCardOnFileAlert({
-          hasChargeableMethod,
-          prediction: billingLane.prediction,
-        });
-        if (noCardAlert) alerts.push(noCardAlert);
-        const unbilledAlert = unbilledVisitAlert({
-          hasChargeableMethod,
-          prediction: billingLane.prediction,
-        });
-        if (unbilledAlert) alerts.push(unbilledAlert);
-        // Rendered by BillingLaneCard as the amber money-gap note. Computed
-        // here, with the wallet, so the card stays a pure renderer.
-        billingLane.unbilledGap = unbilledCompletionGap({
-          prediction: billingLane.prediction,
-          hasChargeableMethod,
-        });
-      }
+      await enrichBillingLaneWithWalletGap({
+        billingLane,
+        customerId: s.customer_id,
+        achStatus: s.ach_status,
+        alerts,
+      });
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
@@ -4147,6 +4155,15 @@ router.get('/week', async (req, res, next) => {
             completionAutopayChargeEnabled: require('../config/feature-gates').gates.completionAutopayCharge === true,
           }),
         };
+        // Week rows open the SAME detail sheet as the day feed, so they get
+        // the same wallet read and money-gap note (Codex P1). No alerts array
+        // here — the propertyAlerts feed is a day-view concept.
+        await enrichBillingLaneWithWalletGap({
+          billingLane,
+          customerId: s.customer_id,
+          achStatus: s.ach_status,
+          alerts: null,
+        });
         return {
           id: s.id,
           customerId: s.customer_id,
@@ -4996,7 +5013,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         customer,
         effectiveBillingTerm: bookingBillingTermEffective,
         prepaid: req.body.prepaid || null,
-        payerId: req.body.billedToPayerId || customer.payer_id || null,
+        // resolveForInvoice never throws (it self-pays on any error), honors
+        // self_pay_override, and only returns an ACTIVE payer — the same
+        // verdict completion will reach. `billedToPayerId` is NOT read here:
+        // this route never persists it, so accepting it would have been a
+        // caller-supplied bypass of the gate (Codex P0).
+        payerBilled: !!(await require('../services/payer')
+          .resolveForInvoice({ database: db, customerId, customer })).payerId,
         isCallback: resolvedIsCallback,
         serviceType,
       });

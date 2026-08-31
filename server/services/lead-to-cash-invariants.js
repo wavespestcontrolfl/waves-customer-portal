@@ -188,7 +188,12 @@ const DETECTORS = Object.freeze([
         .limit(CLOSEOUT_VISIT_CAP + 1)
         .select(
           'ss.id', 'ss.estimated_price', 'ss.is_callback', 'ss.is_recurring', 'ss.service_type',
-          'ss.billed_to_payer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
+          // scheduled_services.payer_id is the real per-job column;
+          // billed_to_payer_id is only an alias the schedule query builds, so
+          // selecting it threw in Postgres and made this detector unavailable
+          // on EVERY sweep (Codex P1). Presence is not the verdict either —
+          // resolveForInvoice below is.
+          'ss.payer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
           'c.billing_mode', 'c.monthly_rate', 'c.waveguard_tier', 'c.per_application_fee',
         );
       const truncated = visits.length > CLOSEOUT_VISIT_CAP;
@@ -210,8 +215,15 @@ const DETECTORS = Object.freeze([
             .map((r) => r.scheduled_service_id)
           : [],
       );
+      const { resolveForInvoice } = require('./payer');
       for (const v of evaluated) {
         if (invoicedIds.has(v.id)) continue;
+        // Canonical active-payer resolution, and only when there is something
+        // to resolve — a payer-billed visit bills the payer, not the customer,
+        // so it is never a gap. resolveForInvoice never throws.
+        const payerBilled = v.payer_id
+          ? !!(await resolveForInvoice({ database: db, scheduledServiceId: v.id })).payerId
+          : false;
         const lane = resolveBillingLane({
           billing_mode: v.billing_mode,
           waveguard_tier: v.waveguard_tier,
@@ -231,7 +243,7 @@ const DETECTORS = Object.freeze([
           isRecurring: !!v.is_recurring,
           isCallback: !!v.is_callback,
           serviceType: v.service_type,
-          payerBilled: !!v.billed_to_payer_id,
+          payerBilled,
           prepaidAmount: v.prepaid_amount,
           prepaidMethod: v.prepaid_method || null,
         });

@@ -89,7 +89,7 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
     effectiveBillingTerm: 'standard',
     prepaid: null,
-    payerId: null,
+    payerBilled: false,
     isCallback: false,
     serviceType: 'Monthly Pest Control Service',
   };
@@ -139,7 +139,11 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
 
   test('the remaining legitimate arrangements pass', () => {
     expect(recurringWithoutBillableAmount({ ...unbillable, prepaid: { totalAmount: 900 } })).toBeNull();
-    expect(recurringWithoutBillableAmount({ ...unbillable, payerId: 'payer-1' })).toBeNull();
+    // Validated ACTIVE payer only — the caller resolves it through
+    // resolveForInvoice, so a deactivated payer arrives here as false and the
+    // series is still refused (Codex P0).
+    expect(recurringWithoutBillableAmount({ ...unbillable, payerBilled: true })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...unbillable, payerBilled: false })).toBeTruthy();
     expect(recurringWithoutBillableAmount({ ...unbillable, isCallback: true })).toBeNull();
     expect(recurringWithoutBillableAmount({ ...unbillable, serviceType: 'Pest Control Re-Service' })).toBeNull();
   });
