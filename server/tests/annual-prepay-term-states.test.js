@@ -108,29 +108,54 @@ function chainAfter(src, start) {
   return src.slice(start);
 }
 
+// The WHERE guards attached to the same builder chain as a status write,
+// normalized to compact strings so each documented move's guard can be
+// pinned exactly.
+function chainGuards(chain) {
+  const upTo = chain.search(/\.(?:update|insert)\(/);
+  const head = upTo === -1 ? chain : chain.slice(0, upTo);
+  return [...head.matchAll(/\.(where(?:In|NotIn|Null|NotNull|Not)?)\(([^)]*)/g)]
+    .map((g) => `${g[1]}(${g[2].replace(/\s+/g, ' ').trim()})`);
+}
+
 function statusWriteExpressions(src) {
+  return statusWriteSites(src).map((s) => s.expr);
+}
+
+function statusWriteSites(src) {
   const out = [];
   // Matches aliased builders too: ('annual_prepay_terms as t').
   const chainRe = new RegExp(`\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
   // Value runs to the next `, key:` or the end of the object body — a ternary
   // (`a ? 'x' : b`) has no comma, so it survives whole.
-  const objectStatuses = (body) => {
+  const objectStatuses = (body, guards) => {
     for (const s of body.matchAll(/\bstatus:\s*((?:[^,\n]|,(?!\s*[\w[\]]+\s*:))+)/g)) {
-      out.push(s[1].replace(/,\s*$/, '').trim());
+      out.push({ expr: s[1].replace(/,\s*$/, '').trim(), guards });
     }
   };
-  for (const m of src.matchAll(chainRe)) {
-    const chain = chainAfter(src, m.index + m[0].length);
-    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*\{([\s\S]*?)\}\s*\)/g)) objectStatuses(w[1]);
+  const scanChain = (chain, declIndex) => {
+    const guards = chainGuards(chain);
+    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*\{([\s\S]*?)\}\s*\)/g)) objectStatuses(w[1], guards);
     for (const w of chain.matchAll(/\.(?:update|insert)\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
       // Nearest `const <id> = {` BEFORE this chain (the same name is declared
       // more than once in the module, e.g. recordDecision's two `update`s).
-      const before = src.slice(0, m.index);
+      const before = src.slice(0, declIndex);
       const declStart = before.lastIndexOf(`const ${w[1]} = {`);
-      if (declStart === -1) { out.push(`<unresolved object ${w[1]}>`); continue; }
+      if (declStart === -1) { out.push({ expr: `<unresolved object ${w[1]}>`, guards }); continue; }
       const body = src.slice(declStart).match(/\{([\s\S]*?)\};/);
-      if (!body) { out.push(`<unresolved object ${w[1]}>`); continue; }
-      objectStatuses(body[1]);
+      if (!body) { out.push({ expr: `<unresolved object ${w[1]}>`, guards }); continue; }
+      objectStatuses(body[1], guards);
+    }
+  };
+  for (const m of src.matchAll(chainRe)) {
+    scanChain(chainAfter(src, m.index + m[0].length), m.index);
+  }
+  // Split builders: `const q = db('annual_prepay_terms'); … q.update({...});`
+  const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
+  for (const m of src.matchAll(splitRe)) {
+    const rest = src.slice(m.index + m[0].length);
+    for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:update|insert)\\(\\s*\\{([\\s\\S]*?)\\}\\s*\\)`, 'g'))) {
+      objectStatuses(w[1], ['<split-builder>']);
     }
   }
   return out;
@@ -173,6 +198,13 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
       "  .returning('*');",
     ].join('\n');
     expect(statusWriteExpressions(src)).toEqual(["'refunded'"]);
+  });
+
+  test('catches a SPLIT builder (chain assigned to a variable, written later)', () => {
+    const src = "const q = db('annual_prepay_terms');\nawait q.update({ status: 'canceled' });";
+    expect(statusWriteExpressions(src)).toEqual(["'canceled'"]);
+    const aliased = "let apt = trx('annual_prepay_terms as t');\napt.update({ status: 'refunded', updated_at: now });";
+    expect(statusWriteExpressions(aliased)).toEqual(["'refunded'"]);
   });
 
   test('an unknown value source resolves to null (fails the lockstep test) instead of passing silently', () => {
@@ -233,6 +265,44 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(writerFiles).toEqual([
       'server/routes/admin-invoices.js',
       'server/services/annual-prepay-renewals.js',
+    ]);
+  });
+
+  test('every write site keeps its documented WHERE guard (moves 1–13) — loosening a guard fails here', () => {
+    // Exact source-level pin of each write's guard chain, in scan order.
+    // (`orWhere` branches are pinned behaviorally in the notice-claim test
+    // below; this list covers the where/whereIn/whereNull/whereNotIn guards.)
+    expect(statusWriteSites(read('server/services/annual-prepay-renewals.js'))).toEqual([
+      // Move 2: payment_pending → active on invoice paid.
+      { expr: "'active'", guards: ['where({ id: term.id, status: PAYMENT_PENDING_STATUS })'] },
+      // Move 11: lost-dispute revival — undecided cancelled only.
+      { expr: "'active'", guards: ["where({ id: term.id, status: 'cancelled' })", "whereNull('renewal_decision')"] },
+      // Move 9: void/refund cancels — undecided only (decided lapse keeps coverage).
+      { expr: "'cancelled'", guards: ['where({ id: term.id })', "whereNull('renewal_decision')"] },
+      // Move 10: dispute demotion — active statuses only.
+      { expr: 'PAYMENT_PENDING_STATUS', guards: ['where({ prepay_invoice_id: invoiceId })', "whereIn('status', ACTIVE_STATUSES)"] },
+      // Move 1 (existing row): decided terms keep their status via the ternary itself.
+      { expr: 'existing.renewal_decision ? existing.status : nextStatus', guards: ['where({ id: existing.id })'] },
+      // Move 1 (birth insert): no guard — new row.
+      { expr: 'nextStatus', guards: [] },
+      // Move 4: notice claim — active, undecided, unsent, availability predicate.
+      {
+        expr: "term.status === 'active' ? 'renewal_pending' : term.status",
+        guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
+          'whereNull(noticeCol)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)'],
+      },
+      // Move 5: claim release — undecided + still unsent.
+      { expr: 'previousStatus', guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)'] },
+      // Move 3: contacted.
+      { expr: "'renewal_pending'", guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
+      // Moves 6–8: decisions.
+      { expr: 'statusAfterDecision(action)', guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
+    ]);
+    expect(statusWriteSites(read('server/routes/admin-invoices.js'))).toEqual([
+      // Move 13: DELETE /:id/annual-prepay — deliberately unguarded (documented residue).
+      { expr: "'cancelled'", guards: ['where({ id: termId })'] },
+      // Move 12: reverse-prepaid un-pay — undecided, non-cancelled only.
+      { expr: "'payment_pending'", guards: ['where({ id: locked.annual_prepay_term_id })', "whereNull('renewal_decision')", "whereNotIn('status', ['cancelled', 'canceled'])"] },
     ]);
   });
 
