@@ -367,7 +367,12 @@ Object.assign(api, {
   }),
   getCards: async () => ({ cards: [CARD, SPARE_CARD] }),
   getAutopay: async () => (CANCELLED
-    ? { ...AUTOPAY, state: 'disabled', autopay_enabled: false, waveguard_tier: null, autopay_selected_method_ids: [] }
+    // Minimal cancelled projection, mirroring the server: status scalars
+    // only — no saved-method rows ride out to a cancelled session.
+    ? {
+      ...AUTOPAY, state: 'disabled', autopay_enabled: false, waveguard_tier: null,
+      payment_methods: [], autopay_selected_method_ids: [], autopay_payment_method_id: null, recent_events: [],
+    }
     : AUTOPAY),
   updateAutopay: async () => ({ success: true, updated: true, changes: [] }),
   pauseAutopay: async () => ({ success: true }),

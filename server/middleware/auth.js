@@ -79,6 +79,11 @@ const CANCELLED_READ_ROUTES = [
   // every preference control (their writes are blocked), so nothing renders
   // from those reads.
   ['POST', '/api/requests/restart-plan'],
+  // The one write besides restart: in-app account deletion (App Store
+  // Guideline 5.1.1(v)) must stay reachable after cancellation — the route
+  // soft-deletes every profile and revokes all sessions itself (codex GH r5
+  // P1: the strict contract 401'd a cancelled customer AFTER the confirm).
+  ['DELETE', '/api/auth/account'],
 ];
 
 function cancelledReadRoute(req) {

@@ -85,14 +85,21 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   const {
     detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
   } = require('../self-booking-plan-sync');
-  const { CHURN_REASON } = require('../cancellation-processor');
+  const { CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX } = require('../cancellation-processor');
   let rowsQuery = dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .where('s.status', 'cancelled')
     .where('s.is_recurring', true)
     .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
-    .where('s.cancellation_reason', CHURN_REASON)
+    // A customer-driven cancellation's reason is either the bare default or
+    // the request-scoped "Portal cancellation request <id>" every
+    // requests.js path passes (codex GH r5 P1: matching only the default
+    // made every ordinary whole-account restart find zero rows).
+    .where(function customerCancelReason() {
+      this.where('s.cancellation_reason', CHURN_REASON)
+        .orWhere('s.cancellation_reason', 'like', `${PORTAL_CANCEL_REASON_PREFIX}%`);
+    })
     .orderBy('s.cancelled_at', 'desc')
     .limit(50)
     .select('s.*', 'sv.service_key', 'sv.service_name');

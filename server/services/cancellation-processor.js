@@ -7,6 +7,11 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
 const CHURN_REASON = 'Customer cancellation request';
+// The reason the portal request routes pass ("Portal cancellation request
+// <id>") — persisted verbatim on each cancelled row's cancellation_reason,
+// so anything matching customer-driven cancellations by reason must accept
+// this prefix alongside the bare CHURN_REASON default.
+const PORTAL_CANCEL_REASON_PREFIX = 'Portal cancellation request';
 // Status/track-state vocabulary lives in cancellation-eligibility so the
 // POST /api/requests gate, the /api/schedule payload, and this sweep can
 // never drift; re-exported below for existing consumers.
@@ -905,5 +910,5 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
 
 module.exports = {
   processCancellationRequest, raiseTermiteRetrievalTask, planScopedWindDown, familyOfServiceRow,
-  CHURN_REASON, CANCELLABLE_STATUSES,
+  CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX, CANCELLABLE_STATUSES,
 };

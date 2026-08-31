@@ -12,7 +12,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { gsmSafeName } = require('../services/messaging/gsm-normalize');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
-const { processCancellationRequest } = require('../services/cancellation-processor');
+const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
@@ -225,7 +225,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
           const retry = await processCancellationRequest({
             customerId: req.customer.id,
-            reason: `Portal cancellation request ${dupe.id}`,
+            reason: `${PORTAL_CANCEL_REASON_PREFIX} ${dupe.id}`,
             requestId: dupe.id,
             families: recoveredScope,
           });
@@ -304,7 +304,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
         const retry = await processCancellationRequest({
           customerId: req.customer.id,
-          reason: `Portal cancellation request ${priorCancellation.id}`,
+          reason: `${PORTAL_CANCEL_REASON_PREFIX} ${priorCancellation.id}`,
           requestId: priorCancellation.id,
           families: recoveredScope,
         });
@@ -507,7 +507,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       try {
         cancellationResult = await processCancellationRequest({
           customerId: req.customer.id,
-          reason: `Portal cancellation request ${request.id}`,
+          reason: `${PORTAL_CANCEL_REASON_PREFIX} ${request.id}`,
           requestId: request.id,
           families: scopedFamilies,
         });

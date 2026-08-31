@@ -200,7 +200,7 @@ const STILL_BLOCKED = [
   ['POST', '/api/requests/cancel-resolution'], ['GET', '/api/requests'],
   ['GET', '/api/referrals'], ['POST', '/api/referrals'],
   ['POST', '/api/ai/chat'],
-  ['POST', '/api/auth/select-property'], ['PUT', '/api/auth/credit-preference'], ['DELETE', '/api/auth/account'],
+  ['POST', '/api/auth/select-property'], ['PUT', '/api/auth/credit-preference'],
 ];
 
 describe('cancelled customer — read allowance (gate on)', () => {
@@ -238,6 +238,25 @@ describe('cancelled customer — read allowance (gate on)', () => {
     }
     const login = await call('POST', '/api/auth/verify-code', {}, { phone: '+19415550104', code: '123456' });
     expect(login.status).toBe(401);
+  });
+
+  // In-app account deletion (App Store 5.1.1(v)) is the one write besides
+  // restart a cancelled customer keeps — the confirm dialog must not land on
+  // a 401 (codex GH r5 P1).
+  test('DELETE /api/auth/account soft-deletes for the churned customer', async () => {
+    const res = await call('DELETE', '/api/auth/account', bearer('cust-churned'));
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    const row = tables.customers.find((c) => c.id === 'cust-churned');
+    expect(row.deleted_at).not.toBeNull();
+  });
+
+  test('DELETE /api/auth/account stays 401 for a deactivated (non-churned) row and with the gate off', async () => {
+    const deact = await call('DELETE', '/api/auth/account', bearer('cust-deact'));
+    expect(deact.status).toBe(401);
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    const gateOff = await call('DELETE', '/api/auth/account', bearer('cust-churned'));
+    expect(gateOff.status).toBe(401);
   });
 
   test('an active customer is unaffected: reads and writes both pass, /me says not cancelled', async () => {

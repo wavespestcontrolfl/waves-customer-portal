@@ -19,6 +19,7 @@ jest.mock('../services/account-membership-email', () => ({
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: jest.fn(),
   CHURN_REASON: 'Customer cancellation request',
+  PORTAL_CANCEL_REASON_PREFIX: 'Portal cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn().mockResolvedValue(false) }));
@@ -135,16 +136,30 @@ function builder(table) {
     const out = (tables[table.split(' as ')[0]] || []).filter((r) => conds.every((c) => c(r)));
     return limitN ? out.slice(0, limitN) : out;
   };
+  const scalarCond = (a, op, val) => {
+    if (typeof a === 'object') { const entries = Object.entries(a); return (r) => entries.every(([k, v]) => String(r[norm(k)]) === String(v)); }
+    if (val === undefined) return (r) => String(r[norm(a)]) === String(op);
+    if (op === 'like') { const prefix = String(val).replace(/%$/, ''); return (r) => String(r[norm(a)] || '').startsWith(prefix); }
+    if (op === '>=') return (r) => (r[norm(a)] ?? '') >= val;
+    return (r) => String(r[norm(a)]) === String(val);
+  };
   b.where = (a, op, val) => {
     if (typeof a === 'function') {
-      // grouped predicate (is_callback NULL OR false) — pass-through
+      // Grouped predicate (is_callback NULL OR false; the customer-cancel
+      // reason group) — knex ORs the branches inside the group, so mirror
+      // that instead of passing through: the reason predicate is exactly
+      // what the codex GH r5 P1 fix changed and must be exercised.
+      const subConds = [];
+      const sub = {
+        where: (sa, sop, sval) => { subConds.push(scalarCond(sa, sop, sval)); return sub; },
+        orWhere: (sa, sop, sval) => { subConds.push(scalarCond(sa, sop, sval)); return sub; },
+        whereNull: (col) => { subConds.push((r) => r[norm(col)] == null); return sub; },
+      };
+      a.call(sub);
+      conds.push((r) => subConds.some((c) => c(r)));
       return b;
     }
-    if (typeof a === 'object') Object.entries(a).forEach(([k, v]) => conds.push((r) => String(r[norm(k)]) === String(v)));
-    else if (val === undefined) conds.push((r) => String(r[norm(a)]) === String(op));
-    else if (op === 'like') { const prefix = String(val).replace(/%$/, ''); conds.push((r) => String(r[norm(a)] || '').startsWith(prefix)); }
-    else if (op === '>=') conds.push((r) => (r[norm(a)] ?? '') >= val);
-    else conds.push((r) => String(r[norm(a)]) === String(val));
+    conds.push(scalarCond(a, op, val));
     return b;
   };
   b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[norm(col)]))); return b; };
@@ -376,6 +391,23 @@ describe('mintRestartEstimate', () => {
     expect(found.caseId).toBe('case-1');
     expect(found.source).toBe('cancelled_rows');
     expect([...found.families].sort()).toEqual(['lawn_care', 'mosquito', 'pest_control']);
+  });
+
+  test('rows cancelled with the request-scoped portal reason are this plan\'s evidence too', async () => {
+    // Every requests.js path passes "Portal cancellation request <id>" as
+    // the reason, and it lands verbatim on the rows — matching only the
+    // bare CHURN_REASON default found nothing for ordinary whole-account
+    // cancels (codex GH r5 P1).
+    tables.cancellation_cases[0].scope = '[]';
+    tables.scheduled_services = [
+      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-77', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-23' },
+      { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-77', service_type: 'Lawn Care Program', cancelled_at: '2026-08-23' },
+      // A staff cancellation with its own reason is still not plan evidence.
+      { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'duplicate booking', service_type: 'Monthly Mosquito Program', cancelled_at: '2026-08-23' },
+    ];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found.source).toBe('cancelled_rows');
+    expect([...found.families].sort()).toEqual(['lawn_care', 'pest_control']);
   });
 
   test('an uncommitted LATEST case never lets an older committed scope answer — recovery keys to the new attempt', async () => {

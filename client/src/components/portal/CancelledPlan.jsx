@@ -101,9 +101,14 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
           {firstName ? `${firstName}'s plan` : 'Your plan'}
         </h1>
         <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
+          {/* Qualified on purpose (codex GH r5 P2): a partially processed
+              cancellation can leave an in-progress visit for manual handling,
+              and a straggler completion can still bill — the Visits and
+              Billing tabs show those, so this copy must not swear both sets
+              are empty. */}
           {cancelledAt
-            ? `Your WaveGuard plan ended on ${fmtDate(cancelledAt)}. No visits are scheduled and nothing is billed going forward.`
-            : 'Your WaveGuard plan is cancelled. No visits are scheduled and nothing is billed going forward.'}
+            ? `Your WaveGuard plan ended on ${fmtDate(cancelledAt)}. Recurring visits and plan billing have stopped — anything still open shows on your Visits and Billing tabs.`
+            : 'Your WaveGuard plan is cancelled. Recurring visits and plan billing have stopped — anything still open shows on your Visits and Billing tabs.'}
         </div>
         <div style={{ marginTop: 14, fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
           Your service reports, visit history, and billing stay available in this portal.
