@@ -99,6 +99,21 @@ async function recordResult(id, result) {
   }
 }
 
+/**
+ * Stamp the persisted thread onto the proposals an exchange produced so
+ * recall (search_ib_history) can join a conversation to its receipts.
+ * Actor-bound: only rows the same actor requested are touched. Best-effort
+ * from the /query path — a failure here never fails the answer.
+ */
+async function attachThread(ids, threadId, requestedBy) {
+  if (!threadId || !requestedBy || !Array.isArray(ids) || ids.length === 0) return 0;
+  return db('ib_pending_actions')
+    .whereIn('id', ids)
+    .where('requested_by', String(requestedBy))
+    .whereNull('thread_id')
+    .update({ thread_id: threadId, updated_at: db.fn.now() });
+}
+
 module.exports = {
   TTL_MINUTES,
   paramsHash,
@@ -107,4 +122,5 @@ module.exports = {
   claimForConfirm,
   cancelPendingAction,
   recordResult,
+  attachThread,
 };

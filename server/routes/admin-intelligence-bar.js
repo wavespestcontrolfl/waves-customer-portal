@@ -18,6 +18,8 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
 const IbThreads = require('../services/intelligence-bar/threads');
+const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
+const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
@@ -175,6 +177,10 @@ const AGENT_ESTIMATE_TOOLS = [
 // /confirm-action; getToolsForContext additionally hides them from
 // non-admin tool lists.
 const ADMIN_ONLY_TOOL_NAMES = new Set([
+  // Recall searches the operator's own persisted IB threads — admin threads
+  // are the only ones that exist (techs stay ephemeral), so never offer or
+  // execute it for a technician token.
+  ...HISTORY_TOOL_NAMES,
   'create_customer',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
@@ -215,6 +221,9 @@ const PII_TOOL_NAMES = new Set([
   // input can carry whatever the operator typed (a name, phone, address) —
   // taint so inputs/telemetry are redacted like the comms tools.
   'search_call_research',
+  // Recall returns verbatim past conversation turns (which may embed
+  // customer PII and carry taint markers) and its query is operator-typed.
+  'search_ib_history',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
@@ -1283,7 +1292,8 @@ function getToolsForContext(context, isAdmin = false) {
   // /execute both refuse them for technician tokens, so non-admin lists must
   // not offer them either. Appended LAST so each context's own tools stay a
   // stable prompt-cache prefix.
-  const infra = isAdmin ? INFRA_TOOLS : [];
+  // Recall rides with infra: context-independent, admin-only, appended last.
+  const infra = isAdmin ? [...INFRA_TOOLS, ...HISTORY_TOOLS] : [];
   if (context === 'schedule' || context === 'dispatch') {
     return [...base, ...SCHEDULE_TOOLS, ...infra];
   }
@@ -1336,6 +1346,9 @@ function getToolsForContext(context, isAdmin = false) {
 function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (TECH_TOOL_NAMES.has(toolName)) {
     return executeTechTool(toolName, input, techContext || {});
+  }
+  if (HISTORY_TOOL_NAMES.has(toolName)) {
+    return executeHistoryTool(toolName, input, actionContext);
   }
   if (REVIEW_TOOL_NAMES.has(toolName)) {
     return executeReviewTool(toolName, input);
@@ -1696,7 +1709,10 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           errorMessage = result.message;
         } else {
           try {
-            result = await executeToolByName(toolUse.name, toolUse.input, techContext);
+            // Recall is actor-bound: the owner id travels from the
+            // authenticated request, never from model-supplied input.
+            result = await executeToolByName(toolUse.name, toolUse.input, techContext,
+              HISTORY_TOOL_NAMES.has(toolUse.name) ? { actorId: getAdminActorId(req) } : {});
             if (isToolFailure(result)) {
               failed = true;
               errorMessage = result.error || result.message || 'tool returned error';
@@ -1836,6 +1852,13 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         });
         persistedThreadId = appended?.threadId || null;
         persistedThreadSeq = appended?.lastSeq ?? null;
+        // Link this exchange's proposals to the thread so recall can join a
+        // conversation to its receipts (actor-bound inside the service).
+        if (persistedThreadId && pendingProposals.length) {
+          await PendingActions.attachThread(
+            pendingProposals.map(p => p.id), persistedThreadId, getAdminActorId(req),
+          );
+        }
       } catch (err) {
         // Never log the full error: knex enriches it with the SQL bindings,
         // which here are the complete user/assistant turn text (customer
