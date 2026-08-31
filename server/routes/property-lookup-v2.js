@@ -3263,9 +3263,12 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // record, or authoritative unitCount field evidence — because
   // trustedUnitCount passes an UNFLAGGED web count through, and a scraped
   // "48 units" on a condo folio must not suppress the wrong-scope flag.
+  // PARCEL-scoped only (county / cadastral / verified): a builder or permit
+  // page counts the DEVELOPMENT, not this folio, so its 2+ would forward a
+  // shared development lot into unit pricing (pre-push codex P1 r3).
   const unitLotCountEvidence = rc?._fieldEvidence?.unitCount;
   const unitLotCountAuthoritative = unitLotCountEvidence
-    ? AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(String(unitLotCountEvidence.sourceType || '').toLowerCase())
+    ? PARCEL_SCOPED_UNIT_COUNT_SOURCES.has(String(unitLotCountEvidence.sourceType || '').toLowerCase())
     : (rc?._source === 'county' || rc?._source === 'cadastral');
   const unitLotTrustedUnitCount = unitLotSignalRc && unitLotCountAuthoritative
     ? Number(trustedUnitCount(unitLotSignalRc))

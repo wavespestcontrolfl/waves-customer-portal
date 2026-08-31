@@ -4946,15 +4946,27 @@ function fieldEvidenceFromRecord(record, field) {
   const entry = record._fieldEvidence?.[field];
   const existing = Array.isArray(entry) ? entry[0] : entry;
   if (field === 'unitCount' && !existing) return null;
+  // The merged OBJECT shape carries the winner's sourceType but no top-level
+  // sourceQuality / providerConfidence — those live on its evidence[0] (the
+  // winning candidate). Falling through to the RECORD-wide _aiSourceQuality
+  // let a hybrid whose unitCount came from a listing re-merge at county
+  // weight 100 and beat an authoritative cadastral count (pre-push codex
+  // P1 r3). Once a field has its own evidence, provenance comes from that
+  // evidence only — never inherited from the record.
+  const winnerEntry = Array.isArray(existing?.evidence) ? existing.evidence[0] : null;
   const sourceType = existing?.sourceType || record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
-  const sourceWeight = existing?.sourceQuality || record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown;
-  const confidence = existing?.providerConfidence || record._aiConfidence;
+  const sourceWeight = existing
+    ? (existing.sourceQuality ?? winnerEntry?.sourceQuality ?? SOURCE_TYPE_WEIGHTS[sourceType] ?? SOURCE_TYPE_WEIGHTS.unknown)
+    : (record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown);
+  const confidence = existing
+    ? (existing.providerConfidence ?? winnerEntry?.providerConfidence ?? null)
+    : record._aiConfidence;
   const score = Math.min(100, sourceWeight + confidenceRank(confidence) * 10);
   return {
     field,
     value: record[field],
-    provider: existing?.provider || record._provider || 'ai',
-    url: existing?.url || record._aiSourceUrl || null,
+    provider: existing?.provider || existing?.winningProvider || record._provider || 'ai',
+    url: existing?.url || existing?.winningSource || record._aiSourceUrl || null,
     sourceType,
     sourceQuality: sourceWeight,
     providerConfidence: confidence || null,

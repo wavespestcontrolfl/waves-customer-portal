@@ -156,4 +156,33 @@ describe('shapeAsPropertyRecord unitCount', () => {
     expect(remerged.unitCount).toBe(48);
     expect(remerged._fieldEvidence?.unitCount).toMatchObject({ value: 48, sourceType: 'county' });
   });
+
+  test('a re-merged hybrid whose count came from a LISTING does not inherit county weight (pre-push codex P1 r3)', () => {
+    // The merged object shape has no top-level sourceQuality; the read
+    // used to fall through to the record-wide _aiSourceQuality — on a
+    // hybrid that is the county donor's 100 — so a listing's 200 re-merged
+    // at county weight and beat an authoritative cadastral 48.
+    const listing = _private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: 200 }, ADDRESS, 'gemini');
+    const hybrid = {
+      ..._private.mergePropertyRecords([listing], ADDRESS),
+      _source: 'hybrid',
+      _aiSourceType: 'county',
+      _aiSourceQuality: 100,
+    };
+    expect(hybrid._fieldEvidence.unitCount.sourceType).not.toBe('county');
+    const cadastral = {
+      ..._private.shapeAsPropertyRecord({ ...BASE_RAW, unitCount: null, source: null }, ADDRESS, 'fdor_cadastral'),
+      _source: 'cadastral',
+      unitCount: 48,
+      _fieldEvidence: {
+        unitCount: [{
+          field: 'unitCount', value: 48, provider: 'fdor_cadastral', url: null,
+          sourceType: 'cadastral', sourceQuality: 97, providerConfidence: 'high',
+        }],
+      },
+    };
+    const remerged = _private.mergePropertyRecords([hybrid, cadastral], ADDRESS);
+    expect(remerged.unitCount).toBe(48);
+    expect(remerged._fieldEvidence?.unitCount).toMatchObject({ value: 48, sourceType: 'cadastral' });
+  });
 });

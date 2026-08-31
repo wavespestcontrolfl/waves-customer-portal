@@ -607,6 +607,40 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
   });
 
+  test('a builder/permit-sourced development count cannot exempt the flag either (pre-push codex P1 r3)', () => {
+    // Builder and permit pages count the development, not this folio —
+    // only parcel-scoped provenance (county / cadastral / verified) may
+    // suppress the wrong-scope flag.
+    const base = {
+      formattedAddress: '18 Example Condo Way Unit 2, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 48,
+      _source: 'hybrid',
+    };
+    for (const sourceType of ['builder', 'permit']) {
+      const flags = buildFieldVerifyFlags({
+        ...base,
+        _fieldEvidence: {
+          propertyType: { value: 'Condominium', sourceType: 'county' },
+          unitCount: { value: 48, sourceType },
+        },
+      }, null, null);
+      expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+    }
+    for (const sourceType of ['county', 'cadastral', 'verified']) {
+      const flags = buildFieldVerifyFlags({
+        ...base,
+        _fieldEvidence: {
+          propertyType: { value: 'Condominium', sourceType: 'county' },
+          unitCount: { value: 48, sourceType },
+        },
+      }, null, null);
+      expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+    }
+  });
+
   test('a web-sourced unit count on an authoritative-type hybrid cannot exempt the flag (codex P1 r8)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '15 Example Condo Way Unit 5, Testville, FL 00000',
