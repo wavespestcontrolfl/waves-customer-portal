@@ -4494,6 +4494,11 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         owed = await require('../services/secure-appointment-plans')
           .findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType });
       } catch (lookupErr) {
+        // Ambiguity is a permanent 409, not a retry (codex #3591 r67 P1):
+        // two owed series need the dialog to name one.
+        if (lookupErr.switchConflict) {
+          return res.status(409).json({ error: lookupErr.message, setupFeeRequired: true, ambiguousSetupSeries: lookupErr.ambiguousSetupSeries || null });
+        }
         logger.warn(`[customers:annual-prepay] rodent setup obligation lookup failed for ${customer.id}: ${lookupErr.message}`);
         return res.status(503).json({ error: 'Could not confirm whether this series owes a bait-station setup — retry in a moment.' });
       }
@@ -5014,6 +5019,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         owed = await require('../services/secure-appointment-plans')
           .findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType });
       } catch (lookupErr) {
+        if (lookupErr.switchConflict) {
+          return res.status(409).json({ error: lookupErr.message, setupFeeRequired: true, ambiguousSetupSeries: lookupErr.ambiguousSetupSeries || null });
+        }
         logger.warn(`[customers:annual-prepay] rodent setup obligation lookup failed for ${customer.id}: ${lookupErr.message}`);
         return res.status(503).json({ error: 'Could not confirm whether this series owes a bait-station setup — retry in a moment.' });
       }

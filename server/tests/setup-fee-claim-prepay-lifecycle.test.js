@@ -139,7 +139,14 @@ describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P
   });
   test('estimateSetupCarriedElsewhere: a live stamp or a claim on ANOTHER root of the estimate blocks a second stamp (codex #3591 r66 P1)', async () => {
     const { estimateSetupCarriedElsewhere } = plans;
-    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00' }] }), 'est-1', 'root-new')).toBe(true);
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00', status: 'confirmed' }] }), 'est-1', 'root-new')).toBe(true);
+    // A DEAD series (cancelled, no live children) can never consume its
+    // stamp — the replacement series must carry the setup (codex #3591 r67 P1)…
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00', status: 'cancelled' }], scheduledService: null }), 'est-1', 'root-new')).toBe(false);
+    // …unless a live child can still complete it.
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00', status: 'completed' }], scheduledService: { id: 'child-live' } }), 'est-1', 'root-new')).toBe(true);
+    // A collected claim on a dead root still counts (billed once already).
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null, status: 'cancelled' }], claim: { id: 'claim-a' } }), 'est-1', 'root-new')).toBe(true);
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: { id: 'claim-a' } }), 'est-1', 'root-new')).toBe(true);
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: null }), 'est-1', 'root-new')).toBe(false);
     expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [] }), 'est-1', 'root-new')).toBe(false);
@@ -365,6 +372,19 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
       .toEqual({ anchorId: 'root-rb', amount: 99 });
   });
 
+  test('TWO live direct rodent roots that both owe their setup → refused (switchConflict) with both anchors, never the first one alone (codex #3591 r67 P1)', async () => {
+    const secondRoot = { ...rodentRoot, id: 'root-rb-2' };
+    const c = conn({ rootsForCoverage: [rodentRoot, secondRoot] });
+    const err = await findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.switchConflict).toBe(true);
+    expect(err.ambiguousSetupSeries).toEqual(['root-rb', 'root-rb-2']);
+    expect(err.message).toMatch(/prepay one series at a time/);
+    // The route surfaces it as a 409 (not a retryable 503) on both dialogs.
+    const adminCustomers = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    expect((adminCustomers.match(/if \(lookupErr\.switchConflict\) \{\s+return res\.status\(409\)\.json\(\{ error: lookupErr\.message, setupFeeRequired: true, ambiguousSetupSeries: lookupErr\.ambiguousSetupSeries \|\| null \}\);/g) || []).length).toBe(2);
+  });
+
   test('coverage naming another family, a member account, or no customer/coverage → null', async () => {
     const c = conn({ rootsForCoverage: [pestRoot, rodentRoot] });
     expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Quarterly Pest Control' })).toBeNull();
@@ -497,6 +517,11 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+
+  test('the discount-rules missing-row insert carries EVERY validated field of the edit (codex #3591 r67 P1)', () => {
+    const pricingConfig = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-pricing-config.js'), 'utf8');
+    expect(pricingConfig).toMatch(/if \(!ruleUpdated && req\.params\.serviceKey === 'rodent_bait'\) \{\s+await trx\('service_discount_rules'\)\.insert\(\{\s+service_key: 'rodent_bait',\s+tier_qualifier: true,\s+exclude_from_pct_discount: false,\s+\.\.\.updates,\s+\}\);/);
+  });
 
   test('booking re-reads the canonical qualifying families under the stamp lock and waives on any OTHER family (codex #3591 r37 P1)', () => {
     const at = booking.indexOf("const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';");

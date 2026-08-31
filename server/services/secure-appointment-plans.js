@@ -344,13 +344,29 @@ async function estimateSetupCarriedElsewhere(database, estimateId, excludeRootId
     .where({ source_estimate_id: estimateId })
     .whereNull('recurring_parent_id');
   if (excludeRootId) query = query.whereNot('id', excludeRootId);
-  const roots = await query.select('id', 'pending_setup_fee');
+  const roots = await query.select('id', 'pending_setup_fee', 'status');
   const ids = [];
   for (const root of roots || []) {
-    if (Number(root.pending_setup_fee) > 0) return true;
     ids.push(root.id);
+    if (!(Number(root.pending_setup_fee) > 0)) continue;
+    // A stamp counts only on a series that can still CONSUME it (codex
+    // #3591 r67 P1): a cancelled root (no live children) can never bill
+    // its stamp, so a replacement series booked from the same estimate
+    // must carry the disclosed setup itself. A completed/rescheduled root
+    // is still the series while a child can complete.
+    const status = String(root.status || '').toLowerCase();
+    if (['cancelled', 'canceled', 'skipped', 'no_show', 'completed', 'rescheduled'].includes(status)) {
+      const liveChild = await database('scheduled_services')
+        .where({ recurring_parent_id: root.id })
+        .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
+        .first('id');
+      if (!liveChild) continue;
+    }
+    return true;
   }
   if (!ids.length) return false;
+  // An immutable collected claim on any root of the estimate counts
+  // regardless of that root's status — the fee was billed once already.
   return !!(await database('setup_fee_claims').whereIn('scheduled_service_id', ids).first('id'));
 }
 
@@ -407,6 +423,10 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   const coverageKey = recurringServiceKey({ name: coverageServiceType });
   const coverageIsBait = isRodentBaitProgramKey(coverageKey);
   let sawMatchingRoot = false;
+  // Every matching root that still owes its per-series setup (codex #3591
+  // r67 P1): a generic coverage request covering TWO owed series cannot
+  // bill one setup as if it settled both — the caller must name the series.
+  const owedRoots = [];
   for (const root of roots || []) {
     const matches = root.service_id
       ? (await authoritativeServiceKey(database, root)) === coverageKey
@@ -426,15 +446,22 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
     // the root; codex #3591 r44 P1) IS the outstanding obligation.
     if (root.source_estimate_id) {
       const restored = frozenAnchorSetupStamp(root);
-      if (restored != null) return { anchorId: root.id, amount: restored };
+      if (restored != null) owedRoots.push({ anchorId: root.id, amount: restored });
       // Settled at accept — but a LATER matching root (a newer direct
       // series) may still owe its own setup (codex #3591 r52 P1): keep
       // scanning instead of concluding the coverage is settled.
       continue;
     }
     const owed = await directRodentSetupForRow(database, root);
-    if (owed > 0) return { anchorId: root.id, amount: owed };
+    if (owed > 0) owedRoots.push({ anchorId: root.id, amount: owed });
   }
+  if (owedRoots.length > 1) {
+    const err = new Error(`${owedRoots.length} ${coverageServiceType} series each owe a bait-station setup — prepay one series at a time (send its scheduledServiceId) so every setup rides its own invoice`);
+    err.switchConflict = true;
+    err.ambiguousSetupSeries = owedRoots.map((o) => String(o.anchorId));
+    throw err;
+  }
+  if (owedRoots.length === 1) return owedRoots[0];
   if (sawMatchingRoot) return null;
   if (coverageIsBait && coverageKey === 'commercial_rodent_bait') {
     // A NEW commercial bait prepay before any series exists: never waived

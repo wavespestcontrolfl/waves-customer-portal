@@ -889,12 +889,16 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
       // UPSERT the missing side (codex #3591 r57 P1): a zero-row rule
       // update — or an absent rodent_waveguard config row — silently split
       // the two policy surfaces while the endpoint reported success.
+      // The inserted row carries EVERY validated field of this edit (codex
+      // #3591 r67 P1) — defaults only for the flags the request left out —
+      // or a max_discount_pct / flat_credit / notes edit on an absent row
+      // reports success while landing nothing.
       if (!ruleUpdated && req.params.serviceKey === 'rodent_bait') {
         await trx('service_discount_rules').insert({
           service_key: 'rodent_bait',
-          tier_qualifier: typeof updates.tier_qualifier === 'boolean' ? updates.tier_qualifier : true,
-          exclude_from_pct_discount: typeof updates.exclude_from_pct_discount === 'boolean' ? updates.exclude_from_pct_discount : false,
-          updated_at: new Date(),
+          tier_qualifier: true,
+          exclude_from_pct_discount: false,
+          ...updates,
         });
       }
       if (mirrorsWaveguard && !waveguardRow) {
