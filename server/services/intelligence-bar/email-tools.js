@@ -658,21 +658,29 @@ async function getBlockedSenders({ limit = 50 }) {
 
 async function blockSender({ email_address, domain }) {
   try {
-    if (!email_address && !domain) return { error: 'email_address or domain required' };
-
-    const blockDomain = domain || email_address.split('@')[1];
-    const { blockSpamSender } = require('../../services/email/spam-blocker');
-
-    // Build a minimal email object for the blocker
-    await blockSpamSender({
-      from_address: email_address || `spam@${blockDomain}`,
+    // Manual, operator-confirmed scope (GH r8 on #3648): an email_address
+    // blocks exactly that sender; a domain (no address given) blocks the
+    // whole domain. The old path routed through the AUTO classifier blocker,
+    // which blocks only the exact address, silently declines vendors/
+    // customers/open leads, and — for a domain-only request — blocked the
+    // synthetic address spam@<domain>, i.e. nothing, while the result note
+    // claimed a domain-wide block the card never disclosed.
+    const { manualBlockSender } = require('../../services/email/spam-blocker');
+    const result = await manualBlockSender({
+      email_address, domain, reason: 'Manual block (Intelligence Bar)',
     });
-
-    return {
-      success: true,
-      blocked_domain: blockDomain,
-      note: `All future emails from @${blockDomain} will be auto-trashed.`,
-    };
+    if (result.error) return { error: result.error };
+    return result.blocked_domain
+      ? {
+        success: true,
+        blocked_domain: result.blocked_domain,
+        note: `All future emails from ANY sender at @${result.blocked_domain} will be auto-trashed.`,
+      }
+      : {
+        success: true,
+        blocked_address: result.blocked_address,
+        note: `Future emails from ${result.blocked_address} will be auto-trashed. Other senders at that domain are unaffected.`,
+      };
   } catch (err) {
     logger.error('[intelligence-bar:email] block_sender failed:', err);
     return { error: err.message };

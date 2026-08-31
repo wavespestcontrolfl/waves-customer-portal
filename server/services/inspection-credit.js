@@ -919,8 +919,16 @@ async function redeemInspectionCreditForBooking({
   try {
     const evt = await dbh('inspection_credit_booking_events')
       .where({ scheduled_service_id: scheduledServiceId })
-      .first('created_at');
+      .first('created_at', 'source');
     if (!evt?.created_at) return { redeemed: 0, reason: 'no_booking_evidence' };
+    // Card-approved credit-free bookings are excluded from EVERY mint path,
+    // direct redemption included (GH r8 P1) — a recovered offer backdated
+    // before this event must not mint against a booking whose card promised
+    // no credit. Estimate-accept adoption restamps the source, re-enabling
+    // redemption — see CREDIT_FREE_CARD_EVENT_SOURCE.
+    if ((evt.source || '') === CREDIT_FREE_CARD_EVENT_SOURCE) {
+      return { redeemed: 0, reason: 'card_credit_free_booking' };
+    }
     bookedAt = new Date(evt.created_at);
   } catch (evtErr) {
     logger.warn(`[inspection-credit] booking event lookup failed for ${scheduledServiceId}: ${evtErr.message}`);

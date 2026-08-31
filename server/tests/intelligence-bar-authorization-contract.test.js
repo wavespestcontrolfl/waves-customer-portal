@@ -366,3 +366,77 @@ test('the proposal terminal set matches the executor: rescheduled visits stay mo
   expect(TERMINAL_APPOINTMENT_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show']);
   expect(TERMINAL_APPOINTMENT_STATUSES).not.toContain('rescheduled');
 });
+
+// ── GH r8 disclosures ──────────────────────────────────────────────────
+
+test('block_sender: address blocks ONE sender; bare domain blocks the WHOLE domain — scope rendered exactly (GH r8)', () => {
+  const addr = buildContract({ toolName: 'block_sender', params: { email_address: 'Sender@Example.test' }, displayParams: { email_address: 'Sender@Example.test' } });
+  expect(addr.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Auto-trash every future email from sender@example\.test .*other senders at that domain are unaffected/));
+  expect(addr.effects.some((e) => /ENTIRE domain/.test(e.label))).toBe(false);
+  const dom = buildContract({ toolName: 'block_sender', params: { domain: '@example.test' }, displayParams: { domain: '@example.test' } });
+  expect(dom.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/ANY sender at @example\.test — the ENTIRE domain is blocked/));
+  // email_address wins when both ride the params (executor precedence).
+  const both = buildContract({ toolName: 'block_sender', params: { email_address: 'a@b.test', domain: 'b.test' }, displayParams: {} });
+  expect(both.effects.some((e) => /ENTIRE domain/.test(e.label))).toBe(false);
+});
+
+test('reply_via_sms with email_id discloses the inbox state change; without one it does not (GH r8)', () => {
+  const withEmail = buildContract({ toolName: 'reply_via_sms', params: { email_id: 'em1', message: 'On my way' }, displayParams: { message: 'On my way' } });
+  expect(withEmail.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/source email is marked read and tagged replied-via-SMS/));
+  const without = buildContract({ toolName: 'reply_via_sms', params: { message: 'On my way' }, displayParams: { message: 'On my way' } });
+  expect(without.effects.some((e) => /marked read/.test(e.label))).toBe(false);
+});
+
+test('clearing an email (null) still discloses the email fan-out — presence, not truthiness (GH r8)', () => {
+  const c = buildContract({ toolName: 'update_customer', params: { customer_id: 'c9', updates: { email: null } }, displayParams: { customer_id: 'c9', updates: { email: null } } });
+  const { EMAIL_FANOUT_DISCLOSURE } = require('../services/customer-email-fanout');
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringContaining(EMAIL_FANOUT_DISCLOSURE));
+  // No DOI re-send claim for a clear — there is no new address to confirm.
+  expect(c.effects.some((e) => /double-opt-in email is re-sent/.test(e.label))).toBe(false);
+});
+
+test('pinned_customer names the target on single-target mutations and binds the hash (GH r8)', () => {
+  const mk = (name) => buildContract({
+    toolName: 'update_customer',
+    params: { customer_id: 'c9', updates: { city: 'Venice' } },
+    displayParams: { customer_id: 'c9', updates: { city: 'Venice' } },
+    preview: { pinned_customer: { id: 'c9', name } },
+  });
+  const c = mk('acct-9001');
+  expect(c.effects.map((e) => e.label)).toContainEqual('Customer: acct-9001');
+  expect(c.pinned_customer).toEqual({ id: 'c9', name: 'acct-9001' });
+  expect(contractHash(mk('acct-9002'))).not.toBe(contractHash(c));
+  const booking = buildContract({
+    toolName: 'create_appointment',
+    params: { customer_id: 'c9' },
+    displayParams: { customer_id: 'c9', date: '2026-09-02' },
+    preview: { proposal: true, pinned_customer: { id: 'c9', name: 'acct-9001' } },
+  });
+  expect(booking.effects.map((e) => e.label)).toContainEqual('Booked for: acct-9001');
+});
+
+test('move_stops_to_day: an evidence-only tracker rewind is disclosed and binds via the stop flag (GH r8)', () => {
+  const mk = (rewind) => buildContract({
+    toolName: 'move_stops_to_day',
+    params: { service_ids: ['s1'], new_date: '2026-09-04' },
+    displayParams: { new_date: '2026-09-04' },
+    preview: { proposal: true, stops: [{ id: 's1', customer: 'acct-7001', status: 'scheduled', ...(rewind ? { track_rewind: true } : {}) }] },
+  });
+  const c = mk(true);
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Clears stale tracker evidence on 1 stop\(s\) — acct-7001/));
+  expect(mk(false).effects.some((e) => /stale tracker evidence/.test(e.label))).toBe(false);
+});
+
+test('reschedule_appointment: evidence-only rewind disclosed on a DATE move of a non-live pinned visit (GH r8)', () => {
+  const mk = (over) => buildContract({
+    toolName: 'reschedule_appointment',
+    params: { appointment_id: 'ap1', new_date: over.new_date || '2026-09-04' },
+    displayParams: {},
+    preview: { pinned_appointment: { id: 'ap1', status: 'scheduled', scheduled_date: '2026-09-02', service_type: 'Pest', track_rewind: true, ...over.pin } },
+  });
+  expect(mk({}).effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Clears stale tracker evidence on this visit/));
+  // Same-day (window-only) change: the executor's rewind is date-gated.
+  expect(mk({ new_date: '2026-09-02' }).effects.some((e) => /stale tracker evidence/.test(e.label))).toBe(false);
+  // Live rows keep the stronger field-workflow disclosure instead.
+  expect(mk({ pin: { status: 'en_route' } }).effects.some((e) => /stale tracker evidence/.test(e.label))).toBe(false);
+});

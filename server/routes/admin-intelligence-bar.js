@@ -233,6 +233,15 @@ const PII_TOOL_NAMES = new Set([
   'trigger_review_request',
   'toggle_estimate_v2_view',
   'toggle_show_one_time_option',
+  // The W0B bulk proposal resolves EVERY target id to the customer's full
+  // name in the model-visible result (fail-closed name listing) — taint so
+  // telemetry and thread history redact like the other bulk tools (GH r8 P1).
+  'bulk_update_customers',
+  // Their proposals now pin the resolved customer NAME into the
+  // model-visible preview (GH r8 — uuid-only cards were unreviewable), and
+  // update_customer's updates map carries emails/phones/names anyway.
+  'update_customer',
+  'create_appointment',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
@@ -532,7 +541,12 @@ async function loadAppointmentPin(appointmentId) {
   const a = await db('scheduled_services as ss')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.id', appointmentId)
-    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id', 'c.first_name', 'c.last_name');
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id',
+      // Tracker-lifecycle evidence for the derived track_rewind pin field
+      // (see normalizeAppointmentPin) — the executor asserts the same
+      // fingerprint on its own full-row read.
+      'ss.track_state', 'ss.en_route_at', 'ss.arrived_at', 'ss.actual_start_time', 'ss.check_in_time', 'ss.track_sms_sent_at', 'ss.arrival_sms_sent_at',
+      'c.first_name', 'c.last_name');
   if (!a) return null;
   return {
     ...normalizeAppointmentPin(a),
@@ -811,6 +825,31 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       } catch (err) {
         return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
       }
+    }
+    if ((toolUse.name === 'create_appointment' || toolUse.name === 'update_customer') && params.customer_id) {
+      // Name the human on the card (GH r8 P1): contract cards hide raw
+      // params, so a uuid-only effect line leaves the operator unable to
+      // tell WHO the booking/edit targets. Resolution happens NOW and the
+      // resolved name rides the contract (hash-bound); the immutable id
+      // stays the execution pin. Fail closed — an unresolvable id never
+      // reaches a confirmable card.
+      let target = null;
+      // A malformed id raises a PG uuid-cast error inside the resolver —
+      // treat it as not-found (same fail-closed refusal), like the other
+      // single-target resolutions in this block.
+      try {
+        target = await resolveCommsCustomer({ customer_id: params.customer_id });
+      } catch { target = null; }
+      if (!target || target.error || target.deleted_at) {
+        return { failed: true, modelResult: target?.error ? target : { error: 'No customer matches that id — nothing was proposed.' } };
+      }
+      preview = {
+        ...preview,
+        pinned_customer: {
+          id: String(target.id),
+          name: `${target.first_name || ''} ${target.last_name || ''}`.trim() || 'Unnamed customer',
+        },
+      };
     }
     if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
       // Pin the visit being moved (W0B): the card must name the customer,

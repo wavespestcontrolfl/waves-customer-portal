@@ -165,6 +165,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
 
   afterAll(() => {
     delete process.env.GATE_IB_UI_CONFIRM;
+    // W0B r8: update_customer proposals resolve the target to a name for
+    // the card — the pin resolver must return a row or the proposal refuses.
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
   });
 
   test('echo attack: model-supplied confirmed:true is stripped, write is proposed not executed, id never reaches the model', async () => {
@@ -210,6 +213,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
   });
 
   test('legacy bare write (update_customer) is never executed from the loop — proposal synthesized', async () => {
+    // W0B r8: update_customer proposals resolve the target to a name for
+    // the card — the pin resolver must return a row or the proposal refuses.
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
     mockCreatePendingAction.mockResolvedValue({
       id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
     });
@@ -325,6 +331,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
 
   test('NO env value restores direct model-loop writes: retired gate=false still proposes', async () => {
     process.env.GATE_IB_UI_CONFIRM = 'false';
+    // W0B r8: update_customer proposals resolve the target to a name for
+    // the card — the pin resolver must return a row or the proposal refuses.
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
       [{ type: 'text', text: 'Proposed.' }],

@@ -209,6 +209,78 @@ async function blockSpamSender(email) {
   logger.info(`[spam-blocker] Blocked sender: ${redactedFrom}`);
 }
 
+const MANUAL_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MANUAL_DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
+
+// Operator-confirmed manual block (IB block_sender card). Unlike the
+// auto-classifier path above — which blocks only the exact sender and
+// silently declines vendors/customers/open leads — a manual block honors
+// the operator's approved scope exactly: an email_address blocks that one
+// sender; a domain (only when no address is given) blocks the whole domain,
+// refused for protected/shared provider domains (same rule as the admin
+// email route's POST /block).
+async function manualBlockSender({ email_address, domain, reason } = {}) {
+  const blockEmail = email_address ? normalizeAddress(email_address) : null;
+  const blockDomain = !blockEmail && domain
+    ? String(domain).trim().toLowerCase().replace(/^@/, '') : null;
+  if (!blockEmail && !blockDomain) return { error: 'email_address or domain required' };
+  if (blockEmail && !MANUAL_EMAIL_RE.test(blockEmail)) return { error: 'Invalid email address' };
+  if (blockDomain && !MANUAL_DOMAIN_RE.test(blockDomain)) return { error: 'Invalid domain' };
+  if (blockDomain && isProtectedDomain(blockDomain)) {
+    return { error: 'Protected domains cannot be blocked domain-wide. Block a specific sender address instead.' };
+  }
+  const filterFrom = blockEmail || `@${blockDomain}`;
+
+  let filterId = null;
+  try {
+    const gmailClient = require('./gmail-client');
+    const auth = await gmailClient.getAuthClient();
+    if (auth) {
+      const gmail = google.gmail({ version: 'v1', auth });
+      const filter = await gmail.users.settings.filters.create({
+        userId: 'me',
+        requestBody: {
+          criteria: { from: filterFrom },
+          action: { removeLabelIds: ['INBOX'], addLabelIds: ['TRASH'] },
+        },
+      });
+      filterId = filter.data.id;
+    }
+  } catch (err) {
+    logger.warn(`[spam-blocker] manual Gmail filter creation failed: ${err.message}`);
+  }
+
+  try {
+    await db('blocked_email_senders').insert({
+      email_address: blockEmail,
+      domain: blockDomain,
+      gmail_filter_id: filterId,
+      reason: reason || 'Manual block',
+      blocked_count: 0,
+    });
+  } catch (insertErr) {
+    // Same orphan-filter rollback contract as the auto path: a filter with
+    // no record is invisible to every unblock path.
+    if (filterId) {
+      try {
+        const gmailClient = require('./gmail-client');
+        const auth = await gmailClient.getAuthClient();
+        if (auth) {
+          const gmail = google.gmail({ version: 'v1', auth });
+          await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
+        }
+      } catch (rollbackErr) {
+        logger.warn(`[spam-blocker] manual filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+      }
+    }
+    throw insertErr;
+  }
+  logger.info(`[spam-blocker] Manually blocked ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`}`);
+  return blockEmail
+    ? { success: true, blocked_address: blockEmail }
+    : { success: true, blocked_domain: blockDomain };
+}
+
 async function unblockSender(id) {
   const blocked = await db('blocked_email_senders').where({ id }).first();
   if (!blocked) return { error: 'Not found' };
@@ -447,6 +519,7 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
 
 module.exports = {
   blockSpamSender,
+  manualBlockSender,
   unblockSender,
   reconcileStaleAutoBlocks,
   isBlocked,

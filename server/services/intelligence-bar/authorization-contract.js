@@ -221,11 +221,36 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     const verb = toolName === 'trigger_review_request' ? 'Send review request to' : 'Text';
     push('comms', `${verb} ${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})`);
   }
+  // Replying by SMS to an email also changes inbox state: the source email
+  // is marked read and stamped auto_action 'replied_via_sms' (GH r8 P2) —
+  // an operational effect on the thread, not just an outbound text.
+  if (toolName === 'reply_via_sms' && params?.email_id) {
+    push('operational', 'The source email is marked read and tagged replied-via-SMS in the inbox');
+  }
+  // Blocking scope, resolved exactly as the executor does (GH r8 P1): an
+  // email address blocks that one sender; a bare domain blocks the whole
+  // domain — the operator must see which one they are approving.
+  if (toolName === 'block_sender') {
+    const blockAddr = params?.email_address ? String(params.email_address).trim().toLowerCase() : null;
+    const blockDom = !blockAddr && params?.domain
+      ? String(params.domain).trim().toLowerCase().replace(/^@/, '') : null;
+    if (blockAddr) {
+      push('operational', `Auto-trash every future email from ${blockAddr} (Gmail filter + blocklist row); other senders at that domain are unaffected`);
+    } else if (blockDom) {
+      push('operational', `Auto-trash every future email from ANY sender at @${blockDom} — the ENTIRE domain is blocked (refused for shared/protected provider domains)`);
+    }
+  }
   if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
     push('comms', `Email reply to ${preview.pinned_recipient.email_masked || 'the sender'}${preview.pinned_recipient.subject ? ` — re: ${preview.pinned_recipient.subject}` : ''}`);
   }
   if (toolName === 'create_appointment' && preview?.pinned_technician) {
     push('operational', `Assigned to ${preview.pinned_technician.name}`);
+  }
+  // Single-target mutations name the resolved human (GH r8 P1) — the card
+  // hides raw params, so the uuid alone would leave the operator unable to
+  // detect a wrong-customer selection before confirming.
+  if (preview?.pinned_customer && (toolName === 'create_appointment' || toolName === 'update_customer')) {
+    push('customer', `${toolName === 'create_appointment' ? 'Booked for' : 'Customer'}: ${preview.pinned_customer.name}`);
   }
   if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
     const a = preview.pinned_appointment;
@@ -241,6 +266,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', `Ends the active field workflow: status ${a.status} → confirmed, technician/tracker state released, lifecycle history appended`, {
         before: a.status, after: 'confirmed',
       });
+    } else if (a.track_rewind === true && params?.new_date && String(params.new_date) !== String(a.scheduled_date)) {
+      // Evidence-only rewind on a non-live row (GH r8): a DATE move clears
+      // stale tracker stamps + runs cleanup without a status change (the
+      // executor's rewind is gated on the day actually changing).
+      push('operational', 'Clears stale tracker evidence on this visit (tracker state released, cleanup run; no status change)');
     }
   }
   if (toolName === 'bulk_update_leads') {
@@ -290,6 +320,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (liveStops.length) {
       const who = liveStops.map((st) => `${st.customer || st.id} (${st.status})`).join(', ');
       push('operational', `Ends the active field workflow for ${liveStops.length} live stop(s) — ${who}: status resets to confirmed, technician/tracker state is released, lifecycle history is appended`);
+    }
+    // Evidence-only rewinds (GH r8 P1): stale tracker evidence on a
+    // non-live stop is cleared by the move (tracker fields reset +
+    // post-commit cleanup) without a status change — an input-dependent
+    // lifecycle effect the operator is approving. The flag rides the
+    // fingerprinted preview, so evidence appearing mid-pending is drift.
+    const rewindStops = preview.stops.filter((st) => st && st.track_rewind);
+    if (rewindStops.length) {
+      const who = rewindStops.map((st) => String(st.customer || st.id)).join(', ');
+      push('operational', `Clears stale tracker evidence on ${rewindStops.length} stop(s) — ${who}: tracker state is released and cleanup runs (no status change)`);
     }
   }
   // Receiving a restock also re-runs the WaveGuard lawn-readiness recheck,
@@ -401,7 +441,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // surfaces. These are mandatory disclosures — encoded as effects, not
   // left in the free-text summary.
   const isCustomerUpdate = toolName === 'update_customer' || toolName === 'bulk_update_customers';
-  if (isCustomerUpdate && params?.updates?.email) {
+  // Field PRESENCE, not truthiness (GH r8 P2): the executors treat
+  // `email !== undefined` as an email submission, so explicitly CLEARING an
+  // email (null) runs the same fan-out and must carry the same disclosure.
+  if (isCustomerUpdate && params?.updates?.email !== undefined) {
     const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
     push('customer', `${n > 1 ? `For each of ${n} customers: ` : ''}${require('../customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`);
   }
@@ -474,6 +517,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // Proposal-time pins the confirm re-checks (recipient phone/email,
     // appointment state) also bind the hash so the card can't drift.
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
+    ...(preview?.pinned_customer ? { pinned_customer: preview.pinned_customer } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
     ...(preview?.pinned_approval ? { pinned_approval: preview.pinned_approval } : {}),
     ...(preview?.pinned_estimate ? { pinned_estimate: preview.pinned_estimate } : {}),

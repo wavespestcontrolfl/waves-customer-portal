@@ -319,6 +319,17 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  it('card-approved credit-free booking event is refused by the DIRECT redeemer too (GH r8 P1)', async () => {
+    // The card promised no credit; the event source excludes this booking
+    // from EVERY mint path — a recovered offer backdated before the event
+    // must not mint here either. Estimate-accept restamps the source.
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    mockEvents = [{ created_at: new Date('2026-08-10'), source: 'ib_card_credit_free' }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 0, reason: 'card_credit_free_booking' });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
   it('mints once, with the frozen amount and the inspection_credit source, and binds the ledger id', async () => {
     mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
     mockEvents = [{ created_at: new Date('2026-08-10') }];

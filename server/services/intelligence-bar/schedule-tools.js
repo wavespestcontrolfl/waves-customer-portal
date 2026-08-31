@@ -430,17 +430,60 @@ async function assignTechnician(input) {
     };
   }
 
+  // The stop/current-tech set the operator approved (`_verified_stops`, the
+  // route's fingerprint-verified re-preview) must match what this run reads
+  // — otherwise a reassignment made during the pending window is silently
+  // overwritten by a card that named the OLD assignments (GH r8 P1).
+  const approvedStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
+  if (approvedStops) {
+    const approvedById = new Map(approvedStops.map((s) => [String(s.id), s]));
+    const drifted = approvedStops.length !== services.length
+      || services.some((s) => {
+        const a = approvedById.get(String(s.id));
+        return !a || String(a.current_tech || 'Unassigned') !== String(s.current_tech_name || 'Unassigned');
+      });
+    if (drifted) {
+      return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
+    }
+  }
+
   // Reassignment edits tech-day MEMBERSHIP on both sides (the day the stop
   // leaves and the day it joins), so it must hold the same tech-day fence the
   // nightly reorder and the booking/reschedule writers hold — an unfenced
   // reassign landing mid-reorder leaves the committed route_order not
   // covering the day.
   const { lockTechDays } = require('../scheduling/tech-day-lock');
-  const count = await db.transaction(async trx => {
+  let count;
+  try {
+    count = await db.transaction(async trx => {
     await lockTechDays(trx, services.flatMap(s => [
       { techId: s.current_tech_id, date: s.scheduled_date_str },
       { techId: tech.id, date: s.scheduled_date_str },
     ]));
+    // Re-assert the approved snapshot UNDER the tech-day locks (same
+    // contract as swap_tech_assignments): the pre-lock read above chose the
+    // lock keys, so any drift between it and the locked rows means the
+    // fence may not cover the real source day — refuse rather than commit
+    // an unapproved overwrite.
+    if (approvedStops) {
+      const live = await trx('scheduled_services')
+        .whereIn('id', serviceIds)
+        .forUpdate()
+        .select('id', 'technician_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
+      const liveById = new Map(live.map((r) => [String(r.id), r]));
+      const changed = live.length !== services.length
+        || services.some((s) => {
+          const l = liveById.get(String(s.id));
+          return !l
+            || String(l.technician_id || '') !== String(s.current_tech_id || '')
+            || l.scheduled_date_str !== s.scheduled_date_str;
+        });
+      if (changed) {
+        const err = new Error('assign_set_changed');
+        err.previewChanged = true;
+        throw err;
+      }
+    }
     // route_order: null ONLY for rows whose technician actually CHANGES —
     // the old sequence number is meaningless in the day the stop joins
     // (NULL appends after the ordered run; every consumer sorts
@@ -457,7 +500,13 @@ async function assignTechnician(input) {
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
       .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
     return changed + Number(alreadyOn);
-  });
+    });
+  } catch (err) {
+    if (err && err.previewChanged) {
+      return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
+    }
+    throw err;
+  }
 
   // Visit-group seam (visit-group-scope.md §2; codex #3590 r9): this
   // writer bypasses assignDispatchJob, so it repairs grouped membership
@@ -555,16 +604,47 @@ async function moveStopsToDay(input) {
   const skippedCollective = collectiveGateOn
     ? movableByDate.filter((s) => s.is_recurring === true).map((s) => ({ id: s.id, status: s.status, reason: 'collective_move_required' }))
     : [];
-  const movable = collectiveGateOn ? movableByDate.filter((s) => s.is_recurring !== true) : movableByDate;
+  const movableUngated = collectiveGateOn ? movableByDate.filter((s) => s.is_recurring !== true) : movableByDate;
+  // Grouped/frozen eligibility at PROPOSAL time too (GH r8 P1): the commit's
+  // per-stop assert (under locks) stays authoritative, but a stop already
+  // known unmovable must never ride the card's approved set only to be
+  // skipped silently after Confirm. Read-only check (no locks — the CAS pins
+  // visit_id, so a stop grouped AFTER this read drifts/misses instead);
+  // fail CLOSED per stop on an unverifiable group state.
+  const skippedGrouped = [];
+  const movable = [];
+  for (const s of movableUngated) {
+    if (!s.visit_id) { movable.push(s); continue; }
+    try {
+      const { openMembers, frozenVisitVerdict } = require('../visit-groups');
+      const members = await openMembers(db, s.visit_id);
+      if (members.length >= 2) {
+        skippedGrouped.push({ id: s.id, status: `${s.status} (grouped visit — move the stop from the schedule so the whole visit moves together)` });
+        continue;
+      }
+      const verdict = await frozenVisitVerdict(db, s.visit_id);
+      if (verdict.frozen) {
+        skippedGrouped.push({ id: s.id, status: `${s.status} (frozen grouped visit)` });
+        continue;
+      }
+      movable.push(s);
+    } catch (err) {
+      logger.warn(`[intelligence-bar:schedule] group-state preview check failed for ${s.id}: ${err.message}`);
+      skippedGrouped.push({ id: s.id, status: `${s.status} (group state unverifiable)` });
+    }
+  }
   if (!movable.length) {
     let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
-    if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
+    if (skippedGrouped.length && !skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
+      error = 'Every selected stop is part of a grouped (or frozen) visit — move the stop from the schedule so the whole visit moves together';
+    } else if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is a recurring-plan visit — with collective moves on, move it from dispatch or Edit appointment so its later visits move with it';
     } else if (skippedUnchanged.length && !skippedElapsed.length) {
       error = 'Every selected stop is already on that date — nothing to move';
     }
     return {
       error,
+      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
@@ -572,6 +652,13 @@ async function moveStopsToDay(input) {
     };
   }
 
+  // Evidence-only tracker rewinds ride the preview too (GH r8 P1): a
+  // non-live stop with stale tracker evidence gets its tracker fields
+  // cleared + post-commit cleanup on move (needsLifecycleRewind) — derived
+  // here so the card can disclose it and the two-step fingerprint binds it
+  // (evidence appearing during the pending window is drift, not a silent
+  // tracker release).
+  const { needsLifecycleRewind: previewNeedsRewind } = require('../rebooker');
   const stops = movable.map(s => ({
     id: s.id,
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
@@ -583,6 +670,7 @@ async function moveStopsToDay(input) {
     // disclose it, and the two-step fingerprint must bind it (a stop going
     // live during the pending window is drift, not a silent workflow kill).
     status: s.status,
+    ...(!LIVE_MOVE_STATUSES.has(String(s.status)) && previewNeedsRewind(s) ? { track_rewind: true } : {}),
     old_date: s.scheduled_date,
     new_date: dateStr,
   }));
@@ -597,6 +685,7 @@ async function moveStopsToDay(input) {
       // committing will text the customers.
       will_text_customers: notifyCustomers,
       stops,
+      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
@@ -916,6 +1005,7 @@ async function moveStopsToDay(input) {
     return {
       error: 'No stops were moved — every selected stop changed concurrently (status, date, or window) while the move was pending; re-check and retry',
       ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
       ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
@@ -936,7 +1026,13 @@ async function moveStopsToDay(input) {
   const notifyNote = notifyCustomers && notificationFailures.length
     ? `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}`
     : null;
-  const combinedWarning = [overlapNote, notifyNote].filter(Boolean).join(' ');
+  // An approved stop that did NOT move (concurrent change or a group formed
+  // during the pending window) must surface as a warning, never a bare Done
+  // — the card promised its listed exact target set (GH r8 P1).
+  const conflictNote = skippedConflict.length
+    ? `${skippedConflict.length} approved stop(s) were NOT moved (changed or became grouped while the card was pending): ${skippedConflict.map((c) => c.status).slice(0, 3).join('; ')}${skippedConflict.length > 3 ? '…' : ''}`
+    : null;
+  const combinedWarning = [overlapNote, notifyNote, conflictNote].filter(Boolean).join(' ');
 
   return {
     success: true,
@@ -950,6 +1046,7 @@ async function moveStopsToDay(input) {
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+    ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
     ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
   };
 }
