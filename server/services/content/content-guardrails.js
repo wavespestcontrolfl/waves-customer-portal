@@ -1649,15 +1649,19 @@ function literalAttribute(attrs, name) {
   const s = String(attrs || '');
   re.lastIndex = 0;
   let m;
+  let value = null;
+  let seen = 0;
   while (re.lastIndex < s.length && (m = re.exec(s)) !== null) {
     if (m[0].length === 0) break;
-    if (m[1] === name) {
-      if (m[2] !== undefined) return m[2];
-      if (m[3] !== undefined) return m[3];
-      return null; // expression, unquoted, or bare boolean — not a literal
-    }
+    if (m[1] !== name) continue;
+    seen += 1;
+    // expression, unquoted, or bare boolean — not a literal
+    value = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null;
   }
-  return null;
+  // A DUPLICATED prop is ambiguous — React/MDX keeps the LAST value while
+  // a human reads the first — so it never resolves (fail closed; the
+  // draft parks as unregistered). Single occurrence: its literal value.
+  return seen === 1 ? value : null;
 }
 
 function collectAffiliateLinkTags(text) {

@@ -571,6 +571,9 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(collectAffiliateLinkTags('<AffiliateLink product=rain-gauge>y</AffiliateLink>')[0].productId).toBeNull();
       expect(collectAffiliateLinkTags(`<AffiliateLink placement="x" product='rain-gauge'>y</AffiliateLink>`)[0].productId).toBe('rain-gauge');
       expect(collectAffiliateLinkTags('<AffiliateLink title="a > b" product="rain-gauge" />')[0].productId).toBe('rain-gauge');
+      // A duplicated prop is ambiguous (React keeps the LAST, a reader sees the
+      // first) — it never resolves, so the draft parks as unregistered.
+      expect(collectAffiliateLinkTags('<AffiliateLink product="rain-gauge" product="pro-termiticide">x</AffiliateLink>')[0].productId).toBeNull();
     });
   });
 
