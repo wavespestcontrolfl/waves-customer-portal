@@ -290,6 +290,10 @@ function GlobalCommandPalette(_props, ref) {
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
+  // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
+  // the id is set from query responses and from resume-on-open.
+  const [threadId, setThreadId] = useState(null);
+  const resumeAttemptedRef = useRef(false);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
   const [attachments, setAttachments] = useState([]);
@@ -364,13 +368,30 @@ function GlobalCommandPalette(_props, ref) {
     setAttachmentBusy(false);
   }, [setAttachmentBusy]);
 
-  // Clear conversation when context changes
+  // Context change no longer wipes the conversation (operating-terminal
+  // scope, owner-ratified 2026-08-31): the thread survives route changes —
+  // the server trims what reaches the model, and tool availability is
+  // recalculated per request from the new context. Attachments stay
+  // per-message.
   useEffect(() => {
-    setConversationHistory([]);
-    setResponse(null);
-    setPendingActions([]);
     resetAttachments();
   }, [context, resetAttachments]);
+
+  // Resume the latest server-persisted thread when the palette first opens
+  // with no local history. 404 = threads not enabled — quietly stay
+  // ephemeral (the pre-threads behavior).
+  useEffect(() => {
+    if (!open || resumeAttemptedRef.current || conversationHistory.length > 0) return;
+    resumeAttemptedRef.current = true;
+    adminFetch("/admin/intelligence-bar/threads/latest")
+      .then((data) => {
+        if (data?.thread?.conversationHistory?.length) {
+          setConversationHistory(data.thread.conversationHistory);
+          setThreadId(data.thread.id);
+        }
+      })
+      .catch(() => { /* threads disabled or unreachable — ephemeral mode */ });
+  }, [open, conversationHistory.length]);
 
   const submit = useCallback(
     async (text) => {
@@ -389,6 +410,7 @@ function GlobalCommandPalette(_props, ref) {
             prompt: q,
             conversationHistory,
             context,
+            ...(threadId ? { thread_id: threadId } : {}),
             pageData: { route: location.pathname },
             ...(attachments.length
               ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
@@ -398,6 +420,7 @@ function GlobalCommandPalette(_props, ref) {
         setResponse(data.response);
         setPendingActions(data.pendingActions || []);
         setConversationHistory(data.conversationHistory || []);
+        if (data.threadId) setThreadId(data.threadId);
       } catch (err) {
         setResponse(`Error: ${err.message}`);
       }
@@ -441,10 +464,14 @@ function GlobalCommandPalette(_props, ref) {
   };
 
   const clear = () => {
+    // "New chat": drops the local view AND detaches from the persisted
+    // thread — the next query starts a fresh thread (old ones remain until
+    // retention).
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
     setPrompt("");
+    setThreadId(null);
     resetAttachments();
   };
 

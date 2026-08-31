@@ -6031,6 +6031,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:23AM — IB thread retention purge (GATE_IB_THREADS lane, owner
+  // default 365 days / IB_THREAD_RETENTION_DAYS). Hard-deletes idle
+  // ib_threads; turns ride the FK cascade. No-op while the gate is off —
+  // nothing writes threads then, and pre-existing rows still age out.
+  // =========================================================================
+  cron.schedule('23 4 * * *', async () => {
+    try {
+      await runExclusive('ib-thread-retention', async () => {
+        const { purgeExpiredThreads } = require('./intelligence-bar/threads');
+        await purgeExpiredThreads();
+      });
+    } catch (err) {
+      logger.error(`IB thread retention purge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
   // annual-prepay payment reminders/sweeps that ride the same run.
