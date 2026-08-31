@@ -278,8 +278,9 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     const extra = `${body}\n<AffiliateLink product="ant-bait" placement="alt-rec">y</AffiliateLink>`;
     expect(affiliateBeltVerdict(approved, extra, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
   });
-  test('non-blog refresh targets (no blog file path) are not subject to the belt', () => {
+  test('non-blog refresh targets (no blog file path) are not subject to the belt; a blog target with no derivable file fails closed', () => {
     expect(affiliateBeltVerdict({}, { notBlog: true }).ok).toBe(true);
+    expect(affiliateBeltVerdict({}, null).ok).toBe(false);
   });
 });
 

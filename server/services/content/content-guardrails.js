@@ -1863,7 +1863,9 @@ function urlIsAffiliate(u, registryIdentities) {
   if (identity && registryIdentities.has(identity)) return true;
   const host = u.hostname.toLowerCase().replace(/^www\./, '');
   if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
-  if ((host === 'amazon.com' || host.endsWith('.amazon.com')) && (u.searchParams.has('tag') || u.searchParams.has('ascsubtag'))) return true;
+  if ((host === 'amazon.com' || host.endsWith('.amazon.com'))) {
+    for (const [k] of u.searchParams) { const key = k.toLowerCase(); if (key === 'tag' || key === 'ascsubtag') return true; }
+  }
   if (hasAffiliateQueryParam(u)) return true;
   return false;
 }

@@ -308,7 +308,15 @@ async function headBlogFileContent(run, pr, gh) {
   let brief = {};
   try { brief = await briefCategorySignalsForRun(run); } catch (_) { return null; }
   const candidates = blogFileCandidatesForRun(run, brief);
-  if (!candidates) return { notBlog: true };
+  if (!candidates) {
+    // No derivable blog file: pass ONLY when the run demonstrably targets a
+    // non-blog page (service/city refresh). A blog-lane run whose draft
+    // slug is missing/malformed fails closed (Codex PR3 r8 P1).
+    if (String(run.action_type || '') === 'new_supporting_blog') return null;
+    let pathname = '';
+    try { pathname = new URL(String(targetForRun(run).url || '')).pathname; } catch (_) { return null; }
+    return /^\/(?:pest-control|lawn-care|termite|mosquito|tree-shrub|seasonal)\/[^/]+\/?$/.test(pathname) ? null : { notBlog: true };
+  }
   let parse;
   try { ({ parse } = require('../content-astro/frontmatter')); } catch (_) { return null; }
   for (const path of candidates.paths) {

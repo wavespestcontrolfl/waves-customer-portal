@@ -449,7 +449,8 @@ export const componentPropSchemas = {
           source: z
             .object({
               label: z.string().min(1),
-              url: z.url(),
+              // Rendered as a citation anchor: https only, never an executable scheme.
+              url: z.url().refine((u) => /^https:\/\//i.test(u), 'citation url must be https'),
             })
             .optional(),
         }),
@@ -623,8 +624,11 @@ export function validateMarkdownComponents(
 // ─────────────────────────────────────────────────────────────
 
 export const AFFILIATE_LINK_MAX_PER_POST = 3;
+// Exact routes only: the path must END after the trailing slash (an
+// optional ?query/#fragment, then the closing paren) — "/quote/anything/"
+// is not the quote page (Codex PR3 r8 P1).
 const SERVICE_CTA_LINK_RE =
-  /\]\(\s*\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/|\]\(\s*\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/|<InlineCTA\b/;
+  /\]\(\s*\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#][^)\s]*)?\s*\)|\]\(\s*\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#][^)\s]*)?\s*\)|<InlineCTA\b/;
 
 export interface AffiliateUsageResult {
   ok: boolean;

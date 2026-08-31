@@ -613,6 +613,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('see https://amazon.com/dp/B000TEST01/?utm_source=x&tag=wavespest-20#reviews')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/test-bait?ref=1&aff=waves')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://amzn.to/abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.amazon.com/dp/B1?Tag=wavespest-20')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://shareasale.com/r.cfm?b=1')).toBe(true);
       // Direct-merchant tracking params on an UNREGISTERED path, any host (Codex r5 P1).
       expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?aff=waves')).toBe(true);

@@ -144,6 +144,14 @@ function registryChecksum(bytes) {
   return hash.digest('hex');
 }
 
+// Query-parameter presence, case-insensitive on the NAME ("Tag=" is still
+// the associate tag to Amazon).
+function hasParamCi(url, name) {
+  const want = String(name).toLowerCase();
+  for (const [k] of url.searchParams) if (k.toLowerCase() === want) return true;
+  return false;
+}
+
 function isAmazonHost(hostname) {
   const host = String(hostname || '').toLowerCase();
   return host === 'amzn.to' || /(^|\.)amazon\.[a-z.]+$/.test(host);
@@ -196,7 +204,7 @@ function validateProduct(row, { now = new Date() } = {}) {
       // parameters (a tagged plain_url would monetize a paused product).
       const h = plain.hostname.toLowerCase();
       if (h !== 'amazon.com' && h !== 'www.amazon.com') errors.push('amazon plain_url must be a direct amazon.com URL — never amzn.to, redirects, or cloak domains');
-      if (plain.searchParams.has('tag') || plain.searchParams.has('ascsubtag')) errors.push('amazon plain_url must carry no tag=/ascsubtag (it is the untracked fallback)');
+      if (hasParamCi(plain, 'tag') || hasParamCi(plain, 'ascsubtag')) errors.push('amazon plain_url must carry no tag=/ascsubtag (it is the untracked fallback)');
     }
   }
   // Amazon policy keys off the URL and a normalized merchant, never the
@@ -206,7 +214,7 @@ function validateProduct(row, { now = new Date() } = {}) {
     const host = url.hostname.toLowerCase();
     if (host !== 'amazon.com' && host !== 'www.amazon.com') {
       errors.push('amazon products must link amazon.com directly — never amzn.to, redirects, or cloak domains (Associates policy)');
-    } else if (!url.searchParams.get('tag')) {
+    } else if (!hasParamCi(url, 'tag')) {
       errors.push('amazon approved_affiliate_url is missing the tag= associate parameter');
     }
   }
