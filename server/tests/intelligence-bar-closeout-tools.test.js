@@ -52,6 +52,11 @@ test('get_closeout_status returns the service result; found:false is a clear err
   getCloseoutStatus.mockResolvedValue(status());
   const ok = await executeCloseoutTool('get_closeout_status', { service_id: 'svc-1' });
   expect(ok.summary.closedOut).toBe(true);
+  // Operator free text never leaves the tool (codex r3).
+  getCloseoutStatus.mockResolvedValue(status({ facts: { ...status().facts, invoice: { state: 'not_required', reason: 'disposition_intentionally_free', dispositionId: 'd1', dispositionReason: 'waived for Jane at 12 Palm St' } } }));
+  const stripped = await executeCloseoutTool('get_closeout_status', { service_id: 'svc-1' });
+  expect(stripped.facts.invoice).toEqual({ state: 'not_required', reason: 'disposition_intentionally_free', dispositionId: 'd1' });
+  expect(JSON.stringify(stripped)).not.toMatch(/Jane|Palm St/);
   getCloseoutStatus.mockResolvedValue({ found: false, lookupFailed: false });
   expect((await executeCloseoutTool('get_closeout_status', { service_id: 'nope' })).error).toMatch(/No visit/);
   getCloseoutStatus.mockResolvedValue({ found: false, lookupFailed: true });

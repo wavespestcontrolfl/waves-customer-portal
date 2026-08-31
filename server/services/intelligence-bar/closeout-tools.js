@@ -49,6 +49,18 @@ Use for: "show me every service today where something is missing", "which of yes
   },
 ];
 
+// The only operator free-text field the service carries
+// (visit_billing_dispositions.reason → facts.invoice.dispositionReason) may
+// hold customer PII per its writer; drop it — the structured disposition
+// (id, state, decidedAt) is the evidence. Nothing free-text reaches the
+// model or the persisted intelligence_bar_queries row.
+function stripFreeText(status) {
+  if (!status?.facts?.invoice) return status;
+  const { dispositionReason, ...invoice } = status.facts.invoice;
+  void dispositionReason;
+  return { ...status, facts: { ...status.facts, invoice } };
+}
+
 function compactFacts(status) {
   const out = {};
   for (const name of FACT_NAMES) {
@@ -68,7 +80,7 @@ async function getCloseoutStatusTool(input) {
       ? { error: 'scheduled_services lookup unavailable — status unknown, not missing', serviceId }
       : { error: 'No visit with that id', serviceId };
   }
-  return status;
+  return stripFreeText(status);
 }
 
 async function listOpenCloseouts(input) {
