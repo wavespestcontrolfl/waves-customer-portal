@@ -200,11 +200,25 @@ class ModuleAnalysis {
         && node.right.type === 'Identifier') {
         this.exportCandidate = node.right.name;
       } else if (node.type === 'CallExpression'
-        && node.callee.type === 'MemberExpression' && !node.callee.computed
-        && node.callee.object.type === 'Identifier'
-        && node.callee.property.type === 'Identifier') {
-        const method = node.callee.property.name;
-        if (VERBS.has(method) || method === 'use' || method === 'route') {
+        && node.callee.type === 'MemberExpression'
+        && node.callee.object.type === 'Identifier') {
+        // Computed string-literal calls (router['get'](...)) register like the
+        // plain form; a computed NON-literal method (router[verb](...)) cannot
+        // be resolved, so it is recorded and reported as a problem when the
+        // object turns out to be a router/app — silence there would be a
+        // fail-open hole in the allowlist.
+        let method = null;
+        let unresolvedMethod = false;
+        if (!node.callee.computed && node.callee.property.type === 'Identifier') {
+          method = node.callee.property.name;
+        } else if (node.callee.computed && node.callee.property.type === 'StringLiteral') {
+          method = node.callee.property.value;
+        } else if (node.callee.computed) {
+          unresolvedMethod = true;
+        }
+        if (unresolvedMethod) {
+          this.registrations.push({ object: node.callee.object.name, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, node });
+        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
           this.registrations.push({ object: node.callee.object.name, method, args: node.arguments, topLevel: ctx.topLevel, node });
         }
       }
@@ -218,6 +232,8 @@ class ModuleAnalysis {
     for (const r of this.registrations) {
       if (r.method === 'route') {
         this.problems.push(`${this.loc(r.node)}: ${r.object}.route(...) chains are not supported by the scanner — register with ${r.object}.<verb>() instead`);
+      } else if (r.method === '<computed>') {
+        this.problems.push(`${this.loc(r.node)}: computed method call ${r.object}[...](...) on a router — the scanner cannot tell what it registers; use a literal ${r.object}.<verb>()/use()`);
       }
     }
   }
@@ -566,7 +582,7 @@ class Scanner {
     const inEffect = [...ctx.inEffect];
     for (const reg of m.registrations) {
       if (reg.object !== objectName) continue;
-      if (reg.method === 'route') continue; // already a problem
+      if (reg.method === 'route' || reg.method === '<computed>') continue; // already a problem
       const args = [...reg.args];
       let paths = ['/'];
       let pathResolved = true;
