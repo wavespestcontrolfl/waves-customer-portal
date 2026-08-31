@@ -205,6 +205,42 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
 }
 
 /**
+ * Compensating cancel: undo a hold this same flow just created — restore
+ * the suspended component and scalar, release tier protection, move the
+ * visits back. Used when a LATER family in a multi-family accept fails so
+ * money and schedule never partially commit (codex P0).
+ */
+async function cancelHold(holdId, { compensateVisits = true } = {}) {
+  const hold = await db('plan_holds').where({ id: holdId }).first('*');
+  if (!hold || hold.status !== 'active') return false;
+  await db.transaction(async (trx) => {
+    const claimed = await trx('plan_holds').where({ id: holdId, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+    if (!claimed) return;
+    if (hold.held_monthly_rate != null) {
+      const component = await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
+      if (component && component.source === 'plan_hold') {
+        await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key })
+          .update({ monthly_rate: Number(hold.held_monthly_rate), source: 'plan_hold_revert', effective_at: new Date(), updated_at: new Date() });
+        const rows = await trx('customer_plan_rates').where({ customer_id: hold.customer_id }).select('monthly_rate');
+        const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
+        await trx('customers').where({ id: hold.customer_id }).update({ monthly_rate: scalar, updated_at: new Date() });
+      }
+    }
+    const others = await trx('plan_holds').where({ customer_id: hold.customer_id, status: 'active' }).whereNot({ id: holdId }).max('resume_on as max');
+    await trx('customers').where({ id: hold.customer_id }).update({ tier_protected_until: others?.[0]?.max || null, updated_at: new Date() });
+  });
+  if (compensateVisits) {
+    let movedVisits = [];
+    try {
+      const parsed = typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : hold.moved_visits;
+      movedVisits = Array.isArray(parsed?.moved) ? parsed.moved : [];
+    } catch { movedVisits = []; }
+    await revertMoves(hold.customer_id, movedVisits);
+  }
+  return true;
+}
+
+/**
  * Daily lifecycle (scheduler): 7-day restart texts, then auto-resume.
  * Both idempotent — the reminder stamps reminder_sent_at, the resume flips
  * status under the live-unique index.
@@ -263,6 +299,13 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       // restarts before a reminder was ACCEPTED for delivery (codex P0).
       // The remind branch above keeps retrying daily; a hold overdue with
       // no deliverable reminder parks for the office instead.
+      // Seven elapsed days after DELIVERY, not merely a stamp (codex P0):
+      // a reminder that only got through on the resume date pushes the
+      // restart out a full week — the notice period is the consent.
+      if (hold.reminder_sent_at) {
+        const stampedEt = etDateString(new Date(hold.reminder_sent_at));
+        if (today < addDays(stampedEt, 7)) continue;
+      }
       if (!hold.reminder_sent_at) {
         if (String(hold.resume_on).slice(0, 10) < today) {
           const { notifyAdmin } = require('../notification-service');
@@ -314,4 +357,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, startHold, cancelHold, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

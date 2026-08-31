@@ -43,7 +43,8 @@ function etDisplayDate(value) {
 async function committedScopeFor(serviceRequestId) {
   try {
     const row = await db('cancellation_cases').where({ service_request_id: serviceRequestId }).first('scope');
-    const scope = row && (typeof row.scope === 'string' ? JSON.parse(row.scope) : row.scope);
+    if (!row) return null; // case write failed or not yet landed — fail closed (codex P0)
+    const scope = typeof row.scope === 'string' ? JSON.parse(row.scope) : row.scope;
     return Array.isArray(scope) ? scope.filter(Boolean) : [];
   } catch (err) {
     logger.warn(`[requests] scope recovery failed for request ${serviceRequestId}: ${err.message}`);
@@ -568,7 +569,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           requestId: request.id,
           value,
-          families: serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [],
+          // The scope the processor actually RAN with is the durable record
+          // (codex P0: a reason-less scoped cancel stored [] and a retry
+          // then churned the whole account).
+          families: Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length
+            ? cancellationResult.scope
+            : (scopedFamilies.length ? scopedFamilies
+              : (serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [])),
           reasonText: cleanDescription || null,
           resolution: serverResolution,
           resolutionOutcome: outcome,
@@ -595,7 +602,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       const cancellationSummary = isCancellation
         ? (cancellationResult && cancellationResult.ok
             ? `\n\nAuto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled, ` +
-              'recurrence stopped, account churned + billing stopped.'
+              (Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length
+                ? `recurrence stopped for ${cancellationResult.scope.join(', ')}; account stays active with ${(cancellationResult.remaining || []).join(', ') || 'its other services'} (tier ${cancellationResult.tierBefore || '—'} → ${cancellationResult.tierAfter || '—'}).`
+                : 'recurrence stopped, account churned + billing stopped.')
             : '\n\n⚠️ Auto-processing did not fully complete — review the calendar/account manually.' +
               (cancellationResult && cancellationResult.errors && cancellationResult.errors.length
                 ? ` (failed: ${cancellationResult.errors.join(', ')})`
@@ -929,15 +938,24 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       f: [...families].sort(),
       p: value.params || {},
     });
-    const priorCandidates = await db('cancellation_cases')
-      .where({ customer_id: req.customer.id, resolution_template_id: value.templateId, resolution_outcome: 'accepted' })
-      .where('created_at', '>=', new Date(Date.now() - 24 * 3600 * 1000))
-      .orderBy('created_at', 'desc')
-      .select('*');
-    const priorCase = (priorCandidates || []).find((row) => {
-      const snap = typeof row.snapshot === 'string' ? JSON.parse(row.snapshot) : (row.snapshot || {});
-      return snap.accept_key === acceptKey;
-    }) || null;
+    // Check + mint under a per-customer advisory lock (codex P1: two
+    // concurrent taps both saw "no prior" and executed twice). The lock
+    // covers only the durable claim; execution runs after it, protected by
+    // per-case idempotency (executor dedupe keys + the grant's case guard).
+    const claim = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${req.customer.id}`]);
+      const candidates = await trx('cancellation_cases')
+        .where({ customer_id: req.customer.id, resolution_template_id: value.templateId, resolution_outcome: 'accepted' })
+        .where('created_at', '>=', new Date(Date.now() - 24 * 3600 * 1000))
+        .orderBy('created_at', 'desc')
+        .select('*');
+      const prior = (candidates || []).find((row) => {
+        const snap = typeof row.snapshot === 'string' ? JSON.parse(row.snapshot) : (row.snapshot || {});
+        return snap.accept_key === acceptKey;
+      }) || null;
+      return { prior };
+    });
+    const priorCase = claim.prior;
     if (priorCase) {
       const receipt = priorCase.snapshot && priorCase.snapshot.accept_receipt;
       if (receipt) return res.json({ ok: true, deduped: true, receipt });

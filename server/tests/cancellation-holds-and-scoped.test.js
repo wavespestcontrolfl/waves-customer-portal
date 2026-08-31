@@ -158,7 +158,12 @@ describe('runPlanHoldLifecycle', () => {
     const second = await runPlanHoldLifecycle({ today: TODAY });
     expect(second.reminded).toBe(0); // reminder claimed, never re-sent
 
-    const onResume = await runPlanHoldLifecycle({ today: daysOut(5) });
+    // The reminder only went out TODAY (5 days before resume) — the 7-day
+    // notice period pushes the restart out, so the resume date itself does
+    // NOT resume billing yet.
+    const tooEarly = await runPlanHoldLifecycle({ today: daysOut(5) });
+    expect(tooEarly.resumed).toBe(0);
+    const onResume = await runPlanHoldLifecycle({ today: daysOut(7) });
     expect(onResume.resumed).toBe(1);
     const lawn = mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care');
     expect(Number(lawn.monthly_rate)).toBe(90);

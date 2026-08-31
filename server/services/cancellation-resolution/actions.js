@@ -194,14 +194,26 @@ async function executeAwayMode({ customerId, caseRow, params }) {
 }
 
 async function executeHold({ customerId, caseRow, action, params, families }) {
-  const { startHold } = require('./holds');
+  const { startHold, cancelHold } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
   if (!holdable.length) throw codedError('hold_family_required', 'Nothing on this plan can be held');
+  // Multi-family holds commit ALL or NOTHING (codex P0): a later family's
+  // failure compensates every hold this accept just created — component
+  // restored, tier protection released, visits moved back.
   const results = [];
-  for (const familyKey of holdable) {
-    results.push(await startHold({
-      customerId, caseId: caseRow.id, familyKey, resumeOn: params?.resumeDate, maxDays: action.holdMaxDays || 180,
-    }));
+  try {
+    for (const familyKey of holdable) {
+      results.push(await startHold({
+        customerId, caseId: caseRow.id, familyKey, resumeOn: params?.resumeDate, maxDays: action.holdMaxDays || 180,
+      }));
+    }
+  } catch (err) {
+    for (const done of results.reverse()) {
+      try { await cancelHold(done.holdId, { compensateVisits: true }); } catch (undoErr) {
+        logger.error(`[cancel-actions] hold compensation failed for ${done.holdId}: ${undoErr.message}`);
+      }
+    }
+    throw err;
   }
   const first = results[0];
   return { holds: results.map((r) => r.holdId), effects: [
@@ -211,8 +223,10 @@ async function executeHold({ customerId, caseRow, action, params, families }) {
 }
 
 async function executeAwayPairing(ctx) {
-  const away = await executeAwayMode(ctx);
+  // Holds first (they can fail and fully compensate); Away Mode is a
+  // single idempotent preference write, so nothing partial can linger.
   const hold = await executeHold(ctx);
+  const away = await executeAwayMode(ctx);
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
 }
 

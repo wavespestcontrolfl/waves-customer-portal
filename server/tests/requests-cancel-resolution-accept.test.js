@@ -45,6 +45,7 @@ jest.mock('../models/db', () => {
     return builder;
   });
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  fn.transaction = async (cb) => cb(Object.assign(((...a) => fn(...a)), { raw: jest.fn(async () => ({})) }));
   return fn;
 });
 
