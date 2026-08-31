@@ -58,7 +58,7 @@ function heldCloseoutAlert({ count, label }) {
     count: Math.max(Number(count || 0), 1),
     // Deliberately NO members: a held snapshot knows a floor, not the set.
     label,
-    href: '/admin/dispatch',
+    href: `/admin/dispatch?date=${etDateString()}`,
     heldThroughOutage: true,
   };
 }
@@ -433,6 +433,14 @@ async function computeDashboardAlertsUncached() {
         href: '/admin/dispatch',
       });
     }
+    // After a COMPLETE list read, a visit no longer in today's completed set
+    // owes nothing — drop it so a stale carry can't resurrect a held alert.
+    // Runs even when the set is now EMPTY (every gapped visit un-completed).
+    if (!sweepTruncated) {
+      const carry = closeoutCarryFor(today);
+      const current = new Set(completedToday.map((r) => r.id));
+      for (const id of [...carry.keys()]) if (!current.has(id)) carry.delete(id);
+    }
     if (completedToday.length) {
       const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
       const carry = closeoutCarryFor(today);
@@ -493,7 +501,10 @@ async function computeDashboardAlertsUncached() {
           // issue (report published → delivery fails), not just on count.
           members: queueMembers(gapIdentities),
           label: `${gapIds.length} completed visit${gapIds.length === 1 ? '' : 's'} today not closed out (${issueCount} open item${issueCount === 1 ? '' : 's'})`,
-          href: '/admin/dispatch',
+          // Day view lists today's visits (per-visit closeout facts: IB
+          // get_closeout_status / list_open_closeouts; a JobDrawer panel is
+          // a follow-up UI PR).
+          href: `/admin/dispatch?date=${today}`,
         });
       }
     }

@@ -101,18 +101,19 @@ function closeoutIssuesForVisit(status) {
   const completionStuck = facts.completion?.state === 'failed'
     || completionReason === 'completed_visit_without_record'
     || completionReason === 'completion_resumable'
-    || completionReason === 'completion_side_effects_resumable';
+    || completionReason === 'completion_side_effects_resumable'
+    // The tech marked the visit incomplete: the row is 'completed' but the
+    // work is not — an operator must reschedule or follow up.
+    || completionReason === 'record_marked_incomplete';
   if (completionStuck) {
     // Own lifecycle key: a dismissed stuck-completion card must not hide a
     // later missing-report card once the completion lands.
-    return [{
-      type: CLOSEOUT_ALERT_TYPES.completion,
-      fact: 'completion',
-      reason: completionReason,
-      summary: completionReason.includes('resumable')
+    const summary = completionReason === 'record_marked_incomplete'
+      ? 'Technician marked this visit incomplete — reschedule or follow up.'
+      : completionReason.includes('resumable')
         ? 'Completion is stuck mid-commit — re-open the completion to resume its side effects.'
-        : 'Completed job has no completion record — closeout never committed.',
-    }];
+        : 'Completed job has no completion record — closeout never committed.';
+    return [{ type: CLOSEOUT_ALERT_TYPES.completion, fact: 'completion', reason: completionReason, summary }];
   }
 
   if (openFact(facts.report)) {
@@ -132,14 +133,12 @@ function closeoutIssuesForVisit(status) {
     && (delivery.state === 'failed' || delivery.state === 'pending')
     && !TRANSIENT_DELIVERY_REASONS.has(delivery.reason);
   if (deliveryOpen) {
-    issues.push({
-      type: CLOSEOUT_ALERT_TYPES.reportDelivery,
-      fact: 'reportDelivery',
-      reason: delivery.reason,
-      summary: delivery.state === 'failed'
+    const deliverySummary = delivery.reason === 'delivery_skipped_no_recipient'
+      ? 'Service report could not be sent — no report recipient on file; add an email for this customer.'
+      : delivery.state === 'failed'
         ? 'Service report was published but its delivery failed after retries.'
-        : 'Service report was published but was never delivered to the customer.',
-    });
+        : 'Service report was published but was never delivered to the customer.';
+    issues.push({ type: CLOSEOUT_ALERT_TYPES.reportDelivery, fact: 'reportDelivery', reason: delivery.reason, summary: deliverySummary });
   }
   if (openFact(facts.application)) {
     issues.push({

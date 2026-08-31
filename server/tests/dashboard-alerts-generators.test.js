@@ -320,7 +320,7 @@ describe('Action Inbox generators', () => {
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'closeout_gaps_today');
     // Members are visit:issue identities so a new issue on a listed visit re-surfaces a dismissal (GH r2).
-    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: '/admin/dispatch', members: ['svc-b:missing_required_photos', 'svc-b:missing_required_service_report'] });
+    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: expect.stringMatching(/^\/admin\/dispatch\?date=\d{4}-\d{2}-\d{2}$/), members: ['svc-b:missing_required_photos', 'svc-b:missing_required_service_report'] });
     expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
     expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d']);
   });
@@ -430,6 +430,23 @@ describe('Action Inbox generators', () => {
     __private.resetCloseoutCarry();
     primeDb({ scheduled_services: [{ id: 'svc-b' }], dashboard_alert_state: () => { throw new Error('state table unavailable'); } });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-b', null]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+  });
+
+  test('closeout_gaps_today: a visit that leaves the completed set is pruned from the carry, so a later failure cannot resurrect it (GH r3)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    const gap = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' } } };
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', gap]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeDefined();
+    // svc-a leaves today's completed set (un-completed / moved) → carry pruned.
+    primeDb({ scheduled_services: [] });
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+    // Generator failure afterwards (no state row) must not resurrect it.
+    primeDb({ scheduled_services: [{ id: 'svc-z' }], dashboard_alert_state: undefined });
+    loadCloseoutStatuses.mockRejectedValueOnce(new Error('boom'));
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
   });
 

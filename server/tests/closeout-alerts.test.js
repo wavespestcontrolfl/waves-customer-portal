@@ -37,6 +37,9 @@ describe('closeoutIssuesForVisit', () => {
       expect(issues[0].type).toBe('completion_not_committed'); // own lifecycle key (GH r2)
     }
     expect(closeoutIssuesForVisit(base({ completion: fact('pending', 'completion_side_effects_resumable') }))[0].summary).toMatch(/stuck mid-commit/);
+    // Tech-marked incomplete is an operator issue too (GH r3).
+    const incomplete = closeoutIssuesForVisit(base({ completion: fact('pending', 'record_marked_incomplete'), report: fact('not_required', 'record_marked_incomplete') }));
+    expect(incomplete).toEqual([expect.objectContaining({ type: 'completion_not_committed', summary: expect.stringMatching(/reschedule or follow up/) })]);
   });
   test('report / delivery-failed / all-retracted application / short photos map to the three legacy types', () => {
     const issues = closeoutIssuesForVisit(base({
@@ -52,6 +55,7 @@ describe('closeoutIssuesForVisit', () => {
     expect(delivery).toEqual([expect.objectContaining({ type: 'report_delivery_incomplete', fact: 'reportDelivery', summary: expect.stringMatching(/delivery failed/) })]);
     expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'not_enqueued') }))).toEqual([expect.objectContaining({ type: 'report_delivery_incomplete', summary: expect.stringMatching(/never delivered/) })]);
     expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'project_report_not_sent') }))).toHaveLength(1);
+    expect(closeoutIssuesForVisit(base({ reportDelivery: fact('failed', 'delivery_skipped_no_recipient') }))[0].summary).toMatch(/no report recipient on file/);
     for (const r of ['delivery_queued', 'delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight', 'report_not_published']) {
       expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', r) }))).toEqual([]);
     }
