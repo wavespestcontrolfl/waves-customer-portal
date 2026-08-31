@@ -651,9 +651,20 @@ const ReviewService = {
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
-        // number, and hasRecentReviewRequest / the 30-day cooldown would
-        // count a request that never happened.
-        await db("review_requests").where({ id: request.id }).del().catch(() => {});
+        // number, and the 30-day cooldown would count a request that never
+        // happened. The cleanup must not be swallowed (pre-push r17 P1): if
+        // the delete fails, durably suppress the row instead — suppressed
+        // rows are never sent — and log loudly if even that fails.
+        try {
+          await db("review_requests").where({ id: request.id }).del();
+        } catch (delErr) {
+          logger.error(`[review] drift-cleanup delete failed (requestId=${request.id}) — suppressing instead: ${delErr.message}`);
+          try {
+            await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+          } catch (supErr) {
+            logger.error(`[review] drift-cleanup suppress ALSO failed (requestId=${request.id}) — manual check needed before the next scheduler run: ${supErr.message}`);
+          }
+        }
         throw Object.assign(
           new Error("The review-request recipient changed after the card was shown — nothing was sent."),
           { statusCode: 409, code: "approved_phone_drift" },
