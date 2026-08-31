@@ -4880,11 +4880,19 @@ function EstimateViewPageInner() {
   // disclosed number rather than a surprise on the next screen.
   const [optOut, setOptOut] = useState({ sectionKey: null, phase: 'idle', quote: null, message: '' });
 
-  const submitOptOut = useCallback(async (sectionKey, included, dryRun) => {
+  const submitOptOut = useCallback(async (sectionKey, included, dryRun, previewBasis = null) => {
     const r = await fetch(`${API_BASE}/estimates/${token}/service-opt-out`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serviceKey: sectionKey, included, ...(dryRun ? { dryRun: true } : {}) }),
+      body: JSON.stringify({
+        serviceKey: sectionKey,
+        included,
+        ...(dryRun ? { dryRun: true } : {}),
+        // Binds a removal commit to the preview the customer confirmed — the
+        // server refuses if the estimate changed in between, so the number on
+        // the confirm panel is the number that persists.
+        ...(previewBasis ? { previewBasis } : {}),
+      }),
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) {
@@ -4895,7 +4903,9 @@ function EstimateViewPageInner() {
           ? 'Removing this would end an included item on your plan. Give us a call at (941) 234-8929 and we\'ll sort it out with you.'
           : body?.error === 'service_not_removable'
             ? 'This service can\'t be removed online. Give us a call and we\'ll take care of it.'
-            : 'We couldn\'t update your estimate just now. Please try again.',
+            : body?.error === 'estimate_changed_since_preview'
+              ? 'Your estimate changed since this preview. Please take another look at the updated numbers and try again.'
+              : 'We couldn\'t update your estimate just now. Please try again.',
       );
       err.code = body?.error;
       throw err;
@@ -4923,7 +4933,7 @@ function EstimateViewPageInner() {
     setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
   }, []);
 
-  const commitOptOut = useCallback(async (sectionKey, included) => {
+  const commitOptOut = useCallback(async (sectionKey, included, previewBasis = null) => {
     if (ctaPhaseRef.current === 'submitting') return;
     if (adminDraftPreview) {
       setError('Draft preview — removing a service is the customer\'s choice once the estimate is sent.');
@@ -4932,7 +4942,7 @@ function EstimateViewPageInner() {
     const run = async () => {
       setOptOut((prev) => ({ ...prev, sectionKey, phase: 'submitting' }));
       try {
-        await submitOptOut(sectionKey, included, false);
+        await submitOptOut(sectionKey, included, false, previewBasis);
         // The plan changed shape, so everything chosen against the old shape
         // goes: the slot was sized from the old service mix, and a payment
         // preference was made against the old amount.
@@ -6142,7 +6152,11 @@ function EstimateViewPageInner() {
                     phase: optOut.sectionKey === section.key ? optOut.phase : 'idle',
                     quote: optOut.sectionKey === section.key ? optOut.quote : null,
                     onPreview: () => onPreviewRemoveService(section.key),
-                    onConfirm: () => commitOptOut(section.key, false),
+                    onConfirm: () => commitOptOut(
+                      section.key,
+                      false,
+                      optOut.sectionKey === section.key ? optOut.quote?.previewBasis || null : null,
+                    ),
                     onCancel: cancelRemoveService,
                   }
                   : null}

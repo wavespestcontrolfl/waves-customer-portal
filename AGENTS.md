@@ -1538,11 +1538,20 @@ violations at the severity noted.
   `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
   recompute cannot run; and a 400 refusal when the removal would turn a
   bundled-free one-time item into a charge (owner ruling — that one goes to
-  the office). Membership identity is loaded EXPLICITLY, never defaulted, or
-  an existing member reprices as a brand-new customer. The write carries the
-  same six-predicate rails + ms-truncated CAS as the bond/interior writes.
-  NOTHING is sent to the customer and no bell rings: one `activity_log` row is
-  the whole audit surface. Treat the gate, the generic-404
+  the office; the before-state resolves through `result` OR the mapped raw
+  `engineResult` so engine-only estimates never blind the guard). Membership
+  identity is loaded EXPLICITLY — `membershipSnapshot.isExistingCustomer ===
+  true`, never snapshot truthiness — or an existing member reprices as a
+  brand-new customer and a linked NEW customer steals the perk. A removal
+  commit must echo the dry run's `previewBasis` and is refused when the row
+  moved since the preview, so the number the customer confirmed is the number
+  that persists. The write carries the same six-predicate rails +
+  ms-truncated CAS as the bond/interior writes, refreshes BOTH stored result
+  carriers (`result` and raw `engineResult`) from the same recompute, and
+  stamps `serviceOptOut.engineTier` as the select-tier eligibility ceiling.
+  NOTHING is sent to the customer and no bell rings: one `activity_log` row,
+  written ATOMICALLY with the estimate update, is the whole audit surface.
+  Treat the gate, the generic-404
   indistinguishability, the fail-closed reprice, the explicit membership
   identity, and the no-comms contract as security-critical.)
   New public routes outside this list are P0.

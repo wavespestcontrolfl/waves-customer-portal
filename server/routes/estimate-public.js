@@ -13239,8 +13239,14 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     // writes Silver), then call this with Gold and accept bills from the
     // persisted totals. Scoped deliberately to estimates carrying an opt-out
     // record — every other estimate keeps this route's existing behaviour.
-    if (parseEstimateDataSafe(estimate)?.serviceOptOut) {
-      const engineTier = String(estimate.waveguard_tier || 'Bronze');
+    const optOutRecord = parseEstimateDataSafe(estimate)?.serviceOptOut;
+    if (optOutRecord) {
+      // Ceiling = the tier the ENGINE wrote at the last opt-out commit, never
+      // the row's waveguard_tier — that column holds the customer's own last
+      // selection once this route writes it back, and clamping on it would
+      // make a dip to Bronze permanent (codex #3684 r1 P2). Fall back to the
+      // row only for a record predating the engineTier stamp.
+      const engineTier = String(optOutRecord.engineTier || estimate.waveguard_tier || 'Bronze');
       const engineRank = ALLOWED_TIERS.findIndex((t) => t.toLowerCase() === engineTier.toLowerCase());
       const requestedRank = ALLOWED_TIERS.indexOf(selectedTier);
       if (engineRank >= 0 && requestedRank > engineRank) {
@@ -13951,6 +13957,22 @@ function optOutPrepayRate(result, estData) {
   } catch (_) { return null; }
 }
 
+// Before-state resolution for the opt-out impact check. Engine-backed
+// estimates can store their original pricing ONLY in the raw engineResult (no
+// mapped result row), and a null before-state would blind the bundled-charge
+// refusal — the one move the owner ruled must never be self-serve. Resolve the
+// raw carrier through the canonical mapper so both sides of the comparison
+// share one shape — mapped top-level specItems retains the onProg rows the
+// guard reads (codex #3684 r1 P1). Mapping errors propagate; the route refuses.
+function resolveOptOutBeforeResult(parsedData) {
+  if (parsedData?.result && typeof parsedData.result === 'object') return parsedData.result;
+  if (parsedData?.engineResult && typeof parsedData.engineResult === 'object') {
+    return require('../services/pricing-engine/v1-legacy-mapper')
+      .mapV1ToLegacyShape(parsedData.engineResult);
+  }
+  return null;
+}
+
 // What the removal does to money the customer did not touch. Returns the
 // disclosures the confirm panel renders, plus the one case the owner ruled must
 // never be self-serve.
@@ -14060,6 +14082,25 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     const included = req.body.included;
     const dryRun = req.body?.dryRun === true;
 
+    // The commit must be bound to the preview the customer confirmed. A write
+    // landing between preview and confirm (a preference toggle, a tier change,
+    // another opt-out) would otherwise be folded silently into this commit's
+    // fresh recompute — the customer confirms one price and a different one
+    // persists; the CAS below cannot catch it because the commit reads the
+    // already-updated row (codex #3684 r1 P1). The dry run returns the row
+    // version it priced against; the commit requires it back and refuses on
+    // mismatch so the page re-previews with real numbers. Restores have no
+    // preview step and skip the requirement. Both sides of the comparison pass
+    // through the same JS Date millisecond truncation — never compare a JS
+    // ms date to the raw µs column value.
+    const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
+    if (!dryRun && included === false) {
+      const previewBasis = typeof req.body?.previewBasis === 'string' ? req.body.previewBasis : null;
+      if (!previewBasis || previewBasis !== rowBasis) {
+        return res.status(409).json({ error: 'estimate_changed_since_preview' });
+      }
+    }
+
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
     catch { parsedData = {}; }
@@ -14081,7 +14122,15 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     }
 
     const label = OptOut.serviceOptOutLabel(serviceKey);
-    const beforeResult = parsedData.result || null;
+    // Before-state for the impact/refusal check. If the stored raw result is
+    // the only carrier and cannot be mapped, refuse rather than run the
+    // bundled-charge guard against nothing (codex #3684 r1 P1).
+    let beforeResult = null;
+    try {
+      beforeResult = resolveOptOutBeforeResult(parsedData);
+    } catch (_) {
+      return res.status(409).json({ error: 'reprice_unavailable' });
+    }
     const beforeData = JSON.parse(JSON.stringify(parsedData));
 
     // Provenance the prune would erase (the pest curve stamp above all) —
@@ -14109,7 +14158,11 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
       priorQualifyingServices: priors,
-      recurringCustomer: !!parsedData.membershipSnapshot || priors.length > 0,
+      // computeMembershipContext persists a snapshot even for a linked NEW
+      // customer (isExistingCustomer: false) — snapshot presence alone must not
+      // force the existing-customer perk onto retained one-time work (codex
+      // #3684 r1 P1). The explicit flag, never truthiness.
+      recurringCustomer: parsedData.membershipSnapshot?.isExistingCustomer === true || priors.length > 0,
     });
     // Fail CLOSED. Nothing is written and nothing is shown — never fall back to
     // arithmetic or to the stale totals.
@@ -14145,11 +14198,25 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       return res.json({
         success: true, dryRun: true, serviceKey, label, included,
         previous, next, disclosures: impact.disclosures,
+        // Echo this back on the commit; the write refuses if the row moved.
+        previewBasis: rowBasis,
       });
     }
 
     // ── commit ──────────────────────────────────────────────────────────
     parsedData.result = afterResult;
+    // Replace the raw carrier IN THE SAME WRITE. acceptanceTermsApplyTo unions
+    // engineResult.lineItems with result.lineItems, so a stale raw result
+    // keeps classifying the reduced estimate by a service that is gone —
+    // removing termite bait would suppress the residential cancel-anytime
+    // terms forever (codex #3684 r1 P1). Same pairing serverRecompute's own
+    // persist path maintains (admin-estimate-persistence).
+    if (reprice.rawEngineResult && typeof reprice.rawEngineResult === 'object') {
+      parsedData.engineResult = reprice.rawEngineResult;
+    } else if (parsedData.engineResult) {
+      // Never keep a raw carrier the recompute could not refresh.
+      delete parsedData.engineResult;
+    }
     // The recompute returns the curve it actually priced pest with SPECIFICALLY
     // so the caller stamps it at the source; skipping this leaves the next
     // replay to re-derive it from a result this write just rewrote.
@@ -14183,52 +14250,78 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       next,
       engineSource: reprice.source || null,
     }, beforeData);
+    // The tier the ENGINE wrote for the current mix — the select-tier clamp's
+    // ceiling. The row's waveguard_tier is the customer's mutable choice once
+    // select-tier writes it back, so clamping on the row would lock a customer
+    // who dipped to Bronze out of the Gold they are still eligible for (codex
+    // #3684 r1 P2). Re-stamped on every commit, so restoring the removed lines
+    // restores the ceiling with them.
+    parsedData.serviceOptOut.engineTier = next.waveGuardTier || null;
 
     // service_interest is the service_summary in every delivery and follow-up
     // email, the per-application line NAME on the proposal PDF, and a pest
     // identity tiebreak — it must not keep naming a service that is gone.
-    // Force re-inference by NOT passing the persisted column, and strip
-    // engineResult: inferEstimateServiceLines reads engineResult.lineItems
-    // concatenated with result.lineItems, and the write-back deliberately
-    // replaces `result` only, leaving engineResult stale. Without the strip the
-    // removed service survives in the summary on every IB-sourced and
-    // agent-drafted quote.
+    // Force re-inference by NOT passing the persisted column. Both carriers
+    // (result and engineResult) were just replaced by the same recompute
+    // above, so the inference reads a consistent, current pair.
     const serviceInterest = require('../services/estimate-service-lines')
-      .inferEstimateServiceInterest({ estimate_data: { ...parsedData, engineResult: undefined } });
+      .inferEstimateServiceInterest({ estimate_data: parsedData });
 
-    const updateCount = await db('estimates')
-      .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
-      .whereNull('price_locked_at')
-      .whereNull('archived_at')
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
-      // Same ms-truncated CAS as the bond/interior writes: any concurrent write
-      // — an accept, a preference toggle, another opt-out — makes this a
-      // zero-row update and the caller reloads server truth.
-      .modify((q) => {
-        if (estimate.updated_at) {
-          q.andWhere(db.raw(
-            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
-            [estimate.updated_at],
-          ));
-        }
-      })
-      .update({
-        estimate_data: JSON.stringify(parsedData),
-        monthly_total: next.monthlyTotal,
-        annual_total: next.annualTotal,
-        onetime_total: next.onetimeTotal,
-        waveguard_tier: next.waveGuardTier,
-        service_interest: serviceInterest,
-        // The margin audit only reads an unmatched engineResult row as
-        // removed-or-repriced when the row carries this stamp; without it the
-        // dropped line is costed in every future audit forever.
-        pricing_authority: 'SERVER',
-        server_computed_price: next.annualTotal,
-        updated_at: db.fn.now(),
+    // One transaction for the price mutation and its audit row. The
+    // activity_log row is the specified audit surface for a customer-visible
+    // price rewrite — a best-effort insert after the update commits could
+    // leave the mutation with no durable audit entry (codex #3684 r1 P2). A
+    // failed insert rolls the whole write back; the customer retries against
+    // unchanged state.
+    let updateCount = 0;
+    await db.transaction(async (trx) => {
+      updateCount = await trx('estimates')
+        .where({ id: estimate.id })
+        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        .whereNull('price_locked_at')
+        .whereNull('archived_at')
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+        // Same ms-truncated CAS as the bond/interior writes: any concurrent
+        // write — an accept, a preference toggle, another opt-out — makes this
+        // a zero-row update and the caller reloads server truth.
+        .modify((q) => {
+          if (estimate.updated_at) {
+            q.andWhere(trx.raw(
+              "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+              [estimate.updated_at],
+            ));
+          }
+        })
+        .update({
+          estimate_data: JSON.stringify(parsedData),
+          monthly_total: next.monthlyTotal,
+          annual_total: next.annualTotal,
+          onetime_total: next.onetimeTotal,
+          waveguard_tier: next.waveGuardTier,
+          service_interest: serviceInterest,
+          // The margin audit only reads an unmatched engineResult row as
+          // removed-or-repriced when the row carries this stamp; without it the
+          // dropped line is costed in every future audit forever.
+          pricing_authority: 'SERVER',
+          server_computed_price: next.annualTotal,
+          updated_at: trx.fn.now(),
+        });
+      if (!updateCount) return;
+      // Rule 14: a deterministic green check auto-applies with an audit trail
+      // and NO bell. This row is the blob-independent copy and surfaces in the
+      // admin dashboard's Recent activity feed.
+      await trx('activity_log').insert({
+        customer_id: estimate.customer_id || null,
+        estimate_id: estimate.id,
+        action: included === false ? 'estimate_service_removed' : 'estimate_service_restored',
+        description: included === false
+          ? `Customer removed ${label} from their estimate.`
+          : `Customer added ${label} back to their estimate.`,
+        metadata: JSON.stringify({ serviceKey, label, previous, next }),
       });
+    });
     if (!updateCount) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
@@ -14239,20 +14332,6 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     try {
       require('../services/estimate-slot-availability').invalidateEstimate(estimate.id);
     } catch (_) { /* cache invalidation is best-effort */ }
-
-    // Rule 14: a deterministic green check auto-applies with an audit trail and
-    // NO bell. This row is the blob-independent copy and surfaces in the admin
-    // dashboard's Recent activity feed. Fire-and-forget, like the add-service
-    // request's own audit write.
-    db('activity_log').insert({
-      customer_id: estimate.customer_id || null,
-      estimate_id: estimate.id,
-      action: included === false ? 'estimate_service_removed' : 'estimate_service_restored',
-      description: included === false
-        ? `Customer removed ${label} from their estimate.`
-        : `Customer added ${label} back to their estimate.`,
-      metadata: JSON.stringify({ serviceKey, label, previous, next }),
-    }).catch((err) => logger.warn(`[estimate] activity_log opt-out write failed: ${err.message}`));
 
     logger.info(`[estimate] ${estimate.id}: service ${included === false ? 'removed' : 'restored'} ${serviceKey} ($${next.monthlyTotal}/mo, $${next.annualTotal}/yr, tier ${next.waveGuardTier || 'none'})`);
     return res.json({
@@ -24331,6 +24410,8 @@ module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
+module.exports.optOutImpact = optOutImpact;
+module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;
