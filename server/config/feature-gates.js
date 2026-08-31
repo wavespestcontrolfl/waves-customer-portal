@@ -1044,6 +1044,11 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Call-processing stall watchdog: recorded calls that never reach a
+  // terminal processing state (wedged claim, dead processor, provider
+  // outage) ring an admin bell instead of silently costing leads — the
+  // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
+  callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
