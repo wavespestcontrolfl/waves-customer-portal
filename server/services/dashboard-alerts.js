@@ -439,18 +439,21 @@ async function computeDashboardAlertsUncached() {
         const status = statuses.get(row.id);
         const unreadable = !status || !status.found || Boolean(status.unavailable && status.unavailable.length);
         const issues = closeoutIssuesForVisit(status);
-        if (issues.length) {
-          // A gap seen in a full OR partial read counts, and is remembered
-          // (count + identities) for the outage carry.
+        if (unreadable) {
+          // Any partial/failed read reconciles against the persisted row
+          // below (held, no-members snapshot). Its carry is the UNION of
+          // what was known and what is readable now — never a shrink.
+          unreadableIds.push(row.id);
+          const prev = carry.get(row.id) || { count: 0, identities: [] };
+          const merged = [...new Set([...prev.identities, ...issues.map((i) => `${row.id}:${i.type}`)])];
+          if (merged.length) {
+            carry.set(row.id, { count: merged.length, identities: merged });
+            gapIds.push(row.id); issueCount += merged.length; gapIdentities.push(...merged);
+          }
+        } else if (issues.length) {
           const identities = issues.map((i) => `${row.id}:${i.type}`);
           gapIds.push(row.id); issueCount += issues.length; gapIdentities.push(...identities);
           carry.set(row.id, { count: issues.length, identities });
-        } else if (unreadable && carry.has(row.id)) {
-          // Outage: hold the last-known gap so the alert cannot clear and re-fire.
-          const prev = carry.get(row.id);
-          gapIds.push(row.id); issueCount += prev.count; gapIdentities.push(...prev.identities);
-        } else if (unreadable) {
-          unreadableIds.push(row.id);
         } else {
           carry.delete(row.id); // complete clean read → genuinely resolved
         }

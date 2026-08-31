@@ -395,6 +395,27 @@ describe('Action Inbox generators', () => {
     expect(item.label).toMatch(/partially unavailable/);
   });
 
+  test('closeout_gaps_today: a partial read that still shows an issue is held (no members) and its carry merges, never shrinks (codex r12)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    const two = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' }, photos: { state: 'pending', reason: 'photo_count_short', required: 2, actual: 0 } } };
+    const partialOne = { found: true, unavailable: [{ lookup: 'service_photos', error: 'timeout' }], facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' }, photos: { state: 'unknown', reason: 'service_photos_lookup_failed' } } };
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', two]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today').members).toHaveLength(2);
+    // Partial read: photos unreadable but report still open → held snapshot, no members, count not shrunk.
+    primeDb({ scheduled_services: [{ id: 'svc-a' }], dashboard_alert_state: { alert_id: 'closeout_gaps_today', current_count: 1, last_label: 'x', last_seen_at: new Date().toISOString() } });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', partialOne]]));
+    const held = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(held).toMatchObject({ count: 1, heldThroughOutage: true });
+    expect(held.members).toBeUndefined();
+    // Complete read afterwards shows both issues again → exact members restored.
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', two]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today').members).toHaveLength(2);
+  });
+
   test('closeout_sweep_incomplete: a day over the cap surfaces the unchecked count instead of a silent false-clean (codex r7)', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     const { __private } = require('../services/dashboard-alerts');
