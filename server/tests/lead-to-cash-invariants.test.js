@@ -41,9 +41,11 @@ jest.mock('../services/estimate-conversion-guard', () => ({ convertedOpenEstimat
 jest.mock('../config/completion-lane-registry', () => ({ ALL_LISTS: { A: ['known_key', 'gone_key'] }, classifyCatalogRow: jest.fn() }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
+jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const { resolveForInvoice } = require('../services/payer');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
 const sendgrid = require('../services/sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { auditChurnedAccountsLiveState } = require('../scripts/audit-churned-accounts-live-state');
@@ -346,6 +348,18 @@ describe('detector adapters', () => {
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
     expect(out.count).toBe(1);
     expect(out.ids).toEqual(['v1 [no_invoice_minted:invoice]']);
+  });
+
+  test('unbilled_completed_visits: an autopay-active member covered by dues is NOT a finding (Codex P1)', async () => {
+    // Dues cover the visit and no invoice is expected — reporting it would put
+    // healthy membership visits in the sweep every morning.
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: 'monthly_membership', monthly_rate: 46.33, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    customerOnAutopay.mockResolvedValueOnce(true);
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.count).toBe(0);
   });
 
   test('unbilled_completed_visits: a VOID invoice is not proof of billing (Codex P1)', async () => {

@@ -5021,12 +5021,29 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // request fields and both over- and under-fired.
     {
       // The floor EVERY generated visit is guaranteed to carry: primary net
-      // plus add-on lines that carry no cadence of their own (those are due
-      // on every date — lineDueOnRecurringDate returns true when a line has
-      // no pattern). Seasonal / one-time add-ons are excluded on purpose:
-      // they do not price the visits they are absent from.
+      // plus add-on lines guaranteed to be present on every generated date.
+      // Two kinds qualify — a line with NO cadence of its own
+      // (lineDueOnRecurringDate returns true immediately), and a line whose
+      // cadence and options MATCH the parent series, which therefore lands on
+      // exactly the dates the parent generates. Dropping the second kind
+      // rejected legitimate add-on-priced series with a $0 floor (Codex P1).
+      // Intermittent lines — seasonal, one_time, or a different cadence — stay
+      // excluded: they do not price the visits they are absent from.
+      const sameNumber = (a, b) => {
+        const x = a == null || a === '' ? null : Number(a);
+        const y = b == null || b === '' ? null : Number(b);
+        return x === y || (!Number.isFinite(x) && !Number.isFinite(y));
+      };
+      const matchesParentCadence = (line) => {
+        const pattern = line?.recurringPattern || line?.recurring_pattern || null;
+        if (pattern !== recurringPattern) return false;
+        if (pattern === 'one_time') return false;
+        return sameNumber(line?.recurringIntervalDays ?? line?.recurring_interval_days, recurringIntervalDays)
+          && sameNumber(line?.recurringNth ?? line?.recurring_nth, recurringNth)
+          && sameNumber(line?.recurringWeekday ?? line?.recurring_weekday, recurringWeekday);
+      };
       const durableAddonLines = (pricing.addonLines || [])
-        .filter((line) => !(line?.recurringPattern || line?.recurring_pattern));
+        .filter((line) => !(line?.recurringPattern || line?.recurring_pattern) || matchesParentCadence(line));
       const recurringFloorPrice = zeroCallbackPrice
         ? 0
         : (calculateVisitFinancialsForAddons(pricing, durableAddonLines).price || 0);

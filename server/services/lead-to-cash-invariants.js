@@ -199,6 +199,7 @@ const DETECTORS = Object.freeze([
           // resolveForInvoice below is.
           'ss.payer_id', 'ss.customer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
           'c.billing_mode', 'c.monthly_rate', 'c.waveguard_tier', 'c.per_application_fee',
+          'c.autopay_enabled', 'c.autopay_paused_until', 'c.autopay_payment_method_id', 'c.ach_status',
         );
       const truncated = visits.length > CLOSEOUT_VISIT_CAP;
       const ids = [];
@@ -227,6 +228,7 @@ const DETECTORS = Object.freeze([
       );
       const { resolveForInvoice } = require('./payer');
       const { monthlyDuesCollected } = require('./billing-lane');
+      const { customerOnAutopay } = require('./autopay-eligibility');
       for (const v of evaluated) {
         if (invoicedIds.has(v.id)) continue;
         // Canonical active-payer resolution for EVERY visit, with BOTH ids.
@@ -256,11 +258,20 @@ const DETECTORS = Object.freeze([
           lane: lane.mode,
           billingMode: v.billing_mode || null,
           duesCollectedThisMonth,
-          // Autopay/dues state is a SETTLEMENT detail; the gap this detector
-          // hunts is "no number exists at all", which neither can create or
-          // cure. Left at the conservative defaults so an unreadable wallet
-          // never manufactures a finding.
-          autopayActive: false,
+          // The REAL autopay verdict, via the same helper the schedule feeds
+          // use. Forcing it false was harmless while this detector reported
+          // only amount gaps, but the missing-invoice arm below needs it: an
+          // active monthly member is legitimately covered by dues and
+          // completes with NO invoice even before a payment row exists, and
+          // calling that a finding would put healthy visits in the sweep
+          // every morning (Codex P1).
+          autopayActive: await customerOnAutopay({
+            id: v.customer_id,
+            autopay_enabled: v.autopay_enabled,
+            autopay_paused_until: v.autopay_paused_until,
+            autopay_payment_method_id: v.autopay_payment_method_id,
+            ach_status: v.ach_status,
+          }),
           estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
           monthlyRate: v.monthly_rate,
           perApplicationFee: v.per_application_fee,
