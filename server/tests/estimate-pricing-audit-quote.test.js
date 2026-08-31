@@ -359,6 +359,38 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.filter((l) => l.serviceKey === 'exclusion')).toHaveLength(2);
   });
 
+  test('waived setup fee never emits a phantom membership line; charged fee does', async () => {
+    const base = (extraData) => ({
+      id: 'est-fee', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, initialFee: 99 }] },
+        ...extraData,
+      },
+    });
+    const waived = await buildEstimatePricingAudit(base({ setupFeeQuote: { amount: 0, waived: 'existing_member' } }));
+    expect(waived.lines.some((l) => l.serviceKey === 'waveguard_membership')).toBe(false);
+    const charged = await buildEstimatePricingAudit(base({}));
+    expect(charged.lines.find((l) => l.serviceKey === 'waveguard_membership')).toMatchObject({ price: 99 });
+    // Frozen firstVisitFees rows are the authority when present.
+    const frozenWaived = await buildEstimatePricingAudit(base({
+      sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 0 }] } },
+    }));
+    expect(frozenWaived.lines.some((l) => l.serviceKey === 'waveguard_membership')).toBe(false);
+  });
+
+  test('dedupe transfers cost metadata from the consumed raw row', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-xfer', status: 'sent', monthly_total: '400.00', annual_total: '4800.00', onetime_total: null,
+      estimate_data: {
+        result: { recurring: { services: [{ name: 'Commercial Turf Treatment Program', mo: 400 }] } },
+        engineResult: { lineItems: [{ service: 'commercial_lawn', name: 'Commercial Turf Program', monthly: 400, annual: 4800, costs: { total: 1900 } }] },
+      },
+    });
+    const rows = audit.lines.filter((l) => /lawn/.test(l.serviceKey));
+    expect(rows).toHaveLength(1); // one charge, two spellings — deduped
+    expect(rows[0].cogs.estimatedCost).toBe(1900); // the raw row's cost survived the dedupe
+  });
+
   test('one mapped counterpart consumes exactly one equal-priced engine row', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-consume', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '1000.00',

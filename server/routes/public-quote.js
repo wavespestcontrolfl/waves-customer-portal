@@ -1736,6 +1736,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // (price + persisted costs) — the audit splits it into its own
             // row (GH codex on #3628).
             installation: item.installation ?? null,
+            // Residential T&S has no bed-area INPUT — the engine resolves a
+            // lot-derived area and stores it on the line; the audit's
+            // dimension picker reads it from here (GH codex on #3628).
+            bedArea: item.bedArea ?? null,
             // Auto-priced commercial rows persist their authoritative
             // annual COGS at costs.total — commercial IDs are deliberately
             // outside SERVICE_MAP, so this block is the audit's only cost

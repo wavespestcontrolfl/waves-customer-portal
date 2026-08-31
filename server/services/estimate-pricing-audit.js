@@ -582,7 +582,7 @@ function protocolFor(line) {
 // The persisted raw-engine lineItems shape (public-quote projection:
 // service/name/annual/monthly/price/total/perApp/...). monthly-bearing
 // rows are recurring; the rest are one-time.
-function normalizeEngineLineItems(result) {
+function normalizeEngineLineItems(result, { emitInitialFee = true } = {}) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
   for (const item of items) {
@@ -720,7 +720,7 @@ function normalizeEngineLineItems(result) {
     // (the mapper normally converts it to the one-time membership fee) —
     // omitting it dropped $99 of delivered revenue (GH codex P1).
     const initialFee = num(item.initialFee);
-    if (Number.isFinite(initialFee) && initialFee > 0) {
+    if (emitInitialFee && Number.isFinite(initialFee) && initialFee > 0) {
       lines.push({
         serviceKey: 'waveguard_membership',
         label: 'WaveGuard Membership',
@@ -845,6 +845,14 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // the one with priced lines, it becomes THE result for the whole audit
   // (dimensions, visit counts, provenance), not just the lines (codex
   // pre-push P1).
+  // The FROZEN setup-fee decision gates the raw initialFee emission: a
+  // bundle waiver, an existing-member/queued setupFeeQuote waiver, or an
+  // operator waiver means the customer was never charged it — the frozen
+  // firstVisitFees rows are the authority when present (GH codex P1).
+  const bundleFees = data?.sendSnapshot?.pricingBundle?.firstVisitFees;
+  const emitInitialFee = Array.isArray(bundleFees)
+    ? bundleFees.some((f) => Number(f?.priceAfterDiscount ?? f?.price) > 0 && /setup|membership/i.test(String(f?.service || f?.name || '')))
+    : !(data?.operatorPriceAdjustment?.waiveSetupFee || data?.setupFeeQuote?.waived);
   if (data.proposal?.enabled !== true) {
     // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
     // additional priced rows only in (engine)result.lineItems — merge and
@@ -872,16 +880,27 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     const remember = (l) => {
       const key = priceKey(l);
       if (!covered.has(key)) covered.set(key, []);
-      covered.get(key).push(Number(l.price) || 0);
+      covered.get(key).push({ price: Number(l.price) || 0, line: l });
     };
     rawLines.forEach(remember);
     const merge = (extra) => {
       const survivors = [];
       for (const line of extra) {
-        const prices = covered.get(priceKey(line)) || [];
-        const matchIdx = prices.findIndex((prev) => Math.abs(prev - (Number(line.price) || 0)) < 0.01);
+        const entries = covered.get(priceKey(line)) || [];
+        const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
         if (matchIdx >= 0) {
-          prices.splice(matchIdx, 1); // consumed — a second equal row is a distinct charge
+          // Consumed — but the discarded raw row may be the ONLY carrier of
+          // cost/provenance metadata (explicitCogsCost, mosquito overrides,
+          // quoted fields) — transfer what the retained row lacks (GH
+          // codex P1).
+          const [{ line: retained }] = entries.splice(matchIdx, 1);
+          if (retained.explicitCogsCost === undefined && line.explicitCogsCost !== undefined) retained.explicitCogsCost = line.explicitCogsCost;
+          if (!retained.cogsServiceTypes && line.cogsServiceTypes) {
+            retained.cogsServiceTypes = line.cogsServiceTypes;
+            retained.cogsServiceTypeFixedMultipliers = line.cogsServiceTypeFixedMultipliers;
+          }
+          if (retained.visitsPerYear === undefined && line.visitsPerYear !== undefined) retained.visitsPerYear = line.visitsPerYear;
+          if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
           continue;
         }
         survivors.push(line);
@@ -892,16 +911,16 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       survivors.forEach(remember);
     };
     const hadMappedLines = rawLines.length > 0;
-    const fromResult = normalizeEngineLineItems(result);
+    const fromResult = normalizeEngineLineItems(result, { emitInitialFee });
     if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
-      const alt = normalizeEngineLineItems(data.engineResult);
+      const alt = normalizeEngineLineItems(data.engineResult, { emitInitialFee });
       if (alt.length) {
         result = data.engineResult;
         merge(alt);
       }
     } else {
       merge(fromResult);
-      if (data.engineResult && data.engineResult !== result) merge(normalizeEngineLineItems(data.engineResult));
+      if (data.engineResult && data.engineResult !== result) merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee }));
     }
   }
   const dimensions = dimensionsFrom(data, result);
