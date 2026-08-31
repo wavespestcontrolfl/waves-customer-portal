@@ -926,6 +926,13 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     work.push({
       label: label.slice(0, 160),
       amount: Math.round(amount * 100) / 100,
+      // Same audit provenance as the raw-pool rows (GH codex P1 ×2):
+      // canonical id + package visit count, twin fallback for both.
+      service: item.service || (twinEntry ? twinEntry.line.service : null) || null,
+      visits: (() => {
+        const v = Number(item.visits ?? item.visitsPerYear ?? (twinEntry ? (twinEntry.line.visits ?? twinEntry.line.visitsPerYear) : null));
+        return v > 0 ? Math.round(v) : null;
+      })(),
       taxable: commercialTaxableDefault(item.service || item.name, explicitTaxable, { taxabilityMap, oneTime: true }),
       // Mapped specialty rows persist customer-facing scope (bed-bug room/
       // visit counts) under the `det` alias — resolve it exactly like the
@@ -951,6 +958,11 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
     work.push({
       label: rawLineLabel(line, 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
+      // Canonical service id + package visit count survive into the
+      // persisted proposal so the pricing audit costs the real units
+      // against the real family (GH codex P1 ×2 on #3628).
+      service: line.service || null,
+      visits: Number(line.visits ?? line.visitsPerYear) > 0 ? Math.round(Number(line.visits ?? line.visitsPerYear)) : null,
       taxable: commercialTaxableDefault(line.service || line.name, line.taxable, { taxabilityMap, oneTime: true }),
       // Raw engine rows carry customer-facing scope under the same
       // detail/det aliases the public extractor preserves (rodent

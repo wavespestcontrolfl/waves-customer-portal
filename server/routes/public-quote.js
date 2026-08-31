@@ -1836,6 +1836,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         oneTimeTotal: oneTimeTotal || 0,
         isOneTimeOnly,
         enriched: ep,
+        // The NORMALIZED input the engine actually priced (GH codex P1 on
+        // #3628): `enriched` is the raw lookup payload — clamped sizes,
+        // trusted-turf substitutions, normalized densities, and derived
+        // service options live only here. Frozen verbatim for the
+        // send-time pricing-audit provenance.
+        engineInput,
         quoteRequired,
         quoteRequiredReason,
         quoteRequiredService: manualQuoteLine?.service || null,
@@ -1855,6 +1861,48 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
             total: item.totalAfterDiscount ?? item.total ?? null,
+            // PRE-discount values + tier/floor provenance for the send-time
+            // pricing audit (GH codex on #3628): the after-discount
+            // projection above erased the discount entirely, so audited
+            // wizard quotes looked undiscounted and their tier/floor basis
+            // was unrecoverable.
+            // The engine's own *BeforeDiscount fields outrank the base
+            // values: discountHandledByPricingFunction services (one-time
+            // pest) return price/annual already NET with the gross only in
+            // *BeforeDiscount — copying the base there erased the discount
+            // from the permanent audit (codex pre-push P1).
+            annualBeforeDiscount: item.annualBeforeDiscount ?? item.annual ?? null,
+            monthlyBeforeDiscount: item.monthlyBeforeDiscount ?? item.monthly ?? null,
+            priceBeforeDiscount: item.priceBeforeDiscount ?? item.price ?? null,
+            totalBeforeDiscount: item.totalBeforeDiscount ?? item.total ?? null,
+            recurringCustomerDiscountRate: item.recurringCustomerDiscountRate ?? null,
+            tier: item.tier ?? null,
+            // Mosquito rows name their program via selectedProgram/tier and
+            // carry station/dunk addOns — both feed the audit's COGS
+            // overrides (GH codex on #3628).
+            program: item.program ?? item.selectedProgram ?? item.tier ?? null,
+            addOns: item.addOns ?? null,
+            floorPa: item.floorPa ?? null,
+            floorAnn: item.floorAnn ?? null,
+            floorMo: item.floorMo ?? null,
+            marginFloorMonthly: item.marginFloorMonthly ?? null,
+            waveGuardDiscountEligible: item.waveGuardDiscountEligible ?? null,
+            // Termite-bait hybrid lines carry their one-time installation
+            // (price + persisted costs) — the audit splits it into its own
+            // row (GH codex on #3628).
+            installation: item.installation ?? null,
+            // Residential T&S has no bed-area INPUT — the engine resolves a
+            // lot-derived area and stores it on the line; the audit's
+            // dimension picker reads it from here (GH codex on #3628).
+            bedArea: item.bedArea ?? null,
+            // Auto-priced commercial rows persist their authoritative
+            // annual COGS at costs.total — commercial IDs are deliberately
+            // outside SERVICE_MAP, so this block is the audit's only cost
+            // source for them (GH codex on #3628).
+            costs: item.costs ?? null,
+            discountEligible: item.discountEligible ?? null,
+            waveGuardTierEligible: item.waveGuardTierEligible ?? null,
+            countsTowardWaveGuardTier: item.countsTowardWaveGuardTier ?? null,
             perApp: item.perApp ?? null,
             // Mosquito lines carry perVisit/visits instead of
             // perApp/visitsPerYear (codex 2642 r4) — preserve both shapes so
@@ -1866,6 +1914,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // left the mirrored draft cadence-less, so a palm-only handoff
             // could never resolve a series plan (codex #3504 r3).
             appsPerYear: item.appsPerYear ?? null,
+            // The engine emits BOTH a textual cadence (frequency:
+            // 'monthly') and the authoritative numeric visitsPerYear —
+            // the fallback below let the text shadow the number, so the
+            // audit guessed the 4-visit default and costed monthly pest
+            // at a third of its real COGS (GH codex P1).
+            visitsPerYear: item.visitsPerYear ?? null,
             frequency: item.frequency ?? item.visitsPerYear ?? null,
             // Recurring foam carries an operator-chosen cadence + tier labor
             // duration; keep them so the accept/render/booking paths present the

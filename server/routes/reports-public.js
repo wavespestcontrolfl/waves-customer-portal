@@ -1284,6 +1284,48 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // resolved the fresh row too. The work is booked; paging staff to
           // follow up on it is the exact noise the accept-path resolution
           // exists to prevent.
+          // Send-time pricing snapshot for click-mints (estimator audit
+          // M4): the mint stamps status='sent' inside its transaction but
+          // never wrote an audit snapshot. AFTER commit (the trx above is
+          // closed once outcome exists) and fail-soft — analytics never
+          // unwind a minted offer.
+          if (mintedEstimate?.estimateId) {
+            try {
+              const { saveEstimatePricingAuditSnapshot, getLatestEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              // A REUSED live mint gets a recovery snapshot only when none
+              // exists (pre-change mints, or a transient failure on the
+              // original attempt) — fresh mints always snapshot (GH codex
+              // P2). Both fail-soft.
+              const existing = mintedEstimate.reused
+                ? await getLatestEstimatePricingAuditSnapshot(mintedEstimate.estimateId)
+                : null;
+              if (!mintedEstimate.reused || !existing) {
+                const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
+                // acceptedReuse also lands here — acceptance rewrites
+                // result/totals, so a backfill from that row would mix
+                // post-acceptance lines with the original sendSnapshot.
+                // No snapshot beats an internally inconsistent one (GH
+                // codex P2).
+                if (mintedEstimate.reused && mintedRow
+                  && (mintedRow.status === 'accepted' || mintedRow.price_locked_at)) {
+                  throw Object.assign(new Error('skip: accepted reuse — no send-time state to backfill'), { skipBackfill: true });
+                }
+                // A recovery row for an OLD reused mint quotes the persisted
+                // send-time prices but costs them with TODAY's inventory —
+                // the distinct trigger keeps it from masquerading as a
+                // mint-time record (codex pre-push P1).
+                if (mintedRow) {
+                  await saveEstimatePricingAuditSnapshot(mintedRow, {
+                    trigger: mintedEstimate.reused ? 'cta_reuse_backfill' : 'cta_mint',
+                  });
+                }
+              }
+            } catch (auditErr) {
+              if (!auditErr.skipBackfill) {
+                logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
+              }
+            }
+          }
           if (!outcome.deduped && !mintedEstimate?.acceptedReuse) {
             // Bell AFTER the durable row exists; a bell failure leaves the
             // row actionable in the Customer 360 requests panel either way.

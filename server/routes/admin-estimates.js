@@ -382,9 +382,18 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
       ...estimate,
       estimate_data: estimateDataForBundle,
     });
+    // A prior send's persisted error was spread in above — a successful
+    // rebuild must clear it or the validated-bundle check downstream
+    // rejects a fresh bundle (GH codex P1).
+    delete sendSnapshot.pricingBundleError;
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[admin-estimates] send pricing snapshot failed for estimate ${estimate.id}: ${err.message}`);
+    // The spread above carries the PRIOR send's bundle forward. Keep it:
+    // the public reader fast-paths sendSnapshot.pricingBundle, and
+    // dropping it here would flip a still-live customer link from the
+    // delivered quote to live pricing (GH codex P1). The AUDIT side never
+    // promotes a snapshot carrying pricingBundleError (send path checks).
     sendSnapshot.pricingBundleError = err.message;
   }
 
@@ -1470,8 +1479,16 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // intentionally left untouched here.
   const freshForSnapshot = await db('estimates').where({ id: estimate.id }).first() || estimate;
   const proposalEnabledForDelivery = normalizeProposal(freshForSnapshot).enabled;
+  // Hoisted so the superseded-send branch can graft the rendered bundle
+  // into ITS audit snapshot too (GH codex P2 on #3628).
+  let builtSendSnapshot = null;
   try {
     const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now);
+    // Only a VALIDATED bundle feeds the audit — same rule as the sibling
+    // and superseded branches (codex pre-push P1).
+    builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
+      ? snapshot.sendSnapshot
+      : null;
     // Merge only the keys we own (sendSnapshot, and proposalDelivery for an
     // authored proposal) so a proposal save committing mid-send isn't clobbered
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
@@ -1555,6 +1572,46 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         logger.warn(`[admin-estimates] superseded-send first-response stamp failed: ${e.message}`);
       }
     }
+    // The customer SAW this quote (channels delivered) even though the row
+    // moved on — the accepted/declined anchor still gets its send-time
+    // pricing snapshot, with the rendered bundle grafted in for the audit
+    // only when the terminal row lacks one (GH codex P2; same rule as the
+    // accepted-mid-publication sibling). Fail-soft.
+    try {
+      const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+      // Build from the PRE-DELIVERY claimed row (`estimate` — read before
+      // the provider handoff): the accept handler rewrites
+      // estimate_data.result/totals, and even freshForSnapshot is read
+      // after channels delivered, so it can already carry the accepted
+      // state (GH codex P1 x2). THIS delivery's freshly built bundle
+      // outranks any stale sendSnapshot a prior send left behind.
+      let preAcceptData = estimate.estimate_data;
+      if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
+      preAcceptData = preAcceptData || {};
+      // ONLY a bundle rebuilt from the PRE-DELIVERY claimed row is
+      // send-time truth — builtSendSnapshot came from freshForSnapshot,
+      // which post-dates delivery and can carry the acceptance rewrite,
+      // and a prior send's stored sendSnapshot is equally stale. When the
+      // rebuild fails, the audit goes out with NO bundle rather than a
+      // wrong one (codex pre-push P1).
+      let raceBundle = null;
+      try {
+        const rebuilt = await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now);
+        if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
+      } catch { /* no validated pre-delivery bundle */ }
+      const { sendSnapshot: stalePriorSnapshot, ...preAcceptSansSnapshot } = preAcceptData;
+      void stalePriorSnapshot;
+      const auditRow = {
+        ...estimate,
+        status: estimate.viewed_at ? 'viewed' : 'sent',
+        estimate_data: raceBundle
+          ? { ...preAcceptSansSnapshot, sendSnapshot: raceBundle }
+          : preAcceptSansSnapshot,
+      };
+      await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'send', sendMethod });
+    } catch (auditErr) {
+      logger.warn(`[admin-estimates] superseded-send pricing audit snapshot failed (state stands): ${auditErr.message}`);
+    }
     // Superseded anchor: a concurrent accept/decline won the anchor row while
     // channels were in flight. Hand claimed siblings back rather than publish
     // a group whose anchor is no longer in a sent state — the operator can
@@ -1631,6 +1688,54 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           published = true;
           if (!updated) {
             logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+            // The customer still SAW this sibling's quote — the public flow
+            // deliberately exposes and accepts siblings mid-'sending', and
+            // acceptance sets price_locked_at which zero-rows the guarded
+            // update above. Snapshot the terminal row too (GH codex P2).
+            try {
+              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              // Build from the PRE-ACCEPT sibling row + THIS delivery's
+              // freshly built bundle — an accept rewrites result/totals,
+              // and a stale prior sendSnapshot must not outrank the bundle
+              // that was just handed to the customer (GH codex P1). Status
+              // reflects the delivered state, not the pre-claim draft.
+              let preAcceptData = sibling.estimate_data;
+              if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
+              preAcceptData = preAcceptData || {};
+              await saveEstimatePricingAuditSnapshot({
+                ...sibling,
+                status: sibling.viewed_at ? 'viewed' : 'sent',
+                estimate_data: { ...preAcceptData, sendSnapshot: snapshot.sendSnapshot },
+              }, { trigger: 'group_send', sendMethod });
+            } catch (auditErr) {
+              logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
+            }
+          } else {
+            // Send-time pricing snapshot for the SIBLING too (estimator
+            // audit M4): only the anchor wrote one, so grouped properties
+            // had no frozen quote provenance. Fail-soft like the anchor's —
+            // an audit-snapshot failure never unwinds a delivered send.
+            try {
+              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              // NO re-read: a customer can accept the now-sent sibling
+              // before a re-read completes, and the acceptance rewrite
+              // would contaminate this permanent send-time record (GH
+              // codex P1). The pre-claim row + the patch we just wrote IS
+              // the published state; status/expiry override to the
+              // delivered values, and the ANCHOR's channel is how it was
+              // delivered (its own send_method is cleared at publication).
+              let publishedData = sibling.estimate_data;
+              if (typeof publishedData === 'string') { try { publishedData = JSON.parse(publishedData); } catch { publishedData = {}; } }
+              await saveEstimatePricingAuditSnapshot({
+                ...sibling,
+                status: sibling.viewed_at ? 'viewed' : 'sent',
+                sent_at: now,
+                expires_at: nextExpiresAt,
+                estimate_data: { ...(publishedData || {}), ...siblingSnapshotPatch },
+              }, { trigger: 'group_send', sendMethod });
+            } catch (auditErr) {
+              logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
+            }
           }
         } catch (e) {
           logger.error(`[admin-estimates] sibling ${sibling.id} publication attempt ${attempt} failed: ${e.message}`);
@@ -1690,8 +1795,32 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   }
 
   try {
-    const sentEstimate = await db('estimates').where({ id: estimate.id }).first();
-    await saveEstimatePricingAuditSnapshot(sentEstimate || estimate, {
+    // The audit basis must be UNCONTAMINATED by acceptance yet include a
+    // proposal save that legitimately committed mid-send (GH codex P1 both
+    // ways): freshForSnapshot — the same row the delivery itself rendered
+    // from — is the basis UNLESS acceptance already rewrote it, in which
+    // case the pre-delivery claimed row is; this delivery's built bundle
+    // is grafted either way, and status/sent_at/expiry reflect the
+    // published values.
+    const acceptedMidSend = !!freshForSnapshot.accepted_at
+      || freshForSnapshot.status === 'accepted'
+      || !!freshForSnapshot.price_locked_at;
+    const basisRow = acceptedMidSend ? estimate : freshForSnapshot;
+    let basisData = basisRow.estimate_data;
+    if (typeof basisData === 'string') { try { basisData = JSON.parse(basisData); } catch { basisData = {}; } }
+    const auditAnchor = {
+      ...basisRow,
+      status: basisRow.viewed_at ? 'viewed' : 'sent',
+      sent_at: now,
+      expires_at: nextExpiresAt,
+      // No validated bundle ⇒ no sendSnapshot at all in the anchor: a
+      // prior send's frozen pricing must not be recorded as this send's
+      // customer-shown truth (codex pre-push P1).
+      estimate_data: builtSendSnapshot
+        ? { ...(basisData || {}), sendSnapshot: builtSendSnapshot }
+        : (() => { const { sendSnapshot: _stale, ...rest } = basisData || {}; return rest; })(),
+    };
+    await saveEstimatePricingAuditSnapshot(auditAnchor, {
       trigger: 'send',
       sendMethod,
     });

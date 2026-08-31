@@ -280,6 +280,38 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
     expect(persisted.result.recurring.grandTotal).toBe(69);
   });
 
+  it('a SERVER reprice persists the RAW engine result beside the mapped one (audit enrichment source)', async () => {
+    const { database, getInsert } = makeDatabase();
+    const rawEngineResult = { lineItems: [{ service: 'commercial_lawn', name: 'Commercial Turf Program', monthly: 69, annual: 828, costs: { total: 310 } }] };
+    const recompute = async () => ({
+      recomputed: true,
+      source: 'ENGINE_REQUEST',
+      serverResult: serverResultMonthly(69, 828),
+      serverTotals: { monthlyTotal: 69, annualTotal: 828, onetimeTotal: 0 },
+      rawEngineResult,
+    });
+    await createOrReuseAdminEstimate({
+      database,
+      now: NOW,
+      recompute,
+      body: baseBody({
+        monthlyTotal: 114.67,
+        annualTotal: 1376.04,
+        estimateData: {
+          inputs: {},
+          result: { recurring: { grandTotal: 114.67, monthlyTotal: 114.67, annualTotal: 1376, services: [{ service: 'lawn_care', mo: 114.67 }] }, oneTime: { total: 0 } },
+          // Stale client-supplied container — must NOT survive a server reprice.
+          engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn', monthly: 114.67, annual: 1376, costs: { total: 999 } }] },
+          engineRequest: { profile: {}, selectedServices: ['LAWN'], options: {} },
+        },
+      }),
+    });
+    const row = getInsert().row;
+    expect(row.pricing_authority).toBe('SERVER');
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
+    expect(data.engineResult).toEqual(rawEngineResult);
+  });
+
   it('fails open to CLIENT_FALLBACK and still saves when recompute errors', async () => {
     const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
     const { database, getInsert } = makeDatabase();
