@@ -111,12 +111,17 @@ function walk(dir, out = []) {
   return out;
 }
 
-// [{ line, anchor }] for one file's source — anchor is the trimmed text of
-// the line where the match begins, which is what the registry keys on.
+// [{ line, anchor, siteCount }] for one file's source — anchor is the
+// trimmed text of the line where the match begins, which is what the
+// registry keys on. Distinct sites are told apart by match END position:
+// two patterns covering the SAME insert (`db.table('leads').insert(` also
+// matches the bare-builder shape) end at the same character and count once,
+// while two inserts sharing one source line end at different characters and
+// surface as siteCount 2 — which the contract below rejects, because two
+// same-line sites cannot get distinguishable anchor keys.
 function scanSourceForLeadInserts(src) {
   const lines = src.split('\n');
-  const seen = new Set();
-  const sites = [];
+  const endsByLine = new Map();
   const patterns = [RAW_SQL_INSERT_RE];
   for (const token of leadsTableTokens(src)) {
     patterns.push(...knexInsertPatterns(token), ...aliasInsertPatterns(src, token));
@@ -126,12 +131,13 @@ function scanSourceForLeadInserts(src) {
     let m;
     while ((m = pattern.exec(src))) {
       const line = src.slice(0, m.index).split('\n').length;
-      if (seen.has(line)) continue;
-      seen.add(line);
-      sites.push({ line, anchor: lines[line - 1].trim() });
+      if (!endsByLine.has(line)) endsByLine.set(line, new Set());
+      endsByLine.get(line).add(m.index + m[0].length);
     }
   }
-  return sites;
+  return [...endsByLine.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([line, ends]) => ({ line, anchor: lines[line - 1].trim(), siteCount: ends.size }));
 }
 
 function scanLeadInsertSites() {
@@ -183,6 +189,18 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
   ])('ignores: %s', (_name, src) => {
     expect(found(src)).toEqual([]);
   });
+
+  test('two inserts sharing one line surface as TWO sites on that line', () => {
+    const sites = scanSourceForLeadInserts("await db('leads').insert(a); await db('leads').insert(b);");
+    expect(sites).toHaveLength(1);
+    expect(sites[0].siteCount).toBe(2);
+  });
+
+  test('overlapping patterns on ONE insert count once', () => {
+    const sites = scanSourceForLeadInserts("await db.withSchema('p').table('leads').insert({ a: 1 });");
+    expect(sites).toHaveLength(1);
+    expect(sites[0].siteCount).toBe(1);
+  });
 });
 
 describe('lead-writer registry (#3137 groundwork)', () => {
@@ -193,6 +211,11 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     // root). The exact set is asserted below; this only proves the scan ran.
     expect(scanned.length).toBeGreaterThanOrEqual(10);
     expect(scanned.some((s) => s.file === 'services/call-recording-processor.js')).toBe(true);
+  });
+
+  test('a source line hosts at most one lead insert (same-line sites cannot be registered distinctly)', () => {
+    const multi = scanned.filter((s) => s.siteCount > 1);
+    expect(multi.map((s) => `${s.file}:${s.line} — ${s.anchor}`)).toEqual([]);
   });
 
   test('every scanned insert site is registered (new writer must declare a resolver)', () => {

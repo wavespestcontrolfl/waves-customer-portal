@@ -252,6 +252,31 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     }
   });
 
+  // Descriptive strings ($comment, case ids, rationales) get pattern-level
+  // hygiene: prose can't be allowlisted like the contact fields, but the two
+  // machine-checkable PII classes — an email-shaped token, a phone-length
+  // digit run — must still be reserved values wherever they appear.
+  function assertDescriptiveStringClean(where, text) {
+    for (const email of String(text).match(/[\w.+%-]+@[\w.-]+/g) || []) {
+      expect({ where, email, reserved: /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email) })
+        .toEqual({ where, email, reserved: true });
+    }
+    for (const run of String(text).match(/\+?\d[\d\s().-]{5,}\d/g) || []) {
+      const digits = run.replace(/\D/g, '');
+      if (digits.length < 7) continue;
+      const ok = NUMERIC_PHONE_SENTINELS.has(digits) || /^1?[2-9]\d\d55501\d\d$/.test(digits);
+      expect({ where, run, ok }).toEqual({ where, run, ok: true });
+    }
+  }
+
+  test('descriptive fields ($comment, ids, rationales) carry no unreserved emails or phone-length digit runs', () => {
+    assertDescriptiveStringClean('$comment', corpus.$comment);
+    for (const c of CASES) {
+      assertDescriptiveStringClean(`${c.id} :: id`, c.id);
+      assertDescriptiveStringClean(`${c.id} :: rationale`, c.rationale);
+    }
+  });
+
   test('no case relies on exactly one usable phone (direction-dependent in production)', () => {
     for (const c of CASES) {
       const phones = [phoneKey(c.a.phone), phoneKey(c.b.phone)].filter(Boolean).length;
