@@ -200,8 +200,10 @@ function statusWriteSites(src) {
   const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
   for (const m of src.matchAll(splitRe)) {
     const rest = src.slice(m.index + m[0].length);
-    for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:update|insert)\\s*\\(`, 'g'))) {
-      classifyWriteArgs(argSpan(rest, w.index + w[0].length - 1), ['<split-builder>'], m.index);
+    for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:[\\w$]+\\([^()]*\\)\\s*\\.\\s*)*(?:update|insert|merge)\\s*\\(`, 'g'))) {
+      const args = argSpan(rest, w.index + w[0].length - 1);
+      if (!args.trim()) continue; // bare merge() reuses already-scanned insert values
+      classifyWriteArgs(args, ['<split-builder>'], m.index);
     }
   }
   return out;
@@ -251,6 +253,8 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     expect(statusWriteExpressions(src)).toEqual(["'canceled'"]);
     const aliased = "let apt = trx('annual_prepay_terms as t');\napt.update({ status: 'refunded', updated_at: now });";
     expect(statusWriteExpressions(aliased)).toEqual(["'refunded'"]);
+    const splitMerge = "const q = db('annual_prepay_terms').insert({ id });\nawait q.onConflict('id').merge({ status: 'refunded' });";
+    expect(statusWriteExpressions(splitMerge)).toEqual(["'refunded'"]);
   });
 
   test('an unknown value source resolves to null (fails the lockstep test) instead of passing silently', () => {
