@@ -84,7 +84,9 @@ test('an address change syncs the primary property atomically and re-geocodes', 
 });
 
 test('a colliding address rolls back and returns a clear error, no geocode', async () => {
-  db.__qb.first.mockResolvedValueOnce(baseRow); // before
+  db.__qb.first
+    .mockResolvedValueOnce(baseRow) // before
+    .mockResolvedValueOnce(baseRow); // locked in-transaction read (liveness re-assert, GH r10 P1)
   const dup = new Error('duplicate key'); dup.code = '23505';
   customerProperties.syncPrimaryAddress.mockRejectedValueOnce(dup);
 

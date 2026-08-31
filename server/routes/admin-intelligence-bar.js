@@ -2559,6 +2559,15 @@ router.post('/confirm-action', async (req, res, next) => {
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments). `_`-prefixed: never shown.
         if (livePreview?.stops) execParams._verified_stops = livePreview.stops;
+        // set_estimate_presentation: the verified preview's previous-name
+        // snapshot rides to the executor to re-assert under the estimate
+        // row lock (GH r10 P2) — the stable engine key would still match a
+        // row a concurrent editor relabeled after this preflight, so the
+        // executor must refuse when the names it is about to overwrite are
+        // not the ones the card approved.
+        if (Array.isArray(livePreview?.previous_names)) {
+          execParams._verified_previous_names = livePreview.previous_names;
+        }
       }
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.

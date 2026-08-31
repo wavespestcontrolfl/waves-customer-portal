@@ -3442,6 +3442,20 @@ async function setEstimatePresentation(input, actionContext = {}) {
       return { error: `No priced service on this estimate matches "${service}" anymore — it changed after the preview. Nothing was changed.` };
     }
     const lockedPrevious = [...new Set(lockedRows.map((row) => String(row.displayName || row.label || row.name || row.service || 'service')))];
+    // The card approved a specific previous_names → new_display_name
+    // transition (GH r10 P2): re-assert that approved snapshot on the FRESH
+    // rows under this lock. The stable engine key still matches a row a
+    // concurrent editor relabeled after the confirm-time preview, and
+    // committing would silently overwrite wording the operator never saw.
+    const approvedPrevious = Array.isArray(input?._verified_previous_names)
+      ? input._verified_previous_names.map(String) : null;
+    if (approvedPrevious && (lockedPrevious.length !== approvedPrevious.length
+      || lockedPrevious.some((n) => !approvedPrevious.includes(n)))) {
+      return {
+        error: 'The displayed name(s) on this estimate changed after the card was shown — nothing was relabeled. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
     for (const row of lockedRows) {
       // displayName ONLY — never label: legacy rows without a stable
       // service/key are CLASSIFIED by label (recurringServiceKey and

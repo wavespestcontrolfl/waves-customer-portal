@@ -1085,7 +1085,16 @@ async function updateCustomer(customerId, updates) {
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
-      const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
+      const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first();
+      // Liveness re-asserted on the LOCKED row (GH r10 P1): the preflight
+      // deleted_at check above ran unlocked, so a merge/soft-delete that
+      // commits between it and this row lock must still refuse — never
+      // edit a merged-away profile back to life.
+      if (!lockedBefore || lockedBefore.deleted_at) {
+        const err = new Error('customer_no_longer_live');
+        err.customerNoLongerLive = true;
+        throw err;
+      }
       const lockedMerged = { ...lockedBefore, ...clean };
       // Close the inferred-monthly vector (#3140 resolution): billing_mode
       // is not an IB-updatable field, so a tier/rate write that leaves the
@@ -1165,6 +1174,9 @@ async function updateCustomer(customerId, updates) {
       }
     });
   } catch (e) {
+    if (e && e.customerNoLongerLive) {
+      return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+    }
     if (e && e.code === '23505') {
       return { error: 'That address already exists as another property on this customer.' };
     }
@@ -1324,14 +1336,30 @@ async function bulkUpdateCustomers(customerIds, updates) {
     const { count, laneStampIds, skippedRows } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
       let stampIds = [];
+      if (laneStampRelevant) {
+        // Membership-affecting bulk writes join the customer-comms
+        // serialization (codex #3426 r6 P2) — same reason as updateCustomer.
+        // Comms locks FIRST, over the FULL approved id set in a STABLE
+        // (sorted) order, BEFORE the customers row locks below (GH r10
+        // P1): taking the row locks first inverted the documented order
+        // (customer-comms-lock.js) and deadlocked against a concurrent
+        // single-customer membership write already holding the advisory
+        // lock while waiting on a row this transaction held. Locking an
+        // id that turns out dead below is harmless — the advisory key
+        // serializes nothing for an absent row.
+        for (const cid of [...customerIds].map(String).sort()) {
+          await lockCustomerComms(trx, cid);
+        }
+      }
       // The card promised EVERY listed customer transitions or is reported
-      // (GH r9 P1): resolve the live pinned set under row locks FIRST, so a
-      // customer deleted/merged while the card was pending surfaces as a
-      // warning instead of silently shrinking a single whereIn UPDATE.
+      // (GH r9 P1): resolve the live pinned set under row locks — AFTER
+      // the comms locks above — so a customer deleted/merged while the
+      // card was pending surfaces as a warning instead of silently
+      // shrinking a single whereIn UPDATE.
       const liveRows = await trx('customers')
         .whereIn('id', customerIds)
-        .whereNull('deleted_at')
         .forUpdate()
+        .whereNull('deleted_at')
         .select('id', 'first_name', 'last_name');
       const liveIds = new Set(liveRows.map((r) => String(r.id)));
       const skipped = customerIds
@@ -1340,14 +1368,6 @@ async function bulkUpdateCustomers(customerIds, updates) {
       const targetIds = [...liveIds];
       if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped };
       if (laneStampRelevant) {
-        // Membership-affecting bulk writes join the customer-comms
-        // serialization (codex #3426 r6 P2) — same reason as updateCustomer.
-        // Comms locks BEFORE the row locks below, and in a STABLE (sorted)
-        // order so two concurrent bulk writers over overlapping id sets
-        // acquire in the same sequence instead of deadlocking.
-        for (const cid of [...targetIds].map(String).sort()) {
-          await lockCustomerComms(trx, cid);
-        }
         const beforeRows = await trx('customers')
           .whereIn('id', targetIds)
           .forUpdate()
@@ -1851,6 +1871,18 @@ async function createAppointment(input) {
     }
     // Rung 6 — the same comms fence withCustomerCommsLock provided.
     await lockCustomerComms(trx, customer_id);
+    // Liveness re-asserted under the fence (GH r10 P1): the deleted_at
+    // preflight above ran outside this transaction, so a merge/soft-delete
+    // committing in between must abort the booking — never insert onto a
+    // merged-away profile. Row-locked so the recheck holds through the
+    // insert (comms lock before row lock, per the documented order).
+    const lockedCustomer = await trx('customers')
+      .where('id', customer_id).whereNull('deleted_at').forUpdate().first();
+    if (!lockedCustomer) {
+      const err = new Error('customer_no_longer_live');
+      err.customerNoLongerLive = true;
+      throw err;
+    }
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       scheduled_date: dateStr,
@@ -1906,6 +1938,9 @@ async function createAppointment(input) {
     });
   });
   } catch (err) {
+    if (err && err.customerNoLongerLive) {
+      return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
+    }
     if (err && err.previewChanged) {
       return {
         error: 'This customer\'s inspection credit changed after the card was shown — nothing was booked. Ask again for a fresh confirmation card.',

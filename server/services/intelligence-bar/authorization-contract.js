@@ -191,6 +191,24 @@ function kindFor(toolName, key) {
 const CUSTOMER_UPDATE_TOOL_NAMES = new Set(['update_customer', 'bulk_update_customers']);
 const ADDRESS_UPDATE_KEYS = ['address_line1', 'city', 'state', 'zip'];
 
+// Derived writes the lead-status executors perform BESIDE the status column
+// (GH r10 P2): the transition mirrors onto the lead's ad_service_attribution
+// funnel row via the monotonic bridge (attribution reporting moves), and a
+// lead_activities status-change row is appended (audit history) — both in the
+// single (leads-tools updateLeadStatus) and bulk paths. The exact-effects
+// contract must disclose them, keyed off the SAME status→stage mapping the
+// bridge consumes so the disclosure fires exactly when the funnel write does.
+function pushLeadStatusDerivedEffects(push, newStatus, { bulk = false } = {}) {
+  const { LEAD_STATUS_TO_FUNNEL_STAGE } = require('../lead-funnel-bridge');
+  const stage = LEAD_STATUS_TO_FUNNEL_STAGE[newStatus];
+  const each = bulk ? 'each lead' : 'the lead';
+  if (stage) {
+    push('operational', `Advances ${each}'s ad-attribution funnel stage toward '${stage}' (monotonic — never downgraded) and appends a status-change entry to ${each}'s activity history`);
+  } else {
+    push('operational', `Appends a status-change entry to ${each}'s activity history`);
+  }
+}
+
 function buildContract({ toolName, params, displayParams, preview, summary }) {
   const effects = [];
   const seen = new Set();
@@ -214,6 +232,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', `Lead ${preview.pinned_lead.name}: status ${preview.pinned_lead.current_status} → ${params?.new_status}`, {
       before: preview.pinned_lead.current_status, after: params?.new_status,
     });
+    pushLeadStatusDerivedEffects(push, params?.new_status);
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
   // phone; send_email_reply pins the email the reply goes to).
@@ -277,6 +296,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
       before: params?.current_status, after: params?.new_status,
     });
+    pushLeadStatusDerivedEffects(push, params?.new_status, { bulk: true });
   }
   if (toolName === 'approve_price' && preview?.pinned_approval) {
     const a = preview.pinned_approval;
