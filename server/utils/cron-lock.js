@@ -1,3 +1,4 @@
+const { AsyncLocalStorage } = require('async_hooks');
 const db = require('../models/db');
 const logger = require('../services/logger');
 
@@ -158,30 +159,59 @@ function lockHolderCap() {
   return Math.max(1, Math.floor(poolMax / 2));
 }
 let activeLockHolders = 0;
-const lockSlotWaiters = [];
+const lockSlotWaiters = []; // FIFO of { jobName, resolve }
+const waitingJobs = new Set();
+// Tracks "this async context already holds a slot" so a body that calls
+// runExclusive again (route-tier reorder, backlink feeders do) bypasses the
+// semaphore instead of deadlocking on its own slot at small caps.
+const lockSlotContext = new AsyncLocalStorage();
 
+// Resolves true once a slot is held; false when a tick of this SAME job is
+// already queued for a slot — the queued tick will run and sweep the same
+// work, so piling a second waiter behind it would only replay stale ticks
+// (minute-cadence jobs fire faster than a saturated herd drains).
 async function acquireLockSlot(jobName) {
   if (activeLockHolders < lockHolderCap()) {
     activeLockHolders += 1;
-    return;
+    return true;
   }
+  if (waitingJobs.has(jobName)) return false;
   logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${lockHolderCap()}) — waiting for a slot`);
+  waitingJobs.add(jobName);
   // The releaser hands its slot over without decrementing, so the counter
   // already accounts for this waiter when the promise resolves.
-  await new Promise((resolve) => lockSlotWaiters.push(resolve));
+  await new Promise((resolve) => lockSlotWaiters.push({ jobName, resolve }));
+  return true;
 }
 
 function releaseLockSlot() {
   const next = lockSlotWaiters.shift();
-  if (next) next(); // slot handed to the waiter; counter unchanged
-  else activeLockHolders -= 1;
+  if (next) {
+    // Slot handed to the waiter; counter unchanged.
+    waitingJobs.delete(next.jobName);
+    next.resolve();
+  } else {
+    activeLockHolders -= 1;
+  }
 }
 
 async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
-  await acquireLockSlot(jobName);
+  // Reentrant path: already inside a held slot (nested runExclusive) —
+  // only the advisory lock applies, exactly the pre-cap behavior.
+  if (lockSlotContext.getStore()) {
+    return runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+  }
+  const acquired = await acquireLockSlot(jobName);
+  if (!acquired) {
+    // Same contract and meaning as an advisory-lock skip: a run of this
+    // job is already pending and will do the work.
+    logger.info(`[cron-lock] ${jobName}: a tick is already queued for a slot — skipping`);
+    return { skipped: true, reason: 'lease_held' };
+  }
   try {
-    return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+    return await lockSlotContext.run({ held: true },
+      () => runExclusiveLocked(jobName, lockKey, fn, recordHealth));
   } finally {
     releaseLockSlot();
   }

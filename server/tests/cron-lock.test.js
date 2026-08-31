@@ -162,6 +162,44 @@ describe('cron-lock runExclusive', () => {
     }
   });
 
+  test('nested runExclusive is reentrant — no self-deadlock at the minimum cap', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    // DB_POOL_MAX floor is 2 → cap 1: the outer job holds the only slot,
+    // so a non-reentrant inner call would wait on itself forever.
+    db.client.pool = { max: 2 };
+    try {
+      const result = await runExclusive('outer-job', async () =>
+        runExclusive('inner-job', async () => 'nested-ok', { recordHealth: false }),
+      { recordHealth: false });
+      expect(result).toBe('nested-ok');
+    } finally {
+      delete db.client.pool;
+    }
+  });
+
+  test('a second tick of a job already queued for a slot coalesces into a lease_held skip', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const herd = Array.from({ length: 10 }, (_, i) =>
+      runExclusive(`herd-${i}`, () => gate, { recordHealth: false }));
+
+    const queuedBody = jest.fn(async () => 'ran-once');
+    const queued = runExclusive('minute-job', queuedBody, { recordHealth: false });
+    // Cron fires again while the first tick still waits: coalesce, don't
+    // stack a backlog of stale ticks behind the queued one.
+    const repeat = await runExclusive('minute-job', jest.fn(), { recordHealth: false });
+    expect(repeat).toEqual({ skipped: true, reason: 'lease_held' });
+
+    release('swept');
+    await Promise.all(herd);
+    await expect(queued).resolves.toBe('ran-once');
+    expect(queuedBody).toHaveBeenCalledTimes(1);
+  });
+
   test('skips (without throwing) when no DB connection is available', async () => {
     db.client.acquireConnection.mockRejectedValue(new Error('pool exhausted'));
 
