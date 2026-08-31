@@ -33,8 +33,12 @@ describe("useAdminViewport", () => {
 
   it("writes visual-viewport CSS vars so fixed chrome can track the keyboard", () => {
     syncAdminViewportVars();
+    // --admin-vh is the layout-top → visual-bottom extent (offsetTop +
+    // height = 12 + 520), not the bare visual height — shell consumers are
+    // anchored at layout y=0, so a bare height would clip the bottom
+    // offsetTop px of the visible range when iOS pans to a focused field.
     expect(document.documentElement.style.getPropertyValue("--admin-vh")).toBe(
-      "520px",
+      "532px",
     );
     expect(
       document.documentElement.style.getPropertyValue("--vv-offset-top"),

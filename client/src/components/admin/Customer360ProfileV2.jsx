@@ -5824,11 +5824,12 @@ export default function Customer360ProfileV2({
               back / menu / Text pills on top, large name, three-stat row */}
           <div className="c360-header-mobile px-4 pb-3">
             {" "}
-            {/* Spacer reserving the fixed top action bar's height (incl. the
-                iPhone safe-area inset) so the name/stats start below it. */}
+            {/* Spacer reserving the fixed top action bar's height (8px top
+                pad + 44px controls + 8px bottom pad = 60px, plus the iPhone
+                safe-area inset) so the name/stats start below it. */}
             <div
               aria-hidden="true"
-              style={{ height: "calc(52px + env(safe-area-inset-top, 0px))" }}
+              style={{ height: "calc(60px + env(safe-area-inset-top, 0px))" }}
             />
             <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-1">
               {c.firstName} {c.lastName}
