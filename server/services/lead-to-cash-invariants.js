@@ -116,7 +116,7 @@ const DETECTORS = Object.freeze([
     label: 'Active catalog services that do not resolve to exactly one completion lane',
     href: '/admin/services',
     provenance: 'universal one-time services plan §5 Phase B — ops/agents/completion-lane-coverage.js',
-    async run() {
+    async run({ now }) {
       const { ALL_LISTS, classifyCatalogRow } = require('../config/completion-lane-registry');
       const rows = await db('services as s')
         .leftJoin('service_completion_profiles as p', 'p.service_key', 's.service_key')
@@ -129,11 +129,45 @@ const DETECTORS = Object.freeze([
       }
       // Registry keys the catalog no longer has AT ALL are stale entries.
       // Inactive/archived keys are kept on purpose (profiles still resolve
-      // for their scheduled visits) and are not defects.
+      // for their scheduled visits) and are not defects by themselves.
       const registryKeys = Array.from(new Set(Object.values(ALL_LISTS).flat()));
       const known = new Set((await db('services').whereIn('service_key', registryKeys).select('service_key')).map((r) => r.service_key));
       const stale = registryKeys.filter((k) => !known.has(k)).map((k) => `registry-only:${k}`);
-      return { count: defects.length + stale.length, ids: [...defects, ...stale], detail: { activeServices: rows.length } };
+      // Ghost lanes (mirrors the canonical audit): an inactive/archived
+      // service with UPCOMING non-terminal visits is a live routing lane no
+      // matter what the catalog flags say — the completion resolver matches
+      // by service_id / name without an is_active filter. Same service_id
+      // precedence and terminal-status set as ops/agents/completion-lane-
+      // coverage.js; every such row is a defect, plus its own lane flags.
+      const ghost = await db.raw(
+        `SELECT s.service_key, s.billing_type, s.category, s.is_archived,
+                p.completion_mode, p.project_type, p.delivery_mode, p.active AS profile_active,
+                count(ss.id) AS upcoming
+           FROM services s
+           LEFT JOIN service_completion_profiles p ON p.service_key = s.service_key
+           JOIN scheduled_services ss ON (
+             ss.service_id = s.id
+             OR (ss.service_id IS NULL AND (
+               lower(s.name) = lower(ss.service_type)
+               OR lower(s.name) = lower(trim(regexp_replace(ss.service_type, '\\s+service$', '', 'i')))
+             ))
+           )
+          WHERE (s.is_active = false OR s.is_archived = true)
+            AND ss.status NOT IN ('completed', 'cancelled', 'skipped')
+            AND ss.scheduled_date >= ?
+          GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+          ORDER BY upcoming DESC`,
+        [etDateString(now)],
+      );
+      const ghosts = (Array.isArray(ghost?.rows) ? ghost.rows : []).map((g) => {
+        const { lane, flags } = classifyCatalogRow(g);
+        return `${g.service_key} (${lane}: ${[`${g.is_archived ? 'archived' : 'inactive'}_service_with_upcoming_visits:${Number(g.upcoming) || 0}`, ...flags].join(',')})`;
+      });
+      return {
+        count: defects.length + stale.length + ghosts.length,
+        ids: [...defects, ...stale, ...ghosts],
+        detail: { activeServices: rows.length, ghostLanes: ghosts.length },
+      };
     },
   },
   {

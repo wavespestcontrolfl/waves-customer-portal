@@ -274,9 +274,33 @@ describe('detector adapters', () => {
     mockTables.services = mockChain({ select: [{ service_key: 'known_key' }, { service_key: 'bad_key' }] });
     // second call (registry lookup) resolves the same table mock — known_key present, gone_key absent
     classifyCatalogRow.mockImplementation((row) => row.service_key === 'bad_key' ? { lane: 'generic', flags: ['no_profile'] } : { lane: 'ok', flags: [] });
+    db.raw.mockResolvedValueOnce({ rows: [] });
     const out = await byKey('completion_lane_coverage').run({ now: NOW });
     expect(out.count).toBe(2);
     expect(out.ids).toEqual(['bad_key (generic: no_profile)', 'registry-only:gone_key']);
+    expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 0 });
+    // ghost-lane query is date-bound to today (ET) and mirrors the canonical audit's terminal set
+    const [sql, bindings] = db.raw.mock.calls[0];
+    expect(sql).toContain("ss.status NOT IN ('completed', 'cancelled', 'skipped')");
+    expect(sql).toContain("regexp_replace(ss.service_type, '\\s+service$', '', 'i')");
+    expect(sql).toContain('(s.is_active = false OR s.is_archived = true)');
+    expect(bindings).toEqual([expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)]);
+  });
+
+  test('completion_lane_coverage: inactive/archived services still routing upcoming visits are defects (ghost lanes)', async () => {
+    mockTables.services = mockChain({ select: [{ service_key: 'known_key' }, { service_key: 'gone_key' }] });
+    classifyCatalogRow.mockImplementation((row) => row.service_key === 'old_pest' ? { lane: 'generic', flags: ['no_profile'] } : { lane: 'ok', flags: [] });
+    db.raw.mockResolvedValueOnce({ rows: [
+      { service_key: 'old_pest', is_archived: true, upcoming: '3' },
+      { service_key: 'paused_lawn', is_archived: false, upcoming: 1 },
+    ] });
+    const out = await byKey('completion_lane_coverage').run({ now: NOW });
+    expect(out.count).toBe(2);
+    expect(out.ids).toEqual([
+      'old_pest (generic: archived_service_with_upcoming_visits:3,no_profile)',
+      'paused_lawn (ok: inactive_service_with_upcoming_visits:1)',
+    ]);
+    expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 2 });
   });
 
   test('closeout_failed_facts flags failed facts/contradictions and treats unevaluable visits as findings', async () => {
