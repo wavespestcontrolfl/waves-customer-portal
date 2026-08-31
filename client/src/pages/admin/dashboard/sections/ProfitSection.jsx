@@ -95,7 +95,7 @@ export default function ProfitSection({
           this answers "is the company profitable after operating expenses?" */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 md:mb-5">
         <ChartCard
-          title="Adjusted EBITDA Bridge"
+          title="Adjusted EBITDA bridge"
           sub={
             ebitda?.period
               ? `month to date · ${ebitda.period.elapsedDays} of ${ebitda.period.daysInMonth} days`
@@ -105,7 +105,7 @@ export default function ProfitSection({
           <EbitdaBridgeCard bridge={ebitda} />
         </ChartCard>
         <ChartCard
-          title="Service Mix"
+          title="Service mix"
           sub={`${mix?.total_services || 0} completed services this month`}
         >
           <ServiceMixDonut mix={mix?.mix || []} />
@@ -126,7 +126,7 @@ export default function ProfitSection({
       ) : (
         <div className="mb-5">
           <ChartCard
-            title="Margin by Service Line"
+            title="Margin by service line"
             sub={revenueOverview?.period?.label ? `job-costed · ${revenueOverview.period.label}` : "job-costed · this month"}
           >
             <MarginByLineBars
@@ -146,7 +146,7 @@ export default function ProfitSection({
             </div>
           </MobileFold>
         ) : (
-          <ChartCard title="Tech Leaderboard" sub={kpis.periodLabel}>
+          <ChartCard title="Tech leaderboard" sub={kpis.periodLabel}>
             <TechLeaderboardBars leaderboard={kpis.leaderboard} />
           </ChartCard>
         ))}

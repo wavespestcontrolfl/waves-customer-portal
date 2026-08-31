@@ -893,7 +893,7 @@ export default function CallLogTabV2() {
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">
-                  Route Calibration
+                  Route calibration
                 </div>
                 <div className="text-12 text-ink-tertiary mt-0.5">
                   Last {routeCalibration.windowDays || 30} days

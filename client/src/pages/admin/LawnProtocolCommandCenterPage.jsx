@@ -874,7 +874,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 <Stat label="30-day completions" value={data?.completionStats?.completions30d || 0} />
               </div>
 
-              <Section title="Current Protocol Window" icon={ClipboardCheck}>
+              <Section title="Current protocol window" icon={ClipboardCheck}>
                 <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -905,7 +905,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
               </Section>
 
               <div className="grid gap-4 lg:grid-cols-2">
-                <Section title="Required Closeout Tasks" icon={CheckCircle2}>
+                <Section title="Required closeout tasks" icon={CheckCircle2}>
                   <div className="grid gap-2">
                     {(window.requiredTasks || []).map((task) => (
                       <div key={task} className="flex items-start gap-2 rounded-sm border border-zinc-200 p-3 text-13 text-zinc-700">
@@ -941,7 +941,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                   )}
                 </Section>
 
-                <Section title="Compliance Gates" icon={ShieldCheck}>
+                <Section title="Compliance gates" icon={ShieldCheck}>
                   <div className="grid gap-2">
                     {(protocol.gates || []).slice(0, 6).map((gate) => (
                       <div key={gate.key} className="rounded-sm border border-zinc-200 p-3">
@@ -967,7 +967,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 <Stat label="Window" value={`${data?.readinessQueue?.days || 14} days`} />
               </div>
 
-              <Section title="Readiness Snapshot" icon={ClipboardCheck}>
+              <Section title="Readiness snapshot" icon={ClipboardCheck}>
                 <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
                   <div className="rounded-sm border border-zinc-200 bg-zinc-50 p-3">
                     <div className="text-11 uppercase tracking-label text-zinc-500">Last snapshot</div>
@@ -1010,7 +1010,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 </div>
               </Section>
 
-              <Section title="Exception Resolution" icon={Wrench}>
+              <Section title="Exception resolution" icon={Wrench}>
                 {exceptionAppointments.length ? (
                   <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
                     <div className="grid gap-3">
@@ -1250,7 +1250,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 )}
               </Section>
 
-              <Section title="Upcoming WaveGuard Lawn Readiness" icon={AlertTriangle}>
+              <Section title="Upcoming WaveGuard lawn readiness" icon={AlertTriangle}>
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div className="text-13 leading-6 text-zinc-600">
                     Office preflight for upcoming lawn appointments. Resolve blocked rows before route day.
@@ -1471,7 +1471,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 </div>
               </Section>
 
-              <Section title="Conditional Products" icon={AlertTriangle}>
+              <Section title="Conditional products" icon={AlertTriangle}>
                 <div className="grid gap-2 md:grid-cols-2">
                   {conditionalProducts.map((product) => (
                     <div key={product.id} className="rounded-sm border border-zinc-200 p-3">
@@ -1487,7 +1487,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
 
           {activeTab === "gates" && (
             <div className="grid gap-4">
-              <Section title="Protocol Gate Editor" icon={ShieldCheck}>
+              <Section title="Protocol gate editor" icon={ShieldCheck}>
                 <div className="mb-4 rounded-sm border border-amber-200 bg-amber-50 p-3 text-13 leading-6 text-amber-900">
                   Gate changes affect treatment planning, service report context, and crew enforcement. Keep legal lockouts and label restrictions conservative.
                 </div>
@@ -1593,7 +1593,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
           {activeTab === "calibration" && (
             <div className="grid gap-4">
               <Section
-                title="Active Spray Calibrations"
+                title="Active spray calibrations"
                 icon={Gauge}
                 action={<Link to="/admin/equipment?tab=calibrations" className="text-12 font-medium uppercase tracking-label text-zinc-700 hover:text-zinc-900">Open Calibration</Link>}
               >
@@ -1618,7 +1618,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 </div>
               </Section>
 
-              <Section title="Assessment Fields Feeding This Protocol" icon={Beaker}>
+              <Section title="Assessment fields feeding this protocol" icon={Beaker}>
                 <div className="grid gap-2 md:grid-cols-3">
                   {(data?.health?.requiredProfileFields || []).map((field) => (
                     <div key={field} className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-2 text-13 text-zinc-700">
@@ -1632,8 +1632,8 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
 
           {activeTab === "bridges" && (
             <div className="grid gap-4 lg:grid-cols-3">
-              <BridgeList title="Field Execution" items={data?.bridges?.fieldExecution} />
-              <BridgeList title="Office Control" items={data?.bridges?.officeControl} />
+              <BridgeList title="Field execution" items={data?.bridges?.fieldExecution} />
+              <BridgeList title="Office control" items={data?.bridges?.officeControl} />
               <BridgeList title="Reporting + Compliance" items={data?.bridges?.reporting} />
               <Section title="Current Window Wiki/SOP Refs" icon={BookOpen}>
                 {(data?.wikiPages || []).length > 0 && (
@@ -1684,7 +1684,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                   </div>
                 </div>
               </Section>
-              <Section title="Recent Protocol Completions" icon={Wrench}>
+              <Section title="Recent protocol completions" icon={Wrench}>
                 <div className="grid gap-2">
                   {(data?.completionStats?.recent || []).map((row) => (
                     <div key={row.id} className="rounded-sm border border-zinc-200 p-3">
@@ -1702,7 +1702,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
 
           {activeTab === "audit" && (
             <div className="grid gap-4">
-              <Section title="Protocol Change History" icon={Clock}>
+              <Section title="Protocol change history" icon={Clock}>
                 <div className="overflow-x-auto">
                   <table className="min-w-full text-left text-13">
                     <thead className="text-11 uppercase tracking-label text-zinc-500">

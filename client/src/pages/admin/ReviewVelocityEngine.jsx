@@ -2172,7 +2172,7 @@ function CustomerDrawer({
       </div>{" "}
       <div style={{ padding: "16px 20px" }}>
         {/* Score */}
-        <DrawerSection title="Review Score Breakdown">
+        <DrawerSection title="Review score breakdown">
           {" "}
           <div
             style={{
@@ -2282,7 +2282,7 @@ function CustomerDrawer({
           </div>{" "}
         </DrawerSection>
         {/* Service History */}
-        <DrawerSection title="Service History">
+        <DrawerSection title="Service history">
           {c.jobs.length > 0 ? (
             c.jobs.map((j, i) => (
               <div
@@ -2343,7 +2343,7 @@ function CustomerDrawer({
           )}
         </DrawerSection>
         {/* Send Review Request */}
-        <DrawerSection title="Send Review Request">
+        <DrawerSection title="Send review request">
           {" "}
           <div
             style={{
@@ -2602,7 +2602,7 @@ function BatchModal({
             color: C.heading,
           }}
         >
-          Batch Send Review Requests
+          Batch send review requests
         </h3>{" "}
         <p
           style={{

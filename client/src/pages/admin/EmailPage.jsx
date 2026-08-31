@@ -1615,7 +1615,7 @@ export default function EmailPage() {
                   margin: 0,
                 }}
               >
-                New Email
+                New email
               </h2>{" "}
               <button
                 onClick={() => !composeSending && setShowCompose(false)}

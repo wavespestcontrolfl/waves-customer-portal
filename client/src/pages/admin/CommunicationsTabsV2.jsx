@@ -410,7 +410,7 @@ export function SmsTemplatesTabV2() {
           <CardBody>
             <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
               <div className="text-13 font-medium text-ink-primary">
-                Recent Template Issues
+                Recent template issues
               </div>
               <Button
                 variant="secondary"
@@ -928,7 +928,7 @@ export function CSRCoachTabV2() {
           <CardBody>
             {" "}
             <div className="text-13 font-medium text-ink-primary mb-2">
-              This Week's Team Focus
+              This week's team focus
             </div>{" "}
             <div className="p-3 bg-zinc-50 rounded-md mb-3 border-l-[3px] border-l-zinc-900">
               {" "}
@@ -966,7 +966,7 @@ export function CSRCoachTabV2() {
           <CardBody>
             {" "}
             <div className="text-13 font-medium text-ink-primary mb-1">
-              Lead Quality vs CSR Performance
+              Lead quality vs CSR performance
             </div>{" "}
             <div className="text-12 text-ink-tertiary mb-3">
               Lost calls breakdown (last 30 days):
@@ -1035,7 +1035,7 @@ export function CSRCoachTabV2() {
           <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
             {" "}
             <div className="text-13 font-medium text-ink-primary">
-              Follow-Up Tasks
+              Follow-up tasks
             </div>{" "}
             <div className="text-12 text-ink-tertiary">
               Pending:{" "}
@@ -1124,7 +1124,7 @@ export function CSRCoachTabV2() {
           <CardBody>
             {" "}
             <div className="text-13 font-medium text-ink-primary mb-0.5">
-              Bonus Leaderboard
+              Bonus leaderboard
             </div>{" "}
             <div className="text-12 text-ink-tertiary mb-3">
               Period: {leaderboard.periodLabel}

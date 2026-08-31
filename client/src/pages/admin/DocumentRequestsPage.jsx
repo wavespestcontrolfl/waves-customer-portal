@@ -195,7 +195,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
     <div className="mx-auto max-w-[1500px]">
       {!embedded && (
       <AdminCommandHeader
-        title="Document Requests"
+        title="Document requests"
         icon={FileClock}
         sections={STATUS_TABS}
         activeKey={status}

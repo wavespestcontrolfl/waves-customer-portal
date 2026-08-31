@@ -137,7 +137,7 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
           <h1
             style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}
           >
-            Pricing Strategy
+            Pricing strategy
           </h1>
         )}{" "}
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>

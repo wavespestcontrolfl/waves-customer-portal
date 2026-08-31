@@ -130,7 +130,7 @@ export default function DuplicateCustomersPage() {
   return (
     <div className="mx-auto max-w-[1100px]">
       <AdminCommandHeader
-        title="Duplicate Customers"
+        title="Duplicate customers"
         icon={Copy}
         actions={[{ label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: load, disabled: loading }]}
       />

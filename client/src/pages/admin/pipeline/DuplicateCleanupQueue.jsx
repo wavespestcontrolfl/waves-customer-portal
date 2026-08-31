@@ -156,7 +156,7 @@ function ReviewedHistoryPanel({ adminFetch, refreshKey, onReopened }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-13 font-medium text-zinc-900">
           <History size={15} strokeWidth={1.8} aria-hidden />
-          Reviewed History
+          Reviewed history
         </div>
         <Button
           variant="secondary"
@@ -521,7 +521,7 @@ export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRef
     <div>
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-hairline border-zinc-200 p-4">
         <div>
-          <div className="text-14 font-medium text-zinc-900">Duplicate Cleanup Queue</div>
+          <div className="text-14 font-medium text-zinc-900">Duplicate cleanup queue</div>
           <div className="mt-1 text-12 text-ink-secondary">
             Review likely standalone estimates and link them to the correct lead.
           </div>

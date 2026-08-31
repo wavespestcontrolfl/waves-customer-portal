@@ -16,7 +16,7 @@ export default function StaleVisitsCard({ data }) {
     <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
-          <CardTitle>Stale Visits</CardTitle>
+          <CardTitle>Stale visits</CardTitle>
           <span className="text-12 text-ink-secondary">
             past their date, still open
           </span>
