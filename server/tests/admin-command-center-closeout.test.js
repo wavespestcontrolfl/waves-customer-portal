@@ -180,12 +180,12 @@ test('stuck resumable completion is the single closeout card (codex r1)', async 
 test('published report with exhausted delivery fires the report card; queued delivery stays silent (GH r1)', async () => {
   installJobs([jobRow('svc-1')]);
   getCloseoutStatus.mockResolvedValue(closeout({ facts: { reportDelivery: fact('failed', 'delivery_exhausted', { attempts: 5 }) } }));
-  const alerts = (await run()).filter((a) => a.type === 'missing_required_service_report');
+  const alerts = (await run()).filter((a) => a.type === 'report_delivery_incomplete');
   expect(alerts).toHaveLength(1);
-  expect(alerts[0]).toMatchObject({ summary: expect.stringMatching(/delivery failed after retries/), metadata: expect.objectContaining({ closeoutFact: 'reportDelivery' }) });
+  expect(alerts[0]).toMatchObject({ id: 'svc-1_report_delivery_incomplete', label: 'Report delivery incomplete', summary: expect.stringMatching(/delivery failed after retries/), metadata: expect.objectContaining({ closeoutFact: 'reportDelivery' }) });
   closeoutAlertsPrivate.memo.clear();
   getCloseoutStatus.mockResolvedValue(closeout({ facts: { reportDelivery: fact('pending', 'delivery_queued') } }));
-  expect((await run()).filter((a) => a.type === 'missing_required_service_report')).toEqual([]);
+  expect((await run()).filter((a) => a.type === 'report_delivery_incomplete')).toEqual([]);
 });
 
 test('closeout loads are memoised for 90s per visit; outages are never memoised (GH r1)', async () => {

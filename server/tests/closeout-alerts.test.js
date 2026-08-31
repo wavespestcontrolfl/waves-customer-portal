@@ -47,9 +47,14 @@ describe('closeoutIssuesForVisit', () => {
     expect(issues.map((i) => i.type)).toEqual([CLOSEOUT_ALERT_TYPES.report, CLOSEOUT_ALERT_TYPES.application, CLOSEOUT_ALERT_TYPES.photos]);
     expect(issues[1].summary).toMatch(/retracted/);
     expect(issues[2]).toMatchObject({ requiredPhotoCount: 2, actualPhotoCount: 1 });
+    // Delivery stage: its OWN lifecycle key; failed and actionable-pending alert, transient stays silent (codex r9).
     const delivery = closeoutIssuesForVisit(base({ reportDelivery: fact('failed', 'delivery_exhausted') }));
-    expect(delivery).toEqual([expect.objectContaining({ type: CLOSEOUT_ALERT_TYPES.report, fact: 'reportDelivery', summary: expect.stringMatching(/delivery failed/) })]);
-    expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'delivery_queued') }))).toEqual([]);
+    expect(delivery).toEqual([expect.objectContaining({ type: 'report_delivery_incomplete', fact: 'reportDelivery', summary: expect.stringMatching(/delivery failed/) })]);
+    expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'not_enqueued') }))).toEqual([expect.objectContaining({ type: 'report_delivery_incomplete', summary: expect.stringMatching(/never delivered/) })]);
+    expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'project_report_not_sent') }))).toHaveLength(1);
+    for (const r of ['delivery_queued', 'delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight', 'report_not_published']) {
+      expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', r) }))).toEqual([]);
+    }
   });
 });
 

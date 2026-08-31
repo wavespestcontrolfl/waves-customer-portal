@@ -9,7 +9,7 @@ const {
   updateAlert,
   listEvents,
 } = require('../services/admin-alerts');
-const { loadCloseoutStatuses, closeoutIssuesForVisit } = require('../services/closeout-alerts');
+const { loadCloseoutStatuses, closeoutIssuesForVisit, CLOSEOUT_ALERT_LABELS } = require('../services/closeout-alerts');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -213,11 +213,6 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
     // over; an outage or a legitimate not_required never renders as
     // "missing" the way the previous inline `.catch(() => [])` queries did.
     const statusByJobId = await loadCloseoutStatuses(completedJobIds);
-    const LABELS = {
-      missing_required_service_report: 'Missing required service report',
-      missing_required_material_log: 'Missing required material log',
-      missing_required_photos: 'Missing required photos',
-    };
     for (const row of rows.filter((r) => completedJobIds.includes(r.sourceRecordId))) {
       const status = statusByJobId.get(row.sourceRecordId);
       const closeoutRequirements = status?.requirements || {};
@@ -227,7 +222,7 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
           id: `${row.sourceRecordId}_${found.type}`,
           type: found.type,
           severity: 'medium',
-          label: LABELS[found.type],
+          label: CLOSEOUT_ALERT_LABELS[found.type],
           summary: found.summary,
           metadata: {
             ...row.metadata,

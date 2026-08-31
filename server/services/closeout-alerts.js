@@ -23,12 +23,28 @@ const CLOSEOUT_MEMO_TTL_MS = 90 * 1000;
 const CLOSEOUT_MEMO_MAX = 500;
 const memo = new Map();
 
-// The three legacy alert types (admin_alerts lifecycle rows key on them).
+// The three legacy alert types (admin_alerts lifecycle rows key on them) plus
+// a DISTINCT key for the delivery stage: a dismissed missing-report card must
+// never mask a later delivery failure on the same visit (admin-alerts dedupes
+// on type + source identity and preserves dismissed status on merge).
 const CLOSEOUT_ALERT_TYPES = Object.freeze({
   report: 'missing_required_service_report',
+  reportDelivery: 'report_delivery_incomplete',
   application: 'missing_required_material_log',
   photos: 'missing_required_photos',
 });
+const CLOSEOUT_ALERT_LABELS = Object.freeze({
+  missing_required_service_report: 'Missing required service report',
+  report_delivery_incomplete: 'Report delivery incomplete',
+  missing_required_material_log: 'Missing required material log',
+  missing_required_photos: 'Missing required photos',
+});
+// Report-delivery reasons that are in flight or held BY DESIGN — not an
+// operator gap (the queue / payment hold / send window owns them).
+const TRANSIENT_DELIVERY_REASONS = new Set([
+  'awaiting_completion', 'report_not_published', 'delivery_queued', 'delivery_sending',
+  'project_delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight',
+]);
 
 async function memoisedCloseoutStatus(serviceId, now) {
   const hit = memo.get(serviceId);
@@ -95,19 +111,30 @@ function closeoutIssuesForVisit(status) {
     }];
   }
 
-  // The report artifact and its DELIVERY are separate facts: a published
-  // report whose delivery exhausted its retries is a failed closeout too.
-  // Pending/in-flight deliveries (queued, sending, held) stay silent.
-  const reportOpen = openFact(facts.report);
-  const deliveryFailed = facts.reportDelivery?.state === 'failed';
-  if (reportOpen || deliveryFailed) {
+  if (openFact(facts.report)) {
     issues.push({
       type: CLOSEOUT_ALERT_TYPES.report,
-      fact: reportOpen ? 'report' : 'reportDelivery',
-      reason: reportOpen ? facts.report.reason : facts.reportDelivery.reason,
-      summary: reportOpen
-        ? 'Completed job is missing the required closeout report.'
-        : 'Service report was published but its delivery failed after retries.',
+      fact: 'report',
+      reason: facts.report.reason,
+      summary: 'Completed job is missing the required closeout report.',
+    });
+  }
+  // The report artifact and its DELIVERY are separate facts with separate
+  // lifecycle keys: a published report whose delivery failed, or was never
+  // enqueued / never sent, is an operator gap; in-flight or held-by-design
+  // deliveries stay silent.
+  const delivery = facts.reportDelivery;
+  const deliveryOpen = Boolean(delivery)
+    && (delivery.state === 'failed' || delivery.state === 'pending')
+    && !TRANSIENT_DELIVERY_REASONS.has(delivery.reason);
+  if (deliveryOpen) {
+    issues.push({
+      type: CLOSEOUT_ALERT_TYPES.reportDelivery,
+      fact: 'reportDelivery',
+      reason: delivery.reason,
+      summary: delivery.state === 'failed'
+        ? 'Service report was published but its delivery failed after retries.'
+        : 'Service report was published but was never delivered to the customer.',
     });
   }
   if (openFact(facts.application)) {
@@ -139,6 +166,7 @@ module.exports = {
   loadCloseoutStatuses,
   closeoutIssuesForVisit,
   CLOSEOUT_ALERT_TYPES,
+  CLOSEOUT_ALERT_LABELS,
   CLOSEOUT_CONCURRENCY,
   __private: { memo, openFact },
 };
