@@ -348,11 +348,14 @@ function affiliateBeltVerdict(run, head, prHeadSha = null) {
   const dp = parseJsonObject(run.draft_payload);
   // The approval is bound to the exact COMMIT the approved publish created
   // (draft_payload.trust_build_approved_head_sha, same binding the named-
-  // competitor merge gate uses): any later push needs a fresh sign-off.
-  // Absent SHA fails closed.
+  // competitor merge gate uses). A head that moved afterwards is never
+  // auto-merged and there is deliberately no "re-approve" path (the run has
+  // left affiliate_review): like the named-competitor lane, the PR waits
+  // for a HUMAN merge after review (merged-by-human reconciliation
+  // finalizes it) or a dismiss. Absent SHA fails closed the same way.
   const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
   if (!approvedSha || !prHeadSha || approvedSha !== String(prHeadSha).toLowerCase()) {
-    return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — re-approve the current head` };
+    return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — auto-merge withheld; review the new head and merge by hand (or dismiss)` };
   }
   let ids;
   try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }

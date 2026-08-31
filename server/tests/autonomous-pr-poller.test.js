@@ -271,7 +271,7 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
     expect(affiliateBeltVerdict(approved, { content: body }, 'HEADSHA1').ok).toBe(true);
     // Bound to the exact approved head: a later push (or no SHA) fails closed.
-    expect(affiliateBeltVerdict(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/re-approve/) });
+    expect(affiliateBeltVerdict(approved, body, 'headsha2')).toMatchObject({ ok: false, reason: expect.stringMatching(/merge by hand/) });
     expect(affiliateBeltVerdict(approved, body, null).ok).toBe(false);
     expect(affiliateBeltVerdict({ ...approved, draft_payload: JSON.stringify({ body }) }, body, 'headsha1').ok).toBe(false);
     // A product added on the branch AFTER approval is not approved.
