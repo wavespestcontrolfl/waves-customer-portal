@@ -356,21 +356,21 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       allowed_post_types: ['protocol', 'seasonal'], allowed_placements: ['primary-rec', 'alt-rec'], owner_approved_at: iso(10) },
     { product_id: 'ant-bait', status: 'active', risk_class: 'yellow', merchant: 'solutions',
       approved_affiliate_url: 'https://www.solutionsstores.com/test-bait?aff=waves',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(10),
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(10),
       epa_reg_number: '12345-67', label_url: 'https://www.solutionsstores.com/label.pdf',
       florida_registration_verified_at: iso(10), label_reviewed_at: iso(10) },
     { product_id: 'stale-dunks', status: 'active', risk_class: 'yellow', merchant: 'solutions',
       approved_affiliate_url: 'https://www.solutionsstores.com/test-dunks?aff=waves',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(400),
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(400),
       epa_reg_number: '765-43', label_url: 'https://www.solutionsstores.com/dunks-label.pdf',
       florida_registration_verified_at: iso(400), label_reviewed_at: iso(400) },
     { product_id: 'pro-termiticide', status: 'prohibited', risk_class: 'red', merchant: 'solutions' },
     { product_id: 'old-trap', status: 'paused', risk_class: 'green', merchant: 'amazon',
       approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST02?tag=wavespest-20',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(90) },
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(90) },
     { product_id: 'bad-amazon', status: 'active', risk_class: 'green', merchant: 'amazon',
       approved_affiliate_url: 'https://amzn.to/short',
-      allowed_post_types: ['protocol'], owner_approved_at: iso(10) },
+      allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(10) },
   ];
 
   let registryPath;
@@ -562,6 +562,9 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(affiliateCodes(guardrails.evaluate({ body: refDef, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
       const fakeHeading = 'Intro.\n\n```md\n## fake\n```\n\n[quote](/quote/) ' + link('rain-gauge') + '\n\n## Real\n\nMore.';
       expect(affiliateCodes(guardrails.evaluate({ body: fakeHeading, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
+      // An expression-wrapped InlineCTA never counts (parity with astro's structural view).
+      const exprCta = `Intro copy.\n\n## Measuring\n\n{true && <InlineCTA />}\n\nUse ${link('rain-gauge')} for this.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: exprCta, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
       // Mirrors the astro contract: the CTA must PRECEDE the first affiliate
       // link, and a rendered <InlineCTA> counts (Codex PR3 r1 P1).
       const after = `Intro copy.\n\n## Measuring\n\nUse ${link('rain-gauge')} for this. Then get a [free quote](/quote/).`;

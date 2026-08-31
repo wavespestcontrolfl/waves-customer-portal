@@ -13,12 +13,12 @@ const iso = (daysAgo) => new Date(Date.now() - daysAgo * 86400000).toISOString()
 const green = (over = {}) => ({
   product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
   approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
-  allowed_post_types: ['protocol'], owner_approved_at: iso(5), ...over,
+  allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(5), ...over,
 });
 const yellow = (over = {}) => ({
   product_id: 'ant-bait', status: 'active', risk_class: 'yellow', merchant: 'solutions',
   approved_affiliate_url: 'https://www.solutionsstores.com/x?aff=waves',
-  allowed_post_types: ['protocol'], owner_approved_at: iso(5),
+  allowed_post_types: ['protocol'], allowed_placements: ['primary-rec'], owner_approved_at: iso(5),
   epa_reg_number: '12345-67', label_url: 'https://www.solutionsstores.com/label.pdf',
   florida_registration_verified_at: iso(5), label_reviewed_at: iso(5), ...over,
 });
@@ -69,6 +69,12 @@ describe('validateProduct', () => {
     for (const empty of ['?tag=', '?TAG=', '?tag=%20']) {
       expect(registry.validateProduct(green({ approved_affiliate_url: `https://www.amazon.com/dp/B000TEST01${empty}` })).join(' ')).toMatch(/non-empty tag=/);
     }
+  });
+  test('allowed_placements is required (non-empty kebab-case); trailing-dot hosts normalize (Codex #3646 r7)', () => {
+    expect(registry.validateProduct(green({ allowed_placements: undefined })).join(' ')).toMatch(/allowed_placements/);
+    expect(registry.validateProduct(green({ allowed_placements: [] })).join(' ')).toMatch(/allowed_placements/);
+    expect(registry.validateProduct(green({ plain_url: 'https://amzn.to./abc' })).join(' ')).toMatch(/network|direct amazon\.com/);
+    expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com./dp/B1?tag=wavespest-20' }))).toEqual([]);
   });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {

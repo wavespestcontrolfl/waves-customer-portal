@@ -933,8 +933,8 @@ export function validateAffiliateUsage(
     if (postType && !(row.allowed_post_types ?? []).includes(postType)) {
       blockers.push(`affiliate product "${id}" is not eligible on a "${postType}" post (allowed: ${(row.allowed_post_types ?? []).join(', ') || 'none'})`);
     }
-    if (row.allowed_placements?.length && placement && !row.allowed_placements.includes(placement)) {
-      blockers.push(`affiliate product "${id}" does not allow placement "${placement}" (allowed: ${row.allowed_placements.join(', ')})`);
+    if (!row.allowed_placements?.length || !row.allowed_placements.includes(placement)) {
+      blockers.push(`affiliate product "${id}" does not allow placement "${placement}" (allowed: ${(row.allowed_placements ?? []).join(', ') || 'none — the row declares no placements'})`);
     }
   }
   const domainsDeclared = (Array.isArray(frontmatter.domains) && frontmatter.domains.length > 0)

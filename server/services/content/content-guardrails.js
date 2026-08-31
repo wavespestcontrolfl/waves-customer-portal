@@ -1708,7 +1708,10 @@ function hasServiceCtaLink(body) {
   // Reference DEFINITIONS ([cta]: /quote/) render nothing — blanked too, so
   // an unused definition can't satisfy the rule (a reference-style link
   // whose definition is blanked simply has no destination: fail closed).
-  const rendered = blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix))))
+  // MDX expressions are blanked from the structural view too (parity with
+  // the astro validator): {true && <InlineCTA/>} can only render a
+  // component, never a Markdown CTA, and must not satisfy the rule.
+  const rendered = blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(prefix)))))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => ' '.repeat(m.length))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   const isServiceRoute = (norm) => {
@@ -1794,7 +1797,11 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     const allowedPlacements = Array.isArray(entry.row.allowed_placements) ? entry.row.allowed_placements : [];
     if (!tag.placement) {
       push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:`, `<AffiliateLink product="${tag.productId}"> needs a quoted literal placement="…" id (e.g. primary-rec) — a missing or expression-valued placement cannot be validated.`);
-    } else if (allowedPlacements.length && !allowedPlacements.includes(tag.placement)) {
+    } else if (!allowedPlacements.length) {
+      // A row without a placement allowlist authorizes NO placement (the
+      // registry validator requires one; this is the fail-closed backstop).
+      push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:${tag.placement}`, `Affiliate product "${tag.productId}" declares no allowed_placements — no placement is authorized until the registry row lists them.`);
+    } else if (!allowedPlacements.includes(tag.placement)) {
       push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:${tag.placement}`, `Affiliate product "${tag.productId}" does not allow placement "${tag.placement}" (allowed: ${allowedPlacements.join(', ')}).`);
     }
   }
@@ -1832,7 +1839,7 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // The first RENDERED section heading — code fences, comments, and hidden
   // spans are masked (length-preserving, so tag offsets stay aligned): a
   // "## fake" inside a fenced block or comment is not a section.
-  const structureMasked = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(String(body || ''))));
+  const structureMasked = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(String(body || '')))));
   const firstHeading = structureMasked.search(/^#{2,3}\s/m);
   if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
