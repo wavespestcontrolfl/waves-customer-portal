@@ -96,8 +96,10 @@ const INACTIVE_VISIT_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no
 const FOLLOWUP_CHILD_INACTIVE_STATUSES = ['cancelled', 'skipped', 'no_show'];
 // Invoice statuses that prove the customer was shown the bill even when the
 // sent_at stamp predates the column.
-const INVOICE_DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid', 'partially_paid']);
-const INVOICE_SETTLED_STATUSES = new Set(['paid']);
+const INVOICE_DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'partially_paid']);
+// 'prepaid' = settled from account credit / prepayment; invoice.js refuses to
+// send one, so no delivery is owed (pre-push codex r4).
+const INVOICE_SETTLED_STATUSES = new Set(['paid', 'prepaid']);
 // Report delivery queue statuses (service_report_deliveries.status).
 const DELIVERY_TERMINAL_OK = new Set(['sent']);
 const DELIVERY_TERMINAL_SKIPPED = new Set(['skipped', 'cancelled', 'canceled']);
@@ -602,7 +604,7 @@ function deriveCloseoutFacts(inputs) {
     const smsSentAt = isoOrNull(live.sms_sent_at);
     const receiptSentAt = isoOrNull(live.receipt_sent_at);
     const evidence = { invoiceId: live.id, status, sentAt, smsSentAt, receiptSentAt };
-    if (INVOICE_SETTLED_STATUSES.has(status)) invoiceDelivery = fact('done', receiptSentAt ? 'paid_receipt_sent' : 'paid', evidence);
+    if (INVOICE_SETTLED_STATUSES.has(status)) invoiceDelivery = fact('done', receiptSentAt ? 'paid_receipt_sent' : status, evidence);
     else if (live.payer_id) invoiceDelivery = fact(sentAt ? 'done' : 'pending', sentAt ? 'payer_invoice_sent' : 'payer_invoice_unsent', evidence);
     else if (sentAt || smsSentAt || INVOICE_DELIVERED_STATUSES.has(status)) invoiceDelivery = fact('done', 'invoice_delivered', evidence);
     else if (smsStatus === 'deferred') invoiceDelivery = fact('pending', 'deferred_send_window', { ...evidence, completionSmsStatus: smsStatus });

@@ -367,6 +367,14 @@ describe('closeout-status: invoice + invoice delivery', () => {
       .toMatchObject({ state: 'pending', reason: 'invoice_draft_unsent' });
   });
 
+  test('prepaid (account-credit) invoice with no send timestamps is settled — nothing to deliver', () => {
+    const prepaid = { id: 'inv-pp', status: 'prepaid', total: 120, sent_at: null, sms_sent_at: null, payer_id: null };
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ liveInvoice: prepaid }));
+    expect(facts.invoice).toMatchObject({ state: 'done', reason: 'invoice_paid' });
+    expect(facts.invoiceDelivery).toMatchObject({ state: 'done', reason: 'prepaid' });
+    expect(summarizeCloseout(facts, []).closedOut).toBe(true);
+  });
+
   test('payer-billed invoice: sent → done payer_invoice_sent; unsent → pending', () => {
     const payer = { id: 'inv-ap', status: 'draft', total: 300, sent_at: null, payer_id: 'payer-1' };
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: payer })).facts.invoiceDelivery)
