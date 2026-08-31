@@ -60,6 +60,12 @@ const WRITTEN_STATUSES = ['payment_pending', 'active', 'renewal_pending', 'cance
 const LEGACY_ONLY_STATUSES = ['canceled', 'refunded']; // in the CHECK, never written
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 
+// The ONLY computed-key identifiers trusted in a literal-table write object.
+// Each is fed exclusively by the notice/payment-reminder column helpers,
+// which are behaviorally pinned below to never return 'status'. Any other
+// identifier ([statusCol], [column], …) fails closed.
+const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol'];
+
 // Non-literal `status:` expressions the scanner accepts, each one a pass-
 // through of a value that is itself CHECK-valid: a constant pinned below, the
 // output of invoiceTermStatus / statusAfterDecision, or the row's own status
@@ -177,7 +183,7 @@ function statusWriteSites(src) {
     // The only sanctioned identifiers are the *Col notice/reminder column
     // helpers, whose outputs are behaviorally pinned non-status below.
     for (const k of body.matchAll(/\[\s*([A-Za-z_$][\w$]*)\s*\]\s*:/g)) {
-      if (!/Col$/.test(k[1])) out.push({ expr: `<computed identifier key ${k[1]}>`, guards });
+      if (!SANCTIONED_KEY_IDENTIFIERS.includes(k[1])) out.push({ expr: `<computed identifier key ${k[1]}>`, guards });
     }
     if (/(?:^|,|\{)\s*status\s*(?:,|$)/.test(body.trim())) out.push({ expr: '<shorthand status key>', guards });
     for (const s of body.matchAll(/(?:\b|['"])status['"]?\s*:\s*((?:[^,\n]|,(?!\s*['"[\]\w]+\s*:))+)/g)) {
@@ -361,9 +367,12 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     // Identifier-computed key that could be 'status' at runtime.
     expect(statusWriteExpressions("const column = 'status';\nawait db('annual_prepay_terms').update({ [column]: 'refunded' });"))
       .toEqual(['<computed identifier key column>']);
-    // Sanctioned *Col identifiers (notice/reminder columns, pinned non-status) pass.
+    // Sanctioned identifiers (notice/reminder columns, pinned non-status) pass.
     expect(statusWriteExpressions("await db('annual_prepay_terms').update({ [claimCol]: now });"))
       .toEqual([]);
+    // A Col-suffixed but UNsanctioned identifier still fails closed.
+    expect(statusWriteExpressions("const statusCol = 'status';\nawait db('annual_prepay_terms').update({ [statusCol]: 'refunded' });"))
+      .toEqual(['<computed identifier key statusCol>']);
     // Post-init payload mutation.
     expect(statusWriteExpressions("const payload = { updated_at: now };\npayload.status = 'refunded';\nawait db('annual_prepay_terms').update(payload);"))
       .toEqual(["'refunded'"]);
