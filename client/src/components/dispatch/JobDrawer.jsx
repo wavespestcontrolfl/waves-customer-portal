@@ -48,7 +48,7 @@ import VisualNotesReviewSection from './VisualNotesReviewSection';
 // Pure display helpers shared with the tech Visit Brief (style-free by
 // design) — the drawer renders the same estimate-source lines and brief
 // facts in V2 zinc.
-import { fmtMoney, quotedLineLabel } from '../../pages/tech/visitBrief';
+import { fmtMoney, quotedLineLabel, quotedTermsLabel } from '../../pages/tech/visitBrief';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -102,7 +102,9 @@ function VisitExtras({ extras }) {
   // The generic visit brief carries access/last_visit itself; the WDO
   // brief does not — its facts block (when the gate serves one) does.
   const servedVisitBrief = brief && brief.type !== 'wdo_inspection' ? brief.brief : null;
-  const access = servedVisitBrief?.access || brief?.facts?.access || null;
+  // Live facts WIN over a cached brief's access copy — the brief is a
+  // sweep-time snapshot and a code changed since then must show fresh.
+  const access = brief?.facts?.access || servedVisitBrief?.access || null;
   const lastVisit = servedVisitBrief?.last_visit || brief?.facts?.last_visit || null;
   const deposit = estimate?.linked ? estimate.deposit : null;
   const codeRows = access
@@ -133,8 +135,11 @@ function VisitExtras({ extras }) {
               </div>
             );
           })}
-          {fmtMoney(estimate.quotedTotal) && (
-            <div className="font-medium">Total {fmtMoney(estimate.quotedTotal)}</div>
+          {/* Honest framing (owner ruling 2026-08-02): unit-aware terms
+              when the lines prove their units — never a blended
+              monthly+one-time headline number. */}
+          {quotedTermsLabel(estimate) && (
+            <div className="font-medium">{quotedTermsLabel(estimate)}</div>
           )}
           {deposit?.payerBilled && (
             <div className="text-ink-secondary">Bills to payer — do not collect from the homeowner</div>

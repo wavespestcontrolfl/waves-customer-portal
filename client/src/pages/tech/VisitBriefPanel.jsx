@@ -22,8 +22,10 @@
 import { stopPropertyAlerts } from './routeStops';
 import {
   fmtMoney,
+  lawnGateLabels,
   prepaidLine,
   quotedLineLabel,
+  quotedTermsLabel,
   smsHref,
   telHref,
   visitMoneySummary,
@@ -229,8 +231,10 @@ function MemberMoney({ service, showType }) {
   );
 }
 
-function MoneySection({ stop, quotedTotal }) {
-  const quoted = fmtMoney(quotedTotal);
+function MoneySection({ stop, quotedEstimate }) {
+  // Honest framing (never a blended monthly+one-time number): unit-aware
+  // terms when the lines prove their units, the legacy total otherwise.
+  const quoted = quotedTermsLabel(quotedEstimate);
   const memberHasMoney = stop.services.some((s) => {
     const m = visitMoneySummary(s);
     return m.headline || m.invoice || prepaidLine(s);
@@ -315,7 +319,12 @@ function BriefGuidanceSection({ brief, service, showType }) {
   const fixed = lawn && Array.isArray(lawn.products) ? lawn.products.filter((p) => p?.name) : [];
   const conditional = lawn && Array.isArray(lawn.conditional_products) ? lawn.conditional_products.filter((p) => p?.name) : [];
   const protocolGates = lawn && Array.isArray(lawn.protocol_gates) ? lawn.protocol_gates.filter((g) => g?.title || g?.ruleText) : [];
+  // priorities/watch_items are THIS visit's action items and quirks (the
+  // brief schema's definition) — they belong here, not under Last visit.
+  const priorities = Array.isArray(brief.priorities) ? brief.priorities.filter(Boolean) : [];
+  const watchItems = Array.isArray(brief.watch_items) ? brief.watch_items.filter(Boolean) : [];
   const hasContent = brief.open_scope || brief.customer_context
+    || priorities.length || watchItems.length
     || fixed.length || conditional.length || protocolGates.length
     || historyProducts.length || companions.length;
   if (!hasContent) return null;
@@ -325,6 +334,8 @@ function BriefGuidanceSection({ brief, service, showType }) {
       <MemberLabel service={service} show={showType} />
       {brief.open_scope && <p style={factRowStyle}>{brief.open_scope}</p>}
       {brief.customer_context && <p style={factMutedStyle}>{brief.customer_context}</p>}
+      {priorities.map((p, i) => <p key={`pr${i}`} style={factRowStyle}>• {p}</p>)}
+      {watchItems.map((w, i) => <p key={`wi${i}`} style={{ ...factRowStyle, color: DARK.amber }}>• {w}</p>)}
       {lawn?.window && (
         <p style={{ ...factRowStyle, fontWeight: 600 }}>
           {lawn.window.title || 'Protocol window'}
@@ -337,11 +348,19 @@ function BriefGuidanceSection({ brief, service, showType }) {
         </p>
       ))}
       {fixed.map((p, i) => <p key={`f${i}`} style={factRowStyle}>• {productLine(p)}</p>)}
-      {conditional.map((p, i) => (
-        <p key={`c${i}`} style={factMutedStyle}>
-          • {productLine(p)} — conditional{p.trigger ? `: ${p.trigger}` : ''}
-        </p>
-      ))}
+      {conditional.map((p, i) => {
+        // The COMPLETE gate object in operational wording — many rows
+        // carry structured gates (premiumTier, maxTempF, soil thresholds)
+        // with no convenience trigger, and bare "conditional" tells the
+        // tech nothing.
+        const conditions = lawnGateLabels(p.gates);
+        if (!conditions.length && p.trigger) conditions.push(String(p.trigger).replace(/_/g, ' '));
+        return (
+          <p key={`c${i}`} style={factMutedStyle}>
+            • {productLine(p)} — conditional{conditions.length ? `: ${conditions.join('; ')}` : ''}
+          </p>
+        );
+      })}
       {historyProducts.length > 0 && (
         <p style={factRowStyle}>
           <span style={{ color: DARK.muted }}>Prior products: </span>
@@ -369,9 +388,7 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
   const notes = service.lastLineServiceNotes || null;
   const summary = visitBrief?.last_visit?.summary || null;
   const products = Array.isArray(briefLast?.products) ? briefLast.products : [];
-  const priorities = Array.isArray(visitBrief?.priorities) ? visitBrief.priorities : [];
-  const watchItems = Array.isArray(visitBrief?.watch_items) ? visitBrief.watch_items : [];
-  if (!date && !notes && !products.length && !priorities.length && !watchItems.length) return null;
+  if (!date && !notes && !products.length) return null;
   return (
     <>
       <MemberLabel service={service} show={showType} />
@@ -388,8 +405,6 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
           {products.map((p) => p?.name).filter(Boolean).join(', ')}
         </p>
       )}
-      {priorities.map((p, i) => <p key={`p${i}`} style={factRowStyle}>• {p}</p>)}
-      {watchItems.map((w, i) => <p key={`w${i}`} style={{ ...factRowStyle, color: DARK.amber }}>• {w}</p>)}
     </>
   );
 }
@@ -464,8 +479,11 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
     };
   });
   // Property access is shared across the stop — first member that
-  // answered carries it.
-  const access = memberBits.map((m) => m.visitBrief?.access || m.facts?.access).find(Boolean) || null;
+  // answered carries it. The live deterministic facts WIN over a cached
+  // brief's copy: the brief regenerates on the :19/:49 sweep, so a gate
+  // code changed since generation would otherwise show stale next to the
+  // freshly-built alert text.
+  const access = memberBits.map((m) => m.facts?.access || m.visitBrief?.access).find(Boolean) || null;
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -508,15 +526,14 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       ))}
 
       {/* Quoted = only what a linked estimate proved — never a catalog
-          price. The headline Quoted total renders only when the whole
+          price. The headline Quoted row renders only when the whole
           stop traces to ONE estimate; separately-quoted siblings keep
-          their totals inside their own Quoted sections. */}
-      <MoneySection stop={stop} quotedTotal={estimates.length === 1 ? estimates[0].quotedTotal : null} />
+          their terms inside their own Quoted sections. */}
+      <MoneySection stop={stop} quotedEstimate={estimates.length === 1 ? estimates[0] : null} />
 
       {memberBits.some((m) => {
         const bl = m.visitBrief?.last_visit || m.facts?.last_visit;
-        return bl || m.service.lastLineServiceDate || m.service.lastLineServiceNotes
-          || (m.visitBrief?.priorities || []).length || (m.visitBrief?.watch_items || []).length;
+        return bl || m.service.lastLineServiceDate || m.service.lastLineServiceNotes;
       }) && (
         <>
           <SectionLabel>Last visit</SectionLabel>

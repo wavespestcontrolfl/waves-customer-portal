@@ -12368,12 +12368,12 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       }
     }
     const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
-    // A served visit brief already contains access + last_visit; the WDO
-    // and legacy brief shapes do not — the deterministic facts ride along
-    // for those so the tech still gets codes and product history.
-    res.json(String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE
-      ? served
-      : await withFacts(served));
+    // Facts ride along with EVERY served brief (gated): the WDO and
+    // legacy shapes carry no access/last_visit at all, and even a served
+    // visit brief's access block is a snapshot from the :19/:49 sweep —
+    // a gate code changed since generation must reach the tech from the
+    // live facts, not the cached copy.
+    res.json(await withFacts(served));
   } catch (err) { next(err); }
 });
 

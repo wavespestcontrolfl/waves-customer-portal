@@ -114,12 +114,90 @@ export function quotedLineLabel(line) {
   if (Number.isFinite(per) && per > 0) return `${fmtMoney(per)} /application`;
   const mo = Number(line?.monthlyPrice);
   if (Number.isFinite(mo) && mo > 0) return `${fmtMoney(mo)} /mo`;
+  // PRESENCE, not positivity (same rule as EstimateProvenanceCard): the
+  // server legitimately emits acceptedOneTimePrice 0 when a discount fully
+  // covers the line, and a $0 accepted line must never fall back to the
+  // gross price.
   const one = Number(line?.acceptedOneTimePrice);
-  if (Number.isFinite(one) && one > 0) return `${fmtMoney(one)} one-time`;
+  if (line?.acceptedOneTimePrice != null && Number.isFinite(one) && one >= 0) {
+    return `${fmtMoney(one)} one-time`;
+  }
   const price = Number(line?.price);
   if (!Number.isFinite(price) || price <= 0) return null;
   const provablyOneTime = line?.source === 'one_time' || line?.cadence === 'one_time';
   return provablyOneTime ? `${fmtMoney(price)} one-time` : fmtMoney(price);
+}
+
+/**
+ * Honest quoted framing for a whole linked estimate (owner ruling
+ * 2026-08-02, mirrored from EstimateProvenanceCard): a blended
+ * "monthly + one-time" total matches nothing the customer ever pays at
+ * once. When EVERY recurring line carries a proven unit price the label
+ * reads "$115/application + $89/mo + $99 one-time"; otherwise the legacy
+ * blended total tells the whole truth.
+ */
+export function quotedTermsLabel(estimate) {
+  if (!estimate?.linked) return null;
+  const lines = Array.isArray(estimate.lines) ? estimate.lines : [];
+  const shaped = lines.map((l) => {
+    const recurring = !!(l?.cadence && l.cadence !== 'one_time');
+    const perApp = recurring && Number(l?.perApplicationPrice) > 0 ? Number(l.perApplicationPrice) : null;
+    const monthly = recurring && perApp == null && Number(l?.monthlyPrice) > 0 ? Number(l.monthlyPrice) : null;
+    return { recurring, perApp, monthly };
+  });
+  const perApp = shaped.map((s) => s.perApp).filter((p) => p != null);
+  const monthly = shaped.map((s) => s.monthly).filter((p) => p != null);
+  const recurringCount = shaped.filter((s) => s.recurring).length;
+  const oneTime = Number(estimate.onetimeTotal) || 0;
+  const allRecurringProven = recurringCount > 0 && perApp.length + monthly.length === recurringCount;
+  if (allRecurringProven) {
+    return [
+      ...(perApp.length ? [`${perApp.map(fmtMoney).join(' + ')}/application`] : []),
+      ...monthly.map((m) => `${fmtMoney(m)}/mo`),
+      ...(oneTime > 0 ? [`${fmtMoney(oneTime)} one-time`] : []),
+    ].join(' + ');
+  }
+  return fmtMoney(estimate.quotedTotal);
+}
+
+// Operational wording for a lawn protocol product's structured gates —
+// many seeded rows carry gates (premiumTier, maxTempF, soil thresholds)
+// with no convenience `trigger`, and "conditional" alone tells the tech
+// nothing. Bookkeeping keys that are not field conditions are skipped;
+// unknown keys degrade to a humanized key:value so nothing is dropped.
+const GATE_SKIP_KEYS = new Set(['gateProduct', 'frac', 'annualCounter']);
+const humanizeKey = (k) => String(k).replace(/([A-Z])/g, ' $1').toLowerCase().trim();
+
+export function lawnGateLabels(gates) {
+  if (!gates || typeof gates !== 'object') return [];
+  const out = [];
+  for (const [key, value] of Object.entries(gates)) {
+    if (value == null || value === false || GATE_SKIP_KEYS.has(key)) continue;
+    switch (key) {
+      case 'trigger': out.push(String(value).replace(/_/g, ' ')); break;
+      case 'premiumTier': out.push('premium plan only'); break;
+      case 'maxTempF': out.push(`skip above ${value}°F`); break;
+      case 'soilPIndexBelow': out.push(`soil P index below ${value}`); break;
+      case 'soilPIndexAtOrAbove': out.push(`soil P index at/above ${value}`); break;
+      case 'soilKGatePpmBelow': out.push(`soil K below ${value} ppm`); break;
+      case 'requiresZeroNP': out.push('blackout: zero N-P only'); break;
+      case 'blackoutSensitive': out.push('blackout-sensitive'); break;
+      case 'finalNBeforeBlackout': out.push('final N before blackout'); break;
+      case 'finalN': out.push('final N of season'); break;
+      case 'sdsPreventive': out.push('SDS preventive'); break;
+      case 'blockInOrdinanceZones':
+        out.push(`not in ${(Array.isArray(value) ? value : [value]).map((z) => String(z).replace(/_/g, ' ')).join(', ')}`);
+        break;
+      case 'annualMaxApps': out.push(`max ${value} apps/year`); break;
+      case 'minIntervalDays': out.push(`min ${value} days between apps`); break;
+      case 'minLabelRate': out.push(`label rate min ${value}`); break;
+      case 'maxLabelRate': out.push(`label rate max ${value}`); break;
+      case 'postAppIrrigation': out.push('irrigate after application'); break;
+      case 'targetN': out.push(`target ${value}`); break;
+      default: out.push(value === true ? humanizeKey(key) : `${humanizeKey(key)}: ${value}`);
+    }
+  }
+  return out;
 }
 
 /**

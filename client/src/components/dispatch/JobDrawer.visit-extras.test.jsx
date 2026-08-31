@@ -52,7 +52,7 @@ describe('JobDrawer visit extras', () => {
         linked: true,
         estimateSlug: 'EST-2026-0254',
         quotedTotal: 450,
-        lines: [{ name: 'Quarterly Pest Control', perApplicationPrice: 115 }],
+        lines: [{ name: 'Quarterly Pest Control', cadence: 'quarterly', perApplicationPrice: 115 }],
         deposit: { required: false, paid: 100, creditRemaining: 40, payerBilled: false },
         payment: null,
       },
@@ -71,7 +71,9 @@ describe('JobDrawer visit extras', () => {
     render(<JobDrawer jobId="svc-1" onClose={() => {}} />);
     expect(await screen.findByText('Quoted · EST-2026-0254')).toBeInTheDocument();
     expect(screen.getByText(/\$115 \/application/)).toBeInTheDocument();
-    expect(screen.getByText('Total $450')).toBeInTheDocument();
+    // Unit-aware terms, never the blended total as a headline.
+    expect(screen.getByText('$115/application')).toBeInTheDocument();
+    expect(screen.queryByText(/Total \$450/)).not.toBeInTheDocument();
     expect(screen.getByText(/Deposit paid \$100 · \$40 credit remaining/)).toBeInTheDocument();
     expect(screen.getByText('Property gate:')).toBeInTheDocument();
     expect(screen.getByText('4482')).toBeInTheDocument();

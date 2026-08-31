@@ -37,7 +37,7 @@ const LINKED_ESTIMATE = {
   quotedTotal: 450,
   lines: [
     { name: 'Quarterly Pest Control', cadence: 'quarterly', perApplicationPrice: 115 },
-    { name: 'Mosquito — WaveGuard Silver', monthlyPrice: 89 },
+    { name: 'Mosquito — WaveGuard Silver', cadence: 'monthly', monthlyPrice: 89 },
   ],
   deposit: { required: false, paid: 100, creditRemaining: 40, payerBilled: false },
   payment: { billingTerm: 'per_service', annualPrepay: false },
@@ -53,7 +53,8 @@ describe('VisitBriefPanel', () => {
       />,
     );
     expect(screen.getByText('Quoted:')).toBeInTheDocument();
-    expect(screen.getByText('$450')).toBeInTheDocument();
+    // Unit-aware terms, never the blended monthly+one-time number.
+    expect(screen.getByText('$115/application + $89/mo')).toBeInTheDocument();
     expect(screen.getByText('Paid · prepaid:')).toBeInTheDocument();
     expect(screen.getByText('Prepaid $50 (card)')).toBeInTheDocument();
     expect(screen.getByText('Amount due today:')).toBeInTheDocument();
@@ -286,8 +287,8 @@ describe('VisitBriefPanel', () => {
               brief: {
                 open_scope: 'Booked from accepted estimate (Silver tier).',
                 customer_context: 'Customer asked about brown patches near the driveway.',
-                priorities: [],
-                watch_items: [],
+                priorities: ['Walk the west fence line first'],
+                watch_items: ['Sprinkler head cracked near bed 2'],
                 last_visit: null,
                 access: null,
                 product_guidance: {
@@ -296,7 +297,10 @@ describe('VisitBriefPanel', () => {
                   window: { title: 'August — Summer stress window', goal: 'Fungus prevention and stress recovery' },
                   protocol_gates: [{ title: 'Blackout ordinance', ruleText: 'No fertilizer before Sep 30 in Sarasota County' }],
                   products: [{ name: 'Headway G', ratePer1000: 3, rateUnit: 'lb', role: 'fungicide' }],
-                  conditional_products: [{ name: 'Dylox 420', trigger: 'visible grub damage', conditional: true }],
+                  conditional_products: [
+                    { name: 'Dylox 420', trigger: 'visible grub damage', conditional: true },
+                    { name: 'Hydretain Liquid', conditional: true, gates: { premiumTier: true, maxTempF: 90 } },
+                  ],
                 },
               },
               type: 'visit_brief_v1',
@@ -313,6 +317,13 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText(/Blackout ordinance — No fertilizer before Sep 30/)).toBeInTheDocument();
     expect(screen.getByText('• Headway G · 3 lb/1000 sq ft · fungicide')).toBeInTheDocument();
     expect(screen.getByText('• Dylox 420 — conditional: visible grub damage')).toBeInTheDocument();
+    // Structured gates without a trigger still explain the condition.
+    expect(screen.getByText('• Hydretain Liquid — conditional: premium plan only; skip above 90°F')).toBeInTheDocument();
+    // priorities/watch_items are THIS visit's guidance — they live here,
+    // not under a Last visit heading (the section is absent entirely).
+    expect(screen.getByText('• Walk the west fence line first')).toBeInTheDocument();
+    expect(screen.getByText('• Sprinkler head cracked near bed 2')).toBeInTheDocument();
+    expect(screen.queryByText('Last visit')).not.toBeInTheDocument();
   });
 
   it('renders the per-service action buttons with the old ServiceRow logic preserved', () => {

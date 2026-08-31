@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   fmtMoney,
+  lawnGateLabels,
   prepaidLine,
   quotedLineLabel,
+  quotedTermsLabel,
   shortAddress,
   smsHref,
   stopAccessIndicator,
@@ -117,6 +119,62 @@ describe('quotedLineLabel', () => {
     expect(quotedLineLabel({ price: 300 })).toBe('$300');
     expect(quotedLineLabel({ price: 300, source: 'one_time' })).toBe('$300 one-time');
     expect(quotedLineLabel({ price: 300, cadence: 'one_time' })).toBe('$300 one-time');
+  });
+
+  it('a fully-discounted acceptedOneTimePrice of 0 shows $0 one-time, never the gross price', () => {
+    expect(quotedLineLabel({ acceptedOneTimePrice: 0, price: 300, cadence: 'one_time' })).toBe('$0 one-time');
+  });
+});
+
+describe('quotedTermsLabel', () => {
+  it('unit-aware terms when every recurring line proves its unit', () => {
+    expect(quotedTermsLabel({
+      linked: true,
+      quotedTotal: 220,
+      onetimeTotal: 99,
+      lines: [
+        { name: 'Pest', cadence: 'quarterly', perApplicationPrice: 121 },
+        { name: 'Mosquito', cadence: 'monthly', monthlyPrice: 89 },
+      ],
+    })).toBe('$121/application + $89/mo + $99 one-time');
+  });
+
+  it('falls back to the legacy total when a recurring line has no proven unit', () => {
+    expect(quotedTermsLabel({
+      linked: true,
+      quotedTotal: 450,
+      lines: [{ name: 'Legacy plan', cadence: 'quarterly', price: 115 }],
+    })).toBe('$450');
+    expect(quotedTermsLabel({ linked: false })).toBe(null);
+    expect(quotedTermsLabel(null)).toBe(null);
+  });
+});
+
+describe('lawnGateLabels', () => {
+  it('renders every structured gate in operational wording', () => {
+    expect(lawnGateLabels({
+      premiumTier: true,
+      maxTempF: 90,
+      soilKGatePpmBelow: 80,
+      blockInOrdinanceZones: ['north_port'],
+      annualMaxApps: 3,
+    })).toEqual([
+      'premium plan only',
+      'skip above 90°F',
+      'soil K below 80 ppm',
+      'not in north port',
+      'max 3 apps/year',
+    ]);
+  });
+
+  it('skips bookkeeping keys, keeps triggers, degrades unknown keys to key:value', () => {
+    expect(lawnGateLabels({
+      trigger: 'armyworm_threshold_3_per_sqft',
+      gateProduct: 'SpeedZone',
+      annualCounter: 'celsius_oz_per_1000',
+      someFutureGate: 42,
+    })).toEqual(['armyworm threshold 3 per sqft', 'some future gate: 42']);
+    expect(lawnGateLabels(null)).toEqual([]);
   });
 });
 

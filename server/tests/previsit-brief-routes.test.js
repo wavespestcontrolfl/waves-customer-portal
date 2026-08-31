@@ -318,8 +318,20 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
     });
   });
 
-  test('a SERVED brief carries no facts key (the brief already contains access + last_visit)', async () => {
+  test('a SERVED visit brief carries live facts too (the cached access block is a sweep-time snapshot)', async () => {
     mockFactsGateEnabled.mockReturnValue(true);
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.brief.priorities).toEqual(['Check garage']);
+      expect(body.type).toBe('visit_brief_v1');
+      expect(body.facts.access.codes.propertyGate).toBe('4482');
+    });
+  });
+
+  test('facts gate OFF: a served brief answers exactly as before (no facts key)', async () => {
+    mockFactsGateEnabled.mockReturnValue(false);
     mockGateEnabled.mockReturnValue(true);
     stubTables({ scheduled_services: VISIT_BRIEF_ROW });
     await withServer(async (base) => {
