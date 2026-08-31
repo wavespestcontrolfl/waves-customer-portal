@@ -16,7 +16,15 @@
  *                  vs bare street is one property, not an identity split
  *
  * findReusableCallLead itself needs a DB (its corroboration lives in SQL), so
- * the verdict below is the PURE composition of its arms, in its precedence:
+ * the verdict below is the PURE composition of its arms, in its precedence.
+ * ONE DELIBERATE DIVERGENCE: production's phone arm compares the resolved
+ * value LITERALLY (`where('phone', phone)` on resolveCallContactPhone's raw
+ * output — no toE164), so a dictated "541-555-0101" against a stored
+ * "+15415550101" can miss and mint a duplicate today. The corpus's phone key
+ * is toE164-normalized ON PURPOSE — that is the semantic the shared #3137
+ * resolver must provide — and the "documented normalization gap" test below
+ * FREEZES exactly which 'same' verdicts depend on normalization production
+ * does not yet do, so the gap is a tested statement, not overstated coverage.
  *   1. both records carry a usable phone → phone arm: keys equal AND names
  *      compatible (nickname-aware, blank side compatible) → same; a phone
  *      match with a name CONFLICT → different (fresh mint, #3627).
@@ -50,8 +58,10 @@ const { _test } = require('../services/call-recording-processor');
 
 const { extractedNameMatchesCustomer, sameFirstName } = _test;
 
-// leads.phone stores toE164 output; garbage (caller-ID sentinels, prose)
-// comes back raw from toE164 and is rejected by isLikelyE164 — never a key.
+// The corpus's phone key: toE164-normalized, garbage (caller-ID sentinels,
+// prose) comes back raw from toE164 and is rejected by isLikelyE164 — never a
+// key. NOTE this is the #3137 TARGET semantic; production's
+// findReusableCallLead compares literally (see header + the gap test below).
 function phoneKey(value) {
   const e164 = toE164(value);
   return e164 && isLikelyE164(e164) ? e164 : null;
@@ -160,6 +170,29 @@ describe('lead identity corpus — verdicts through the call-path primitives', (
     for (const c of CASES) {
       expect({ id: c.id, verdict: identityVerdict(c.b, c.a) }).toEqual({ id: c.id, verdict: c.expected });
     }
+  });
+
+  test("documented gap: production's findReusableCallLead phone arm is LITERAL (where('phone', phone)); these 'same' verdicts depend on the toE164 normalization the #3137 resolver must add", () => {
+    const literal = (v) => String(v || '').trim();
+    const reliesOnNormalization = CASES
+      .filter((c) => c.expected === 'same'
+        && phoneKey(c.a.phone) && phoneKey(c.b.phone)
+        && literal(c.a.phone) !== literal(c.b.phone))
+      .map((c) => c.id)
+      .sort();
+    // Frozen: every case here is a pair production can DUPLICATE today. If a
+    // corpus edit changes this list, re-verify the verdict is the resolver's
+    // target semantic, not an accidental claim about current behavior.
+    expect(reliesOnNormalization).toEqual([
+      'nickname-bill-william-same-phone',
+      'nickname-liz-elizabeth-same-phone',
+      'phone-format-parens-spaces-leading-1',
+      'phone-format-plus1-vs-dashes',
+      'shared-phone-one-side-nameless-shell',
+      'typo-email-domain-but-phone-matches',
+      'unit-suffixed-address-hash-spelling',
+      'unit-suffixed-address-vs-bare-same-person',
+    ]);
   });
 
   test('checks.firstNameVariant — nickname table membership matches the case annotation', () => {
