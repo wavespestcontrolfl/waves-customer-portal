@@ -27,13 +27,23 @@
  *     TOP LEVEL of a module protect routes registered AFTER it (source order)
  *     whose path starts with `prefix`. Guards inside if/for/function bodies
  *     are conditional and are NOT counted.
- *   - `router.<verb>(path, ...mw, handler)` is a route; guards in its own
- *     argument list protect it. Arrays / spreads of top-level const arrays
- *     are flattened (`const staff = [adminAuthenticate, requireAdmin]`).
+ *   - `router.<verb>(path, ...mw, handler)` is a route; a guard in its
+ *     argument list counts only while everything BEFORE it is itself a guard
+ *     or a registered reject-or-next passthrough (route-auth-guards.json
+ *     `passthroughs`) — any other handler could terminate the request first,
+ *     so it voids every later guard in the call. Arrays / spreads of
+ *     top-level const arrays are flattened.
+ *   - A use() handler must be provably NOT a router: a router/static mount, a
+ *     registered guard/passthrough, an inline or in-repo function, or a
+ *     node_modules factory call. Anything opaque (an unresolved identifier, an
+ *     in-repo factory call) is rejected as a scanner problem — a factory
+ *     could return a router whose routes would bypass the allowlist.
+ *   - Router aliases (`const api = router`) resolve to the canonical router.
  *   - Nested routers (`router.use('/sub', subRouter)` or a require()) recurse.
  *   - Paths: string literals, arrays of them, RegExp literals, template
  *     literals and `for (const x of [...])` / `[...].forEach(x => ...)`
- *     enumerations over string literals are expanded. Anything else is an
+ *     enumerations over string literals are expanded (each loop variable is
+ *     scoped to its own loop body). Anything else is an
  *     UNRESOLVED path — tolerated only when the route is guarded.
  *   - `express.static(...)` mounts are reported as `STATIC <prefix>`.
  *
@@ -165,7 +175,7 @@ class ModuleAnalysis {
   }
 
   collect() {
-    const enumBindings = [];
+    this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
     walk(this.ast.program, (node, ctx) => {
       if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
         this.recordBinding(node.id.name, node.init, ctx.topLevel);
@@ -184,7 +194,12 @@ class ModuleAnalysis {
         && node.left.declarations.length === 1
         && node.left.declarations[0].id.type === 'Identifier') {
         const values = this.resolveStringList(node.right);
-        if (values) enumBindings.push([node.left.declarations[0].id.name, values]);
+        if (values) {
+          this.enumScopes.push({
+            name: node.left.declarations[0].id.name, values,
+            start: node.body.start, end: node.body.end,
+          });
+        }
       } else if (node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression' && !node.callee.computed
         && node.callee.property.name === 'forEach'
@@ -192,7 +207,13 @@ class ModuleAnalysis {
         && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')
         && node.arguments[0].params[0] && node.arguments[0].params[0].type === 'Identifier') {
         const values = this.resolveStringList(node.callee.object);
-        if (values) enumBindings.push([node.arguments[0].params[0].name, values]);
+        if (values) {
+          const fn = node.arguments[0];
+          this.enumScopes.push({
+            name: fn.params[0].name, values,
+            start: fn.body.start, end: fn.body.end,
+          });
+        }
       } else if (node.type === 'AssignmentExpression'
         && node.left.type === 'MemberExpression' && !node.left.computed
         && node.left.object.type === 'Identifier' && node.left.object.name === 'module'
@@ -223,10 +244,18 @@ class ModuleAnalysis {
         }
       }
     }, { topLevel: true });
-    // Enumeration bindings (loop variables) are only known after the walk
-    // because the right-hand side may be a const declared earlier.
-    for (const [name, values] of enumBindings) this.setBinding(name, { kind: 'enum', values, topLevel: false });
-    if (this.exportCandidate && this.routers.has(this.exportCandidate)) this.exportedRouter = this.exportCandidate;
+    // Resolve identifier aliases (`const api = router`) to their canonical
+    // binding so registrations made through the alias are still attributed to
+    // the router (or the app) — a plain alias mounts routes just as well as
+    // the original name, so dropping them would be a fail-open hole.
+    for (const [name, b] of this.bindings) {
+      if (b.kind === 'alias' && this.routers.has(this.canonName(name))) this.routers.add(name);
+    }
+    for (const r of this.registrations) r.object = this.canonName(r.object);
+    if (this.exportCandidate) {
+      const canon = this.canonName(this.exportCandidate);
+      if (this.routers.has(canon)) this.exportedRouter = canon;
+    }
     // Only registrations on real routers (or the app) matter.
     this.registrations = this.registrations.filter((r) => this.routers.has(r.object) || APP_IDENTIFIERS.has(r.object));
     for (const r of this.registrations) {
@@ -235,6 +264,18 @@ class ModuleAnalysis {
       } else if (r.method === '<computed>') {
         this.problems.push(`${this.loc(r.node)}: computed method call ${r.object}[...](...) on a router — the scanner cannot tell what it registers; use a literal ${r.object}.<verb>()/use()`);
       }
+    }
+  }
+
+  /** Follow `const a = b` alias chains to the canonical name. */
+  canonName(name) {
+    const seen = new Set();
+    let n = name;
+    for (;;) {
+      const b = this.bindings.get(n);
+      if (!b || b.kind !== 'alias' || seen.has(n)) return n;
+      seen.add(n);
+      n = b.target;
     }
   }
 
@@ -259,8 +300,12 @@ class ModuleAnalysis {
     } else if (init && (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression')) {
       this.setBinding(name, { kind: 'function', topLevel });
     } else if (init && init.type === 'CallExpression') {
-      // e.g. `const payLimiter = rateLimit({...})` — a produced handler.
-      this.setBinding(name, { kind: 'call', topLevel });
+      // e.g. `const payLimiter = rateLimit({...})` — a produced handler. The
+      // call node is kept so classify() can judge the callee's provenance.
+      this.setBinding(name, { kind: 'call', node: init, topLevel });
+    } else if (init && init.type === 'Identifier') {
+      // `const api = router` — a plain alias; resolved after the walk.
+      this.setBinding(name, { kind: 'alias', target: init.name, topLevel });
     } else if (init && init.type === 'MemberExpression' && !init.computed && isRequireCall(init.object)) {
       this.setBinding(name, {
         kind: 'requireMember',
@@ -329,13 +374,29 @@ class ModuleAnalysis {
     }
   }
 
+  /**
+   * Values of an enumeration loop variable, valid only INSIDE that loop's own
+   * body (innermost scope wins). Keyed by source position so two loops that
+   * reuse a variable name never bleed into each other.
+   */
+  enumValuesAt(name, pos) {
+    if (typeof pos !== 'number') return null;
+    let best = null;
+    for (const s of this.enumScopes) {
+      if (s.name !== name || pos < s.start || pos > s.end) continue;
+      if (!best || s.start > best.start) best = s;
+    }
+    return best ? best.values : null;
+  }
+
   resolveStrings(node) {
     if (node.type === 'StringLiteral') return [node.value];
     if (node.type === 'Identifier') {
+      const enumValues = this.enumValuesAt(node.name, node.start);
+      if (enumValues) return enumValues;
       const b = this.bindings.get(node.name);
       if (!b) return null;
       if (b.kind === 'string') return [b.value];
-      if (b.kind === 'enum') return b.values;
       if (b.kind === 'array') return stringLiteralArray({ type: 'ArrayExpression', elements: b.elements });
     }
     return null;
@@ -352,8 +413,9 @@ class ModuleAnalysis {
       return true;
     }
     if (node.type === 'Identifier') {
+      if (this.enumValuesAt(node.name, node.start)) return true;
       const b = this.bindings.get(node.name);
-      return Boolean(b && (b.kind === 'string' || b.kind === 'enum'));
+      return Boolean(b && b.kind === 'string');
     }
     return false;
   }
@@ -375,42 +437,78 @@ class ModuleAnalysis {
       if (this.scanner.registry.lookup(mod, b.name)) return false;
       return true;
     }
-    return true; // 'other', 'string' (handled by couldBePath), 'enum'
+    return true; // 'other', 'alias', 'string' (handled by couldBePath)
+  }
+
+  /**
+   * True when `node` (an Identifier or require() call) resolves to a
+   * node_modules import — i.e. code that cannot construct one of OUR routers.
+   */
+  isNodeModulesRef(node) {
+    if (!node) return false;
+    if (isRequireCall(node)) return resolveModulePath(this.file, node.arguments[0].value) === null;
+    if (node.type === 'Identifier') {
+      const b = this.bindings.get(node.name);
+      return Boolean(b && (b.kind === 'require' || b.kind === 'requireMember') && b.module === null);
+    }
+    return false;
   }
 
   /**
    * Classify a handler argument. Returns a flat list of
    *   { type: 'guard', name, exempts }      recognised auth guard
-   *   { type: 'router', module }            external router module
+   *   { type: 'passthrough', name }         registered reject-or-next middleware
+   *   { type: 'router', module, name? }     router exported by another module
    *   { type: 'localRouter', name }         Router() declared in this file
    *   { type: 'static', desc }              express.static(...)
-   *   { type: 'opaque', desc }              anything else (NOT auth)
+   *   { type: 'middleware', desc }          provably NOT a router (inline
+   *                                         function, in-repo function, or a
+   *                                         node_modules factory call) — but
+   *                                         still NOT auth and may terminate
+   *   { type: 'opaque', desc }              could be anything, a router
+   *                                         included (NOT auth; rejected in
+   *                                         use() calls — fail closed)
    */
   classify(node, depth = 0) {
     if (!node) return [{ type: 'opaque', desc: 'hole' }];
-    if (depth > 4) return [{ type: 'opaque', desc: 'too-deep' }];
+    if (depth > 8) return [{ type: 'opaque', desc: 'too-deep' }];
     const registry = this.scanner.registry;
     switch (node.type) {
       case 'SpreadElement':
         return this.classify(node.argument, depth + 1);
       case 'ArrayExpression':
         return node.elements.flatMap((el) => this.classify(el, depth + 1));
+      case 'ArrowFunctionExpression':
+      case 'FunctionExpression':
+        // An inline function is definitionally not a Router instance.
+        return [{ type: 'middleware', desc: node.type }];
       case 'Identifier': {
-        const b = this.bindings.get(node.name);
-        if (this.routers.has(node.name)) return [{ type: 'localRouter', name: node.name }];
+        const canon = this.canonName(node.name);
+        if (this.routers.has(canon)) return [{ type: 'localRouter', name: canon }];
+        const b = this.bindings.get(canon);
         if (!b) return [{ type: 'opaque', desc: `unbound identifier ${node.name}` }];
         if (b.kind === 'requireMember') {
           const g = registry.lookup(b.module, b.name);
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
-          return [{ type: 'opaque', desc: `${node.name} (from ${b.module})` }];
+          if (registry.lookupPassthrough(b.module, b.name)) return [{ type: 'passthrough', name: b.name }];
+          if (b.module === null) return [{ type: 'middleware', desc: `${node.name} (node_modules)` }];
+          return this.scanner.classifyModuleName(b.module, b.name, depth + 1, `${node.name} (from ${b.module})`);
         }
         if (b.kind === 'require') {
+          if (b.module === null) return [{ type: 'middleware', desc: `${node.name} (node_modules)` }];
           return [this.scanner.moduleRef(b.module, node.name)];
         }
         if (b.kind === 'array') return b.elements.flatMap((el) => this.classify(el, depth + 1));
         if (b.kind === 'function') {
-          const g = registry.lookup(this.file, node.name, { local: true });
+          const g = registry.lookup(this.file, canon, { local: true });
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
+          if (registry.lookupPassthrough(this.file, canon, { local: true })) return [{ type: 'passthrough', name: canon }];
+          // A function declared in this file cannot be a Router instance.
+          return [{ type: 'middleware', desc: node.name }];
+        }
+        if (b.kind === 'call') {
+          if (registry.lookupPassthrough(this.file, canon, { local: true })) return [{ type: 'passthrough', name: canon }];
+          return this.classify(b.node, depth + 1);
         }
         return [{ type: 'opaque', desc: node.name }];
       }
@@ -418,6 +516,7 @@ class ModuleAnalysis {
         if (isRequireCall(node)) {
           return [this.scanner.moduleRef(resolveModulePath(this.file, node.arguments[0].value), node.arguments[0].value)];
         }
+        if (isRouterFactoryCall(node)) return [{ type: 'opaque', desc: 'inline Router() call' }];
         const c = node.callee;
         if (c.type === 'MemberExpression' && !c.computed && c.property.name === 'static'
           && (c.object.type === 'Identifier' || isRequireCall(c.object))) {
@@ -425,31 +524,53 @@ class ModuleAnalysis {
           const desc = arg ? this.src.slice(arg.start, arg.end) : '';
           return [{ type: 'static', desc }];
         }
+        if (c.type === 'CallExpression' && this.isNodeModulesRef(c)) {
+          // require('express-rate-limit')({...}) — node_modules factory call.
+          return [{ type: 'middleware', desc: this.src.slice(c.start, c.end) + '(...)' }];
+        }
         if (c.type === 'Identifier') {
           const b = this.bindings.get(c.name);
           if (b && b.kind === 'requireMember') {
             const g = registry.lookup(b.module, b.name);
             if (g && g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
+            if (registry.lookupPassthrough(b.module, b.name)) return [{ type: 'passthrough', name: b.name }];
           }
           if (b && b.kind === 'function') {
             const g = registry.lookup(this.file, c.name, { local: true });
             if (g && g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
+            if (registry.lookupPassthrough(this.file, c.name, { local: true })) return [{ type: 'passthrough', name: c.name }];
+          }
+          if (this.isNodeModulesRef(c)) {
+            // A node_modules factory (rateLimit, cors, morgan, ...) cannot
+            // return one of OUR routers — middleware, but never auth.
+            return [{ type: 'middleware', desc: `${c.name}(...)` }];
           }
           return [{ type: 'opaque', desc: `${c.name}(...)` }];
+        }
+        if (c.type === 'MemberExpression' && !c.computed
+          && (this.isNodeModulesRef(c.object) || (c.object.type === 'Identifier'
+            && (this.bindings.get(c.object.name) || {}).kind === 'require'
+            && (this.bindings.get(c.object.name) || {}).module === null))) {
+          // express.json(...), bodyParser.raw(...) — node_modules member call.
+          return [{ type: 'middleware', desc: this.src.slice(c.start, c.end) + '(...)' }];
         }
         return [{ type: 'opaque', desc: this.src.slice(c.start, c.end) + '(...)' }];
       }
       case 'MemberExpression': {
         if (node.computed || node.property.type !== 'Identifier') return [{ type: 'opaque', desc: 'computed member' }];
         let mod = null;
-        if (isRequireCall(node.object)) mod = resolveModulePath(this.file, node.object.arguments[0].value);
+        let modKnown = false;
+        if (isRequireCall(node.object)) { mod = resolveModulePath(this.file, node.object.arguments[0].value); modKnown = true; }
         else if (node.object.type === 'Identifier') {
           const b = this.bindings.get(node.object.name);
-          if (b && b.kind === 'require') mod = b.module;
+          if (b && b.kind === 'require') { mod = b.module; modKnown = true; }
         }
+        if (modKnown && mod === null) return [{ type: 'middleware', desc: this.src.slice(node.start, node.end) }];
         if (mod) {
           const g = registry.lookup(mod, node.property.name);
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
+          if (registry.lookupPassthrough(mod, node.property.name)) return [{ type: 'passthrough', name: node.property.name }];
+          return this.scanner.classifyModuleName(mod, node.property.name, depth + 1, this.src.slice(node.start, node.end));
         }
         return [{ type: 'opaque', desc: this.src.slice(node.start, node.end) }];
       }
@@ -476,10 +597,21 @@ class GuardRegistry {
         exempts: Array.isArray(g.exempts) ? g.exempts : [],
       };
     });
+    // Reviewed reject-or-next middleware (never serves protected data): a
+    // guard placed AFTER one of these still counts. Any UNregistered
+    // middleware before a guard voids the guard — fail closed.
+    this.passthroughs = (Array.isArray(json.passthroughs) ? json.passthroughs : []).map((p) => {
+      if (!p.name || !p.module) throw new Error(`passthrough entry missing name/module: ${JSON.stringify(p)}`);
+      return { name: p.name, module: p.module, local: Boolean(p.local) };
+    });
   }
 
   lookup(module, name, { local = false } = {}) {
     return this.entries.find((g) => g.module === module && g.name === name && g.local === local) || null;
+  }
+
+  lookupPassthrough(module, name, { local = false } = {}) {
+    return this.passthroughs.find((p) => p.module === module && p.name === name && p.local === local) || null;
   }
 }
 
@@ -562,6 +694,21 @@ class Scanner {
     return { type: 'opaque', desc: `module ${rel} (no exported Router)` };
   }
 
+  /**
+   * Classify a NAMED export/member of another module by resolving the name in
+   * that module's own bindings (guard, passthrough, function → middleware,
+   * Router → mountable router, ...). Fail closed to opaque when unresolvable.
+   */
+  classifyModuleName(rel, name, depth, label) {
+    if (!rel || !this.exists(rel)) return [{ type: 'opaque', desc: label }];
+    const m = this.module(rel);
+    return m.classify({ type: 'Identifier', name }, depth).map((h) => {
+      if (h.type === 'localRouter') return { type: 'router', module: rel, name: h.name };
+      if (h.type === 'opaque') return { type: 'opaque', desc: `${label} → ${h.desc}` };
+      return h;
+    });
+  }
+
   scan() {
     const app = this.module(this.appFile);
     this.walkRouter(app, 'app', { prefix: '/', mountGuards: [], inEffect: [], mountLabel: '/', mountRouter: this.appFile });
@@ -598,32 +745,43 @@ class Scanner {
         this.problems.push(`${m.loc(reg.node)}: cannot classify first argument "${args[0].name}" (path or handler?) — use a literal path or a top-level string/array binding`);
         continue;
       }
-      // Order-preserving: Express runs middleware left-to-right, so a guard
-      // only protects what comes AFTER it in the argument list. Each
-      // router/static ref captures the guards that precede it, and a verb
-      // route only counts guards that precede its last non-guard handler
-      // (`router.get('/x', handler, guardA)` is REACHABLE before guardA runs).
+      // Order-preserving AND fail closed: Express runs middleware
+      // left-to-right, and ANY unrecognised handler may terminate the request
+      // before a later guard ever runs (`router.get('/x', publicHandler,
+      // guardA, realHandler)` serves from publicHandler unauthenticated). So
+      // a guard only counts while everything BEFORE it in the argument list
+      // is itself a guard or a registered reject-or-next passthrough; the
+      // first anything-else voids every later guard in the call.
       const handlers = args.flatMap((a) => m.classify(a));
-      const lastNonGuard = handlers.reduce((acc, h, i) => (h.type === 'guard' ? acc : i), -1);
-      const ownGuards = handlers.filter((h, i) => h.type === 'guard' && (lastNonGuard === -1 || i < lastNonGuard));
+      const ownGuards = [];
       const routerRefs = [];
       const statics = [];
       {
-        const guardsSoFar = [];
+        let chainIntact = true;
         for (const h of handlers) {
-          if (h.type === 'guard') guardsSoFar.push(h);
-          else if (h.type === 'router' || h.type === 'localRouter') routerRefs.push({ ...h, precedingGuards: [...guardsSoFar] });
-          else if (h.type === 'static') statics.push({ ...h, precedingGuards: [...guardsSoFar] });
+          if (h.type === 'guard') { if (chainIntact) ownGuards.push(h); continue; }
+          if (h.type === 'passthrough') continue;
+          if (h.type === 'router' || h.type === 'localRouter') routerRefs.push({ ...h, precedingGuards: [...ownGuards] });
+          else if (h.type === 'static') statics.push({ ...h, precedingGuards: [...ownGuards] });
+          chainIntact = false;
         }
       }
 
       if (reg.method === 'use') {
+        // An OPAQUE handler in use() could itself be a router built by a
+        // factory or re-exported in a shape the scanner cannot see — its
+        // routes would silently bypass the allowlist. Reject it (fail
+        // closed); provable non-routers ('middleware') stay silent.
+        for (const h of handlers) {
+          if (h.type === 'opaque') {
+            this.problems.push(`${m.loc(reg.node)}: cannot prove use() handler "${h.desc}" is not a router — mount routers directly, or use an inline/in-repo function or a registered guard/passthrough`);
+          }
+        }
         for (const p of paths) {
           const scope = joinPaths(ctx.prefix, p);
           if (routerRefs.length === 0 && statics.length === 0) {
-            // Pure middleware. Only guards matter for the model, and here
-            // every guard counts (there is no terminal handler in the call).
-            const useGuards = handlers.filter((h) => h.type === 'guard');
+            // Pure middleware. Only guards matter for the model.
+            const useGuards = ownGuards;
             if (useGuards.length === 0) continue;
             if (!pathResolved) {
               this.problems.push(`${m.loc(reg.node)}: guard ${useGuards.map((g) => g.name).join(',')} mounted on an unresolvable path — make the path a literal`);
@@ -657,7 +815,7 @@ class Scanner {
             }
             if (ref.type === 'router') {
               const child = this.module(ref.module);
-              this.walkRouter(child, child.exportedRouter, childCtx, depth + 1);
+              this.walkRouter(child, ref.name || child.exportedRouter, childCtx, depth + 1);
             } else {
               this.walkRouter(m, ref.name, { ...childCtx, mountLabel: ctx.mountLabel, mountRouter: ctx.mountRouter }, depth + 1);
             }

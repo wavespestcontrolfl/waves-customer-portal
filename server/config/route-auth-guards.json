@@ -34,5 +34,32 @@
     { "name": "adminAuthenticateExceptOauthCallback", "module": "server/routes/admin-email.js", "local": true,
       "exempts": ["GET /oauth/callback"],
       "what": "adminAuthenticate + requireAdmin for the whole Gmail router except Google's OAuth redirect target" }
+  ],
+  "_passthroughs_comment": [
+    "Reviewed reject-or-next middleware that deliberately runs BEFORE an auth",
+    "guard in the same chain. A guard preceded by anything NOT in this list is",
+    "voided (an unknown handler could serve the response before the guard",
+    "runs), so keeping a guard countable behind a leading middleware requires",
+    "registering that middleware here. The bar for an entry: it either calls",
+    "next() or rejects the request outright — it must never serve data or",
+    "perform the route's work."
+  ],
+  "passthroughs": [
+    { "name": "devOnly", "module": "server/routes/admin-schedule.js", "local": true,
+      "what": "404 in production (hide dev-only routes from scanners) before the auth chain runs" },
+    { "name": "devOnly", "module": "server/routes/admin-dev-tech-status.js", "local": true,
+      "what": "404 in production before the auth chain runs" },
+    { "name": "devOnly", "module": "server/routes/admin-dev-job-status.js", "local": true,
+      "what": "404 in production before the auth chain runs" },
+    { "name": "devOnly", "module": "server/routes/admin-dev-dispatch-alert.js", "local": true,
+      "what": "404 in production before the auth chain runs" },
+    { "name": "requireAiContentReport", "module": "server/routes/ai-assistant.js", "local": true,
+      "what": "404 while the report surface is dark (unobservable-when-dark contract) before auth" },
+    { "name": "chatReportLimiter", "module": "server/routes/ai-assistant.js", "local": true,
+      "what": "express-rate-limit instance ahead of authenticate — 429s or next(), never serves" },
+    { "name": "rejectQueryString", "module": "server/routes/admin-call-recordings.js", "local": true,
+      "what": "400 on any query string (recording-audio URL hygiene) before the auth chain" },
+    { "name": "createBodyErrorHandler", "module": "server/services/mcp-rpc.js",
+      "what": "factory for the JSON-RPC body-parser error handler — 413/parse-error JSON or next(err)" }
   ]
 }

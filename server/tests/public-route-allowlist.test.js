@@ -101,8 +101,8 @@ describe('public-route allowlist (AGENTS.md: "New public routes outside this lis
 describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
   const registry = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, GUARD_REGISTRY_FILE), 'utf8'));
 
-  test('every registered guard resolves to a real identifier in its module', () => {
-    for (const g of registry.guards) {
+  test('every registered guard and passthrough resolves to a real identifier in its module', () => {
+    for (const g of [...registry.guards, ...(registry.passthroughs || [])]) {
       const file = path.join(REPO_ROOT, g.module);
       expect({ guard: g.name, exists: fs.existsSync(file) }).toEqual({ guard: g.name, exists: true });
       const src = fs.readFileSync(file, 'utf8');
@@ -239,7 +239,10 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
   });
 
-  test('a guard AFTER the terminal handler does not protect the route; before it, it does', () => {
+  test('a guard preceded by ANY unregistered handler is voided (it may never run)', () => {
+    // `router.get('/x', publicHandler, guardA, realHandler)` — publicHandler
+    // can respond before guardA ever runs, so guardA proves nothing. Only a
+    // guard whose entire prefix is guards/registered passthroughs counts.
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
       'server/routes/x.js': [
@@ -247,11 +250,99 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
         "const { guardA } = require('../middleware/a');",
         'const limiter = (req, res, next) => next();',
         "router.get('/late-guard', (req, res) => res.json({}), guardA);",
-        "router.get('/guarded', limiter, guardA, (req, res) => res.json({}));",
+        "router.get('/voided', limiter, guardA, (req, res) => res.json({}));",
+        "router.get('/guarded', guardA, limiter, (req, res) => res.json({}));",
         'module.exports = router;',
       ].join('\n'),
     });
-    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/late-guard']);
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/late-guard', 'GET /api/x/voided']);
+  });
+
+  test('a REGISTERED passthrough before a guard does not void it; unregistered does', () => {
+    const files = (registerIt) => ({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        "function devOnly(req, res, next) { if (process.env.NODE_ENV === 'production') return res.status(404).end(); next(); }",
+        "router.post('/thing', devOnly, guardA, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    const registry = (passthroughs) => ({ ...REGISTRY, passthroughs });
+    const withReg = new Scanner({
+      files: files(true), appFile: 'server/index.js',
+      registry: registry([{ name: 'devOnly', module: 'server/routes/x.js', local: true }]),
+    }).scan();
+    expect(withReg.publicRoutes).toEqual([]);
+    const withoutReg = new Scanner({ files: files(false), appFile: 'server/index.js', registry: registry([]) }).scan();
+    expect(withoutReg.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /api/x/thing']);
+  });
+
+  test('an opaque use() handler (in-repo factory call) is a reported problem, never silence', () => {
+    // `app.use('/api/new', buildRouter())` — the factory could return a
+    // router whose routes would silently bypass the allowlist.
+    const res = scanOf({
+      'server/index.js': app([
+        "const { buildRouter } = require('./routes/factory');",
+        "app.use('/api/new', buildRouter());",
+      ].join('\n')),
+      'server/routes/factory.js': [
+        "function buildRouter() { const r = require('express').Router(); r.get('/leak', (req, res) => res.json({})); return r; }",
+        'module.exports = { buildRouter };',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('is not a router'))).toBe(true);
+  });
+
+  test('a provably-non-router use() handler (inline fn, node_modules call) is NOT a problem', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const cors = require('cors');",
+        "const rateLimit = require('express-rate-limit');",
+        'const limiter = rateLimit({ max: 5 });',
+        'app.use(cors({}));',
+        "app.use('/api', limiter);",
+        'app.use((req, res, next) => next());',
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems).toEqual([]);
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
+  });
+
+  test('registrations through a router ALIAS are not lost', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const api = router;',
+        "api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('two loops reusing an enumeration variable name stay separate (lexical scoping)', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "for (const p of ['/a', '/b']) router.get(p, (req, res) => res.json({}));",
+        "for (const p of ['/c']) router.post(p, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      'GET /api/x/a', 'GET /api/x/b', 'POST /api/x/c',
+    ]);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
