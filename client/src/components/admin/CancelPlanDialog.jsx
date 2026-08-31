@@ -285,6 +285,13 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                 onChange={(e) => setWaiveLateFee(e.target.checked)}
                 disabled={running}
               />
+              {preview?.visitFees?.applies && !waiveLateFee && (
+                <div className="ml-6 text-12 text-ink-secondary">
+                  {preview.visitFees.total != null
+                    ? `${money(preview.visitFees.total)} in scheduled-visit fees will be charged on ${preview.visitFees.visits.length} pulled visit${preview.visitFees.visits.length === 1 ? "" : "s"} unless waived.`
+                    : `A scheduled-visit fee may apply to ${preview.visitFees.visits.length} pulled visit${preview.visitFees.visits.length === 1 ? "" : "s"} — the amount could not be verified. Waive it, or the fee rail judges at commit.`}
+                </div>
+              )}
               <Checkbox
                 id="cancel-plan-send-confirmation"
                 label="Send the customer the confirmation text and email"

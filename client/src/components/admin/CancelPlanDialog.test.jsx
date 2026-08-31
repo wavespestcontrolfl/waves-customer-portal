@@ -293,4 +293,29 @@ describe('CancelPlanDialog', () => {
     await screen.findByText(/no active plan, recurring service, or upcoming visit/);
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).toBeDisabled();
   });
+
+  it('scheduled-visit fee exposure renders from the server preview and clears when waived', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview')
+      ? response(previewBody({
+        visitFees: {
+          applies: true, unresolved: false, total: 35,
+          visits: [{ id: 'v1', lane: 'card_hold', feeApplies: true, feeAmount: 35, unresolved: false }],
+        },
+      }))
+      : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText(/\$35\.00 in scheduled-visit fees will be charged on 1 pulled visit unless waived\./);
+    fireEvent.click(screen.getByLabelText('Waive the scheduled-visit fee on pulled visits'));
+    expect(screen.queryByText(/in scheduled-visit fees will be charged/)).not.toBeInTheDocument();
+    cleanup();
+
+    // Unverifiable lane: fee-may-apply, never a silent no-fee.
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview')
+      ? response(previewBody({
+        visitFees: { applies: true, unresolved: true, total: null, visits: [{ id: 'v1', lane: null, feeApplies: true, feeAmount: null, unresolved: true }] },
+      }))
+      : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText(/A scheduled-visit fee may apply to 1 pulled visit — the amount could not be verified/);
+  });
 });

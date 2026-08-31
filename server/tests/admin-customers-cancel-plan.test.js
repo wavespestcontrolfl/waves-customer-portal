@@ -32,6 +32,11 @@ jest.mock('../services/cancellation-confirmations', () => ({
   sendCancellationConfirmations: jest.fn().mockResolvedValue({ smsSent: true, emailSent: true, channels: ['sms', 'email'], smsTemplateKey: 'service_cancellation_confirmation' }),
   familyLabelOf: (k) => ({ pest_control: 'Pest Control', lawn_care: 'Lawn Care' }[k] || k),
 }));
+// Fee lanes for previewVisitFees — default: no hold, no secured card.
+const mockHoldPreview = jest.fn(async () => ({ held: false, feeApplies: false }));
+const mockApptPreview = jest.fn(async () => ({ secured: false, feeApplies: false }));
+jest.mock('../services/estimate-card-holds', () => ({ cardHoldCancelPreview: (...a) => mockHoldPreview(...a) }));
+jest.mock('../services/appointment-card-request', () => ({ appointmentCardCancelPreview: (...a) => mockApptPreview(...a) }));
 jest.mock('../services/cancellation-eligibility', () => ({
   hasCancellableWork: jest.fn().mockResolvedValue(true),
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
@@ -241,6 +246,8 @@ beforeEach(() => {
   hasCancellableWork.mockResolvedValue(true);
   mockOpenCase.mockClear();
   mockRecordDecision.mockClear();
+  mockHoldPreview.mockClear().mockResolvedValue({ held: false, feeApplies: false });
+  mockApptPreview.mockClear().mockResolvedValue({ secured: false, feeApplies: false });
   sendCancellationConfirmations.mockClear();
   NotificationService.notifyAdmin.mockClear();
 });
@@ -389,6 +396,66 @@ describe('POST /:id/cancel-plan', () => {
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     expect(body).toEqual(expect.objectContaining({ confirmation: null, confirmationChannels: [], confirmationRequested: false }));
     expect(mockOpenCase.mock.calls[0][0].snapshot.sendConfirmation).toBe(false);
+  }));
+
+  test('the preview surfaces scheduled-visit fee exposure on pulled visits, and a changed exposure trips preview_changed', () => withServer(async (baseUrl) => {
+    const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+    const base = await buildCancellationImpact();
+    buildCancellationImpact.mockResolvedValue({ ...base, pulledVisitKeys: ['v1:2099-01-05', 'v2:2099-01-09'] });
+    mockHoldPreview.mockImplementation(async (id) => (id === 'v1'
+      ? { held: true, feeApplies: true, feeAmount: 35 }
+      : { held: false, feeApplies: false }));
+    const preview = await (await post(baseUrl, '/cancel-plan/preview')).json();
+    // Both lanes consulted per pulled visit; only the fee-applying one lists.
+    expect(preview.visitFees).toEqual({
+      applies: true, unresolved: false, total: 35,
+      visits: [{ id: 'v1', lane: 'card_hold', feeApplies: true, feeAmount: 35, unresolved: false }],
+    });
+    expect(mockApptPreview).toHaveBeenCalledWith('v2');
+
+    // The fee window lapsing between preview and commit changes the
+    // approved facts — the fingerprint refuses.
+    mockHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 35 });
+    const res = await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('preview_changed');
+    buildCancellationImpact.mockResolvedValue(base);
+  }));
+
+  test('an unverifiable fee lane reads fee-may-apply — never a silent no-fee preview', () => withServer(async (baseUrl) => {
+    const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+    const base = await buildCancellationImpact();
+    buildCancellationImpact.mockResolvedValueOnce({ ...base, pulledVisitKeys: ['v1:2099-01-05'] });
+    mockHoldPreview.mockRejectedValueOnce(new Error('hold lookup down'));
+    const preview = await (await post(baseUrl, '/cancel-plan/preview')).json();
+    expect(preview.visitFees).toEqual(expect.objectContaining({ applies: true, unresolved: true, total: null }));
+  }));
+
+  test('a retry after a partial run reuses the SAME accepted request — the repair pass can find the first attempt\'s rows', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['visit_cancel_flip:s1'] });
+    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(first.processed).toBe(false);
+    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+    // Both runs hand the processor the SAME request-id reason, so the
+    // note-less fallback reason matches the first attempt's history notes.
+    expect(mockProcess.mock.calls[0][0].reason).toBe(mockProcess.mock.calls[1][0].reason);
+  }));
+
+  test('more visits pulled than the approved preview showed is an exception, never a clean "Done."', () => withServer(async (baseUrl) => {
+    const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+    const base = await buildCancellationImpact();
+    buildCancellationImpact.mockResolvedValue({ ...base, pulledVisitKeys: ['v1:2099-01-05', 'v2:2099-01-09', 'v3:2099-02-01'] });
+    const preview = await (await post(baseUrl, '/cancel-plan/preview')).json();
+    // A recurrence occurrence minted mid-flight: the straggler re-sweep
+    // pulls a 4th visit the operator never saw.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 4 });
+    const body = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    expect(body.processed).toBe(true);
+    expect(body.errors).toContain('visits_pulled_beyond_preview');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    buildCancellationImpact.mockResolvedValue(base);
   }));
 
   test('a requested confirmation a reachable channel did not accept is a surfaced failure — review bell, never a clean "Done."', () => withServer(async (baseUrl) => {
@@ -694,7 +761,8 @@ describe('POST /:id/cancel-plan', () => {
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({
           prepayTermId: 'term-1', effectiveDate: 'now', prepayDisposition: 'end_now_refund',
-          refund: null, proposedRefund: { amount: 360, needsManualCalc: false },
+          refund: null,
+          proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
           outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
         }),
       }];
@@ -716,12 +784,67 @@ describe('POST /:id/cancel-plan', () => {
       expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     }));
 
+    test('a repair whose live refund no longer matches the recorded proposal is refused — a fresh approved preview unlocks it', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      // A covered visit completed between the attempts: live refund is now
+      // 2 remaining ($240), not the recorded 3 ($360).
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01' },
+      ];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: null,
+          proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
+        }),
+      }];
+      let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.duplicate).toBe(true);
+      expect(body.errors).toEqual(['refund_facts_changed']);
+      expect(body.refund).toBeUndefined();
+      // No task for numbers nobody approved.
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+
+      // The approval path: a FRESH preview (current numbers) → commit with
+      // its fingerprint → the repair raises with the approved live refund.
+      const preview = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
+      body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: preview.previewFingerprint })).json();
+      expect(body.duplicate).toBe(true);
+      expect(body.errors).toEqual([]);
+      expect(body.refund).toEqual(expect.objectContaining({ amount: 240, remainingVisits: 2 }));
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('billing');
+    }));
+
+    test('a duplicate answers with the FIRST run\'s recorded errors — a belled run never re-reads as "Done"', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: null, confirmationChannels: [],
+            errors: ['confirmation_sms_not_sent', 'confirmation_email_not_sent'],
+          },
+        }),
+      }];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(body.duplicate).toBe(true);
+      expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
+    }));
+
     test('a failed repair reports the missing task instead of a clean duplicate; a recorded refund is never re-raised', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
-        snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: null }),
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: null,
+          proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 0, remainingVisits: 4, amount: 480, needsManualCalc: false },
+        }),
       }];
       NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
       let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();

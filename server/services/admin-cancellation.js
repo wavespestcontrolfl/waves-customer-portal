@@ -156,9 +156,59 @@ const termCoverageResolvable = (term) => !!(term
 // or the term is edited during the confirmation window (codex C3 r3 P2).
 // Both surfaces carry it: the dialog echoes previewFingerprint into the
 // commit body; the IB pending action pins it at proposal time.
-function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, scope, wholeAccount }) {
+// Scheduled-visit fee exposure on the visits this cancel pulls: BOTH card
+// fee lanes (estimate card hold + /secure appointment card — mutually
+// exclusive per visit) judged by the SAME preview helpers the dispatch
+// cancel prompt uses (cardHoldCancelPreview / appointmentCardCancelPreview),
+// so the operator sees the fee-or-waive choice BEFORE the money-moving
+// commit. Unverifiable = fee-may-apply, never a silent "no fee" (a thrown
+// preview matches the helpers' own posture); only fee-applying visits are
+// listed. Rides the approved-facts fingerprint.
+async function previewVisitFees(pulledVisitKeys) {
+  const ids = (Array.isArray(pulledVisitKeys) ? pulledVisitKeys : [])
+    .map((k) => String(k).split(':')[0]).filter(Boolean);
+  const visits = [];
+  let unresolved = false;
+  let total = 0;
+  let totalKnown = true;
+  for (const id of ids) {
+    let fee = null;
+    try {
+      const CardHolds = require('./estimate-card-holds');
+      const hold = await CardHolds.cardHoldCancelPreview(id);
+      if (hold.held) {
+        fee = { id, lane: 'card_hold', feeApplies: hold.feeApplies === true, feeAmount: hold.feeAmount ?? null, unresolved: hold.unresolved === true };
+      } else {
+        const ApptCards = require('./appointment-card-request');
+        const appt = await ApptCards.appointmentCardCancelPreview(id);
+        if (appt.secured) fee = { id, lane: 'appointment_card', feeApplies: appt.feeApplies === true, feeAmount: appt.feeAmount ?? null, unresolved: appt.unresolved === true };
+      }
+    } catch (err) {
+      logger.warn(`[admin-cancellation] fee preview failed for visit ${id}: ${err.message}`);
+      fee = { id, lane: null, feeApplies: true, feeAmount: null, unresolved: true };
+    }
+    if (!fee || !fee.feeApplies) continue;
+    visits.push(fee);
+    if (fee.unresolved) unresolved = true;
+    if (fee.feeAmount != null && Number.isFinite(Number(fee.feeAmount))) total += Number(fee.feeAmount);
+    else totalKnown = false;
+  }
+  return {
+    applies: visits.length > 0,
+    unresolved,
+    total: visits.length && totalKnown ? Math.round(total * 100) / 100 : null,
+    visits,
+  };
+}
+
+function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }) {
   const crypto = require('crypto');
   const facts = {
+    // The fee-or-waive exposure the operator approved (id, lane, amount,
+    // resolvability per fee-applying visit).
+    visitFees: visitFees
+      ? visitFees.visits.map((v) => `${v.id}:${v.lane}:${v.feeAmount}:${v.unresolved}`).sort()
+      : null,
     scope: wholeAccount ? [] : [...scope].sort(),
     termId: term ? String(term.id) : null,
     termEnd: term ? dateOnly(term.term_end) : null,
@@ -485,9 +535,10 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   const refund = term && prepayPlan.prepayDisposition === 'end_now_refund'
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
+  const visitFees = await previewVisitFees(impact ? impact.pulledVisitKeys : null);
   const today = etDateString();
   return {
-    previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, scope, wholeAccount }),
+    previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }),
     enabled: true,
     customer: customerSummary(customer),
     eligible,
@@ -510,6 +561,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
       refund,
     } : null,
     waiveLateFee: input.waiveLateFee,
+    visitFees,
     sendConfirmation: input.sendConfirmation,
     confirmationChannels: { sms: !!customer.phone, email: !!customer.email },
     reasonCode: input.reasonCode,
@@ -587,6 +639,21 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // unresolvable set refuses the commit (liveCoveredKeepIds throws 409).
   const keepVisitIds = prepayPlan.keepThrough ? await liveCoveredKeepIds(term, customerId) : null;
 
+  const suppliedFingerprint = raw.previewFingerprint == null || raw.previewFingerprint === ''
+    ? null : String(raw.previewFingerprint);
+  // The live approved-facts view (impact + fee exposure + fingerprint) —
+  // shared by the pre-write preview_changed check and the duplicate latch's
+  // refund-task repair, which must never mint a task from numbers nobody
+  // approved.
+  const liveApprovedFacts = async () => {
+    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds });
+    const liveVisitFees = await previewVisitFees(liveImpact ? liveImpact.pulledVisitKeys : null);
+    return {
+      liveImpact,
+      fingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, visitFees: liveVisitFees, scope, wholeAccount }),
+    };
+  };
+
   // Idempotency latch: an end-of-coverage cancel leaves the account with
   // cancellable work (the kept covered visits), so a retry or double-click
   // sails past the eligibility gate. The durable proof a prior run finished
@@ -627,7 +694,33 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       let repairedRefund = priorSnap && priorSnap.refund ? priorSnap.refund : null;
       const repairErrors = [];
       if (prepayPlan.prepayDisposition === 'end_now_refund' && !repairedRefund) {
-        try {
+        // The repaired task must carry facts somebody APPROVED (codex r8
+        // P1): this latch answers before any fingerprint check, so a
+        // coverage / term / payment-refund change between attempts could
+        // otherwise mint an actionable billing task for numbers nobody saw.
+        // Approved = the live recount still matches the FIRST run's recorded
+        // proposal, OR the caller carries a fingerprint matching the live
+        // facts (the operator just re-approved them from a fresh preview).
+        // Neither → refund_facts_changed; a fresh preview → commit is the
+        // approval path.
+        const proposed = priorSnap && priorSnap.proposedRefund ? priorSnap.proposedRefund : null;
+        let approved = !!proposed && !!refund
+          && proposed.needsManualCalc === refund.needsManualCalc
+          && proposed.amount === refund.amount
+          && proposed.prepaidAmount === refund.prepaidAmount
+          && proposed.includedVisits === refund.includedVisits
+          && proposed.remainingVisits === refund.remainingVisits;
+        if (!approved && suppliedFingerprint) {
+          try {
+            approved = (await liveApprovedFacts()).fingerprint === suppliedFingerprint;
+          } catch (factsErr) {
+            logger.warn(`[admin-cancellation] live-facts check failed during repair for case ${prior.id}: ${factsErr.message}`);
+          }
+        }
+        if (!approved) {
+          repairErrors.push('refund_facts_changed');
+          logger.error(`[admin-cancellation] refund repair for case ${prior.id} refused — the live refund matches neither the recorded proposal nor an approved preview`);
+        } else try {
           await raisePrepayRefundTask({
             customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
           });
@@ -671,25 +764,26 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         confirmationChannels: outcome && Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [],
         confirmationRequested: outcome ? outcome.confirmationRequested === true : false,
         ...(repairedRefund ? { refund: repairedRefund } : {}),
-        errors: repairErrors,
+        // The FIRST run's follow-up failures ride along — a lost-response
+        // retry must not show "Done" for a run that belled the office.
+        errors: [...(outcome && Array.isArray(outcome.errors) ? outcome.errors : []), ...repairErrors],
       };
     }
   }
 
   // Approved-facts check (409 preview_changed): when the caller carries the
   // preview's fingerprint, the live facts must still match what the operator
-  // saw — a visit that completed/appeared or an edited term changes the
-  // visit pull and the refund dollars, and pressing Confirm must not
-  // silently commit different numbers. Checked before any write.
-  const suppliedFingerprint = raw.previewFingerprint == null || raw.previewFingerprint === ''
-    ? null : String(raw.previewFingerprint);
+  // saw — a visit that completed/appeared, an edited term, or a changed fee
+  // exposure changes what pressing Confirm does, and it must not silently
+  // commit different numbers. Checked before any write.
+  let approvedPulled = null;
   if (suppliedFingerprint) {
-    const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds });
-    const liveFingerprint = cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, scope, wholeAccount });
-    if (liveFingerprint !== suppliedFingerprint) {
+    const { liveImpact, fingerprint } = await liveApprovedFacts();
+    if (fingerprint !== suppliedFingerprint) {
       throw new CancelPlanError(409, 'preview_changed',
         'The cancellation facts changed since this preview (a visit completed or appeared, or the prepay term was edited). Re-open the preview and approve the current numbers.');
     }
+    approvedPulled = liveImpact && Array.isArray(liveImpact.pulledVisitKeys) ? liveImpact.pulledVisitKeys.length : null;
   }
 
   let caseSnapshot = null;
@@ -701,20 +795,41 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   }
 
   // Durable acceptance — cases and retries key on this id like the portal path.
-  const [request] = await db('service_requests')
-    .insert({
-      customer_id: customerId,
-      category: 'cancellation',
-      subject: wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`,
-      description: input.note || '',
-      urgency: 'routine',
-      location_on_property: null,
-      photos: JSON.stringify([]),
-      status: 'new',
-      source: 'admin',
-    })
-    .returning('*');
-  logger.info(`[admin-cancellation] request ${request.id} opened for customer ${customerId} by ${actorLabel}`);
+  // A retry after a PARTIAL run must land on the SAME accepted request: a
+  // note-less cancel's recorded reason embeds the request id, and the
+  // processor's repair pass finds the first attempt's cancelled rows by that
+  // exact note — a fresh request would skip their failed side effects
+  // forever (and per-request dedupe keys would double-bell). Reuse the
+  // still-open acceptance for the same scope from the last 24h.
+  const subject = wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`;
+  let request = null;
+  try {
+    request = await db('service_requests')
+      .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new', subject })
+      .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      .orderBy('created_at', 'desc')
+      .first('*');
+  } catch (reuseErr) {
+    logger.warn(`[admin-cancellation] request-reuse lookup failed for ${customerId}: ${reuseErr.message}`);
+  }
+  if (request) {
+    logger.info(`[admin-cancellation] retry reuses accepted request ${request.id} for customer ${customerId} by ${actorLabel}`);
+  } else {
+    [request] = await db('service_requests')
+      .insert({
+        customer_id: customerId,
+        category: 'cancellation',
+        subject,
+        description: input.note || '',
+        urgency: 'routine',
+        location_on_property: null,
+        photos: JSON.stringify([]),
+        status: 'new',
+        source: 'admin',
+      })
+      .returning('*');
+    logger.info(`[admin-cancellation] request ${request.id} opened for customer ${customerId} by ${actorLabel}`);
+  }
 
   // NOTHING between the acceptance and the billing wind-down.
   const errors = [];
@@ -740,6 +855,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   }
   const processed = !!(result && result.ok && (result.churned || result.scopedWoundDown));
   if (result && Array.isArray(result.errors)) errors.push(...result.errors);
+  // Approved-facts reconcile after the sweep (codex r8 P2): the recurrence
+  // stop's straggler re-sweep can catch an occurrence minted after the
+  // fingerprint check — correctly cancelled (its series is ending), but a
+  // visit the operator never saw. More rows pulled than approved is an
+  // exception for office eyes, not a clean "Done."
+  if (processed && approvedPulled != null && Number(result?.cancelledCount) > approvedPulled) {
+    errors.push('visits_pulled_beyond_preview');
+    logger.warn(`[admin-cancellation] request ${request.id} pulled ${result.cancelledCount} visits but the approved preview showed ${approvedPulled}`);
+  }
 
   // Annual-prepay term disposition (whole-account only) — GATED on a
   // successful wind-down: deciding the term (or raising the refund task)
@@ -910,6 +1034,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             confirmationRequested: input.sendConfirmation,
             confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
             confirmationChannels: confirmations.channels,
+            // Follow-up failures ride the record: a lost-response retry must
+            // answer with the run's real verdict, not a clean "Done."
+            errors: [...errors],
           },
         }),
         updated_at: new Date(),

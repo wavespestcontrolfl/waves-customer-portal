@@ -1674,6 +1674,10 @@ async function cancelPlan(input, actionContext = {}) {
       effective_date: preview.effectiveDate,
       effective_on: preview.effectiveOn,
       prepay: preview.prepay,
+      // Scheduled-visit fee exposure on the pulled visits (both card fee
+      // lanes) — the confirmation card must show the fee-or-waive choice
+      // before the money-moving commit; unresolved = fee may apply.
+      visit_fees: preview.visitFees,
       waive_late_fee: preview.waiveLateFee,
       send_confirmation: preview.sendConfirmation,
       confirmation_channels: preview.confirmationChannels,
