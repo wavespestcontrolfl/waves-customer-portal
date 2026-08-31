@@ -28,6 +28,10 @@ import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
+// Thread id the operator dismissed with "New chat" — a reload must not
+// resume it (it stays on the server for history/retention, just not as the
+// auto-resumed conversation). Per-browser, like recents.
+const DISMISSED_THREAD_KEY = "admin_ib_dismissed_thread";
 const RECENTS_MAX = 5;
 const D = {
   bg: "#F1F5F9",
@@ -418,11 +422,15 @@ function GlobalCommandPalette(_props, ref) {
       .then((data) => {
         threadsAvailableRef.current = true; // 200 = gate on (thread may be null)
         if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
+        let dismissedId = null;
+        try { dismissedId = localStorage.getItem(DISMISSED_THREAD_KEY); } catch { /* storage unavailable */ }
+        if (data?.thread?.id && data.thread.id === dismissedId) return; // operator dismissed it with New chat
         const hist = data?.thread?.conversationHistory;
         if (hist?.length) {
           setConversationHistory(hist);
           setThreadId(data.thread.id);
           threadSeqRef.current = Number.isInteger(data.thread.lastSeq) ? data.thread.lastSeq : null;
+          try { localStorage.removeItem(DISMISSED_THREAD_KEY); } catch { /* storage unavailable */ }
           // Show the resumed conversation's last reply — otherwise the
           // palette looks like a new chat while silently sending the old
           // history with the next prompt. Server-side taint markers are
@@ -554,7 +562,11 @@ function GlobalCommandPalette(_props, ref) {
   const clear = () => {
     // "New chat": drops the local view AND detaches from the persisted
     // thread — the next query starts a fresh thread (old ones remain until
-    // retention).
+    // retention). The dismissed id is remembered so a reload doesn't
+    // resurrect the conversation the operator just cleared.
+    if (threadId) {
+      try { localStorage.setItem(DISMISSED_THREAD_KEY, threadId); } catch { /* storage unavailable */ }
+    }
     threadEpochRef.current += 1; // invalidate any inflight thread resume
     setConversationHistory([]);
     setResponse(null);
