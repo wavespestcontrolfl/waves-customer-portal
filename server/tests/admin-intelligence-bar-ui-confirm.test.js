@@ -23,6 +23,8 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockResolveTechnician = jest.fn();
+const mockResolveTechnicianById = jest.fn();
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -46,6 +48,8 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 jest.mock('../services/intelligence-bar/tools', () => ({
   TOOLS: [],
   executeTool: (...args) => mockExecuteTool(...args),
+  resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
+  resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -242,14 +246,16 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(onPrompt).toContain('WRITE CONFIRMATION (UI mode)');
     expect(onPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
 
+    // The boundary is structural: the retired GATE_IB_UI_CONFIRM value is
+    // ignored — UI mode holds no matter what the env says.
     process.env.GATE_IB_UI_CONFIRM = 'false';
     scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
     await withServer(async (baseUrl) => {
       await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
     });
     const offPrompt = mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
-    expect(offPrompt).toContain('WRITE CONFIRMATION (conversational mode)');
-    expect(offPrompt).not.toContain('WRITE CONFIRMATION (UI mode)');
+    expect(offPrompt).toContain('WRITE CONFIRMATION (UI mode)');
+    expect(offPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
   });
 
   test('prompt caching: system block breakpoint, one message breakpoint per round (no accumulation), pageData on the user turn not the system prompt', async () => {
@@ -291,20 +297,62 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(JSON.stringify(firstUserTurn.content)).toContain('open_jobs');
   });
 
-  test('gate off: legacy behavior unchanged, no pendingActions field', async () => {
-    process.env.GATE_IB_UI_CONFIRM = 'false';
-    mockExecuteTool.mockResolvedValue({ success: true });
+  test('gate is FAIL-CLOSED: env unset still proposes instead of executing (owner ruling 2026-08-30)', async () => {
+    // An unset/missing env var must behave as gate ON — only the explicit
+    // 'false' kill switch restores legacy direct execution.
+    delete process.env.GATE_IB_UI_CONFIRM;
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
-      [{ type: 'text', text: 'Done.' }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'move them to Venice', context: 'customers' });
+      expect(status).toBe(200);
+      // Legacy bare write: never executed from the loop under the gate.
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      expect(body.pendingActions).toHaveLength(1);
+    });
+  });
+
+  test('NO env value restores direct model-loop writes: retired gate=false still proposes', async () => {
+    process.env.GATE_IB_UI_CONFIRM = 'false';
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+      [{ type: 'text', text: 'Proposed.' }],
     ]);
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'set city', context: 'customers' });
-      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
-      expect(mockCreatePendingAction).not.toHaveBeenCalled();
-      expect(body.pendingActions).toBeUndefined();
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      expect(body.pendingActions).toHaveLength(1);
     });
+  });
+
+  test('IB_WRITES_DISABLED freezes writes: no execution, no proposal — reads unaffected', async () => {
+    process.env.IB_WRITES_DISABLED = 'true';
+    try {
+      scriptModelTurns([
+        [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+        [{ type: 'text', text: 'Writes are disabled.' }],
+      ]);
+
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'set city', context: 'customers' });
+        expect(mockExecuteTool).not.toHaveBeenCalled();
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+        expect(body.pendingActions).toEqual([]);
+
+        // The model-visible tool result explains the freeze.
+        const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+        const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+        expect(toolResult.error).toContain('disabled');
+      });
+    } finally {
+      delete process.env.IB_WRITES_DISABLED;
+    }
   });
 
   test('image-backed turns send valid vision blocks, drop invalid images, and redact persisted telemetry', async () => {
@@ -488,18 +536,35 @@ describe('/confirm-action commit path', () => {
     });
   });
 
-  test('/execute still works for gated writes when the gate is off (legacy behavior)', async () => {
+  test('/execute refuses gated writes regardless of the retired env value — no bypass exists', async () => {
     process.env.GATE_IB_UI_CONFIRM = 'false';
-    mockExecuteTool.mockResolvedValue({ success: true });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
         method: 'POST',
         headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'update_customer', params: { customer_id: 'c1', updates: { city: 'Venice' } } }),
       });
-      expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(409);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
     });
+  });
+
+  test('IB_WRITES_DISABLED: /confirm-action refuses commits of already-proposed actions', async () => {
+    process.env.IB_WRITES_DISABLED = 'true';
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pending_action_id: PENDING_ID }),
+        });
+        expect(res.status).toBe(409);
+        expect(mockClaimForConfirm).not.toHaveBeenCalled();
+        expect(mockExecuteTool).not.toHaveBeenCalled();
+      });
+    } finally {
+      delete process.env.IB_WRITES_DISABLED;
+    }
   });
 
   test('missing pending_action_id is a 400', async () => {
@@ -665,6 +730,90 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.recipient).toBe('Testa Alpha (…1234)');
+    });
+  });
+
+  test('create_appointment by tech name: pinned technician_id in stored params, tech NAME on the card', async () => {
+    mockResolveTechnician.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_name: 'testd' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it with testd', context: 'schedule' });
+      expect(mockResolveTechnician).toHaveBeenCalledWith('testd');
+
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.technician_id).toBe('tech-uuid-9');
+      expect(stored.params.technician_name).toBe('Testd Tech');
+
+      expect(body.pendingActions).toHaveLength(1);
+      // The card names the tech; the opaque uuid stays off the display.
+      expect(body.pendingActions[0].params.technician).toBe('Testd Tech');
+      expect(body.pendingActions[0].params.technician_id).toBeUndefined();
+    });
+  });
+
+  test('create_appointment by model-supplied technician_id: resolved + canonicalized — the card names the tech, never an opaque uuid', async () => {
+    mockResolveTechnicianById.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_id: 'tech-uuid-9' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      expect(mockResolveTechnicianById).toHaveBeenCalledWith('tech-uuid-9');
+
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.technician_id).toBe('tech-uuid-9');
+      expect(stored.params.technician_name).toBe('Testd Tech');
+      // The summary is built from the CURATED display params: it names the
+      // tech and never carries the opaque uuid.
+      expect(stored.summary).toContain('Testd Tech');
+      expect(stored.summary).not.toContain('tech-uuid-9');
+
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.technician).toBe('Testd Tech');
+      expect(body.pendingActions[0].params.technician_id).toBeUndefined();
+    });
+  });
+
+  test('create_appointment with an unknown/inactive technician_id: proposal fails, nothing stored', async () => {
+    mockResolveTechnicianById.mockResolvedValue(undefined);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_id: 'tech-uuid-gone' } }],
+      [{ type: 'text', text: 'No match.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+    });
+  });
+
+  test('create_appointment ambiguous tech name: no pending action, ambiguity error to the model', async () => {
+    mockResolveTechnician.mockResolvedValue({
+      error: 'Multiple technicians match that name. Ask the operator which one, then retry with technician_id.',
+      ambiguous: true,
+      candidates: [{ id: 't1', name: 'Testd A' }, { id: 't2', name: 'Testd B' }],
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_name: 'testd' } }],
+      [{ type: 'text', text: 'Which one?' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it with testd', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.ambiguous).toBe(true);
+      expect(toolResult.candidates).toHaveLength(2);
     });
   });
 

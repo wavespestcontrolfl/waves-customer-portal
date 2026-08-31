@@ -16,7 +16,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { TOOLS, executeTool } = require('../services/intelligence-bar/tools');
+const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
@@ -185,6 +185,7 @@ const PII_TOOL_NAMES = new Set([
   'create_customer',
   'update_property_access',
   'get_stop_details',
+  'get_recent_completions',
   'get_unanswered_threads',
   'get_conversation_thread',
   'search_messages',
@@ -406,23 +407,38 @@ function withCacheBreakpoint(messages) {
   return [...messages.slice(0, -1), { ...last, content }];
 }
 
-// UI-backed write confirmation (issue #1568). Dark until the Railway env
-// flips it on; read per-request so it can be toggled without a restart.
+// UI-backed write confirmation (issue #1568) is STRUCTURAL (owner rulings
+// 2026-08-30/31): NO environment value restores direct model-loop writes —
+// a config switch must never mean "turn off the safety layer". The
+// emergency control is IB_WRITES_DISABLED=true, which refuses every
+// Intelligence Bar write (proposals, /execute writes, /confirm-action
+// commits) while reads stay available; the fallback for a broken confirm
+// UI is the normal admin screen, never ungated AI execution. Read
+// per-request so it can be toggled without a restart. (GATE_IB_UI_CONFIRM
+// is retired and intentionally ignored.)
 function uiConfirmEnabled() {
-  return process.env.GATE_IB_UI_CONFIRM === 'true';
+  return true;
 }
+
+function ibWritesDisabled() {
+  return process.env.IB_WRITES_DISABLED === 'true';
+}
+const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
 
-function summarizeProposal(toolName, params) {
+function summarizeProposal(toolName, params, displayParams = params) {
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
   // changed (the confirmation card must show everything the commit will do).
+  // The flatten runs over the CURATED display params (same source as the
+  // card's param list), never the stored execution params — those carry
+  // pinned opaque ids and internal `_`-prefixed pins that must not surface.
   const flat = [];
-  for (const [k, v] of Object.entries(params || {})) {
-    if (v === undefined || v === null) continue;
+  for (const [k, v] of Object.entries(displayParams || {})) {
+    if (v === undefined || v === null || k.startsWith('_')) continue;
     if (typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
         if (v2 !== undefined && v2 !== null && typeof v2 !== 'object') flat.push(`${k}.${k2}: ${String(v2)}`);
@@ -483,6 +499,12 @@ function confirmationDisplayParams(toolName, params, preview) {
     // identity resolved at proposal time, not a raw partial name that
     // /confirm-action would re-resolve to somebody else.
     return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+  }
+  if (toolName === 'create_appointment' && preview?.pinned_technician) {
+    // Show the pinned tech by NAME (the id is opaque on a card) — the visit
+    // binds to exactly this technician at commit.
+    const { technician_id, technician_name, ...rest } = params;
+    return { ...rest, technician: preview.pinned_technician.name };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
@@ -604,6 +626,23 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
+    if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
+      // Pin the technician like send_sms pins the recipient: resolution
+      // happens NOW, so the card names the exact tech the visit binds to
+      // and /confirm-action can never re-resolve "Adam" to a different row
+      // than the operator approved. A model-supplied technician_id gets the
+      // SAME treatment — resolved to an active tech and canonicalized to a
+      // name, never approved as an opaque uuid. Ambiguity (or no active
+      // match) fails the proposal instead of silently mis-assigning.
+      const tech = params.technician_id
+        ? await resolveActiveTechnicianById(params.technician_id)
+        : await resolveTechnicianByName(params.technician_name);
+      if (!tech) return { failed: true, modelResult: { error: 'No active technician matches — nothing was proposed. Retry with a corrected name, a technician_id from an ambiguity result, or omit the technician.' } };
+      if (tech.error) return { failed: true, modelResult: tech };
+      params.technician_id = tech.id;
+      params.technician_name = tech.name;
+      preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
+    }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);
       if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
@@ -680,7 +719,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   const row = await PendingActions.createPendingAction({
     toolName: toolUse.name,
     params,
-    summary: summarizeProposal(toolUse.name, params),
+    summary: summarizeProposal(toolUse.name, params, confirmationDisplayParams(toolUse.name, params, preview)),
     requestedBy: getAdminActorId(req),
     context,
   });
@@ -701,6 +740,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // to find the dollars and review flags they are approving.
       params: confirmationDisplayParams(toolUse.name, params, preview),
       expiresAt: row.expires_at,
+      // Server-computed remaining ms — the client countdown anchors on
+      // receipt + this, never on comparing expiresAt to the device clock
+      // (codex P2 on #3633: a skewed clock staled the card at the wrong
+      // moment in both directions).
+      expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     },
   };
 }
@@ -1618,6 +1662,11 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop. The confirmation id goes to the client only.
+          if (ibWritesDisabled()) {
+            result = { error: IB_WRITES_DISABLED_MESSAGE };
+            failed = true;
+            errorMessage = result.error;
+          } else {
           try {
             const proposed = await proposePendingWrite({
               toolUse,
@@ -1637,6 +1686,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
             result = { error: err.message || 'Could not create the pending action' };
             failed = true;
             errorMessage = result.error;
+          }
           }
         } else if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
@@ -1811,6 +1861,9 @@ router.post('/execute', async (req, res, next) => {
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
+    if (ibWritesDisabled() && (UI_GATED_WRITE_TOOL_NAMES.has(action) || CONFIRMED_ACTION_TOOL_NAMES.has(action))) {
+      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    }
 
     let executionParams = params || {};
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
@@ -1861,6 +1914,12 @@ router.post('/confirm-action', async (req, res, next) => {
   try {
     const id = String(req.body?.pending_action_id || '').trim();
     if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+
+    // Emergency write freeze covers commits too — a pending action proposed
+    // before the freeze must not slip through after it.
+    if (ibWritesDisabled()) {
+      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    }
 
     const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req));
     if (claim.error) {
