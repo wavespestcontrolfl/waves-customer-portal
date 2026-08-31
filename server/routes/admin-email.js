@@ -35,7 +35,9 @@ function redactEmail(value) {
 // records the /oauth/callback exemption.
 const OAUTH_PUBLIC_PATHS = new Set(['/oauth/callback']);
 function adminAuthenticateExceptOauthCallback(req, res, next) {
-  if (OAUTH_PUBLIC_PATHS.has(req.path)) return next();
+  // GET only, matching the registry's exempts entry — Google's redirect is a
+  // GET; any other method (or a future sibling route) stays behind admin auth.
+  if (req.method === 'GET' && OAUTH_PUBLIC_PATHS.has(req.path)) return next();
   return adminAuthenticate(req, res, (err) => {
     if (err) return next(err);
     return requireAdmin(req, res, next);

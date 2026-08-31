@@ -224,6 +224,36 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('conditional'))).toBe(true);
   });
 
+  test('a guard AFTER the router in app.use does not protect it (middleware order)', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const { guardA } = require('./middleware/a');",
+        "app.use('/api/x', require('./routes/x'), guardA);",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
+  });
+
+  test('a guard AFTER the terminal handler does not protect the route; before it, it does', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'const limiter = (req, res, next) => next();',
+        "router.get('/late-guard', (req, res) => res.json({}), guardA);",
+        "router.get('/guarded', limiter, guardA, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/late-guard']);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),

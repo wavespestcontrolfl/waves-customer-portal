@@ -598,39 +598,55 @@ class Scanner {
         this.problems.push(`${m.loc(reg.node)}: cannot classify first argument "${args[0].name}" (path or handler?) — use a literal path or a top-level string/array binding`);
         continue;
       }
+      // Order-preserving: Express runs middleware left-to-right, so a guard
+      // only protects what comes AFTER it in the argument list. Each
+      // router/static ref captures the guards that precede it, and a verb
+      // route only counts guards that precede its last non-guard handler
+      // (`router.get('/x', handler, guardA)` is REACHABLE before guardA runs).
       const handlers = args.flatMap((a) => m.classify(a));
-      const ownGuards = handlers.filter((h) => h.type === 'guard');
-      const routerRefs = handlers.filter((h) => h.type === 'router' || h.type === 'localRouter');
-      const statics = handlers.filter((h) => h.type === 'static');
+      const lastNonGuard = handlers.reduce((acc, h, i) => (h.type === 'guard' ? acc : i), -1);
+      const ownGuards = handlers.filter((h, i) => h.type === 'guard' && (lastNonGuard === -1 || i < lastNonGuard));
+      const routerRefs = [];
+      const statics = [];
+      {
+        const guardsSoFar = [];
+        for (const h of handlers) {
+          if (h.type === 'guard') guardsSoFar.push(h);
+          else if (h.type === 'router' || h.type === 'localRouter') routerRefs.push({ ...h, precedingGuards: [...guardsSoFar] });
+          else if (h.type === 'static') statics.push({ ...h, precedingGuards: [...guardsSoFar] });
+        }
+      }
 
       if (reg.method === 'use') {
         for (const p of paths) {
           const scope = joinPaths(ctx.prefix, p);
           if (routerRefs.length === 0 && statics.length === 0) {
-            // Pure middleware. Only guards matter for the model.
-            if (ownGuards.length === 0) continue;
+            // Pure middleware. Only guards matter for the model, and here
+            // every guard counts (there is no terminal handler in the call).
+            const useGuards = handlers.filter((h) => h.type === 'guard');
+            if (useGuards.length === 0) continue;
             if (!pathResolved) {
-              this.problems.push(`${m.loc(reg.node)}: guard ${ownGuards.map((g) => g.name).join(',')} mounted on an unresolvable path — make the path a literal`);
+              this.problems.push(`${m.loc(reg.node)}: guard ${useGuards.map((g) => g.name).join(',')} mounted on an unresolvable path — make the path a literal`);
               continue;
             }
             if (!reg.topLevel) {
-              this.problems.push(`${m.loc(reg.node)}: guard ${ownGuards.map((g) => g.name).join(',')} is registered inside a block/function (conditional) — it is NOT counted; move it to module top level`);
+              this.problems.push(`${m.loc(reg.node)}: guard ${useGuards.map((g) => g.name).join(',')} is registered inside a block/function (conditional) — it is NOT counted; move it to module top level`);
               continue;
             }
-            inEffect.push({ scope, guards: ownGuards });
+            inEffect.push({ scope, guards: useGuards });
             continue;
           }
           for (const s of statics) {
             this.routes.push(this.makeRoute({
               method: 'STATIC', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
-              guards: [...ctx.mountGuards, ...ownGuards, ...inEffectGuards(inEffect, scope)],
+              guards: [...ctx.mountGuards, ...s.precedingGuards, ...inEffectGuards(inEffect, scope)],
               resolved: pathResolved, extra: s.desc, loc: m.loc(reg.node),
             }));
           }
           for (const ref of routerRefs) {
             const childCtx = {
               prefix: scope,
-              mountGuards: [...ctx.mountGuards, ...ownGuards],
+              mountGuards: [...ctx.mountGuards, ...ref.precedingGuards],
               inEffect: [...inEffect],
               mountLabel: scope,
               mountRouter: ref.type === 'router' ? ref.module : m.file,
