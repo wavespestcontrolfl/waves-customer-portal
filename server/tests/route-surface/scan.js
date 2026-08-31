@@ -59,7 +59,10 @@ const parser = require('@babel/parser');
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const APP_FILE = 'server/index.js';
 const GUARD_REGISTRY_FILE = 'server/config/route-auth-guards.json';
-const VERBS = new Set(['get', 'post', 'put', 'patch', 'delete', 'all', 'head', 'options']);
+// Every HTTP method Express exposes as a router method (router.checkout,
+// router.m-search, ... included) — a route registered under ANY of them is
+// surface. `all` is Express's own addition.
+const VERBS = new Set([...require('http').METHODS.map((m) => m.toLowerCase()), 'all']);
 const APP_IDENTIFIERS = new Set(['app']);
 
 // ---------------------------------------------------------------------------
@@ -163,6 +166,7 @@ class ModuleAnalysis {
     this.scanner = scanner;
     this.ast = parseSource(src, file);
     this.bindings = new Map(); // name -> descriptor
+    this.shadowedNames = new Set(); // bound at top level AND inside a block
     this.routers = new Set(); // identifiers bound to express.Router()
     this.exportedRouter = null;
     this.registrations = []; // ordered { object, method, args, topLevel, loc }
@@ -185,7 +189,7 @@ class ModuleAnalysis {
           if (prop.type !== 'ObjectProperty' || prop.key.type !== 'Identifier') continue;
           const local = prop.value.type === 'Identifier' ? prop.value.name : null;
           if (!local) continue;
-          this.setBinding(local, { kind: 'requireMember', module: mod, name: prop.key.name, topLevel: ctx.topLevel });
+          this.setBinding(local, { kind: 'requireMember', module: mod, spec: node.init.arguments[0].value, name: prop.key.name, topLevel: ctx.topLevel });
         }
       } else if (node.type === 'FunctionDeclaration' && node.id) {
         this.setBinding(node.id.name, { kind: 'function', topLevel: ctx.topLevel });
@@ -222,7 +226,7 @@ class ModuleAnalysis {
         this.exportCandidate = node.right.name;
       } else if (node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression'
-        && node.callee.object.type === 'Identifier') {
+        && (node.callee.object.type === 'Identifier' || node.callee.object.type === 'CallExpression')) {
         // Computed string-literal calls (router['get'](...)) register like the
         // plain form; a computed NON-literal method (router[verb](...)) cannot
         // be resolved, so it is recorded and reported as a problem when the
@@ -237,10 +241,29 @@ class ModuleAnalysis {
         } else if (node.callee.computed) {
           unresolvedMethod = true;
         }
-        if (unresolvedMethod) {
-          this.registrations.push({ object: node.callee.object.name, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, node });
+        // Fluent chains (`router.get('/a', h).post('/b', h)`) register on the
+        // chain's ROOT identifier — Express verbs return the router, so every
+        // link is a real registration. A chain rooted in an inline Router()
+        // call has no name to attribute routes to: reject it (fail closed).
+        let objName = null;
+        if (node.callee.object.type === 'Identifier') {
+          objName = node.callee.object.name;
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
-          this.registrations.push({ object: node.callee.object.name, method, args: node.arguments, topLevel: ctx.topLevel, node });
+          let base = node.callee.object;
+          while (base && base.type === 'CallExpression' && !isRouterFactoryCall(base)) {
+            base = base.callee && base.callee.type === 'MemberExpression' ? base.callee.object : null;
+          }
+          if (base && base.type === 'Identifier') objName = base.name;
+          else if (base && isRouterFactoryCall(base)) {
+            this.problems.push(`${this.loc(node)}: ${method}() chained on an inline Router() call — bind the router to a const so its routes can be attributed`);
+          }
+        }
+        if (objName === null) {
+          // not a chain we can attribute (or not a registration shape at all)
+        } else if (unresolvedMethod) {
+          this.registrations.push({ object: objName, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, node });
+        } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
+          this.registrations.push({ object: objName, method, args: node.arguments, topLevel: ctx.topLevel, node });
         }
       }
     }, { topLevel: true });
@@ -281,8 +304,12 @@ class ModuleAnalysis {
 
   setBinding(name, desc) {
     // Top-level bindings win over nested shadows so a route file's imports
-    // stay authoritative; nested-only names are still recorded.
+    // stay authoritative; nested-only names are still recorded. A name bound
+    // at BOTH levels is remembered as shadowed: the flat model cannot tell
+    // which binding a handler reference resolves to, so classify() must
+    // refuse to credit it (a block-local no-op could shadow a real guard).
     const existing = this.bindings.get(name);
+    if (existing && existing.topLevel !== desc.topLevel) this.shadowedNames.add(name);
     if (existing && existing.topLevel && !desc.topLevel) return;
     this.bindings.set(name, desc);
   }
@@ -292,7 +319,7 @@ class ModuleAnalysis {
       this.routers.add(name);
       this.setBinding(name, { kind: 'router', topLevel });
     } else if (isRequireCall(init)) {
-      this.setBinding(name, { kind: 'require', module: resolveModulePath(this.file, init.arguments[0].value), topLevel });
+      this.setBinding(name, { kind: 'require', module: resolveModulePath(this.file, init.arguments[0].value), spec: init.arguments[0].value, topLevel });
     } else if (init && init.type === 'StringLiteral') {
       this.setBinding(name, { kind: 'string', value: init.value, topLevel });
     } else if (init && init.type === 'ArrayExpression') {
@@ -310,6 +337,7 @@ class ModuleAnalysis {
       this.setBinding(name, {
         kind: 'requireMember',
         module: resolveModulePath(this.file, init.object.arguments[0].value),
+        spec: init.object.arguments[0].value,
         name: init.property.name,
         topLevel,
       });
@@ -481,9 +509,14 @@ class ModuleAnalysis {
       case 'ArrowFunctionExpression':
       case 'FunctionExpression':
         // An inline function is definitionally not a Router instance.
-        return [{ type: 'middleware', desc: node.type }];
+        return [{ type: 'middleware', desc: 'inline function' }];
       case 'Identifier': {
         const canon = this.canonName(node.name);
+        if (this.shadowedNames.has(node.name) || (canon !== node.name && this.shadowedNames.has(canon))) {
+          // Which binding this reference resolves to depends on lexical scope
+          // the flat model doesn't track — never credit a shadowed name.
+          return [{ type: 'opaque', desc: `${node.name} (shadowed by a nested redeclaration)` }];
+        }
         if (this.routers.has(canon)) return [{ type: 'localRouter', name: canon }];
         const b = this.bindings.get(canon);
         if (!b) return [{ type: 'opaque', desc: `unbound identifier ${node.name}` }];
@@ -526,6 +559,8 @@ class ModuleAnalysis {
         }
         if (c.type === 'CallExpression' && this.isNodeModulesRef(c)) {
           // require('express-rate-limit')({...}) — node_modules factory call.
+          const spec = c.arguments[0].value;
+          if (registry.lookupPackagePassthrough(spec, null)) return [{ type: 'passthrough', name: spec }];
           return [{ type: 'middleware', desc: this.src.slice(c.start, c.end) + '(...)' }];
         }
         if (c.type === 'Identifier') {
@@ -543,15 +578,21 @@ class ModuleAnalysis {
           if (this.isNodeModulesRef(c)) {
             // A node_modules factory (rateLimit, cors, morgan, ...) cannot
             // return one of OUR routers — middleware, but never auth.
+            if (registry.lookupPackagePassthrough(b.spec, b.kind === 'requireMember' ? b.name : null)) {
+              return [{ type: 'passthrough', name: c.name }];
+            }
             return [{ type: 'middleware', desc: `${c.name}(...)` }];
           }
           return [{ type: 'opaque', desc: `${c.name}(...)` }];
         }
-        if (c.type === 'MemberExpression' && !c.computed
-          && (this.isNodeModulesRef(c.object) || (c.object.type === 'Identifier'
-            && (this.bindings.get(c.object.name) || {}).kind === 'require'
-            && (this.bindings.get(c.object.name) || {}).module === null))) {
+        if (c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier'
+          && (this.isNodeModulesRef(c.object)
+            || (isRequireCall(c.object) && resolveModulePath(this.file, c.object.arguments[0].value) === null))) {
           // express.json(...), bodyParser.raw(...) — node_modules member call.
+          const spec = isRequireCall(c.object) ? c.object.arguments[0].value : (this.bindings.get(c.object.name) || {}).spec;
+          if (spec && registry.lookupPackagePassthrough(spec, c.property.name)) {
+            return [{ type: 'passthrough', name: `${spec}.${c.property.name}` }];
+          }
           return [{ type: 'middleware', desc: this.src.slice(c.start, c.end) + '(...)' }];
         }
         return [{ type: 'opaque', desc: this.src.slice(c.start, c.end) + '(...)' }];
@@ -602,7 +643,7 @@ class GuardRegistry {
     // middleware before a guard voids the guard — fail closed.
     this.passthroughs = (Array.isArray(json.passthroughs) ? json.passthroughs : []).map((p) => {
       if (!p.name || !p.module) throw new Error(`passthrough entry missing name/module: ${JSON.stringify(p)}`);
-      return { name: p.name, module: p.module, local: Boolean(p.local) };
+      return { name: p.name, module: p.module, local: Boolean(p.local), package: Boolean(p.package) };
     });
   }
 
@@ -611,7 +652,17 @@ class GuardRegistry {
   }
 
   lookupPassthrough(module, name, { local = false } = {}) {
-    return this.passthroughs.find((p) => p.module === module && p.name === name && p.local === local) || null;
+    return this.passthroughs.find((p) => !p.package && p.module === module && p.name === name && p.local === local) || null;
+  }
+
+  /**
+   * Package passthroughs: a factory CALL whose callee is require('<module>')
+   * (member === null) or require('<module>').<member>. The reviewed claim is
+   * that the package's produced middleware only rejects or next()s.
+   */
+  lookupPackagePassthrough(spec, member) {
+    return this.passthroughs.find((p) => p.package && p.module === spec
+      && (member === null ? (p.name === '*') : p.name === member)) || null;
   }
 }
 
@@ -738,6 +789,16 @@ class Scanner {
         if (resolved) paths = resolved;
         else { paths = [`<unresolved:${m.src.slice(args[0].start, args[0].end)}>`]; pathResolved = false; }
         args.shift();
+      } else if (reg.method !== 'use' && args.length
+        && !['ArrowFunctionExpression', 'FunctionExpression', 'ArrayExpression', 'SpreadElement'].includes(args[0].type)
+        && !(args[0].type === 'Identifier' && !m.ambiguousFirstArg(args[0]))) {
+        // Express verbs take a leading path. An expression we cannot resolve
+        // ('/api/' + x, PATHS.leak) must be treated as an UNRESOLVED path —
+        // reading it as a handler would silently file the route under the
+        // mount root, where an existing allowlist entry could mask it.
+        paths = [`<unresolved:${m.src.slice(args[0].start, args[0].end)}>`];
+        pathResolved = false;
+        args.shift();
       } else if (args.length && m.ambiguousFirstArg(args[0])) {
         // An identifier that is neither a resolvable string nor a known
         // handler shape could be a path constant — refuse to guess, because
@@ -777,8 +838,23 @@ class Scanner {
             this.problems.push(`${m.loc(reg.node)}: cannot prove use() handler "${h.desc}" is not a router — mount routers directly, or use an inline/in-repo function or a registered guard/passthrough`);
           }
         }
+        const middlewareDescs = handlers.filter((h) => h.type === 'middleware').map((h) => h.desc);
         for (const p of paths) {
           const scope = joinPaths(ctx.prefix, p);
+          if (middlewareDescs.length && scope !== '/') {
+            // Terminal-capable middleware on a scoped mount is real surface:
+            // Express runs it for every request under the scope and it may
+            // answer without calling next() (`app.use('/api/leak', (req, res)
+            // => res.json(data))`), so it is inventoried as a USE entry and
+            // must be allowlisted when unguarded. Registered passthroughs are
+            // exempt; a path-less app-level use() (body parsing, logging on
+            // scope '/') has no scope of its own and stays out.
+            this.routes.push(this.makeRoute({
+              method: 'USE', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
+              guards: [...ctx.mountGuards, ...ownGuards, ...inEffectGuards(inEffect, scope)],
+              resolved: pathResolved, extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
+            }));
+          }
           if (routerRefs.length === 0 && statics.length === 0) {
             // Pure middleware. Only guards matter for the model.
             const useGuards = ownGuards;

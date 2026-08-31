@@ -11,6 +11,22 @@
   ],
   "mounts": [
     {
+      "router": "server/index.js",
+      "mount": "/",
+      "reason": "Scoped pre-router middleware inventoried as USE surface: embed-CORS + privacy header stamps (pest-forecast, secure-card) and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A) — each either sets headers and next()s or 404s while its GATE_* is off",
+      "routes": [
+        "USE /api/ai/chat/report (inline function)",
+        "USE /api/pay/statement (inline function)",
+        "USE /api/public/a2a (inline function)",
+        "USE /api/public/careers (inline function)",
+        "USE /api/public/lawn-assessment (inline function)",
+        "USE /api/public/mcp (inline function)",
+        "USE /api/public/pest-forecast (inline function)",
+        "USE /api/public/pest-identifier (inline function)",
+        "USE /api/public/secure-card (inline function)"
+      ]
+    },
+    {
       "router": "server/routes/stripe-webhook.js",
       "mount": "/api/stripe/webhook",
       "reason": "Stripe webhook — signature-verified in-handler (stripe.webhooks.constructEvent over the raw body; rejects when STRIPE_WEBHOOK_SECRET is unset)",
@@ -352,8 +368,9 @@
     {
       "router": "server/routes/appointment-public.js",
       "mount": "/api/public/appointment",
-      "reason": "Tokenized appointment confirm / calendar links from SMS/email",
+      "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
+        "USE /api/public/appointment (inline function)",
         "GET /api/public/appointment/:token",
         "GET /api/public/appointment/:token/calendar.ics",
         "POST /api/public/appointment/:token/confirm"
@@ -362,8 +379,9 @@
     {
       "router": "server/routes/secure-card-public.js",
       "mount": "/api/public/secure-card",
-      "reason": "Tokenized secure card-capture links (Stripe Payment Element) from SMS/email",
+      "reason": "Tokenized secure card-capture links (Stripe Payment Element) from SMS/email; the USE entry is the router's privacy-header stamp (always next())",
       "routes": [
+        "USE /api/public/secure-card (inline function)",
         "GET /api/public/secure-card/:token",
         "POST /api/public/secure-card/:token/complete",
         "POST /api/public/secure-card/:token/select-plan"
@@ -398,8 +416,9 @@
     {
       "router": "server/routes/public-lawn-assessment.js",
       "mount": "/api/public/lawn-assessment",
-      "reason": "Public AI lawn assessment funnel (rate-limited lead-gen intake per its AGENTS.md contract)",
+      "reason": "Public AI lawn assessment funnel (rate-limited lead-gen intake per its AGENTS.md contract); the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
+        "USE /api/public/lawn-assessment (inline function)",
         "POST /api/public/lawn-assessment/:id/claim",
         "POST /api/public/lawn-assessment/analyze"
       ]
@@ -425,8 +444,9 @@
     {
       "router": "server/routes/estimate-slots-public.js",
       "mount": "/api/public/estimates",
-      "reason": "Estimate scheduling/deposit flow by unguessable estimate token (ask/find-slots carry the signed askToken contract from AGENTS.md)",
+      "reason": "Estimate scheduling/deposit flow by unguessable estimate token (ask/find-slots carry the signed askToken contract from AGENTS.md); the USE entry is the router's no-cache header stamp (always next())",
       "routes": [
+        "USE /api/public/estimates (inline function)",
         "DELETE /api/public/estimates/:token/reserve/:scheduledServiceId",
         "GET /api/public/estimates/:token/available-slots",
         "POST /api/public/estimates/:token/ask",
@@ -529,8 +549,9 @@
     {
       "router": "server/routes/pay-statement.js",
       "mount": "/api/pay/statement",
-      "reason": "Tokenized account-statement payment page from customer comms",
+      "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
+        "USE /api/pay/statement (inline function)",
         "GET /api/pay/statement/:token",
         "POST /api/pay/statement/:token/finalize",
         "POST /api/pay/statement/:token/quote",

@@ -60,6 +60,22 @@
     { "name": "rejectQueryString", "module": "server/routes/admin-call-recordings.js", "local": true,
       "what": "400 on any query string (recording-audio URL hygiene) before the auth chain" },
     { "name": "createBodyErrorHandler", "module": "server/services/mcp-rpc.js",
-      "what": "factory for the JSON-RPC body-parser error handler — 413/parse-error JSON or next(err)" }
+      "what": "factory for the JSON-RPC body-parser error handler — 413/parse-error JSON or next(err)" },
+    { "name": "noStore", "module": "server/middleware/no-store.js",
+      "what": "cache/robots/referrer header stamp for tokenized public surfaces — always next()" },
+    { "name": "requireStaffTokenForLargeBody", "module": "server/middleware/large-body-auth.js",
+      "what": "401 on a large body without a staff token, next() otherwise — never serves" },
+    { "name": "publicMcpGate", "module": "server/routes/public-mcp.js", "local": true,
+      "what": "404 while GATE mcpPublic is off (unobservable-when-dark) ahead of parse/limits" },
+    { "name": "publicA2aGate", "module": "server/routes/public-a2a.js", "local": true,
+      "what": "404 while GATE a2aPublic is off (unobservable-when-dark) ahead of parse/limits" },
+    { "name": "*", "module": "express-rate-limit", "package": true,
+      "what": "any express-rate-limit instance — 429s or next()s, never serves route data" },
+    { "name": "json", "module": "express", "package": true,
+      "what": "body parser — 4xx on a malformed/oversized body, next() otherwise" },
+    { "name": "urlencoded", "module": "express", "package": true,
+      "what": "body parser — 4xx on a malformed/oversized body, next() otherwise" },
+    { "name": "raw", "module": "express", "package": true,
+      "what": "body parser — 4xx on an oversized body, next() otherwise" }
   ]
 }

@@ -102,7 +102,10 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
   const registry = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, GUARD_REGISTRY_FILE), 'utf8'));
 
   test('every registered guard and passthrough resolves to a real identifier in its module', () => {
-    for (const g of [...registry.guards, ...(registry.passthroughs || [])]) {
+    // Package passthroughs (module = an npm package name) have no repo file
+    // to resolve against — the scanner matches them by require() specifier.
+    const fileEntries = [...registry.guards, ...(registry.passthroughs || []).filter((p) => !p.package)];
+    for (const g of fileEntries) {
       const file = path.join(REPO_ROOT, g.module);
       expect({ guard: g.name, exists: fs.existsSync(file) }).toEqual({ guard: g.name, exists: true });
       const src = fs.readFileSync(file, 'utf8');
@@ -113,6 +116,25 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
       ).test(src);
       expect({ guard: g.name, module: g.module, defined }).toEqual({ guard: g.name, module: g.module, defined: true });
     }
+  });
+
+  test("adminAuthenticateExceptOauthCallback's runtime exemption set matches its registry exempts", () => {
+    // The guard lets through req.path values in OAUTH_PUBLIC_PATHS (GET only).
+    // The registry's exempts must mirror that set EXACTLY — a path added to
+    // the runtime Set without a registry (and allowlist) update would be an
+    // untracked public route the scanner still reports as authenticated.
+    const src = fs.readFileSync(path.join(REPO_ROOT, 'server/routes/admin-email.js'), 'utf8');
+    const m = src.match(/OAUTH_PUBLIC_PATHS\s*=\s*new Set\(\[([^\]]*)\]\)/);
+    expect(m).not.toBeNull();
+    const runtimePaths = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] || x[2]).sort();
+    const guard = registry.guards.find((g) => g.name === 'adminAuthenticateExceptOauthCallback');
+    expect(guard).toBeDefined();
+    const exemptPaths = (guard.exempts || []).map((e) => {
+      const [method, p] = e.split(/\s+/);
+      expect(method).toBe('GET'); // the guard's carve-out is GET-only
+      return p;
+    }).sort();
+    expect(exemptPaths).toEqual(runtimePaths);
   });
 
   test('exempted paths on guards are themselves allowlisted', () => {
@@ -175,7 +197,10 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
         'module.exports = router;',
       ].join('\n'),
     });
-    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
+    // The wrapper itself is also inventoried as scoped USE surface — it is
+    // unproven middleware that runs for every request under /api/x.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/thing', 'USE /api/x']);
   });
 
   test('a REGISTERED guard on the mount protects every route under it', () => {
@@ -314,7 +339,11 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(res.problems).toEqual([]);
-    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
+    // The scoped limiter mount is inventoried as USE surface (it is not a
+    // registered passthrough in this fixture registry); path-less use()
+    // calls (cors, the inline fn) are not.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/thing', 'USE /api']);
   });
 
   test('registrations through a router ALIAS are not lost', () => {
@@ -343,6 +372,98 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
       'GET /api/x/a', 'GET /api/x/b', 'POST /api/x/c',
     ]);
+  });
+
+  test('TERMINAL middleware mounted with a scoped use() is inventoried as USE surface', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/leak', (req, res) => res.json({ secret: 1 }));"),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['USE /api/leak']);
+  });
+
+  test('a registered PACKAGE passthrough factory neither voids guards nor inventories USE surface', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, passthroughs: [{ name: '*', module: 'express-rate-limit', package: true }] },
+      files: {
+        'server/index.js': app([
+          "const rateLimit = require('express-rate-limit');",
+          "const { guardA } = require('./middleware/a');",
+          "app.use('/api/x', rateLimit({ max: 5 }), guardA, require('./routes/x'));",
+        ].join('\n')),
+        'server/routes/x.js': [
+          "const router = require('express').Router();",
+          "router.get('/thing', (req, res) => res.json({}));",
+          'module.exports = router;',
+        ].join('\n'),
+      },
+    }).scan();
+    expect(res.publicRoutes).toEqual([]);
+    expect(res.problems).toEqual([]);
+  });
+
+  test('fluent CHAINED registrations are all recorded (router.get(...).post(...))', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/a', (req, res) => res.json({})).post('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/a', 'POST /api/x/leak']);
+  });
+
+  test('a registration chained on an INLINE Router() call is a reported problem', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', express.Router().get('/leak', (req, res) => res.json({})));"),
+    });
+    expect(res.problems.some((p) => p.includes('inline Router()'))).toBe(true);
+  });
+
+  test('an unsupported expression in verb path position is an UNRESOLVED path, not a handler', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const PATHS = { leak: '/leak' };",
+        "router.get(PATHS.leak, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // The route surfaces as unresolved-and-public, which is itself a problem —
+    // it can never silently pass as the mount root's existing allowlist entry.
+    expect(res.publicRoutes.some((r) => r.path.includes('<unresolved:PATHS.leak>'))).toBe(true);
+    expect(res.problems.some((p) => p.includes('unresolvable path'))).toBe(true);
+  });
+
+  test('a guard name SHADOWED by a nested redeclaration is never credited', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'function setup() { const guardA = (req, res, next) => next(); return guardA; }',
+        "router.get('/thing', guardA, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
+  });
+
+  test('every Express HTTP method counts as surface (trace, checkout, ...)', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.trace('/leak', (req, res) => res.json({}));",
+        "router.checkout('/leak2', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['CHECKOUT /api/x/leak2', 'TRACE /api/x/leak']);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
