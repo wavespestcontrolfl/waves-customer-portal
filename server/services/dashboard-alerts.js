@@ -26,6 +26,16 @@ const { loadCloseoutStatuses, closeoutIssuesForVisit } = require('./closeout-ale
 // Closeout sweep bound — the day view checks at most this many completed
 // visits (Waves runs one technician; a day is ~5-15).
 const CLOSEOUT_SWEEP_CAP = 50;
+// Last-known gap set for the current service date. dashboard-alerts-cron
+// deletes state for an ABSENT alert and re-notifies when it reappears, so a
+// transient lookup outage must not make closeout_gaps_today vanish: a visit
+// whose read is unreadable (load failed / found:false / partial with no
+// readable issue) keeps its last-known gap until a COMPLETE clean read.
+let closeoutGapCarry = { date: null, issueCounts: new Map() };
+function closeoutCarryFor(date) {
+  if (closeoutGapCarry.date !== date) closeoutGapCarry = { date, issueCounts: new Map() };
+  return closeoutGapCarry.issueCounts;
+}
 
 // A lead is "waiting" once it has gone this long with no first response.
 // Mirrors the Response Speed tile's alert threshold order-of-magnitude but
@@ -375,11 +385,22 @@ async function computeDashboardAlertsUncached() {
       .select('id')) || [];
     if (completedToday.length) {
       const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
+      const carry = closeoutCarryFor(today);
       const gapIds = [];
       let issueCount = 0;
       for (const row of completedToday) {
-        const issues = closeoutIssuesForVisit(statuses.get(row.id));
-        if (issues.length) { gapIds.push(row.id); issueCount += issues.length; }
+        const status = statuses.get(row.id);
+        const unreadable = !status || !status.found || Boolean(status.unavailable && status.unavailable.length);
+        const issues = closeoutIssuesForVisit(status);
+        if (issues.length) {
+          // A gap seen in a full OR partial read counts, and is remembered.
+          gapIds.push(row.id); issueCount += issues.length; carry.set(row.id, issues.length);
+        } else if (unreadable && carry.has(row.id)) {
+          // Outage: hold the last-known gap so the alert cannot clear and re-fire.
+          gapIds.push(row.id); issueCount += carry.get(row.id);
+        } else if (!unreadable) {
+          carry.delete(row.id); // complete clean read → genuinely resolved
+        }
       }
       if (gapIds.length) {
         alerts.push({
@@ -751,6 +772,7 @@ module.exports = {
   computeDashboardAlerts,
   computeDashboardAlertsUncached,
   toNotifications,
+  __private: { resetCloseoutCarry: () => { closeoutGapCarry = { date: null, issueCounts: new Map() }; } },
   // Shared with routes/admin-leads.js so the bell's builder-warranty count
   // and its ?builder_warranty=expiring drill list can never disagree.
   whereBuilderWarrantyExpiring,

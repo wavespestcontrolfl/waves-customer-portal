@@ -324,6 +324,33 @@ describe('Action Inbox generators', () => {
     expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d']);
   });
 
+  test('closeout_gaps_today: a lookup outage holds the last-known gap (no clear/re-fire); a complete clean read clears it (codex r5)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    const gap = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' } } };
+    const clean = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'done', reason: 'report_published' } } };
+    const partialNoIssue = { ...clean, unavailable: [{ lookup: 'service_report_deliveries', error: 'timeout' }] };
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', gap]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1 });
+    // Load failed → still present.
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1, members: ['svc-a'] });
+    // Partial read with no readable issue → still present.
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', partialNoIssue]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1 });
+    // Complete clean read → cleared, and a later outage does not resurrect it.
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', clean]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+    primeDb({ scheduled_services: [{ id: 'svc-a' }] });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
+  });
+
   test('closeout_gaps_today: absent when every completed visit is closed out or there are none', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     primeDb({ scheduled_services: [] });
