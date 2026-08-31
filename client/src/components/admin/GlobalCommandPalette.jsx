@@ -294,6 +294,9 @@ function GlobalCommandPalette(_props, ref) {
   // the id is set from query responses and from resume-on-open.
   const [threadId, setThreadId] = useState(null);
   const resumeAttemptedRef = useRef(false);
+  // Bumped by submit/"New chat" so a still-inflight resume response can't
+  // clobber newer state (it only applies if the epoch is unchanged).
+  const threadEpochRef = useRef(0);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
   const [attachments, setAttachments] = useState([]);
@@ -383,8 +386,10 @@ function GlobalCommandPalette(_props, ref) {
   useEffect(() => {
     if (!open || resumeAttemptedRef.current || conversationHistory.length > 0) return;
     resumeAttemptedRef.current = true;
+    const epoch = threadEpochRef.current;
     adminFetch("/admin/intelligence-bar/threads/latest")
       .then((data) => {
+        if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
         if (data?.thread?.conversationHistory?.length) {
           setConversationHistory(data.thread.conversationHistory);
           setThreadId(data.thread.id);
@@ -397,6 +402,7 @@ function GlobalCommandPalette(_props, ref) {
     async (text) => {
       const q = (text || prompt).trim();
       if (!q || loading || attachmentsLoadingRef.current) return;
+      threadEpochRef.current += 1; // invalidate any inflight thread resume
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
@@ -428,7 +434,7 @@ function GlobalCommandPalette(_props, ref) {
       setPrompt("");
       resetAttachments();
     },
-    [prompt, loading, conversationHistory, context, location.pathname, attachments, resetAttachments],
+    [prompt, loading, conversationHistory, context, threadId, location.pathname, attachments, resetAttachments],
   );
 
   const addAttachments = useCallback(
@@ -467,6 +473,7 @@ function GlobalCommandPalette(_props, ref) {
     // "New chat": drops the local view AND detaches from the persisted
     // thread — the next query starts a fresh thread (old ones remain until
     // retention).
+    threadEpochRef.current += 1; // invalidate any inflight thread resume
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
