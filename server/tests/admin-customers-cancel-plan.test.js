@@ -328,7 +328,9 @@ describe('POST /:id/cancel-plan', () => {
       b.insert = (row) => { order.push(`insert:${table}`); return insert(row); };
       return b;
     });
-    mockProcess.mockImplementation(async () => { order.push('processor'); return { ...PROCESSED }; });
+    // The processor CONFIRMS the requested waiver (every fee rail released) —
+    // the response's lateFeeWaived reflects that verdict, never the request.
+    mockProcess.mockImplementation(async () => { order.push('processor'); return { ...PROCESSED, lateFeeWaived: true }; });
     mockOpenCase.mockImplementation(async (args) => { order.push('case'); return { id: 'case-1', ...args }; });
     sendCancellationConfirmations.mockImplementation(async () => { order.push('confirm'); return { smsSent: true, emailSent: false, channels: ['sms'] }; });
 
@@ -585,6 +587,13 @@ describe('POST /:id/cancel-plan', () => {
       expect(body.processed).toBe(true);
       expect(body.prepayTermOutcome).toBe('decision_conflict');
       expect(body.errors).toContain('prepay_term_decision_conflict');
+      // No RECORDED refund for a term that stands: the response must not
+      // carry a refund object the dialog would render as "Refund recorded".
+      expect(body.refund).toBeUndefined();
+      // The case keeps the numbers as PROPOSED-only metadata.
+      const snapshot = mockOpenCase.mock.calls[0][0].snapshot;
+      expect(snapshot.refund).toBeNull();
+      expect(snapshot.proposedRefund).toEqual(expect.objectContaining({ needsManualCalc: false }));
       // Only the review bell — the refund task must NOT be raised for a term
       // that is renewing.
       const categories = NotificationService.notifyAdmin.mock.calls.map((c) => c[0]);

@@ -611,6 +611,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // the operator retries; the retry re-runs processor-then-disposition in
   // the documented order.
   let termOutcome = null;
+  // The refund is a RECORDED money fact only after the cancel decision is
+  // verified AND the office task persisted — a conflicting renew decision
+  // (or a lost task) must not put "Refund recorded" on the case, the
+  // response, or the IB card for a term that stands.
+  let refundRecorded = false;
   if (term && prepayPlan.prepayDisposition && !processed) {
     termOutcome = 'skipped_processor_failed';
     errors.push('prepay_term_disposition_skipped');
@@ -650,6 +655,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         } else {
           termOutcome = decision.fresh ? 'ended_now' : 'decision_already_recorded';
           await raisePrepayRefundTask({ customer, request, term, refund, actorLabel });
+          refundRecorded = true;
         }
       }
     } catch (err) {
@@ -667,7 +673,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     prepayDisposition: prepayPlan.prepayDisposition,
     prepayTermId: term ? term.id : null,
     prepayTermOutcome: termOutcome,
-    refund,
+    // A recorded refund is one whose cancel decision verified AND whose
+    // office task persisted; anything else stays PROPOSED-only metadata so
+    // the case never claims money that was not promised.
+    refund: refundRecorded ? refund : null,
+    ...(refund && !refundRecorded ? { proposedRefund: refund } : {}),
     sendConfirmation: input.sendConfirmation,
     tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
     monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
@@ -731,7 +741,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             scope: Array.isArray(result?.scope) ? result.scope : (wholeAccount ? [] : scope),
             tierBefore: result?.tierBefore ?? (caseSnapshot ? caseSnapshot.waveguard_tier : null),
             tierAfter: result?.tierAfter ?? null,
-            lateFeeWaived: input.waiveLateFee,
+            lateFeeWaived: result ? result.lateFeeWaived === true : false,
             confirmationRequested: input.sendConfirmation,
             confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
             confirmationChannels: confirmations.channels,
@@ -786,7 +796,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         keep_through: prepayPlan.keepThrough,
         waive_late_fee: input.waiveLateFee,
         prepay_disposition: prepayPlan.prepayDisposition,
-        refund_amount: refund ? refund.amount : null,
+        refund_amount: refundRecorded && refund ? refund.amount : null,
         send_confirmation: input.sendConfirmation,
         processed,
       },
@@ -807,10 +817,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     tierAfter: result?.tierAfter ?? null,
     effectiveDate: prepayPlan.keepThrough || etDateString(),
     keptThrough: prepayPlan.keepThrough,
-    lateFeeWaived: input.waiveLateFee,
+    // The processor's CONFIRMED waiver, never the raw request.
+    lateFeeWaived: result ? result.lateFeeWaived === true : false,
     prepayDisposition: prepayPlan.prepayDisposition,
     prepayTermOutcome: termOutcome,
-    ...(refund ? { refund } : {}),
+    ...(refundRecorded && refund ? { refund } : {}),
     confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
     confirmationChannels: confirmations.channels,
     confirmationRequested: input.sendConfirmation,

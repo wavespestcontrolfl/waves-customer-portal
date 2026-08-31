@@ -360,6 +360,12 @@ async function processCancellationRequest({
     ? require('./annual-prepay-renewals').ANNUAL_PREPAY_PREPAID_METHOD
     : null;
   const lateFeeWaived = waiveLateFee === true;
+  // The waiver is REPORTED only after every applicable fee rail confirms
+  // release: a lost race or ambiguous outcome ({released:false}, with or
+  // without a reason) means a fee may still charge — claiming "waived" then
+  // would be a false money fact on the case, the response, and the
+  // customer's confirmation copy.
+  let feeWaiverConfirmed = lateFeeWaived;
   const scopedFamilies = Array.isArray(families) ? families.filter(Boolean) : [];
   const scoped = scopedFamilies.length > 0;
   let scopedIds = null;
@@ -819,9 +825,13 @@ async function processCancellationRequest({
         scheduledServiceId: svc.id,
         ...(lateFeeWaived ? { waiveFee: true, ...(scoped ? {} : { intent: 'offboard' }) } : {}),
       });
-      if (holdResult && CARD_HOLD_REVIEW_REASONS.has(holdResult.reason)) {
+      // released === false is unresolved money even with NO reason (a lost
+      // release race returns exactly that shape) — same rule as the
+      // appointment-card rail below.
+      if (holdResult && (CARD_HOLD_REVIEW_REASONS.has(holdResult.reason) || holdResult.released === false)) {
         errors.push(`card_hold:${svc.id}`);
-        logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason}`);
+        if (lateFeeWaived) feeWaiverConfirmed = false;
+        logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason || 'released:false with no reason'}`);
       }
       // Appointment-card fee rail fallback for visits with no hold row
       // (mutually exclusive lanes — the rail re-checks). Customer-initiated
@@ -838,11 +848,13 @@ async function processCancellationRequest({
         // reason-set check is belt-and-braces on top of it.
         if (apptResult && (CARD_HOLD_REVIEW_REASONS.has(apptResult.reason) || apptResult.released === false)) {
           errors.push(`appt_card_fee:${svc.id}`);
+          if (lateFeeWaived) feeWaiverConfirmed = false;
           logger.error(`[cancellation-processor] appointment-card fee for ${svc.id} needs review: ${apptResult.reason}`);
         }
       }
     } catch (err) {
       errors.push(`card_hold:${svc.id}`);
+      if (lateFeeWaived) feeWaiverConfirmed = false;
       logger.error(`[cancellation-processor] card-hold handling failed for ${svc.id}: ${err.message}`);
     }
 
@@ -927,7 +939,7 @@ async function processCancellationRequest({
   let scopedWoundDown = false;
   if (scoped && scopedPlan?.ok) {
     try {
-      await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived });
+      await applyScopedWindDown(customerId, scopedPlan, { requestId, actorLabel, lateFeeWaived: feeWaiverConfirmed });
       scopedWoundDown = true;
     } catch (err) {
       errors.push('scoped_wind_down');
@@ -946,7 +958,9 @@ async function processCancellationRequest({
           `. Cancelled ${cancelledCount} upcoming visit(s), stopped recurrence, ` +
           'set pipeline_stage=churned + active=false, disabled autopay.' +
           (sweepAfter ? ` Paid coverage kept through ${sweepAfter}.` : '') +
-          (lateFeeWaived ? ' Scheduled-visit fee waived.' : ''),
+          // Confirmed only — a rail that failed to release must not be
+          // recorded as a waived fee.
+          (feeWaiverConfirmed ? ' Scheduled-visit fee waived.' : ''),
       });
     } catch (noteErr) {
       logger.warn(`[cancellation-processor] audit note failed for ${customerId}: ${noteErr.message}`);
@@ -979,10 +993,11 @@ async function processCancellationRequest({
 
   return {
     cancelledCount, recurrenceStopped, churned, ok, errors,
-    // C3 facts the caller records on the case: what was kept and whether
-    // the fee rails were told to waive.
+    // C3 facts the caller records on the case: what was kept, and whether
+    // the requested waiver was CONFIRMED by every applicable fee rail —
+    // never the raw request while a fee may still charge.
     keptThrough: sweepAfter,
-    lateFeeWaived,
+    lateFeeWaived: feeWaiverConfirmed,
     ...(scoped ? {
       scope: scopedPlan?.inScope || scopedFamilies,
       remaining: scopedPlan?.remaining || [],

@@ -910,6 +910,30 @@ describe('processCancellationRequest', () => {
       expect(db.__tables.customer_interactions[0].body).toContain('Scheduled-visit fee waived');
     });
 
+    test('a card-hold release race ({released:false}, NO reason) is unresolved money — flagged, and the waiver is NOT reported', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      CardHolds.handleCardHoldCancellation.mockResolvedValueOnce({ released: false });
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r8', requestId: 'r8', waiveLateFee: true });
+      expect(result.errors).toEqual(['card_hold:s1']);
+      expect(result.ok).toBe(false);
+      // A fee may still charge — the run must not claim the fee was waived.
+      expect(result.lateFeeWaived).toBe(false);
+      expect(db.__tables.customer_interactions[0].body).not.toContain('Scheduled-visit fee waived');
+    });
+
+    test('the waiver is reported ONLY after every applicable rail confirms release', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r9', requestId: 'r9', waiveLateFee: true });
+      expect(result.errors).toEqual([]);
+      expect(result.lateFeeWaived).toBe(true);
+    });
+
     test('a waive that lost the row to a concurrent fee worker is unresolved money — flagged, never a clean cancel', async () => {
       seedActive();
       db.__tables.scheduled_services = [
