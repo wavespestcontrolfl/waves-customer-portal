@@ -462,9 +462,12 @@ test('reschedule_appointment: sole-open-member grouped visit discloses detach/di
   // card must say so.
   expect(mk('v1').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/sole open member of a grouped visit/));
   expect(mk(null).effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
-  // Same-day window edit (GH r13 P2): the seam keeps a date-matching sole
-  // member grouped (no detach, no dissolve) — no disclosure.
-  expect(mk('v1', '2026-09-02').effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
+  // Same-day window edit (GH r13/r17 P2): the seam keeps a date-matching
+  // sole member grouped — no detach/dissolve claim, but the parent visit's
+  // window recompute is still disclosed.
+  const sameDay = mk('v1', '2026-09-02').effects.map((e) => e.label);
+  expect(sameDay.some((l) => /detaches|dissolves/.test(l))).toBe(false);
+  expect(sameDay).toContainEqual(expect.stringMatching(/recomputes the parent visit's time window/));
   // Joining/leaving a group during the pending window must drift the
   // appointment fingerprint (preview_changed), never execute undisclosed.
   const { appointmentPinFingerprint } = require('../services/intelligence-bar/proposal-pins');

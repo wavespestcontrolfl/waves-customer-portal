@@ -922,12 +922,15 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       const toServiceContact = !!smsTarget && smsTarget.phone !== contactApi.getPrimaryContact(recipient).phone;
       if (!pinPhone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
       if (toolUse.name === 'trigger_review_request') {
-        // The executor suppresses requests inside the 30-day cooldown and
-        // returns already_sent without error — resolve that NOW so the card
-        // never promises a send that won't happen (codex r5 P2).
-        const { hasRecentReviewRequest } = require('../services/intelligence-bar/review-tools');
-        if (await hasRecentReviewRequest(recipient.id)) {
-          return { failed: true, modelResult: { error: 'A review request was already sent to this customer in the last 30 days — nothing was proposed.', already_sent: true } };
+        // The FULL outreach gate stack, not just the 30-day cooldown (GH
+        // r17 P1): ReviewService.create deterministically rejects an at-cap
+        // / in-cadence / already-queued / archived / already-reviewed
+        // customer AFTER Confirm consumes the card — so every one of those
+        // must refuse the proposal now.
+        const { reviewAskBlockedReason } = require('../services/intelligence-bar/review-tools');
+        const blocked = await reviewAskBlockedReason(recipient);
+        if (blocked) {
+          return { failed: true, modelResult: { error: `${blocked} Nothing was proposed.` } };
         }
       }
       params._pinned_phone = pinPhone;
@@ -970,8 +973,29 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._pinned_email = emailPinFingerprint(email);
       preview = {
         ...preview,
-        pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null },
+        // linked_customer drives the card's contact flag (GH r17 P2): a
+        // reply to a vendor/partner/unattributed email is NOT customer
+        // contact and must not claim to be.
+        pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null, linked_customer: !!email.customer_id },
       };
+    }
+    if (toolUse.name === 'block_sender') {
+      // Existing-block state resolved at proposal (GH r17 P2): an intact
+      // same-scope block (row + Gmail filter) makes the card's promised
+      // effects a no-op — refuse instead of carding it; a row whose filter
+      // is MISSING proposes as a repair, and the contract describes exactly
+      // that (re-apply onto the existing entry, no new row).
+      const blockEmail = params.email_address ? String(params.email_address).trim().toLowerCase() : null;
+      const blockDomain = !blockEmail && params.domain ? String(params.domain).trim().toLowerCase().replace(/^@/, '') : null;
+      if (blockEmail || blockDomain) {
+        const existing = blockEmail
+          ? await db('blocked_email_senders').where('email_address', blockEmail).first('id', 'gmail_filter_id')
+          : await db('blocked_email_senders').where('domain', blockDomain).first('id', 'gmail_filter_id');
+        if (existing && existing.gmail_filter_id) {
+          return { failed: true, modelResult: { error: `${blockEmail || `@${blockDomain}`} is already blocked (blocklist row + Gmail filter in place) — nothing was proposed.`, already_blocked: true } };
+        }
+        if (existing) params._existing_block_repair = true;
+      }
     }
     if (toolUse.name === 'cancel_appointment') {
       return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
@@ -2524,11 +2548,14 @@ router.post('/confirm-action', async (req, res, next) => {
             ? require('../services/customer-contact').getServiceContactSmsRecipient(r).phone
             : r.phone);
         drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
-        // The card promised a NEW review request: a request sent by any other
-        // route since the proposal makes that promise false — refuse.
+        // The card promised a NEW review request: any gate that closed
+        // during the pending window (a send from another route, a cadence
+        // start, the cap, an archive, the already-reviewed flag) makes that
+        // promise false — refuse with the same FULL stack the proposal ran
+        // (GH r17 P1).
         if (!drifted && action.tool_name === 'trigger_review_request') {
-          const { hasRecentReviewRequest } = require('../services/intelligence-bar/review-tools');
-          drifted = await hasRecentReviewRequest(r.id);
+          const { reviewAskBlockedReason } = require('../services/intelligence-bar/review-tools');
+          drifted = !!(await reviewAskBlockedReason(r));
         }
       }
       if (!drifted && pinnedEmail) {

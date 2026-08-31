@@ -592,16 +592,6 @@ async function getVelocityPipeline(days) {
 }
 
 
-// Same 30-day rolling cooldown triggerReviewRequest enforces — exposed so
-// the confirm card can refuse a request that would be suppressed instead of
-// promising a send (W0B).
-async function hasRecentReviewRequest(customerId) {
-  const recent = await db('review_requests')
-    .where({ customer_id: customerId })
-    .where('created_at', '>=', new Date(Date.now() - 30 * 86400000).toISOString())
-    .first('id');
-  return !!recent;
-}
 
 // Full customer row for the proposal-time recipient pin — the service-contact
 // resolver needs the slot columns + consent artifact, not a phone projection.
@@ -610,4 +600,28 @@ async function loadReviewRecipient(customerId) {
   return db('customers').where('id', String(customerId)).first();
 }
 
-module.exports = { REVIEW_TOOLS, executeReviewTool, hasRecentReviewRequest, loadReviewRecipient };
+// The FULL outreach gate stack ReviewService.create enforces (GH r17 P1),
+// run at proposal AND at the confirm preflight so a card can never promise
+// a send create() deterministically rejects: archived customer,
+// already-reviewed flag, then checkUnscheduledAskGates (30-day cooldown,
+// 3-in-180-days cap, active cadence, already-queued ask). Returns null when
+// the ask may proceed, else the operator-facing reason.
+async function reviewAskBlockedReason(customer) {
+  if (!customer) return 'Customer not found';
+  if (customer.deleted_at) return 'This customer is archived — review outreach is not sent to archived customers.';
+  if (customer.has_left_google_review) return 'This customer is marked as already having left a Google review.';
+  const ReviewService = require('../review-request');
+  const gate = await ReviewService.checkUnscheduledAskGates(customer.id);
+  if (gate && gate.allowed === false) {
+    const messages = {
+      in_cadence: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.',
+      at_cap: 'Customer has already received 3 review requests in the last 6 months.',
+      cooldown: 'Customer received a review request in the last 30 days.',
+      already_queued: 'A review request to this customer is already queued and will send automatically.',
+    };
+    return messages[gate.outcome] || 'Review request blocked by the outreach gates.';
+  }
+  return null;
+}
+
+module.exports = { REVIEW_TOOLS, executeReviewTool, loadReviewRecipient, reviewAskBlockedReason };

@@ -60,7 +60,7 @@ jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/review-tools', () => ({
-  REVIEW_TOOLS: [], executeReviewTool: jest.fn(), hasRecentReviewRequest: jest.fn(async () => false),
+  REVIEW_TOOLS: [], executeReviewTool: jest.fn(), reviewAskBlockedReason: jest.fn(async () => null),
   loadReviewRecipient: (...args) => mockLoadReviewRecipient(...args),
 }));
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
@@ -379,9 +379,9 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
     });
   });
 
-  test('trigger_review_request: 30-day cooldown is resolved at proposal — refused, never a card', async () => {
+  test('trigger_review_request: a closed outreach gate is resolved at proposal — refused, never a card (GH r17 P1: the FULL stack, not just the cooldown)', async () => {
     const reviewTools = require('../services/intelligence-bar/review-tools');
-    reviewTools.hasRecentReviewRequest.mockResolvedValueOnce(true);
+    reviewTools.reviewAskBlockedReason.mockResolvedValueOnce('Customer received a review request in the last 30 days.');
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'trigger_review_request', input: { customer_name: 'acct 1042' } }],
@@ -391,13 +391,13 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
       await postQuery(baseUrl, { prompt: 'ask for a review', context: 'customers' });
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       const toolResult = mockMessagesCreate.mock.calls[1][0].messages.at(-1).content[0];
-      expect(JSON.parse(toolResult.content)).toMatchObject({ already_sent: true });
+      expect(JSON.parse(toolResult.content).error).toMatch(/last 30 days/);
     });
   });
 
-  test('trigger_review_request: a request sent by another route since the card → confirm refuses (409 preview_changed)', async () => {
+  test('trigger_review_request: a gate that closed since the card → confirm refuses (409 preview_changed)', async () => {
     const reviewTools = require('../services/intelligence-bar/review-tools');
-    reviewTools.hasRecentReviewRequest.mockResolvedValueOnce(true);
+    reviewTools.reviewAskBlockedReason.mockResolvedValueOnce('Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.');
     mockClaimForConfirm.mockResolvedValue({
       action: { id: PENDING_ID, tool_name: 'trigger_review_request', params: { customer_name: 'acct 1042', _pinned_phone: '+19415550000' } },
     });

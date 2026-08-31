@@ -64,10 +64,13 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
 // later, and disclosed as their own effect).
 // move_stops_to_day is conditional on notify_customers and handled
 // explicitly.
+// send_email_reply is deliberately NOT here (GH r17 P2): the inbox holds
+// vendor/partner/unattributed mail too, and a reply to those is not
+// customer contact — the flag derives from the pinned email's customer
+// attribution (preview.pinned_recipient.linked_customer) instead.
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
-  'send_email_reply',
   'trigger_review_request',
 ]);
 
@@ -264,14 +267,26 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     const blockAddr = params?.email_address ? String(params.email_address).trim().toLowerCase() : null;
     const blockDom = !blockAddr && params?.domain
       ? String(params.domain).trim().toLowerCase().replace(/^@/, '') : null;
+    // An existing same-scope block with a MISSING Gmail filter proposes as
+    // a repair (GH r17 P2): the executor re-applies the filter onto the
+    // existing row — the card must promise exactly that, not a new block.
+    // (A fully intact existing block is refused at proposal, never a card.)
+    const repair = params?._existing_block_repair === true;
     if (blockAddr) {
-      push('operational', `Auto-trash every future email from ${blockAddr} (Gmail filter + blocklist row); other senders at that domain are unaffected`);
+      push('operational', repair
+        ? `${blockAddr} is already on the blocklist but its Gmail auto-trash filter is missing — re-applies the filter onto the EXISTING entry (no new blocklist row)`
+        : `Auto-trash every future email from ${blockAddr} (Gmail filter + blocklist row); other senders at that domain are unaffected`);
     } else if (blockDom) {
-      push('operational', `Auto-trash every future email from ANY sender at @${blockDom} — the ENTIRE domain is blocked (refused for shared/protected provider domains)`);
+      push('operational', repair
+        ? `@${blockDom} is already on the blocklist but its Gmail auto-trash filter is missing — re-applies the filter onto the EXISTING entry (no new blocklist row)`
+        : `Auto-trash every future email from ANY sender at @${blockDom} — the ENTIRE domain is blocked (refused for shared/protected provider domains)`);
     }
   }
   if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
     push('comms', `Email reply to ${preview.pinned_recipient.email_masked || 'the sender'}${preview.pinned_recipient.subject ? ` — re: ${preview.pinned_recipient.subject}` : ''}`);
+    if (preview.pinned_recipient.linked_customer === false) {
+      push('comms', 'Sends to an EXTERNAL (non-customer) recipient — this inbox row is not attributed to a customer');
+    }
   }
   if (toolName === 'create_appointment' && preview?.pinned_technician) {
     push('operational', `Assigned to ${preview.pinned_technician.name}`);
@@ -548,9 +563,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // above. visit_id rides the appointment fingerprint either way, so a
   // membership change during the pending window drifts to preview_changed
   // instead of executing undisclosed.
-  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment?.visit_id
-    && params?.new_date && String(params.new_date) !== String(preview.pinned_appointment.scheduled_date)) {
-    push('operational', 'This service is the sole open member of a grouped visit — the date move also detaches it from that visit and dissolves the now-empty group');
+  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment?.visit_id) {
+    if (params?.new_date && String(params.new_date) !== String(preview.pinned_appointment.scheduled_date)) {
+      push('operational', 'This service is the sole open member of a grouped visit — the date move also detaches it from that visit and dissolves the now-empty group');
+    } else {
+      // Same-day edit (GH r17 P2): the seam KEEPS a date-matching sole
+      // member grouped and recomputes the parent visit's time window from
+      // its members — a service_visits write the card must still disclose.
+      push('operational', "This service is the sole open member of a grouped visit — the edit also recomputes the parent visit's time window (membership is kept)");
+    }
   }
 
   // An email change may re-send the newsletter double-opt-in confirmation
@@ -565,14 +586,18 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (emailChangeMayContact) {
     push('comms', 'If a newsletter confirmation is pending for this customer, a re-send of the double-opt-in email to the NEW address is attempted after commit — best-effort: a do-not-contact/suppression veto, a superseded confirmation, or a delivery failure each stop it, and the result does not report whether it sent');
   }
+  // Email replies contact the CUSTOMER only when the pinned inbox row is
+  // attributed to one (GH r17 P2) — vendor/partner replies are outbound
+  // mail, not customer contact.
+  const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailChangeMayContact);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact);
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
   if (notifiesCustomer) {
-    push('comms', CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || toolName === 'move_stops_to_day'
+    push('comms', CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)');
   }
