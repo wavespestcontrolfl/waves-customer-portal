@@ -117,10 +117,13 @@ const GOLD_FIELDS = {
   is_spam: { severity: 'high', kind: 'boolean', read: (x) => x?.meta?.is_spam },
   call_nature: { severity: 'high', kind: schemaEnum('call_nature'), read: (x) => x?.call_nature },
   scheduling_status: { severity: 'high', kind: schemaEnum('scheduling', 'status'), read: (x) => x?.scheduling?.status },
-  agent_committed_booking: { severity: 'high', kind: 'boolean', read: (x) => x?.scheduling?.agent_committed_booking },
+  // Nullable-by-schema booleans read as `=== true`: the pipeline (routing,
+  // flatView) treats null/omitted as "no commitment"/"not promised", so a
+  // valid null must satisfy a gold `false`, never score as a miss.
+  agent_committed_booking: { severity: 'high', kind: 'boolean', read: (x) => x?.scheduling?.agent_committed_booking === true },
   schedule_date: { severity: 'high', kind: 'date', read: (x, schedule) => schedule?.scheduled_date },
   schedule_window_start: { severity: 'high', kind: 'time', read: (x, schedule) => schedule?.window_start, normalize: normalizeTime },
-  quote_promised: { severity: 'high', kind: 'boolean', read: (x) => x?.service_request?.quote_promised },
+  quote_promised: { severity: 'high', kind: 'boolean', read: (x) => x?.service_request?.quote_promised === true },
   recommended_disposition: { severity: 'medium', kind: schemaEnum('recommended_disposition'), read: (x) => x?.recommended_disposition },
   primary_service_category: { severity: 'medium', kind: schemaEnum('service_request', 'primary_service_category'), read: (x) => x?.service_request?.primary_service_category },
   service_intent: { severity: 'medium', kind: schemaEnum('service_request', 'service_intent'), read: (x) => x?.service_request?.service_intent },

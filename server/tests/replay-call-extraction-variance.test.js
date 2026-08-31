@@ -345,6 +345,11 @@ describe('call extraction replay variance reporting', () => {
     });
     expect(JSON.stringify(values)).not.toMatch(/Pat|9415550100|Main St/);
     expect(goldFieldValues({}, {})).toMatchObject({ is_spam: null, schedule_date: null });
+    // Nullable-by-schema booleans normalize to false (pipeline semantics), so
+    // a valid null extraction satisfies a gold `false` label.
+    const nullish = goldFieldValues({ scheduling: { status: 'none', agent_committed_booking: null }, service_request: { quote_promised: null } }, {});
+    expect(nullish.agent_committed_booking).toBe(false);
+    expect(nullish.quote_promised).toBe(false);
   });
 
   test('checks call-nature and recommended-disposition membership expectations', () => {
