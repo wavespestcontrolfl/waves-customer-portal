@@ -71,6 +71,14 @@ const CONTRADICTION_SUMMARIES = Object.freeze({
 // The five closeout FACTS the mapper reads (signature is a requirement, not
 // a fact — it has no state and never counts toward readability).
 const MAPPED_FACT_KEYS = Object.freeze(['completion', 'report', 'reportDelivery', 'application', 'photos']);
+// Readability covers every fact whose inputs can PRODUCE an issue: the five
+// mapped facts plus `invoice`, because the invoice/billing inputs also feed
+// the invoice_* contradictions (pre-push r18 P1) — with facts.invoice
+// 'unknown' those contradictions are silently absent, so treating the read
+// as complete would let an outage clear a contradiction alert and the cron
+// re-fire it on recovery. followUp/license/comms/invoiceDelivery still
+// never hold the floor: they produce no issues here (r14).
+const ISSUE_INPUT_FACT_KEYS = Object.freeze([...MAPPED_FACT_KEYS, 'invoice']);
 // Report-delivery reasons that are in flight or held BY DESIGN — not an
 // operator gap (the queue / payment hold / send window owns them).
 const TRANSIENT_DELIVERY_REASONS = new Set([
@@ -85,7 +93,7 @@ const TRANSIENT_DELIVERY_REASONS = new Set([
 function factsFullyKnown(status) {
   if (!status || !status.found) return false;
   const facts = status.facts || {};
-  return MAPPED_FACT_KEYS.every((k) => facts[k]?.state !== 'unknown');
+  return ISSUE_INPUT_FACT_KEYS.every((k) => facts[k]?.state !== 'unknown');
 }
 
 async function memoisedCloseoutStatus(serviceId, now) {

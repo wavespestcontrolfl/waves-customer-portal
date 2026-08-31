@@ -142,5 +142,12 @@ describe('loadCloseoutStatuses', () => {
     await loadCloseoutStatuses(['c'], { now: t0 });
     await loadCloseoutStatuses(['c'], { now: t0 + 60 * 1000 });
     expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
+    // An UNKNOWN invoice fact is an outage too (pre-push r18): invoice inputs
+    // feed the invoice_* contradictions, so the read is incomplete.
+    getCloseoutStatus.mockReset();
+    getCloseoutStatus.mockResolvedValue(base({ invoice: fact('unknown', 'billing_disposition_lookup_failed') }));
+    await loadCloseoutStatuses(['d'], { now: t0 });
+    await loadCloseoutStatuses(['d'], { now: t0 + 21 * 1000 });
+    expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
   });
 });
