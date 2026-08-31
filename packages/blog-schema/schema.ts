@@ -657,7 +657,10 @@ export function validateAffiliateUsage(
   // Definitely-hidden markup never satisfies a reader-facing rule (a CTA a
   // reader cannot see is no CTA): elements carrying `hidden`, an inline
   // display:none, or a closed <details> body are blanked (length-preserving).
-  cleaned = cleaned.replace(/<(\w+)\b[^>]*\b(?:hidden\b|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
+  cleaned = cleaned.replace(/<(\w+)\b[^>]*(?:\shidden(?=[\s>/=])|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
+  // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
+  // "sr-only") hide just as surely as the attribute.
+  cleaned = cleaned.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
   cleaned = cleaned.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
 
   const positions: number[] = [];

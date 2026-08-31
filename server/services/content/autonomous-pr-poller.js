@@ -302,46 +302,44 @@ async function recheckTopicTargeting(run, pr, gh) {
 // Head blog file content for lanes that don't run the topic recheck
 // (refresh PRs): same candidate-path probe as recheckTopicTargeting, null
 // when unreadable (the belt then fails closed).
-// → { content } | { notBlog: true } (no blog file path derivable — service/
-// city-page refreshes have no affiliate surface) | null (unreadable).
-async function headBlogFileContent(run, pr, gh) {
-  let brief = {};
-  try { brief = await briefCategorySignalsForRun(run); } catch (_) { return null; }
-  const candidates = blogFileCandidatesForRun(run, brief);
-  if (!candidates) {
-    // No derivable blog file: pass ONLY when the run demonstrably targets a
-    // non-blog page (service/city refresh). A blog-lane run whose draft
-    // slug is missing/malformed fails closed (Codex PR3 r8 P1).
-    if (String(run.action_type || '') === 'new_supporting_blog') return null;
-    let pathname = '';
-    try { pathname = new URL(String(targetForRun(run).url || '')).pathname; } catch (_) { return null; }
-    return /^\/(?:pest-control|lawn-care|termite|mosquito|tree-shrub|seasonal)\/[^/]+\/?$/.test(pathname) ? null : { notBlog: true };
+// Refresh PRs: the ACTUAL refresh target file at the PR head, resolved the
+// way publishRefresh resolves it (explicit draft.file_path, else the
+// brief/draft target URL through the publisher's resolver, registry
+// fallback included) — a blog refresh yields the blog file, a service/city
+// refresh yields that page (which carries no affiliate surface). Anything
+// unresolvable → null → the belt fails closed.
+async function headRefreshFileContent(run, pr) {
+  let publisher;
+  try { publisher = require('../content-astro/astro-publisher'); } catch (_) { return null; }
+  if (typeof publisher.resolveExistingAstroFileForTarget !== 'function') return null;
+  const dp = parseJsonObject(run.draft_payload);
+  let target = dp.file_path || null;
+  if (!target) {
+    try { target = (await resolveTargetForRun(run)).url || null; } catch (_) { return null; }
   }
-  let parse;
-  try { ({ parse } = require('../content-astro/frontmatter')); } catch (_) { return null; }
-  for (const path of candidates.paths) {
-    const found = await gh.getFile(path, pr.head?.ref);
-    if (!found || typeof found.content !== 'string') continue;
-    // Same adoption rule as recheckTopicTargeting: a file whose frontmatter
-    // slug renders a DIFFERENT route is not this post's file.
-    let existingSlug = '';
-    try { existingSlug = parse(found.content)?.data?.slug || ''; } catch (_) { existingSlug = ''; }
-    if (existingSlug && candidates.slugKey(existingSlug) !== candidates.routeKey) continue;
-    return { content: found.content };
-  }
-  return null;
+  if (!target) return null;
+  try {
+    const resolved = await publisher.resolveExistingAstroFileForTarget(target, { ref: pr.head?.ref });
+    const content = resolved?.file?.content;
+    return typeof content === 'string' ? { content } : null;
+  } catch (_) { return null; }
 }
 
-// head: a string (the topic recheck's content), { content }, { notBlog }
-// (no affiliate surface — pass), or null/undefined (unreadable — fail
-// closed). The approval is BOUND to the reviewed draft: every affiliate
+// head: a string (the topic recheck's content), { content } (the refresh
+// target file), or null/undefined (unreadable — fail closed). The approval is BOUND to the reviewed draft: every affiliate
 // product id on the head must be one the approved draft_payload body
 // referenced, so a branch push after approval cannot add products.
 function affiliateBeltVerdict(run, head, prHeadSha = null) {
-  if (head && typeof head === 'object' && head.notBlog) return { ok: true };
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
   if (!/<AffiliateLink\b/.test(content)) return { ok: true };
+  // The kill switch is re-checked at MERGE time: an approval taken while the
+  // lane was open must not publish affiliate material after
+  // GATE_AFFILIATE_LINKS was unset (exact 'true', same call-time read as
+  // content-guardrails).
+  if (process.env.GATE_AFFILIATE_LINKS !== 'true') {
+    return { ok: false, reason: 'head carries <AffiliateLink> but GATE_AFFILIATE_LINKS is not "true" — the affiliate lane is dark; auto-merge withheld' };
+  }
   if (!run?.trust_build_approved_by) {
     return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
   }
@@ -1523,8 +1521,9 @@ async function maybeAutoMerge(run, pr) {
       // Refresh PRs skip the topic recheck but not the affiliate belt: a
       // refresh that PRESERVES affiliate links also parks at affiliate_review
       // (every affiliate-bearing draft does during the pilot), so the same
-      // approval stamp is required before auto-merge (Codex PR3 r3 P1).
-      const aff = affiliateBeltVerdict(run, await headBlogFileContent(run, pr, gh), pr.head?.sha);
+      // approval stamp is required before auto-merge. The belt inspects the
+      // ACTUAL refresh target file at the head (publisher resolver).
+      const aff = affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha);
       if (!aff.ok) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
         return { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
