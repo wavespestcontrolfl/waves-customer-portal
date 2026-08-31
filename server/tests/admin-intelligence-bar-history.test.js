@@ -140,6 +140,21 @@ test('technician: never offered, and refused if the model tries it anyway', asyn
   });
 });
 
+test('/execute passes the request-derived actor id too (direct admin call path)', async () => {
+  mockExecuteHistoryTool.mockResolvedValue({ query: 'x', total: 0, results: [], receipts: [] });
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'search_ib_history', params: { query: 'x', actorId: 'spoofed' } }),
+    });
+    expect(res.status).toBe(200);
+    expect(mockExecuteHistoryTool).toHaveBeenCalledTimes(1);
+    const [, , ctx] = mockExecuteHistoryTool.mock.calls[0];
+    expect(ctx.actorId).toBe('admin-1');
+  });
+});
+
 test('admin tool call is dispatched with the actor id from the request, not the model input', async () => {
   mockExecuteHistoryTool.mockResolvedValue({ query: 'acct-1042', total: 0, results: [], receipts: [] });
   mockMessagesCreate

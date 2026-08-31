@@ -1967,6 +1967,9 @@ router.post('/execute', async (req, res, next) => {
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: confirmed === true,
+      // Request-derived actor for actor-bound reads (recall) — same source
+      // the /query loop uses, never the client params.
+      actorId: getAdminActorId(req),
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 

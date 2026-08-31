@@ -86,8 +86,8 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
       { id: 'pa-1', thread_id: T1, thread_turn_seq: 2, tool_name: 'reschedule_appointment', summary: 'Move → Thu', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:00:30Z', consumed_at: '2026-08-30T01:02:00Z' },
       // Same exchange: confirmed but the run recorded an error → failed
       { id: 'pa-2', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify', status: 'confirmed', result: JSON.stringify({ error: 'Twilio 21610' }), created_at: '2026-08-30T01:00:31Z', consumed_at: '2026-08-30T01:02:01Z' },
-      // Same exchange: expired → never_ran
-      { id: 'pa-3', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify again', status: 'expired', result: null, created_at: '2026-08-30T01:00:32Z', consumed_at: null },
+      // Same exchange: still `pending` in the table but past its TTL → reported expired, never_ran
+      { id: 'pa-3', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify again', status: 'pending', result: null, created_at: '2026-08-30T01:00:32Z', consumed_at: null, expires_at: '2026-08-30T01:10:32Z' },
       // Same exchange: confirmed but the tool BLOCKED without an error key → failed (never executed)
       { id: 'pa-4', thread_id: T1, thread_turn_seq: 2, tool_name: 'create_pending_estimate', summary: 'Draft', status: 'confirmed', result: JSON.stringify({ success: false, blocked: true, reason: 'duplicate' }), created_at: '2026-08-30T01:00:33Z', consumed_at: '2026-08-30T01:02:03Z' },
       // Same exchange: confirmed, result recorded but empty object → unknown (not claimed executed)
@@ -103,8 +103,9 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
   const hit = r.results[0];
   expect(hit.thread_title).toBe('acct-1042 reschedule');
   expect(hit.paired_turn).toEqual({ role: 'user', content: 'move acct-1042 to thursday', truncated: false });
-  expect(hit.receipts.map((x) => [x.id, x.outcome])).toEqual([
-    ['pa-1', 'executed'], ['pa-2', 'failed'], ['pa-3', 'never_ran'], ['pa-4', 'failed'], ['pa-5', 'unknown'],
+  expect(hit.receipts.map((x) => [x.id, x.status, x.outcome])).toEqual([
+    ['pa-1', 'confirmed', 'executed'], ['pa-2', 'confirmed', 'failed'], ['pa-3', 'expired', 'never_ran'],
+    ['pa-4', 'confirmed', 'failed'], ['pa-5', 'confirmed', 'unknown'],
   ]);
   expect(hit.receipts.find((x) => x.id === 'pa-9')).toBeUndefined();
 
@@ -128,6 +129,25 @@ test('substring fallback runs only when full-text finds nothing, with LIKE metac
   const fallback = calls[1];
   expect(fallback.ilike).toBe('%5pm\\_one\\%%');
   expect(fallback.where).toEqual(expect.arrayContaining([['t.admin_actor_id', 'admin-1']]));
+});
+
+test('a term matching both halves of an exchange yields ONE result, and the limit counts exchanges', async () => {
+  // Two exchanges, both halves of each match (4 turn rows); limit 1 must
+  // return exactly one exchange, not one duplicate-eaten half.
+  queue.push(
+    [
+      { id: 'u1', thread_id: T1, seq: 1, role: 'user', created_at: '2026-08-30T01:00:00Z', title: 't', context: 'schedule', last_active_at: null, snippet: 'acct-1042?' },
+      { id: 'a1', thread_id: T1, seq: 2, role: 'assistant', created_at: '2026-08-30T01:00:01Z', title: 't', context: 'schedule', last_active_at: null, snippet: 'acct-1042 moved' },
+      { id: 'u2', thread_id: T1, seq: 3, role: 'user', created_at: '2026-08-30T01:05:00Z', title: 't', context: 'schedule', last_active_at: null, snippet: 'acct-1042 again?' },
+      { id: 'a2', thread_id: T1, seq: 4, role: 'assistant', created_at: '2026-08-30T01:05:01Z', title: 't', context: 'schedule', last_active_at: null, snippet: 'acct-1042 done' },
+    ],
+    [{ thread_id: T1, seq: 2, role: 'assistant', content: 'acct-1042 moved' }],
+    [],
+  );
+  const r = await executeHistoryTool('search_ib_history', { query: 'acct-1042', limit: 1 }, { actorId: 'admin-1' });
+  expect(r.total).toBe(1);
+  expect(r.results[0].turn_seq).toBe(1);
+  expect(r.results[0].paired_turn.role).toBe('assistant');
 });
 
 test('no matches either way returns an empty, well-formed result', async () => {

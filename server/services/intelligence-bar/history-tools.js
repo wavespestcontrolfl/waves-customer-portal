@@ -48,7 +48,7 @@ Results are the operator's own threads only. Supports quoted phrases and -exclus
       columns: {
         ib_thread_turns: ['id', 'thread_id', 'seq', 'role', 'content', 'created_at'],
         ib_threads: ['id', 'admin_actor_id', 'title', 'context', 'last_active_at'],
-        ib_pending_actions: ['id', 'thread_id', 'thread_turn_seq', 'requested_by', 'tool_name', 'summary', 'status', 'result', 'created_at', 'consumed_at'],
+        ib_pending_actions: ['id', 'thread_id', 'thread_turn_seq', 'requested_by', 'tool_name', 'summary', 'status', 'result', 'created_at', 'consumed_at', 'expires_at'],
       },
       reason: 'Full-text search uses to_tsvector/websearch_to_tsquery/ts_headline in raw fragments.',
     },
@@ -100,11 +100,16 @@ async function searchIbHistory(input, actionContext) {
     return q;
   };
 
+  // A term that appears in BOTH halves of an exchange (identifiers usually
+  // do) matches two turns; over-fetch so exchange-level dedupe below still
+  // yields `limit` DISTINCT exchanges instead of duplicates eating the
+  // budget.
+  const fetchLimit = limit * 2;
   const TSQ = "websearch_to_tsquery('english', ?)";
   let rows = await base()
     .whereRaw(`to_tsvector('english', tt.content) @@ ${TSQ}`, [query])
     .orderByRaw(`ts_rank(to_tsvector('english', tt.content), ${TSQ}) DESC, tt.created_at DESC`, [query])
-    .limit(limit)
+    .limit(fetchLimit)
     .select(
       'tt.id', 'tt.thread_id', 'tt.seq', 'tt.role', 'tt.created_at',
       't.title', 't.context', 't.last_active_at',
@@ -118,11 +123,20 @@ async function searchIbHistory(input, actionContext) {
     rows = await base()
       .where('tt.content', 'ilike', `%${query.replace(/[%_\\]/g, (c) => `\\${c}`)}%`)
       .orderBy('tt.created_at', 'desc')
-      .limit(limit)
+      .limit(fetchLimit)
       .select('tt.id', 'tt.thread_id', 'tt.seq', 'tt.role', 'tt.created_at', 't.title', 't.context', 't.last_active_at',
         db.raw('substr(tt.content, 1, 300) as snippet'));
     mode = rows.length ? 'substring' : 'full_text';
   }
+
+  // One result per exchange: keep the best-ranked half, drop its twin.
+  const seenExchange = new Set();
+  rows = rows.filter((r) => {
+    const key = `${r.thread_id}:${r.role === 'assistant' ? r.seq : r.seq + 1}`;
+    if (seenExchange.has(key)) return false;
+    seenExchange.add(key);
+    return true;
+  }).slice(0, limit);
 
   if (rows.length === 0) {
     return { query, days_searched: days, mode, total: 0, results: [], receipts: [] };
@@ -144,7 +158,7 @@ async function searchIbHistory(input, actionContext) {
     .whereIn('thread_id', threadIds)
     .where('requested_by', actorId)
     .orderBy('created_at', 'desc')
-    .select('id', 'thread_id', 'thread_turn_seq', 'tool_name', 'summary', 'status', 'result', 'created_at', 'consumed_at');
+    .select('id', 'thread_id', 'thread_turn_seq', 'tool_name', 'summary', 'status', 'result', 'created_at', 'consumed_at', 'expires_at');
 
   const results = rows.map((r) => {
     // The exchange = (user seq, assistant seq); receipts are stamped with
@@ -170,9 +184,9 @@ async function searchIbHistory(input, actionContext) {
       receipts: receipts
         .filter((x) => x.thread_id === r.thread_id && x.thread_turn_seq === assistantSeq)
         .map((x) => ({
-          id: x.id, tool: x.tool_name, summary: x.summary, status: x.status,
+          id: x.id, tool: x.tool_name, summary: x.summary, status: effectiveStatus(x),
           outcome: receiptOutcome(x),
-          proposed_at: x.created_at, resolved_at: x.consumed_at,
+          proposed_at: x.created_at, resolved_at: x.consumed_at, expires_at: x.expires_at,
         })),
     };
   });
@@ -185,6 +199,16 @@ async function searchIbHistory(input, actionContext) {
     results,
     note: 'Receipts are the audit trail of pending actions proposed by that exact exchange. Trust `outcome`, not `status`: executed = the operator confirmed AND the run recorded success; failed = confirmed but the run recorded an error; unknown = confirmed but no result was recorded; never_ran = pending, expired, or cancelled.',
   };
+}
+
+// Expiry is enforced only at confirm time (expires_at check), so a proposal
+// the operator never touched stays `pending` in the table forever. Report
+// the effective state so "did that expire?" answers honestly.
+function effectiveStatus(row) {
+  if (row.status === 'pending' && row.expires_at && new Date(row.expires_at).getTime() < Date.now()) {
+    return 'expired';
+  }
+  return row.status;
 }
 
 // `status = confirmed` is set when the operator clicks Confirm, BEFORE the
