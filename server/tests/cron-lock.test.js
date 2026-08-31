@@ -169,18 +169,74 @@ describe('cron-lock runExclusive', () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const first = runExclusive('sms-sweep', () => gate, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
 
-    // Second tick while the first still runs: must skip (the old advisory
-    // try-lock semantics), NOT wait — a queued tick would acquire the lock
-    // the moment the first run releases it and rerun the sweep, risking
-    // duplicate sends.
+    // Second tick while the first still runs: it must never rerun the
+    // sweep — a queued replay right after the first run releases the
+    // advisory lock risks duplicate sends.
     const replayBody = jest.fn();
-    const second = await runExclusive('sms-sweep', replayBody, { recordHealth: false, waitForSlot: true });
-    expect(second).toEqual({ skipped: true, reason: 'lease_held' });
+    const second = runExclusive('sms-sweep', replayBody, { recordHealth: false, waitForSlot: true });
 
     release('swept');
     await expect(first).resolves.toBe('swept');
+    await expect(second).resolves.toEqual({ skipped: true, reason: 'lease_held' });
     expect(replayBody).not.toHaveBeenCalled();
+  });
+
+  test('a coalesced tick inherits a leaseless outcome and does the work itself', async () => {
+    const conn = mockConnection(true);
+    // First run gets its slot but its connection acquire FAILS — it never
+    // held the lease, so its work was not done. The overlapping tick must
+    // not report lease_held over a run that ran nothing (deploy overlap on
+    // a once-daily job would drop both invocations).
+    let failAcquire;
+    const pendingAcquire = new Promise((resolve, reject) => { failAcquire = reject; });
+    db.client.acquireConnection
+      .mockReturnValueOnce(pendingAcquire)
+      .mockResolvedValue(conn);
+
+    const firstBody = jest.fn();
+    const first = runExclusive('billing-monthly', firstBody, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const secondBody = jest.fn(async () => 'billed');
+    const second = runExclusive('billing-monthly', secondBody, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    failAcquire(new Error('pool exhausted'));
+    await expect(first).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+    await expect(second).resolves.toBe('billed');
+    expect(firstBody).not.toHaveBeenCalled();
+    expect(secondBody).toHaveBeenCalledTimes(1);
+  });
+
+  test('a queued tick fails (no_connection) instead of running past the wait bound', async () => {
+    jest.useFakeTimers();
+    try {
+      const conn = mockConnection(true);
+      db.client.acquireConnection.mockResolvedValue(conn);
+
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const herd = Array.from({ length: 10 }, (_, i) =>
+        runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
+      await Promise.resolve();
+
+      const lateBody = jest.fn();
+      const late = runExclusive('billing-monthly', lateBody, { recordHealth: false, waitForSlot: true });
+
+      // Ten minutes pass with no slot: the tick must FAIL visibly, not run
+      // whenever a slot opens — date-sensitive bodies recompute their
+      // target date at execution time and would charge the wrong cohort.
+      await jest.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      await expect(late).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+      expect(lateBody).not.toHaveBeenCalled();
+
+      release('swept');
+      await expect(Promise.all(herd)).resolves.toEqual(Array(10).fill('swept'));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('request-scoped locks (recordHealth: false) never wait behind the herd', async () => {
@@ -244,15 +300,18 @@ describe('cron-lock runExclusive', () => {
 
     const queuedBody = jest.fn(async () => 'ran-once');
     const queued = runExclusive('minute-job', queuedBody, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
     // Cron fires again while the first tick still waits: coalesce, don't
     // stack a backlog of stale ticks behind the queued one.
-    const repeat = await runExclusive('minute-job', jest.fn(), { recordHealth: false, waitForSlot: true });
-    expect(repeat).toEqual({ skipped: true, reason: 'lease_held' });
+    const repeatBody = jest.fn();
+    const repeat = runExclusive('minute-job', repeatBody, { recordHealth: false, waitForSlot: true });
 
     release('swept');
     await Promise.all(herd);
     await expect(queued).resolves.toBe('ran-once');
+    await expect(repeat).resolves.toEqual({ skipped: true, reason: 'lease_held' });
     expect(queuedBody).toHaveBeenCalledTimes(1);
+    expect(repeatBody).not.toHaveBeenCalled();
   });
 
   test('skips (without throwing) when no DB connection is available', async () => {

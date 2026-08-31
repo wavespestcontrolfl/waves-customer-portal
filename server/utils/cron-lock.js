@@ -159,40 +159,53 @@ function lockHolderCap() {
   return Math.max(1, Math.floor(poolMax / 2));
 }
 let activeLockHolders = 0;
-const lockSlotWaiters = []; // FIFO of { jobName, resolve }
-const waitingJobs = new Set();
-const activeJobs = new Set(); // slot-holding runs, by job name
+const lockSlotWaiters = []; // FIFO of { resolve, timer }
+// jobName → never-rejecting promise of the in-flight run's machinery
+// outcome. Present from before the slot wait until the run settles, so it
+// covers waiting AND running ticks of a job.
+const activeRuns = new Map();
+// A queued tick must not run arbitrarily late: date-sensitive callbacks
+// recompute their target date at execution time (billing-monthly derives
+// todayDay from new Date()), so a tick that crossed midnight ET would
+// charge the wrong day's cohort and permanently miss the original one.
+// Past this bound the tick FAILS as no_connection — visible in job_health
+// and the watchers — rather than running in the wrong window.
+const SLOT_WAIT_MAX_MS = 10 * 60 * 1000;
 // Tracks "this async context already holds a slot" so a body that calls
 // runExclusive again (route-tier reorder, backlink feeders do) bypasses the
 // semaphore instead of deadlocking on its own slot at small caps.
 const lockSlotContext = new AsyncLocalStorage();
 
+// Resolves true once a slot is held, false if none freed up within the
+// wait bound.
 async function acquireLockSlot(jobName) {
   if (activeLockHolders < lockHolderCap()) {
     activeLockHolders += 1;
-    activeJobs.add(jobName);
-    return;
+    return true;
   }
   logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${lockHolderCap()}) — waiting for a slot`);
-  waitingJobs.add(jobName);
-  // The releaser hands its slot over without decrementing, so the counter
-  // already accounts for this waiter when the promise resolves.
-  await new Promise((resolve) => lockSlotWaiters.push({ jobName, resolve }));
+  return new Promise((resolve) => {
+    const entry = {
+      resolve: (granted) => {
+        clearTimeout(entry.timer);
+        resolve(granted);
+      },
+    };
+    entry.timer = setTimeout(() => {
+      const i = lockSlotWaiters.indexOf(entry);
+      if (i !== -1) lockSlotWaiters.splice(i, 1);
+      logger.error(`[cron-lock] ${jobName}: no slot within ${SLOT_WAIT_MAX_MS}ms — failing this tick`);
+      resolve(false);
+    }, SLOT_WAIT_MAX_MS);
+    entry.timer.unref?.();
+    lockSlotWaiters.push(entry);
+  });
 }
 
-function releaseLockSlot(jobName) {
-  activeJobs.delete(jobName);
+function releaseLockSlot() {
   const next = lockSlotWaiters.shift();
-  if (next) {
-    // Slot handed to the waiter; counter unchanged. The waiter is marked
-    // active HERE, before its continuation runs, so a tick of the same job
-    // arriving in the gap still coalesces instead of queueing a replay.
-    waitingJobs.delete(next.jobName);
-    activeJobs.add(next.jobName);
-    next.resolve();
-  } else {
-    activeLockHolders -= 1;
-  }
+  if (next) next.resolve(true); // slot handed to the waiter; counter unchanged
+  else activeLockHolders -= 1;
 }
 
 // waitForSlot defaults to recordHealth: scheduled jobs (recordHealth on)
@@ -215,20 +228,37 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = re
   if (!waitForSlot) {
     return runExclusiveLocked(jobName, lockKey, fn, recordHealth);
   }
-  // Coalesce BEFORE queueing: if this job is running or already has a tick
-  // queued, this tick's work is covered — queueing it would replay the
-  // sweep right after the current run finishes (the advisory lock frees on
-  // release, so the queued tick WOULD acquire it), defeating the overlap
-  // guarantee and risking duplicate sends.
-  if (activeJobs.has(jobName) || waitingJobs.has(jobName)) {
-    logger.info(`[cron-lock] ${jobName}: a run is active or queued — skipping tick`);
+  // Coalesce behind an in-flight (waiting or running) tick of this job
+  // rather than queueing a replay — but inherit its outcome: if that run
+  // never actually held the lease (its connection acquire failed or its
+  // slot wait timed out), its work was NOT done and this tick must do it,
+  // not report lease_held over a run that ran nothing (both deploy-overlap
+  // invocations of a once-daily job would silently drop).
+  const prior = activeRuns.get(jobName);
+  if (prior) {
+    const priorOutcome = await prior;
+    if (priorOutcome && priorOutcome.skipped === true && priorOutcome.reason === 'no_connection') {
+      return runExclusive(jobName, fn, { recordHealth, waitForSlot });
+    }
+    logger.info(`[cron-lock] ${jobName}: covered by a concurrent run — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
   }
-  await acquireLockSlot(jobName);
+  const runPromise = (async () => {
+    const granted = await acquireLockSlot(jobName);
+    if (!granted) return { skipped: true, reason: 'no_connection' };
+    try {
+      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+    } finally {
+      releaseLockSlot();
+    }
+  })();
+  // The stored promise never rejects; a thrown body means the lease WAS
+  // held, so coalesced ticks correctly read it as covered.
+  activeRuns.set(jobName, runPromise.then((r) => r, () => ({ bodyThrew: true })));
   try {
-    return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+    return await runPromise;
   } finally {
-    releaseLockSlot(jobName);
+    activeRuns.delete(jobName);
   }
 }
 
