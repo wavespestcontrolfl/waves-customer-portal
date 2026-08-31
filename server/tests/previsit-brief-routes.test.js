@@ -360,6 +360,19 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
     expect(mockDeterministicVisitFacts).toHaveBeenCalled();
   });
 
+  test('a reassignment detected mid-request withholds a SERVED brief too (cached codes never reach the former tech)', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW }, { ownsVisit: true, recheckOwns: false });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`, {
+        headers: { 'x-test-role': 'technician' },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ brief: null });
+    });
+  });
+
   test('a served WDO brief carries facts too (its schema has no access/last_visit)', async () => {
     mockFactsGateEnabled.mockReturnValue(true);
     stubTables({

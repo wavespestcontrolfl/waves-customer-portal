@@ -12338,7 +12338,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
           .where({ 'scheduled_services.id': svc.id })
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
-        if (!stillOwned) return payload;
+        // Ownership KNOWN lost mid-request → withhold everything, not
+        // just the facts: a served brief's cached access codes must not
+        // reach the former technician once the recheck has the signal.
+        if (!stillOwned) return { brief: null };
         return { ...payload, facts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
