@@ -494,7 +494,7 @@ describe('Action Inbox generators', () => {
     loadCloseoutStatuses.mockResolvedValueOnce(new Map());
     const { alerts } = await computeDashboardAlertsUncached();
     // The list query is capped at cap+1; the exact overflow comes from the COUNT query (codex r10).
-    expect(alerts.find((a) => a.id === 'closeout_sweep_incomplete')).toMatchObject({ severity: 'warn', kind: 'alert', href: '/admin/dispatch', count: 3 });
+    expect(alerts.find((a) => a.id === 'closeout_sweep_incomplete')).toMatchObject({ severity: 'warn', kind: 'alert', href: expect.stringMatching(/^\/admin\/dispatch\?tab=schedule&date=\d{4}-\d{2}-\d{2}$/), count: 3 });
     expect(loadCloseoutStatuses.mock.calls[0][0]).toHaveLength(50);
   });
 

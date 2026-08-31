@@ -430,7 +430,9 @@ async function computeDashboardAlertsUncached() {
         label: unchecked != null
           ? `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — ${unchecked} unchecked`
           : `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — an unknown number unchecked`,
-        href: '/admin/dispatch',
+        // Same dated schedule-tab deep link as closeout_gaps_today (GH codex
+        // r5 P2): the Board default doesn't list the completed visits.
+        href: `/admin/dispatch?tab=schedule&date=${today}`,
       });
     }
     // After a COMPLETE list read, a visit no longer in today's completed set
