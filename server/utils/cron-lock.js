@@ -144,14 +144,14 @@ async function recordJobEnd(jobName, startedAtMs, error, conn) {
 // is tunable now, and dev/test pools are only 10) guarantees the other
 // half stays free.
 //
-// Jobs over the cap WAIT for a slot — they must not skip. A waiter holds
-// NO connection (the semaphore sits before the pool acquire), so waiting
-// is free for the pool; skipping is not free for the business: date-scoped
-// once-a-day jobs (monthly billing charges customers whose billing_day is
-// today) cannot recover a dropped tick tomorrow. A late tick beats a lost
-// one. The advisory try-lock still governs same-job overlap: if a prior
-// tick of the SAME job is still running once the slot arrives, the tick
-// skips as lease_held exactly as before.
+// Scheduled jobs over the cap WAIT for a slot (bounded — see
+// SLOT_WAIT_MAX_MS) rather than skip. A waiter holds NO connection (the
+// semaphore sits before the pool acquire), so waiting is free for the
+// pool; skipping is not free for the business: date-scoped once-a-day jobs
+// (monthly billing charges customers whose billing_day is today) cannot
+// recover a dropped tick tomorrow. Same-job overlap is coalesced in
+// runExclusive before any slot is taken (see activeRuns); the advisory
+// try-lock still covers overlap across instances.
 function lockHolderCap() {
   const poolMax = Number(db.client?.pool?.max)
     || Number(db.client?.config?.pool?.max)
@@ -243,18 +243,23 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = re
     logger.info(`[cron-lock] ${jobName}: covered by a concurrent run — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
   }
+  const lease = { held: false };
   const runPromise = (async () => {
     const granted = await acquireLockSlot(jobName);
     if (!granted) return { skipped: true, reason: 'no_connection' };
     try {
-      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+      return await runExclusiveLocked(jobName, lockKey, fn, recordHealth, null, lease);
     } finally {
       releaseLockSlot();
     }
   })();
-  // The stored promise never rejects; a thrown body means the lease WAS
-  // held, so coalesced ticks correctly read it as covered.
-  activeRuns.set(jobName, runPromise.then((r) => r, () => ({ bodyThrew: true })));
+  // The stored promise never rejects. A throw AFTER the lease was held
+  // means the body ran (covered); a throw BEFORE it (the try-lock query
+  // itself failed) means no work was done, so coalesced ticks must retry.
+  activeRuns.set(jobName, runPromise.then(
+    (r) => r,
+    () => (lease.held ? { bodyThrew: true } : { skipped: true, reason: 'no_connection' }),
+  ));
   try {
     return await runPromise;
   } finally {
@@ -262,7 +267,7 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = re
   }
 }
 
-async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn) {
+async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, lease) {
   let conn = heldConn;
   if (!conn) {
     try {
@@ -284,6 +289,7 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn) 
       logger.info(`[cron-lock] ${jobName}: lease held elsewhere (overlapping instance or prior tick) — skipping`);
       return { skipped: true, reason: 'lease_held' };
     }
+    if (lease) lease.held = true;
     const startedAtMs = Date.now();
     if (recordHealth) await recordJobStart(jobName, conn);
     try {

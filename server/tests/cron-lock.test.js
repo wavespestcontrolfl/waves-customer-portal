@@ -210,6 +210,49 @@ describe('cron-lock runExclusive', () => {
     expect(secondBody).toHaveBeenCalledTimes(1);
   });
 
+  test('a coalesced tick retries when the in-flight run threw BEFORE holding the lease', async () => {
+    // The try-lock query itself fails (connection reset mid-acquire): the
+    // first run throws with no body executed. That is a machinery failure,
+    // not "covered" — the overlapping tick must run the job.
+    let failLock;
+    const pendingLock = new Promise((resolve, reject) => { failLock = reject; });
+    const brokenConn = { query: jest.fn(() => pendingLock) };
+    const goodConn = mockConnection(true);
+    db.client.acquireConnection
+      .mockResolvedValueOnce(brokenConn)
+      .mockResolvedValue(goodConn);
+
+    const firstBody = jest.fn();
+    const first = runExclusive('billing-monthly', firstBody, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    const secondBody = jest.fn(async () => 'billed');
+    const second = runExclusive('billing-monthly', secondBody, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    failLock(new Error('connection terminated'));
+    await expect(first).rejects.toThrow('connection terminated');
+    await expect(second).resolves.toBe('billed');
+    expect(firstBody).not.toHaveBeenCalled();
+    expect(secondBody).toHaveBeenCalledTimes(1);
+  });
+
+  test('a coalesced tick stays coalesced when the in-flight BODY threw (lease was held)', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    let failBody;
+    const gate = new Promise((resolve, reject) => { failBody = reject; });
+
+    const first = runExclusive('sms-sweep', () => gate, { recordHealth: false, waitForSlot: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    const replayBody = jest.fn();
+    const second = runExclusive('sms-sweep', replayBody, { recordHealth: false, waitForSlot: true });
+
+    failBody(new Error('provider 500'));
+    await expect(first).rejects.toThrow('provider 500');
+    await expect(second).resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    expect(replayBody).not.toHaveBeenCalled();
+  });
+
   test('a queued tick fails (no_connection) instead of running past the wait bound', async () => {
     jest.useFakeTimers();
     try {
