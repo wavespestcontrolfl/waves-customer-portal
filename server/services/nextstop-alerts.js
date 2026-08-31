@@ -63,8 +63,15 @@ function compilePropertyAlerts({
       ? JSON.parse(servicePreferences || '{}')
       : (servicePreferences || null);
   } catch { svcPrefs = null; }
+  // Away Mode (cancel-flow C2): dated exterior-only, independent of the
+  // persistent service-preference toggle.
+  const awayUntil = prefs?.away_mode_until ? String(prefs.away_mode_until).slice(0, 10) : null;
+  const awayActive = awayUntil && awayUntil >= new Date().toISOString().slice(0, 10);
+  if (awayActive && /pest/i.test(normalizedServiceType)) {
+    alerts.push({ type: 'service_pref', text: `AWAY MODE — exterior only until ${awayUntil}, nobody home` });
+  }
   if (svcPrefs && /pest/i.test(normalizedServiceType)) {
-    if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
+    if (!awayActive && svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
     if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
   }
 

@@ -155,10 +155,19 @@ async function executeConfigureServices({ customerId, caseRow, action, params })
 /* ------------------------------------------------------------------ */
 /* set_preferences — writes the same allowlisted fields the portal does  */
 /* ------------------------------------------------------------------ */
+const PREFERRED_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const PREFERRED_TIMES = ['early_morning', 'morning', 'late_morning', 'midday', 'afternoon'];
+
 async function executeSetPreferences({ customerId, caseRow, params }) {
-  const preferredDay = String(params?.preferredDay || '').trim().slice(0, 40);
-  const preferredTime = String(params?.preferredTime || '').trim().slice(0, 40);
+  // Canonical scheduler vocabulary ONLY (codex r1 P1): auto-dispatch's
+  // normalizePreferences hard-filters on these exact keys — free text like
+  // "Friday" or "after 3 PM" would persist verbatim and constrain nothing
+  // while the receipt claims it does.
+  const preferredDay = String(params?.preferredDay || '').trim().toLowerCase();
+  const preferredTime = String(params?.preferredTime || '').trim().toLowerCase();
   if (!preferredDay && !preferredTime) throw codedError('preferences_required', 'Pick a service day or time');
+  if (preferredDay && !PREFERRED_DAYS.includes(preferredDay)) throw codedError('preferences_invalid', 'Pick a day from the list');
+  if (preferredTime && !PREFERRED_TIMES.includes(preferredTime)) throw codedError('preferences_invalid', 'Pick a time from the list');
   const updates = { updated_at: new Date() };
   if (preferredDay) updates.preferred_day = preferredDay;
   if (preferredTime) updates.preferred_time = preferredTime;
@@ -167,7 +176,9 @@ async function executeSetPreferences({ customerId, caseRow, params }) {
   else await db('property_preferences').insert({ customer_id: customerId, ...updates, created_at: new Date() });
   await timelineNote(customerId, 'Service preferences updated from the cancel flow',
     `Case ${caseRow.id}. Preferred day: ${preferredDay || '—'}; time: ${preferredTime || '—'}.`);
-  return { effects: [`Your visits will be scheduled ${[preferredDay, preferredTime].filter(Boolean).join(', ')} from now on. Reply to any reminder if a date does not work.`] };
+  const dayLabel = preferredDay ? preferredDay.charAt(0).toUpperCase() + preferredDay.slice(1) : '';
+  const timeLabels = { early_morning: '8-10 AM', morning: '9-11 AM', late_morning: '10 AM-12 PM', midday: '11 AM-1 PM', afternoon: '1-5 PM' };
+  return { effects: [`Your visits will be scheduled ${[dayLabel ? `on ${dayLabel}s` : '', preferredTime ? timeLabels[preferredTime] : ''].filter(Boolean).join(', ')} from now on. Reply to any reminder if a date does not work.`] };
 }
 
 /* ------------------------------------------------------------------ */

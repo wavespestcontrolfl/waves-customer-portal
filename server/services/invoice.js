@@ -1871,9 +1871,13 @@ const InvoiceService = {
   async buildRetentionOfferLineForMint({ customerId, scheduledServiceId, lineItems, database }) {
     if (!customerId || !scheduledServiceId) return null;
     const dbh = database || db;
-    const visit = await dbh("scheduled_services")
-      .where({ id: scheduledServiceId })
-      .first("service_type", "is_recurring", "recurring_ongoing", "is_callback", "source");
+    // Catalog identity joins along (codex r1 P1): familyOfServiceRow is
+    // catalog-authoritative — a stale free-form service_type must not pick
+    // the wrong family's offer.
+    const visit = await dbh("scheduled_services as s")
+      .leftJoin("services as sv", "s.service_id", "sv.id")
+      .where("s.id", scheduledServiceId)
+      .first("s.service_type", "s.is_recurring", "s.recurring_ongoing", "s.is_callback", "s.source", "sv.service_key", "sv.service_name");
     if (!visit) return null;
     if (visit.is_callback === true) return null;
     if (!(visit.is_recurring === true || visit.recurring_ongoing === true)) return null;
@@ -2022,13 +2026,12 @@ const InvoiceService = {
               category: sr.service_type,
             },
           ];
-      if (Array.isArray(extraLineItems) && extraLineItems.length) {
-        lineItems = [...lineItems, ...extraLineItems];
-      }
       // Retention offer (cancel-flow C1, 15% × 2 charges / $75 cap): a
-      // GRANTED offer for this visit's service family discounts the
-      // recurring subtotal as its OWN negative line. Fail-soft — a lookup
-      // problem never blocks the invoice; consumption is CAS'd post-create.
+      // GRANTED offer discounts the VISIT's recurring lines only — computed
+      // BEFORE extras (setup fees, operator additions) are appended, so the
+      // 15% never touches supplemental charges (codex r1 P2). Fail-soft —
+      // a lookup problem never blocks the invoice; consumption is CAS'd in
+      // the mint transaction.
       try {
         const retention = await this.buildRetentionOfferLineForMint({
           customerId: sr.customer_id,
@@ -2042,6 +2045,9 @@ const InvoiceService = {
         }
       } catch (retentionErr) {
         logger.warn(`[invoice] retention-offer check failed for customer ${sr.customer_id}: ${retentionErr.message}`);
+      }
+      if (Array.isArray(extraLineItems) && extraLineItems.length) {
+        lineItems = [...lineItems, ...extraLineItems];
       }
       return {
         customerId: sr.customer_id,

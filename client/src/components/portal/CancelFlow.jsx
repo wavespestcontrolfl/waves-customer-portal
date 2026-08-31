@@ -45,6 +45,17 @@ const REASONS = [
   { code: 'personal_circumstances', label: 'Personal circumstances' },
 ];
 const PRIMARY_REASON_COUNT = 10;
+// Scheduler-canonical values (Codex r1 P1): the accept endpoint 409s
+// `preferences_invalid` on anything outside these exact values.
+const DAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+  .map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) }));
+const TIME_OPTIONS = [
+  { value: 'early_morning', label: '8:00\u201310:00 AM' },
+  { value: 'morning', label: '9:00\u201311:00 AM' },
+  { value: 'late_morning', label: '10:00 AM\u201312:00 PM' },
+  { value: 'midday', label: '11:00 AM\u20131:00 PM' },
+  { value: 'afternoon', label: '1:00\u20135:00 PM' },
+];
 const HOLD_MAX_DAYS_DEFAULT = 180;
 
 export function reasonLabel(code) {
@@ -119,6 +130,8 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest })
   const selectedFamilies = partial ? families.filter((f) => !excluded.includes(f.key)).map((f) => f.key) : undefined;
   const selectedLabels = families.filter((f) => !selectedFamilies || selectedFamilies.includes(f.key)).map((f) => f.label);
   const scopeLabel = partial ? listWords(selectedLabels) : 'my plan';
+  // Codex r1 P2: the server flags plans it cannot price partially online.
+  const partialUnsupported = partial && impact?.scopedSupported === false;
   const subject = partial
     ? `Cancel ${listWords(selectedLabels)} (WaveGuard ${tierName})`
     : `Cancel WaveGuard ${tierName} plan`;
@@ -190,8 +203,8 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest })
       showCustomerAlert('Enter the address you are moving to so we can transfer your plan.');
       return;
     }
-    if (action?.type === 'set_preferences' && !preferredDay.trim() && !preferredTime.trim()) {
-      showCustomerAlert('Tell us the day or time that works better.');
+    if (action?.type === 'set_preferences' && !preferredDay && !preferredTime) {
+      showCustomerAlert('Pick the day or time window that works better.');
       return;
     }
     let params;
@@ -199,8 +212,8 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest })
     else if (action?.type === 'transfer_request') params = { newAddress: newAddress.trim() };
     else if (action?.type === 'set_preferences') {
       params = {
-        ...(preferredDay.trim() ? { preferredDay: preferredDay.trim() } : {}),
-        ...(preferredTime.trim() ? { preferredTime: preferredTime.trim() } : {}),
+        ...(preferredDay ? { preferredDay } : {}),
+        ...(preferredTime ? { preferredTime } : {}),
       };
     }
     setBusy(true);
@@ -425,9 +438,14 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest })
           </fieldset>
         )}
         {factRows(false)}
+        {partialUnsupported && (
+          <div style={{ ...body, marginTop: 10 }}>
+            We can't price a partial cancellation for this plan online — pick the whole plan, or call our office and we'll cancel just that service by hand.
+          </div>
+        )}
         <div style={pairRow}>
           <button data-glass-accent="" type="button" onClick={reset} className="waves-focus-ring" style={pairSecondary}>Keep my plan</button>
-          <button type="button" onClick={() => setStage('reason')} className="waves-focus-ring" style={pairPrimary}>Continue</button>
+          <button type="button" disabled={partialUnsupported} onClick={() => setStage('reason')} className="waves-focus-ring" style={{ ...pairPrimary, ...(partialUnsupported ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}>Continue</button>
         </div>
         <div style={{ marginTop: 10 }}>
           <button type="button" onClick={() => onOpenRequest?.()} className="waves-focus-ring" style={backLink}>Need to move, reschedule or report a problem instead?</button>
@@ -515,11 +533,17 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest })
               <div style={{ display: 'flex', gap: 8, flexDirection: compact ? 'column' : 'row' }}>
                 <label style={{ display: 'block', marginTop: 10, fontSize: 14, color: B.grayDark, flex: '1 1 0' }}>
                   Preferred day
-                  <input type="text" value={preferredDay} onChange={(e) => setPreferredDay(e.target.value)} placeholder="e.g. Friday" className="waves-focus-ring" style={{ ...field, marginTop: 6 }} />
+                  <select value={preferredDay} onChange={(e) => setPreferredDay(e.target.value)} className="waves-focus-ring" style={{ ...field, marginTop: 6 }}>
+                    <option value="">No preference</option>
+                    {DAY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
                 </label>
                 <label style={{ display: 'block', marginTop: 10, fontSize: 14, color: B.grayDark, flex: '1 1 0' }}>
                   Preferred time
-                  <input type="text" value={preferredTime} onChange={(e) => setPreferredTime(e.target.value)} placeholder="e.g. after 3 PM" className="waves-focus-ring" style={{ ...field, marginTop: 6 }} />
+                  <select value={preferredTime} onChange={(e) => setPreferredTime(e.target.value)} className="waves-focus-ring" style={{ ...field, marginTop: 6 }}>
+                    <option value="">No preference</option>
+                    {TIME_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
                 </label>
               </div>
             )}

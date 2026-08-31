@@ -115,6 +115,41 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     heldRate = Number(component.monthly_rate) || 0;
   }
 
+  // Move the series FIRST (codex r1 P1): the hold's promise is "no visits
+  // until the resume date" — if any visit will not move, revert the ones
+  // that did and refuse the hold instead of suspending billing around a
+  // visit that can still dispatch.
+  const visits = await familyUpcomingVisits(customerId, familyKey);
+  const moved = [];
+  if (visits.length) {
+    const SmartRebooker = require('../rebooker');
+    const delta = daysBetween(String(visits[0].scheduled_date).slice(0, 10), resume);
+    for (const visit of visits) {
+      const from = String(visit.scheduled_date).slice(0, 10);
+      const to = addDays(from, delta);
+      try {
+        await SmartRebooker.reschedule(visit.id, to, {
+          start: visit.window_start || null, end: visit.window_end || null,
+        }, 'plan_hold', 'customer', {});
+        moved.push({ id: visit.id, from, to, window: { start: visit.window_start || null, end: visit.window_end || null } });
+      } catch (err) {
+        logger.error(`[holds] visit ${visit.id} did not move for a ${familyKey} hold: ${err.message}`);
+        for (const done of moved.reverse()) {
+          try {
+            await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', {});
+          } catch (revertErr) {
+            logger.error(`[holds] revert of visit ${done.id} failed: ${revertErr.message}`);
+            const { notifyAdmin } = require('../notification-service');
+            await notifyAdmin('service', 'Plan hold aborted: visit needs a manual move back', `Visit ${done.id} was moved to ${done.to} for a hold that then failed — move it back to ${done.from}.`, {
+              bell: true, dedupeKey: `plan_hold_revert_failed:${done.id}`, metadata: { kind: 'plan_hold_revert_failed', customerId, visitId: done.id },
+            }).catch(() => {});
+          }
+        }
+        throw codedError('hold_visits_unmovable', 'One of the upcoming visits could not be moved — call our office and we will set the hold up by hand');
+      }
+    }
+  }
+
   const [hold] = await db('plan_holds').insert({
     customer_id: customerId,
     cancellation_case_id: caseId || null,
@@ -126,38 +161,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   }).returning(['id']);
   const holdId = hold?.id || hold;
 
-  // Shift the series: every upcoming visit moves forward by the same delta
-  // so the cadence resumes intact on the return date. A visit that will not
-  // move is left for the office — never silently dropped.
-  const visits = await familyUpcomingVisits(customerId, familyKey);
-  const moved = [];
-  const failed = [];
-  if (visits.length) {
-    const SmartRebooker = require('../rebooker');
-    const delta = daysBetween(String(visits[0].scheduled_date).slice(0, 10), resume);
-    for (const visit of visits) {
-      const from = String(visit.scheduled_date).slice(0, 10);
-      const to = addDays(from, delta);
-      try {
-        await SmartRebooker.reschedule(visit.id, to, {
-          start: visit.window_start || null, end: visit.window_end || null,
-        }, 'plan_hold', 'customer', {});
-        moved.push({ id: visit.id, from, to });
-      } catch (err) {
-        failed.push({ id: visit.id, from, error: err.message });
-        logger.error(`[holds] visit ${visit.id} did not move for hold ${holdId}: ${err.message}`);
-      }
-    }
-  }
-  await db('plan_holds').where({ id: holdId }).update({ moved_visits: JSON.stringify({ moved, failed }), updated_at: new Date() });
-  if (failed.length) {
-    const { notifyAdmin } = require('../notification-service');
-    await notifyAdmin('service', 'Plan hold: visits need a manual move', `${failed.length} visit(s) did not move for the ${familyKey} hold (customer ${customerId}). Move them past ${resume}.`, {
-      bell: true,
-      dedupeKey: `plan_hold_move_failed:${holdId}`,
-      metadata: { kind: 'plan_hold_move_failed', customerId, holdId, failed },
-    }).catch(() => {});
-  }
+  await db('plan_holds').where({ id: holdId }).update({ moved_visits: JSON.stringify({ moved }), updated_at: new Date() });
 
   // Suspend the component + protect the tier, in one transaction.
   await db.transaction(async (trx) => {
@@ -179,11 +183,11 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       customer_id: customerId,
       interaction_type: 'note',
       subject: `${familyKey} on hold until ${resume} (cancel flow)`,
-      body: `Case ${caseId || '—'}. ${moved.length} visit(s) moved${failed.length ? `, ${failed.length} need a manual move` : ''}; monthly component ${heldRate == null ? 'n/a' : `$${heldRate} suspended`}; tier protected until ${resume}.`,
+      body: `Case ${caseId || '—'}. ${moved.length} visit(s) moved; monthly component ${heldRate == null ? 'n/a' : `$${heldRate} suspended`}; tier protected until ${resume}.`,
     });
   } catch (err) { logger.warn(`[holds] hold note failed for ${customerId}: ${err.message}`); }
 
-  return { holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length, failedMoves: failed.length };
+  return { holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length };
 }
 
 /**
@@ -198,9 +202,16 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   const toRemind = await db('plan_holds').where({ status: 'active' }).whereNull('reminder_sent_at').where('resume_on', '<=', remindOn).select('*');
   for (const hold of toRemind) {
     try {
-      const claimed = await db('plan_holds').where({ id: hold.id }).whereNull('reminder_sent_at').update({ reminder_sent_at: new Date(), updated_at: new Date() });
-      if (!claimed) continue;
-      const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone');
+      // Send FIRST, stamp only after the provider accepted (codex r1 P1):
+      // a stamped-but-undelivered reminder would let the auto-resume fire
+      // without the consent text. runExclusive serializes the cron, so the
+      // post-send stamp cannot double-send.
+      const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
+      if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
+        await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+        continue;
+      }
+      let sent = false;
       if (customer?.phone) {
         const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
         const { sendCustomerMessage } = require('../messaging/send-customer-message');
@@ -211,13 +222,20 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
           service: familyLabel(hold.family_key) || hold.family_key,
           resume_date: displayDate(String(hold.resume_on).slice(0, 10)),
         }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
-        await sendCustomerMessage({
+        const smsResult = await sendCustomerMessage({
           to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
           customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
           metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id },
         });
+        sent = !!smsResult.sent;
       }
-      out.reminded += 1;
+      if (sent) {
+        await db('plan_holds').where({ id: hold.id }).whereNull('reminder_sent_at').update({ reminder_sent_at: new Date(), updated_at: new Date() });
+        out.reminded += 1;
+      } else {
+        out.errors.push(`remind_unsent:${hold.id}`);
+        logger.error(`[holds] resume reminder not delivered for hold ${hold.id} — will retry tomorrow`);
+      }
     } catch (err) {
       out.errors.push(`remind:${hold.id}`);
       logger.error(`[holds] resume reminder failed for hold ${hold.id}: ${err.message}`);
@@ -227,6 +245,17 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   const toResume = await db('plan_holds').where({ status: 'active' }).where('resume_on', '<=', today).select('*');
   for (const hold of toResume) {
     try {
+      // A hold whose plan was cancelled or reconfigured in the meantime is
+      // OBSOLETE (codex r1 P2): resuming would text a false restart and
+      // overwrite the current component with the stale pre-hold rate.
+      const owner = await db('customers').where({ id: hold.customer_id }).first('active', 'pipeline_stage');
+      const component = await db('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
+      const obsolete = !owner || owner.active === false || owner.pipeline_stage === 'churned'
+        || (hold.held_monthly_rate != null && (!component || component.source !== 'plan_hold'));
+      if (obsolete) {
+        await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+        continue;
+      }
       await db.transaction(async (trx) => {
         const claimed = await trx('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'resumed', resumed_at: new Date(), updated_at: new Date() });
         if (!claimed) return;

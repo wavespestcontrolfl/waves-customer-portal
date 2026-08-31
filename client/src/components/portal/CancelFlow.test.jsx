@@ -111,6 +111,26 @@ describe('Screen 1 — review', () => {
     expect(screen.getByText('Remains active for Lawn Care')).toBeInTheDocument();
   });
 
+  it('scopedSupported:false blocks Continue for a partial selection only', async () => {
+    renderFlow();
+    await openReview();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
+
+    api.cancelResolutionPreview.mockResolvedValue({
+      kind: 'none', reasonCode: null, scope: ['pest_control'],
+      impact: impact({ scopedSupported: false }),
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: /lawn care/i }));
+    expect(await screen.findByText(/we can't price a partial cancellation for this plan online/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+
+    // Back to whole account: the line clears and Continue re-enables.
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ scopedSupported: false }) });
+    fireEvent.click(screen.getByRole('checkbox', { name: /lawn care/i }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled());
+    expect(screen.queryByText(/partial cancellation for this plan online/i)).not.toBeInTheDocument();
+  });
+
   it('hides the scope picker for a single-family account', async () => {
     api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact({ families: [TWO_FAMILIES[0]] }) });
     renderFlow();
@@ -223,14 +243,22 @@ describe('Screen 2 — reason and resolution', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Show me' }));
-    fireEvent.change(await screen.findByLabelText('Preferred day'), { target: { value: 'Friday' } });
-    fireEvent.change(screen.getByLabelText('Preferred time'), { target: { value: 'after 3 PM' } });
+    // Selects carry the scheduler's canonical values, never free text.
+    const daySelect = await screen.findByLabelText('Preferred day');
+    expect(daySelect.tagName).toBe('SELECT');
+    expect(Array.from(daySelect.options).map((o) => o.value)).toEqual(['', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']);
+    const timeSelect = screen.getByLabelText('Preferred time');
+    expect(timeSelect.tagName).toBe('SELECT');
+    expect(Array.from(timeSelect.options).map((o) => o.value)).toEqual(['', 'early_morning', 'morning', 'late_morning', 'midday', 'afternoon']);
+    expect(screen.getByRole('option', { name: '1:00–5:00 PM' })).toBeInTheDocument();
+    fireEvent.change(daySelect, { target: { value: 'friday' } });
+    fireEvent.change(timeSelect, { target: { value: 'afternoon' } });
     api.cancelResolutionAccept.mockResolvedValue({ ok: true, receipt: { reference: 'CR-3', actionType: 'set_preferences', summary: 'Preferences updated.', effects: [], confirmationChannels: [] } });
     fireEvent.click(screen.getByRole('button', { name: 'Update my service days' }));
     await screen.findByRole('heading', { name: 'All set' });
     expect(api.cancelResolutionAccept).toHaveBeenCalledWith({
       reasonCode: 'scheduling_access_communication', families: [], templateId: 'sched_prefs',
-      params: { preferredDay: 'Friday', preferredTime: 'after 3 PM' },
+      params: { preferredDay: 'friday', preferredTime: 'afternoon' },
     });
   });
 

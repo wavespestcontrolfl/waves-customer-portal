@@ -424,6 +424,17 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
   // Only once the churn actually persisted: a failed customer update leaves
   // the account active and billable, and staff must never be told to pull
   // hardware from a live program.
+  // A cancel supersedes any live hold on the affected families — the
+  // lifecycle must not later text a false restart or restore a stale rate
+  // (codex r1 P2).
+  try {
+    let holdQuery = db('plan_holds').where({ customer_id: customerId, status: 'active' });
+    if (scoped) holdQuery = holdQuery.whereIn('family_key', scopedFamilies);
+    await holdQuery.update({ status: 'cancelled', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[cancellation-processor] hold invalidation failed for ${customerId}: ${err.message}`);
+  }
+
   if (churned || (scoped && scopedFamilies.includes('termite_bait'))) {
     try {
       await raiseTermiteRetrievalTask(customerId, requestId);

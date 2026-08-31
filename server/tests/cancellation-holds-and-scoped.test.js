@@ -145,7 +145,7 @@ describe('runPlanHoldLifecycle', () => {
     seed({
       customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly', tier_protected_until: daysOut(5) }],
       components: [
-        { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0 },
+        { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' },
         { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
       ],
       holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(5), held_monthly_rate: 90, reminder_sent_at: null, created_at: new Date() }],
