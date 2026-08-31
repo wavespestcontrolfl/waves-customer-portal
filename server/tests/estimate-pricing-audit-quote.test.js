@@ -509,6 +509,10 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     // Wizard engineInput outranks the raw shapes.
     expect(dimensionsFrom({ engineInput: { homeSqFt: 1800 }, engineRequest: { profile: { homeSqFt: 9999 } } }))
       .toMatchObject({ homeSqFt: 1800 });
+    // The canonical priced profile outranks the RAW admin form inputs —
+    // arbitration/clamping can change dimensions between them.
+    expect(dimensionsFrom({ inputs: { homeSqFt: 3100 }, engineRequest: { profile: { homeSqFt: 2600 } } }))
+      .toMatchObject({ homeSqFt: 2600 });
   });
 
   test('dedupe transfers cost metadata from the consumed raw row', async () => {

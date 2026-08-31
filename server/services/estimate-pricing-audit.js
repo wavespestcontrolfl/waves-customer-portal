@@ -157,11 +157,14 @@ function dimensionsFrom(data, resultOverride) {
   // engineResult has no property object — without this path every
   // auto-sent lead estimate audited at zero square feet (GH codex P1).
   // engineRequest.profile is the canonical admin-builder shape (per
-  // profileFromEstimateData) — without it admin-created estimates whose
-  // mapped result lacks `property` audited at zero square feet (codex
-  // pre-push P1).
-  const inputs = data?.engineInput || data?.inputs || data?.engineInputs
+  // profileFromEstimateData) and the input the engine ACTUALLY priced —
+  // it outranks the raw form shapes (data.inputs/engineInputs), whose
+  // pre-arbitration dimensions can differ from what was priced (codex
+  // pre-push P1 ×2; only the wizard's normalized engineInput ranks
+  // higher).
+  const inputs = data?.engineInput
     || data?.engineRequest?.profile
+    || data?.inputs || data?.engineInputs
     || data?.automation?.draftEstimateAutomation?.engineInput || {};
   const result = resultOverride || data?.result || data?.engineResult || {};
   const property = result.property || {};
