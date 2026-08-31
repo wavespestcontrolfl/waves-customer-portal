@@ -644,7 +644,10 @@ const SERVICE_CTA_LINK_RE =
 // inline code, and CommonMark indented (4-space / tab) code lines — none of
 // it renders as prose, so none of it may satisfy a structural rule.
 function blankNonRenderedCode(src: string): string {
-  let out = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
+  // CommonMark fences: 3+ backticks or tildes, up to 3 leading spaces, any
+  // info string; the closing fence uses the same character with a length
+  // >= the opener (a longer closer is valid) and nothing but whitespace after.
+  let out = src.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[`~]*[ \t]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
   out = out.replace(/(`+)(?!`)[\s\S]*?\1/g, (m) => m.replace(/[^\n]/g, ' '));
   // An indented code line follows a blank line (or another code line).
   const lines = out.split('\n');
