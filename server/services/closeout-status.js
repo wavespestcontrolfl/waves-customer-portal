@@ -218,7 +218,7 @@ async function probe(label, unavailable, fn) {
 // ---------------------------------------------------------------------------
 // Loader — every DB read for one service, each individually fallible.
 // ---------------------------------------------------------------------------
-async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {}) {
+async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _restarts = 0 } = {}) {
   const unavailable = [];
   const inputs = { serviceId, now, unavailable };
 
@@ -392,14 +392,23 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.dispositionLookupFailed = Boolean(dispositionProbe.error);
 
   // The reads above are not one snapshot: a completion can commit between
-  // the first visit read and the record probes. Re-read the visit row so a
-  // status that moved mid-read does not manufacture a contradiction.
+  // the first visit read and the record probes. Re-read the visit row and,
+  // when the status moved, RESTART the whole load so every dependent probe
+  // (follow-up obligation, requirements, billing inputs) sees the new row —
+  // swapping just the visit would mix two generations. Bounded: a visit
+  // still moving after two restarts is surfaced via visitReRead, not looped.
   const reReadProbe = await probe('scheduled_services (re-read)', unavailable, () => knex('scheduled_services')
     .where({ id: serviceId })
     .first());
   if (reReadProbe.value && String(reReadProbe.value.status || '') !== String(visit.status || '')) {
+    const marker = { from: visit.status || null, to: reReadProbe.value.status || null };
+    if (_restarts < 2) {
+      const fresh = await loadCloseoutInputs(serviceId, { knex, now, _restarts: _restarts + 1 });
+      fresh.visitReRead = fresh.visitReRead || marker;
+      return fresh;
+    }
     inputs.visit = reReadProbe.value;
-    inputs.visitReRead = { from: visit.status || null, to: reReadProbe.value.status || null };
+    inputs.visitReRead = marker;
   }
 
 

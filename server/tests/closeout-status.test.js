@@ -966,18 +966,24 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.facts.photos).toMatchObject({ state: 'done', actual: 2, source: 'project_photos' });
   });
 
-  test('visit status that moves between the first read and the probes is re-read, not reported as a contradiction (GH r3)', async () => {
+  test('visit status that moves mid-read RESTARTS the load — all probes see the new row, no contradiction (GH r3 + codex r16)', async () => {
     const tables = healthyTables();
-    let reads = 0;
-    const flipping = makeFakeKnex(tables);
+    let visitReads = 0;
+    const stable = makeFakeKnex(tables);
     const knex = (table) => {
-      if (table === 'scheduled_services') { reads += 1; if (reads === 1) return makeFakeKnex({ ...tables, scheduled_services: [{ ...visitRow, status: 'on_site' }] })(table); }
-      return flipping(table);
+      if (table === 'scheduled_services') {
+        visitReads += 1;
+        if (visitReads === 1) return makeFakeKnex({ ...tables, scheduled_services: [{ ...visitRow, status: 'on_site' }] })(table);
+      }
+      return stable(table);
     };
     const result = await getCloseoutStatus(SVC, { knex, now: NOW });
     expect(result.visitReRead).toEqual({ from: 'on_site', to: 'completed' });
     expect(result.contradictions).toEqual([]);
     expect(result.facts.completion.state).toBe('done');
+    // Restarted: the visit row was read again after the flip (initial + re-read + restart initial + restart re-read ≥ 4).
+    expect(visitReads).toBeGreaterThanOrEqual(4);
+    expect(result.summary.closedOut).toBe(true);
   });
 
   test('unknown service id → found:false, no facts fabricated', async () => {
