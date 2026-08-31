@@ -1782,8 +1782,23 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   }
 
   try {
-    const sentEstimate = await db('estimates').where({ id: estimate.id }).first();
-    await saveEstimatePricingAuditSnapshot(sentEstimate || estimate, {
+    // NO re-read (GH codex P1, same rule as the sibling/race paths): a
+    // customer can accept between the guarded send update and a re-read,
+    // and the acceptance rewrite would be stored as send-time truth. The
+    // pre-delivery claimed row + THIS delivery's built bundle IS the
+    // delivered quote; status/sent_at/expiry override to published values.
+    let preDeliveryData = estimate.estimate_data;
+    if (typeof preDeliveryData === 'string') { try { preDeliveryData = JSON.parse(preDeliveryData); } catch { preDeliveryData = {}; } }
+    const auditAnchor = {
+      ...estimate,
+      status: estimate.viewed_at ? 'viewed' : 'sent',
+      sent_at: now,
+      expires_at: nextExpiresAt,
+      estimate_data: builtSendSnapshot
+        ? { ...(preDeliveryData || {}), sendSnapshot: builtSendSnapshot }
+        : (preDeliveryData || {}),
+    };
+    await saveEstimatePricingAuditSnapshot(auditAnchor, {
       trigger: 'send',
       sendMethod,
     });

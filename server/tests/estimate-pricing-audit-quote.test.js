@@ -381,6 +381,11 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
     }));
     expect(frozenCharged.lines.find((l) => l.serviceKey === 'waveguard_membership')).toMatchObject({ price: 99 });
+    // A DISCOUNTED frozen fee audits at the customer-shown amount, not raw initialFee.
+    const frozenDiscounted = await buildEstimatePricingAudit(base({
+      sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 49 }] } },
+    }));
+    expect(frozenDiscounted.lines.find((l) => l.serviceKey === 'waveguard_membership')).toMatchObject({ price: 49 });
   });
 
   test('dedupe transfers cost metadata from the consumed raw row', async () => {

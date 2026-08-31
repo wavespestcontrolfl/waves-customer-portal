@@ -589,7 +589,7 @@ function protocolFor(line) {
 // The persisted raw-engine lineItems shape (public-quote projection:
 // service/name/annual/monthly/price/total/perApp/...). monthly-bearing
 // rows are recurring; the rest are one-time.
-function normalizeEngineLineItems(result, { emitInitialFee = true } = {}) {
+function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOverride = null } = {}) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
   for (const item of items) {
@@ -726,7 +726,7 @@ function normalizeEngineLineItems(result, { emitInitialFee = true } = {}) {
     // Raw pest rows carry the customer-visible setup charge as initialFee
     // (the mapper normally converts it to the one-time membership fee) —
     // omitting it dropped $99 of delivered revenue (GH codex P1).
-    const initialFee = num(item.initialFee);
+    const initialFee = Number.isFinite(numOrNaN(initialFeeOverride)) ? numOrNaN(initialFeeOverride) : num(item.initialFee);
     if (emitInitialFee && Number.isFinite(initialFee) && initialFee > 0) {
       lines.push({
         serviceKey: 'waveguard_membership',
@@ -857,9 +857,20 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // operator waiver means the customer was never charged it — the frozen
   // firstVisitFees rows are the authority when present (GH codex P1).
   const bundleFees = data?.sendSnapshot?.pricingBundle?.firstVisitFees;
+  const frozenSetupRow = Array.isArray(bundleFees)
+    ? bundleFees.find((f) => /setup|membership/i.test(String(f?.service || f?.name || '')))
+    : null;
+  // Discounted-first: the CUSTOMER-SHOWN amount ({priceAfterDiscount: 49}
+  // beside {price: 99}) is what the audit must record (codex pre-push P1).
+  const frozenSetupAmount = frozenSetupRow
+    ? Number(frozenSetupRow.priceAfterDiscount ?? frozenSetupRow.amount ?? frozenSetupRow.price)
+    : null;
   const emitInitialFee = Array.isArray(bundleFees)
-    ? bundleFees.some((f) => Number(f?.priceAfterDiscount ?? f?.price ?? f?.amount) > 0 && /setup|membership/i.test(String(f?.service || f?.name || '')))
+    ? Number(frozenSetupAmount) > 0
     : !(data?.operatorPriceAdjustment?.waiveSetupFee || data?.setupFeeQuote?.waived);
+  const initialFeeOverride = emitInitialFee && Number.isFinite(frozenSetupAmount) && frozenSetupAmount > 0
+    ? frozenSetupAmount
+    : null;
   if (data.proposal?.enabled !== true) {
     // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
     // additional priced rows only in (engine)result.lineItems — merge and
@@ -918,16 +929,16 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       survivors.forEach(remember);
     };
     const hadMappedLines = rawLines.length > 0;
-    const fromResult = normalizeEngineLineItems(result, { emitInitialFee });
+    const fromResult = normalizeEngineLineItems(result, { emitInitialFee, initialFeeOverride });
     if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
-      const alt = normalizeEngineLineItems(data.engineResult, { emitInitialFee });
+      const alt = normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride });
       if (alt.length) {
         result = data.engineResult;
         merge(alt);
       }
     } else {
       merge(fromResult);
-      if (data.engineResult && data.engineResult !== result) merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee }));
+      if (data.engineResult && data.engineResult !== result) merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }));
     }
   }
   const dimensions = dimensionsFrom(data, result);
