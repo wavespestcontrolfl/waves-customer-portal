@@ -470,6 +470,66 @@ describe('cron-lock runExclusive', () => {
     }
   });
 
+  test('a tick fired late in the ET day cannot wait past ET midnight', async () => {
+    jest.useFakeTimers();
+    try {
+      const { parseETDateTime } = require('../utils/datetime-et');
+      jest.setSystemTime(parseETDateTime('2026-08-31T23:56:00'));
+      const conn = mockConnection(true);
+      db.client.acquireConnection.mockResolvedValue(conn);
+
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const herd = Array.from({ length: 10 }, (_, i) =>
+        runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
+      await Promise.resolve();
+
+      const body = jest.fn(async () => 'snapshotted');
+      const late = runExclusive('mrr-month-end', body, { recordHealth: false, waitForSlot: true });
+      // Only 4 minutes to midnight — the tick fails THEN, not at +10 min.
+      await jest.advanceTimersByTimeAsync(4 * 60 * 1000 + 1);
+      await expect(late).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+      expect(body).not.toHaveBeenCalled();
+
+      release('swept');
+      await Promise.all(herd);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the deadline is re-checked right before the body, after the start record', async () => {
+    jest.useFakeTimers();
+    try {
+      let finishStart;
+      const conn = {
+        query: jest.fn(async ({ text }) => {
+          if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+          if (text.includes('INSERT INTO job_health')) return new Promise((resolve) => { finishStart = resolve; });
+          return { rows: [] };
+        }),
+      };
+      db.client.acquireConnection.mockResolvedValue(conn);
+
+      const body = jest.fn(async () => 'snapshotted');
+      const run = runExclusive('mrr-month-end', body, { waitForSlot: true });
+      // (fake timers fake setImmediate too — flush via the timer API)
+      await jest.advanceTimersByTimeAsync(1);
+      // The start record stalls across the deadline.
+      await jest.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      finishStart({ rows: [] });
+
+      await expect(run).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+      expect(body).not.toHaveBeenCalled();
+      const fail = conn.query.mock.calls.map(([a]) => a).find((a) => a.text.includes("last_status = 'failed'"));
+      expect(fail.values.at(-1)).toContain('before body start');
+      const texts = conn.query.mock.calls.map(([a]) => a.text);
+      expect(texts.some((x) => x.includes('pg_advisory_unlock'))).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('timer-driven sweeps registered through scheduled-cron run as scheduled ticks', async () => {
     jest.useFakeTimers();
     try {

@@ -1,6 +1,7 @@
 const { AsyncLocalStorage } = require('async_hooks');
 const db = require('../models/db');
 const { isScheduledTick } = require('./scheduled-cron');
+const { parseETDateTime, etDateString, addETDays } = require('./datetime-et');
 const logger = require('../services/logger');
 
 /**
@@ -307,7 +308,17 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = is
       releaseLockSlot();
     }
   }
-  return runScheduled(jobName, lockKey, fn, recordHealth, Date.now() + SLOT_WAIT_MAX_MS);
+  return runScheduled(jobName, lockKey, fn, recordHealth, tickDeadline());
+}
+
+// A tick may wait at most SLOT_WAIT_MAX_MS — and never into the next ET
+// business day. Bodies compute their period from the wall clock when they
+// run (the 23:50 month-end MRR snapshot, billing_day cohorts), so a tick
+// that fired today must not execute tomorrow even if the window has not
+// elapsed yet: the deadline is capped at the next ET midnight.
+function tickDeadline(now = Date.now()) {
+  const nextEtMidnight = parseETDateTime(`${etDateString(addETDays(new Date(now), 1))}T00:00`).getTime();
+  return Math.min(now + SLOT_WAIT_MAX_MS, nextEtMidnight);
 }
 
 async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt) {
@@ -414,6 +425,15 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, 
         logger.error(`[cron-lock] ${jobName}: lock session lost before the body ran (${err.message}) — skipping tick, connection flagged for destruction`);
         return { skipped: true, reason: 'no_connection' };
       }
+    }
+    // The start record just awaited a round-trip; re-check the deadline
+    // immediately before the body so nothing between "lease usable" and
+    // "body runs" can carry the tick across its cutoff. The row already
+    // says 'running' under our own lease, so this is a plain failed end.
+    if (lease && Date.now() >= lease.deadlineAt) {
+      logger.error(`[cron-lock] ${jobName}: deadline passed before the body could start — not running`);
+      if (recordHealth) await recordJobEnd(jobName, lease.tickStartedAtMs, new Error('deadline passed before body start — tick failed'), conn);
+      return { skipped: true, reason: 'no_connection' };
     }
     // Lease confirmed usable: tell coalesced ticks of this job they are
     // covered (see runScheduled).

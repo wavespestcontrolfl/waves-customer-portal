@@ -1770,24 +1770,18 @@ router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
     setImmediate(() => {
       const { runExclusive } = require('../utils/cron-lock');
       void runExclusive('sms-sealed-eval', () => sealedEval.runSealedExam({ runId }), { recordHealth: false })
-        .then(async (outcome) => {
+        .then((outcome) => {
           // A resolved lock skip is not a rejection. lease_held means the
-          // original holder is still working the run — fine. no_connection
-          // (no holder slot under the cron herd) means THIS pod ran nothing:
-          // for a row this request just created as 'running', nobody else
-          // can be working it, and it would sit there blocking every new
-          // experiment through the one-running index until an operator or
-          // the nightly recovery noticed — retire it so the UI's retry
-          // (resumeRunId) reopens it cleanly. A RESUMED row is left alone:
-          // the process-local cap fires before the fleet-wide advisory
-          // lease is consulted, so another deploy-overlap pod may still own
-          // that run, and retiring it would let a second experiment start
-          // while the first is executing.
-          if (!resumeRunId && outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
-            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start: ${outcome.reason}`);
-            await db('sms_sealed_eval_runs')
-              .where({ id: runId, status: 'running' })
-              .update({ status: 'failed', error: 'could not start: no lock slot available — resume to retry', finished_at: new Date() });
+          // original holder is still working the run. no_connection means
+          // THIS pod ran nothing — but the row is not provably ours to
+          // retire: another pod's stranded-run recovery (runAutoExamSweep)
+          // or a concurrent resume can take the fleet-wide lease and start
+          // processing it right after this pod bailed, and an unguarded
+          // status flip would mark that live run failed and let a second
+          // paid experiment start. The existing recovery path resumes a
+          // stranded 'running' row; surface the miss and leave it there.
+          if (outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
+            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start on this pod (${outcome.reason}) — resume it or let the auto exam sweep recover it`);
           }
         })
         .catch((err) => logger.error(`[sealed-eval] background run ${String(runId).slice(0, 8)} failed: ${err.message}`));
