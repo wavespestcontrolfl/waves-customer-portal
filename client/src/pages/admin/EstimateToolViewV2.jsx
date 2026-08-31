@@ -2920,7 +2920,11 @@ export default function EstimateToolViewV2({
         ...(key === "address" ? { measuredTurfSf: "", unitCount: "", _unitCountEdited: false } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
-        ...(key === "unitCount" ? { _unitCountEdited: true } : {}),
+        // The edit is BOUND to the address it was typed for — every
+        // address-replacement path (typed, autocomplete, customer select,
+        // incoming prefill) then disarms the save without each needing its
+        // own reset (pre-push codex P1 r7).
+        ...(key === "unitCount" ? { _unitCountEdited: true, _unitCountAddress: f.address } : {}),
         ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
@@ -3287,16 +3291,17 @@ export default function EstimateToolViewV2({
   const [unitSaveState, setUnitSaveState] = useState("");
   useEffect(() => {
     setUnitSaveState("");
-  }, [form.address, form.unitCount]);
+  }, [form.address, form.unitCount, form._unitCountAddress]);
   const unitCountNumber = Number(form.unitCount);
   const unitCountSavable =
     form._unitCountEdited &&
+    form._unitCountAddress === form.address &&
     String(form.unitCount || "").trim() !== "" &&
     Number.isInteger(unitCountNumber) &&
     unitCountNumber >= 1;
   const saveVerifiedUnitCount = useCallback(async () => {
     const n = Number(form.unitCount);
-    if (!form.address || !Number.isInteger(n) || n < 1) return;
+    if (!form.address || form._unitCountAddress !== form.address || !Number.isInteger(n) || n < 1) return;
     setUnitSaveState("saving");
     try {
       const r = await fetch("/api/admin/estimator/property-lookup/verify", {
@@ -3316,7 +3321,7 @@ export default function EstimateToolViewV2({
     } catch {
       setUnitSaveState("error");
     }
-  }, [form.address, form.unitCount]);
+  }, [form.address, form.unitCount, form._unitCountAddress]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
