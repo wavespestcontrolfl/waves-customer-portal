@@ -139,18 +139,54 @@ function statusWriteSites(src) {
       out.push({ expr: s[1].replace(/,\s*$/, '').trim(), guards });
     }
   };
-  const scanChain = (chain, declIndex) => {
-    const guards = chainGuards(chain);
-    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*\{([\s\S]*?)\}\s*\)/g)) objectStatuses(w[1], guards);
-    for (const w of chain.matchAll(/\.(?:update|insert)\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
-      // Nearest `const <id> = {` BEFORE this chain (the same name is declared
-      // more than once in the module, e.g. recordDecision's two `update`s).
-      const before = src.slice(0, declIndex);
-      const declStart = before.lastIndexOf(`const ${w[1]} = {`);
-      if (declStart === -1) { out.push({ expr: `<unresolved object ${w[1]}>`, guards }); continue; }
-      const body = src.slice(declStart).match(/\{([\s\S]*?)\};/);
-      if (!body) { out.push({ expr: `<unresolved object ${w[1]}>`, guards }); continue; }
+  // Balanced-paren argument text of a call starting at `(`.
+  const argSpan = (text, openIdx) => {
+    let depth = 0;
+    for (let i = openIdx; i < text.length; i += 1) {
+      if ('({['.includes(text[i])) depth += 1;
+      else if (')}]'.includes(text[i])) { depth -= 1; if (depth === 0) return text.slice(openIdx + 1, i); }
+    }
+    return text.slice(openIdx + 1);
+  };
+  // Classify one update/insert argument list. Every Knex mutation shape is
+  // either understood or pushed as an unclassifiable marker — never skipped.
+  const classifyWriteArgs = (args, guards, declIndex) => {
+    const a = args.trim();
+    if (a.startsWith('{')) {
+      // Object (optionally followed by a returning-columns arg, which cannot
+      // carry a status write).
+      objectStatuses(argSpan(a, 0), guards);
+      return;
+    }
+    if (a.startsWith('[')) {
+      // Array-of-rows insert.
+      const inner = argSpan(a, 0);
+      let found = false;
+      for (const o of inner.matchAll(/\{([\s\S]*?)\}/g)) { objectStatuses(o[1], guards); found = true; }
+      if (!found) out.push({ expr: `<unclassifiable write args: ${a.slice(0, 40)}>`, guards });
+      return;
+    }
+    const colForm = a.match(/^['"]([\w]+)['"]\s*,\s*([\s\S]+)$/);
+    if (colForm) {
+      // Two-arg column form: .update('status', value).
+      if (colForm[1] === 'status') out.push({ expr: colForm[2].trim(), guards });
+      return;
+    }
+    if (/^[A-Za-z_$][\w$]*$/.test(a)) {
+      // Identifier: nearest `const <id> = {` BEFORE this chain (the same name
+      // is declared more than once in the module, e.g. recordDecision's two
+      // `update`s).
+      const declStart = src.slice(0, declIndex).lastIndexOf(`const ${a} = {`);
+      const body = declStart === -1 ? null : src.slice(declStart).match(/\{([\s\S]*?)\};/);
+      if (!body) { out.push({ expr: `<unresolved object ${a}>`, guards }); return; }
       objectStatuses(body[1], guards);
+      return;
+    }
+    out.push({ expr: `<unclassifiable write args: ${a.slice(0, 40)}>`, guards });
+  };
+  const scanChain = (chain, declIndex, guards = chainGuards(chain)) => {
+    for (const w of chain.matchAll(/\.(?:update|insert)\s*\(/g)) {
+      classifyWriteArgs(argSpan(chain, w.index + w[0].length - 1), guards, declIndex);
     }
   };
   for (const m of src.matchAll(chainRe)) {
@@ -160,8 +196,8 @@ function statusWriteSites(src) {
   const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
   for (const m of src.matchAll(splitRe)) {
     const rest = src.slice(m.index + m[0].length);
-    for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:update|insert)\\(\\s*\\{([\\s\\S]*?)\\}\\s*\\)`, 'g'))) {
-      objectStatuses(w[1], ['<split-builder>']);
+    for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:update|insert)\\s*\\(`, 'g'))) {
+      classifyWriteArgs(argSpan(rest, w.index + w[0].length - 1), ['<split-builder>'], m.index);
     }
   }
   return out;
@@ -218,6 +254,19 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     expect(resolveStatusExpression("cond ? 'active' : mysteryVar")).toBeNull();
     expect(statusWriteExpressions("await db('annual_prepay_terms').update(mystery);"))
       .toEqual(['<unresolved object mystery>']);
+  });
+
+  test('other Knex mutation shapes are classified, never skipped', () => {
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update('status', 'refunded');"))
+      .toEqual(["'refunded'"]);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ status: 'refunded' }, ['id']);"))
+      .toEqual(["'refunded'"]);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').insert([{ status: 'refunded' }, { status: 'canceled' }]);"))
+      .toEqual(["'refunded'", "'canceled'"]);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update('notes', 'x');"))
+      .toEqual([]); // two-arg form on a non-status column is not a status write
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update(buildPayload(term));"))
+      .toEqual(['<unclassifiable write args: buildPayload(term)>']);
   });
 
   test('shorthand, computed-key, and spread write objects fail closed instead of slipping through', () => {
