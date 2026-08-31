@@ -31,6 +31,21 @@ describe('service_cancellation_confirmation SMS body', () => {
     expect(b).not.toMatch(/[\u{1F300}-\u{1FAFF}]/u); // no emoji (house voice)
   });
 
+  test('non-GSM first names fold to GSM-7 so the whole text stays at two segments', () => {
+    const { gsmSafeName } = require('../services/messaging/gsm-normalize');
+    // Á is outside GSM-7 → folds; é/ñ are GSM-native → kept as typed.
+    expect(gsmSafeName('Álvaro')).toBe('Alvaro');
+    expect(gsmSafeName('José-María Peña')).toBe('José-María Peña'.replace('í', 'i'));
+    expect(gsmSafeName('  ')).toBe('there');
+    expect(gsmSafeName('王小明')).toBe('there');
+    const rendered = render(CANCELLATION_CONFIRMATION_BODY, { ...LONG_VARS, first_name: gsmSafeName('Álvaro-Christopher') });
+    expect(detectEncoding(rendered).encoding).toBe('GSM_7');
+    expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
+    // Without folding the same name forces UCS-2 and a third segment — the bug.
+    const unsafe = render(CANCELLATION_CONFIRMATION_BODY, { ...LONG_VARS, first_name: 'Álvaro-Christopher' });
+    expect(countSegments(unsafe).segmentCount).toBeGreaterThan(2);
+  });
+
   test('documents the bug: the prior H0 body rendered past two segments', () => {
     const rendered = render(CANCELLATION_CONFIRMATION_PRIOR_BODY, LONG_VARS);
     expect(countSegments(rendered).segmentCount).toBeGreaterThan(2);

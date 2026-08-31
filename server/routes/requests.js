@@ -7,6 +7,9 @@ const { authenticate, authenticateAllowInactive } = require('../middleware/auth'
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+// A non-GSM first name (Á) would flip the whole confirmation text to UCS-2
+// and past two segments — fold it before rendering (codex pre-push P1).
+const { gsmSafeName } = require('../services/messaging/gsm-normalize');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
@@ -616,13 +619,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         : 'service_request_confirmation';
       const smsVars = isCancellation
         ? {
-            first_name: req.customer.first_name || 'there',
+            first_name: gsmSafeName(req.customer.first_name),
             // ET date of the request — a quiet-hours hold delivers this text
             // the next morning, so the body never says "today".
             effective_date: etDisplayDate(request.created_at),
           }
         : {
-            first_name: req.customer.first_name || 'there',
+            first_name: gsmSafeName(req.customer.first_name),
             category: categoryLabel,
             response_time: responseTime,
           };
