@@ -37,7 +37,7 @@
 //   need signature verification. Untrusted POSTs that update
 //   classification or write recordings to disk are an attack
 //   surface — flag any path missing the signature check.
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { formatAddress } from "../../utils/format-address";
 import { describeProcessResult } from "../../lib/callProcessResult";
@@ -632,6 +632,12 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   const [generatingSynopsis, setGeneratingSynopsis] = useState(false);
   const [processingOne, setProcessingOne] = useState(false);
   const [processVerdict, setProcessVerdict] = useState(null);
+  // Which recording the pane is showing RIGHT NOW. An in-flight process
+  // resolves against whatever is selected when it returns, and list rows
+  // stay clickable while it runs, so every state write below is fenced on
+  // this — otherwise a slow request repaints the previous call's verdict,
+  // and its follow-up fetch drags the previous recording back into the pane.
+  const selectedIdRef = useRef(recording?.id);
   const [synopsisExpanded, setSynopsisExpanded] = useState(true);
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const extraction = parseExtraction(r);
@@ -643,11 +649,18 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   // over from the previous call would sit under the new call's Process
   // button and describe the wrong recording.
   useEffect(() => {
+    selectedIdRef.current = recording?.id;
     setR(recording);
     setProcessVerdict(null);
+    // Reset the busy flag here rather than letting a fenced-out request do
+    // it: the fence stops a stale response from writing state, so without
+    // this the new recording would inherit a disabled Process button.
+    setProcessingOne(false);
   }, [recording]);
 
   const handleProcess = async () => {
+    const requestedId = r.id;
+    const stillShowing = () => selectedIdRef.current === requestedId;
     setProcessingOne(true);
     setProcessVerdict(null);
     try {
@@ -655,23 +668,27 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
         `/admin/call-recordings/process/${r.twilio_call_sid}`,
         { method: "POST" },
       );
+      if (!stillShowing()) return;
       // This detail pane gave NO feedback at all — a blocked claim looked
       // identical to a successful run, which is how a stuck call read as
       // processed on 2026-08-31.
       setProcessVerdict(describeProcessResult(res));
       const fresh = await adminFetch(
-        `/admin/call-recordings/recording/${r.id}`,
+        `/admin/call-recordings/recording/${requestedId}`,
       );
+      if (!stillShowing()) return;
       if (fresh?.recording) setR(fresh.recording);
       if (onUpdate) onUpdate();
     } catch (e) {
+      if (!stillShowing()) return;
       setProcessVerdict({
         didWork: false,
         severity: "failed",
         text: `Process failed — ${e.message || "unknown error"}`,
       });
+    } finally {
+      if (stillShowing()) setProcessingOne(false);
     }
-    setProcessingOne(false);
   };
 
   const handleGenerateSynopsis = async () => {
