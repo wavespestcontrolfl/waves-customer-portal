@@ -156,7 +156,7 @@ function validateProduct(row, { now = new Date() } = {}) {
   if (row.plain_url !== undefined && row.plain_url !== null && !parseHttpsUrl(row.plain_url)) {
     errors.push('plain_url, when present, must be an https URL');
   }
-  if (String(row.merchant).toLowerCase() === 'amazon' && url) {
+  if (String(row.merchant).trim().toLowerCase() === 'amazon' && url) {
     const host = url.hostname.toLowerCase();
     if (host !== 'amazon.com' && host !== 'www.amazon.com') {
       errors.push('amazon products must link amazon.com directly — never amzn.to, redirects, or cloak domains (Associates policy)');

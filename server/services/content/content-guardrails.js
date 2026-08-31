@@ -1607,8 +1607,9 @@ function allowedExactSourceUrls(requiredSourceUrls = []) {
 // a draft stay plain DISALLOWED_EXTERNAL_LINK (no bypass exists), so the
 // tracking URL can never appear in publishable copy at all.
 //
-// The gate is GATE_AFFILIATE_LINKS (call-time read — flips and tests take
-// effect immediately). Gate off, non-blog lane, or an unknown product id
+// The gate is GATE_AFFILIATE_LINKS === 'true' exactly (call-time read —
+// flips and tests take effect immediately; '1'/'on' stay dark). Gate off,
+// non-blog lane, or an unknown product id
 // all collapse to the same P0: the component resolves to nothing, so the
 // draft parks. FTC §255.5 disclosure, the yellow-class label-review ruling
 // (owner 2026-08-31), page-class eligibility, refresh no-additions, and
@@ -1708,8 +1709,10 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   const tags = collectAffiliateLinkTags(body);
   if (tags.length === 0) return findings;
 
-  const { gateEnvValue } = require('../../config/feature-gates');
-  const gateOn = gateEnvValue('GATE_AFFILIATE_LINKS');
+  // Exact 'true' at CALL time — the feature-gates `affiliateLinks` entry
+  // documents the flag; reading the env here (reserviceReportCopy pattern)
+  // keeps flips/tests immediate and keeps '1'/'on' dark (Codex r4 P1).
+  const gateOn = process.env.GATE_AFFILIATE_LINKS === 'true';
   const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex() : new Map();
   const postType = String(frontmatter?.post_type || '').trim().toLowerCase();
 

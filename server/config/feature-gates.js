@@ -1269,11 +1269,12 @@ const gates = {
   // UNREGISTERED_AFFILIATE_LINK and the lane is fully dark. Raw affiliate
   // URLs never pass regardless (DISALLOWED_EXTERNAL_LINK), and channel
   // stripping (newsletter/social) runs regardless of this flag. OFF in
-  // EVERY environment unless explicitly set (policy flag, same posture as
-  // GATE_NAMED_COMPETITOR_AUTOPUBLISH); consumers read it at CALL time via
-  // gateEnvValue('GATE_AFFILIATE_LINKS') so flips and tests take effect
-  // immediately; kill switch = unset GATE_AFFILIATE_LINKS.
-  affiliateLinks: gateEnvValue('GATE_AFFILIATE_LINKS'),
+  // EVERY environment unless set to EXACTLY 'true' (policy flag, same
+  // posture as GATE_NAMED_COMPETITOR_AUTOPUBLISH — '1'/'on' stay dark);
+  // content-guardrails reads process.env.GATE_AFFILIATE_LINKS === 'true' at
+  // CALL time (the reserviceReportCopy pattern) so flips and tests take
+  // effect immediately; kill switch = unset GATE_AFFILIATE_LINKS.
+  affiliateLinks: process.env.GATE_AFFILIATE_LINKS === 'true',
 
   // aeo_gap opportunity mining — feeds answer-engine (LLM) visibility gaps into
   // the content engine's opportunity_queue. Default OFF in prod: ships dormant

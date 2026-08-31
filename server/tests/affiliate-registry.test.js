@@ -46,6 +46,8 @@ describe('validateProduct', () => {
   test('amazon rows must be direct amazon.com with a tag — shortlinks and tag-less rows are invalid', () => {
     expect(registry.validateProduct(green({ approved_affiliate_url: 'https://amzn.to/x' })).join(' ')).toMatch(/amazon\.com directly/);
     expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com/dp/B1' })).join(' ')).toMatch(/tag=/);
+    // merchant is normalized (trim + lowercase) before the Amazon rules apply (Codex r4 P1)
+    expect(registry.validateProduct(green({ merchant: ' Amazon ', approved_affiliate_url: 'https://amzn.to/x' })).join(' ')).toMatch(/amazon\.com directly/);
   });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {

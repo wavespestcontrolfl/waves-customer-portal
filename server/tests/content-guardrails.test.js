@@ -412,6 +412,15 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     }, { gate: '' });
   });
 
+  test('the kill switch is EXACT: GATE_AFFILIATE_LINKS=1 / on stay dark (Codex r4 P1)', () => {
+    for (const v of ['1', 'on', 'TRUE', 'yes']) {
+      withAffiliateEnv(() => {
+        const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });
+        expect(affiliateCodes(r)).toEqual(['P0:UNREGISTERED_AFFILIATE_LINK']);
+      }, { gate: v });
+    }
+  });
+
   test('gate on + active product + disclosure + eligible post_type + service CTA ⇒ no affiliate findings', () => {
     withAffiliateEnv(() => {
       const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: true });

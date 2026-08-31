@@ -34,7 +34,8 @@ product by ID:
 
 ## Kill switch
 
-`GATE_AFFILIATE_LINKS` (Railway env, portal server; read at call time).
+`GATE_AFFILIATE_LINKS` (Railway env, portal server; read at call time;
+must be EXACTLY `true` — `1`/`on` stay dark).
 Unset/anything-but-true = the product index is empty, so every
 `<AffiliateLink>` is a P0 `UNREGISTERED_AFFILIATE_LINK` and nothing
 affiliate can publish. Channel stripping (below) runs REGARDLESS of the
