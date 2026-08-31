@@ -569,10 +569,18 @@ async function getMrrTrend(months) {
 
   const results = settled;
 
-  // Growth rates
+  // Growth rates. Never computed across the lane-definition boundary
+  // (#3669, Codex r8): the pre-boundary point holds the old wide
+  // population, so a crossing pair would report every excluded residue
+  // row as negative growth (and contaminate avg_growth_pct) — same rule
+  // the Net MRR bridge applies (mrr-bridge.js LANE_DEFINITION_BOUNDARY).
+  const { LANE_DEFINITION_BOUNDARY } = require('../mrr-bridge');
   for (let i = 1; i < results.length; i++) {
-    const prev = results[i - 1].mrr;
-    results[i].growth_pct = prev > 0 ? Math.round((results[i].mrr - prev) / prev * 100) : null;
+    const prev = results[i - 1];
+    const crossesLaneBoundary = prev.date < LANE_DEFINITION_BOUNDARY && results[i].date >= LANE_DEFINITION_BOUNDARY;
+    results[i].growth_pct = (!crossesLaneBoundary && prev.mrr > 0)
+      ? Math.round((results[i].mrr - prev.mrr) / prev.mrr * 100)
+      : null;
   }
 
   return {

@@ -235,6 +235,12 @@ router.get('/', dashboardCache, async (req, res, next) => {
     const monW = mondayThisWeek();
     const sunW = sundayThisWeek();
 
+    // ONE pending-prepay set shared by the headline breakdown and the tier
+    // rows, so revenueByTier sums to the same response's MRR tile even
+    // across a transient lookup failure (Codex #3669 r4/r8).
+    const { pendingPrepayIds } = require('../services/mrr-snapshot');
+    const pendingIds = await pendingPrepayIds(db);
+
     const [
       revMTD, revLastMonth, activeCustomers, newThisMonth,
       estimatesPending, servicesWeek, avgResponse, mrrBreakdown, oneTimeMonth,
@@ -263,7 +269,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
       ).first(),
       db('estimates').where({ status: 'accepted' }).whereNotNull('accepted_at').whereNotNull('sent_at').where('accepted_at', '>=', som)
         .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first(),
-      computeMrrBreakdown(db, today),
+      computeMrrBreakdown(db, today, pendingIds),
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
       // Today's schedule
       db('scheduled_services')
@@ -276,8 +282,11 @@ router.get('/', dashboardCache, async (req, res, next) => {
         .orderBy('scheduled_services.window_start'),
       // Recent activity
       db('activity_log').orderBy('created_at', 'desc').limit(15),
-      // Tier revenue
-      db('customers').where({ active: true }).whereNull('deleted_at').select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
+      // Tier revenue — the shared breakdown population (monthly lane ∪
+      // payment-pending prepay, internal excluded), so revenueByTier
+      // reconciles to the headline MRR in the same response (Codex #3669
+      // r8): the raw sum counted every rate-bearing row, monthly or not.
+      require('../services/mrr-snapshot').tierBreakdown(db, pendingIds),
       // Google reviews — use Places API totals from _stats rows, fallback to actual review count
       (async () => {
         try {
@@ -417,7 +426,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
         createdAt: a.created_at,
       })),
       revenueByTier: tierRevenue.map(t => ({
-        tier: t.waveguard_tier || 'None', count: parseInt(t.count), revenue: parseFloat(t.revenue || 0),
+        tier: t.tier, count: t.count, revenue: t.mrr,
       })),
     });
   } catch (err) { next(err); }
