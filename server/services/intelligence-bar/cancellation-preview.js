@@ -109,4 +109,19 @@ function cancellationFingerprint(preview) {
   return crypto.createHash('sha256').update(JSON.stringify(material)).digest('hex');
 }
 
-module.exports = { previewCancellationEffects, cancellationFingerprint };
+// The card's exact-effect scope: a cancellation whose follow-through could
+// charge or void anything is NOT card-confirmable. The rails settle those
+// amounts by re-reading state after commit, which cannot be pinned to what
+// the card showed — so they stay on the Dispatch screen (waiver + review
+// controls) until the rails accept a bound snapshot.
+function cancellationHasMoneyEffects(preview) {
+  return !!(preview?.fee?.applies || preview?.fee?.unresolved || (preview?.invoices || []).length);
+}
+const CANCELLATION_MONEY_EFFECTS_MESSAGE = 'This cancellation has money effects (a late-cancel fee may apply and/or open invoices would be voided), which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen, where the fee waiver and invoice review controls live. Nothing was changed.';
+
+module.exports = {
+  previewCancellationEffects,
+  cancellationFingerprint,
+  cancellationHasMoneyEffects,
+  CANCELLATION_MONEY_EFFECTS_MESSAGE,
+};

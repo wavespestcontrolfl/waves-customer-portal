@@ -85,8 +85,8 @@ const mockPreviewCancellation = jest.fn();
 jest.mock('../services/intelligence-bar/cancellation-preview', () => {
   const actual = jest.requireActual('../services/intelligence-bar/cancellation-preview');
   return {
+    ...actual,
     previewCancellationEffects: (...args) => mockPreviewCancellation(...args),
-    cancellationFingerprint: actual.cancellationFingerprint,
   };
 });
 jest.mock('../middleware/admin-auth', () => ({
@@ -226,8 +226,14 @@ describe('W0B authorization contract', () => {
 });
 
 describe('W0B cancellation money effects', () => {
+  // Money-free cancellation: the only kind the card commits.
   const PREVIEW = {
     appointment: { id: 'ap1', scheduled_date: '2026-09-02', service_type: 'Quarterly Pest', status: 'scheduled', customer_name: 'acct-3001' },
+    fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false },
+    invoices: [],
+  };
+  const MONEY_PREVIEW = {
+    ...PREVIEW,
     fee: { rail: 'card_hold', applies: true, amount: 49, unresolved: false },
     invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 0 }],
   };
@@ -240,7 +246,7 @@ describe('W0B cancellation money effects', () => {
     });
   });
 
-  test('proposal previews fee + invoice effects, pins a fingerprint, and the contract discloses the charge', async () => {
+  test('money-free proposal pins a fingerprint and the contract says no fee / no invoices', async () => {
     mockPreviewCancellation.mockResolvedValue(PREVIEW);
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'ap1', reason: 'rain' } }],
@@ -253,11 +259,30 @@ describe('W0B cancellation money effects', () => {
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._cancellation_fingerprint).toBe(cancellationFingerprint(PREVIEW));
       const labels = stored.contract.effects.map((e) => e.label);
-      expect(labels).toContainEqual(expect.stringMatching(/^Late-cancel fee of \$49\.00 will be charged/));
-      expect(labels).toContainEqual(expect.stringMatching(/^Void invoice INV-1001 \(sent, \$120\.00\)/));
+      expect(labels).toContainEqual(expect.stringMatching(/^No late-cancel fee/));
+      expect(labels.some((l) => /Void invoice|will be charged/.test(l))).toBe(false);
       expect(body.pendingActions[0].contract.effects.map((e) => e.label)).toEqual(labels);
       // Internal pins never ride to the card.
       expect(body.pendingActions[0].params._cancellation_fingerprint).toBeUndefined();
+    });
+  });
+
+  test('a cancellation WITH money effects is refused at proposal and routed to the Dispatch screen', async () => {
+    mockPreviewCancellation.mockResolvedValue(MONEY_PREVIEW);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'ap1' } }],
+      [{ type: 'text', text: 'Use Dispatch.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(status).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toMatch(/Dispatch screen/);
+      expect(toolResult.error).toMatch(/Nothing was changed/);
     });
   });
 
@@ -268,8 +293,8 @@ describe('W0B cancellation money effects', () => {
         params: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: cancellationFingerprint(PREVIEW) },
       },
     });
-    // Fee window elapsed between proposal and confirm → no fee now.
-    mockPreviewCancellation.mockResolvedValue({ ...PREVIEW, fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false } });
+    // A fee window was entered between proposal and confirm → money effect now.
+    mockPreviewCancellation.mockResolvedValue(MONEY_PREVIEW);
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
         method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },

@@ -429,6 +429,11 @@ function withCacheBreakpoint(messages) {
 // /confirm-action commits) while reads stay available; the fallback for a
 // broken confirm UI is the normal admin screen, never ungated AI execution.
 // (GATE_IB_UI_CONFIRM is retired and intentionally ignored.)
+// cancel_appointment via the confirm card is limited to money-free
+// cancellations (see proposePendingWrite) — shared with the executor's
+// in-transaction re-check so both boundaries agree.
+const { cancellationHasMoneyEffects, CANCELLATION_MONEY_EFFECTS_MESSAGE } = require('../services/intelligence-bar/cancellation-preview');
+
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
 }
@@ -662,6 +667,14 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       const { previewCancellationEffects, cancellationFingerprint } = require('../services/intelligence-bar/cancellation-preview');
       const cancellation = await previewCancellationEffects(String(params.appointment_id));
       if (cancellation?.error) return { failed: true, modelResult: { error: cancellation.error } };
+      // Exact-effect scope (W0B): the card commits only cancellations with
+      // NO money effects. A fee (or an unverifiable fee lane) or open
+      // invoices are settled by rails that re-read amounts after commit,
+      // which cannot be pinned to the card yet — those cancels happen on
+      // the Dispatch screen, which owns the waiver and review controls.
+      if (cancellationHasMoneyEffects(cancellation)) {
+        return { failed: true, modelResult: { error: CANCELLATION_MONEY_EFFECTS_MESSAGE } };
+      }
       params._cancellation_fingerprint = cancellationFingerprint(cancellation);
       preview = { ...preview, cancellation };
     }

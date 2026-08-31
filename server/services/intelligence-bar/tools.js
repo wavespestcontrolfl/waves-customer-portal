@@ -2305,13 +2305,15 @@ async function cancelAppointment(input) {
     const { transitionJobStatus } = require('../job-status');
     await db.transaction(async (trx) => {
       if (approvedFingerprint) {
-        const { previewCancellationEffects, cancellationFingerprint } = require('./cancellation-preview');
+        const { previewCancellationEffects, cancellationFingerprint, cancellationHasMoneyEffects } = require('./cancellation-preview');
         await trx('scheduled_services').where('id', appointment_id).forUpdate().first('id');
         await trx('invoices').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
         await trx('estimate_card_holds').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
         await trx('appointment_card_requests').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
         const live = await previewCancellationEffects(appointment_id, { trx });
-        if (live?.error || cancellationFingerprint(live) !== approvedFingerprint) {
+        // Same scope the proposal enforced: a money effect that appeared
+        // since the card (fee window entered, invoice minted) is drift.
+        if (live?.error || cancellationFingerprint(live) !== approvedFingerprint || cancellationHasMoneyEffects(live)) {
           const err = new Error('cancellation_effects_changed');
           err.previewChanged = true;
           throw err;
