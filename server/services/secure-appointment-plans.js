@@ -334,6 +334,26 @@ async function settledSetupClaimForEstimate(database, estimateId) {
   return settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
 }
 
+// TRUE when another series booked from this estimate already carries the
+// setup (a live positive stamp) or collected it (a claim on that root) —
+// a second series booked later from the same accepted estimate must not
+// stamp the disclosed setup again (codex #3591 r66 P1).
+async function estimateSetupCarriedElsewhere(database, estimateId, excludeRootId = null) {
+  if (!estimateId) return false;
+  let query = database('scheduled_services')
+    .where({ source_estimate_id: estimateId })
+    .whereNull('recurring_parent_id');
+  if (excludeRootId) query = query.whereNot('id', excludeRootId);
+  const roots = await query.select('id', 'pending_setup_fee');
+  const ids = [];
+  for (const root of roots || []) {
+    if (Number(root.pending_setup_fee) > 0) return true;
+    ids.push(root.id);
+  }
+  if (!ids.length) return false;
+  return !!(await database('setup_fee_claims').whereIn('scheduled_service_id', ids).first('id'));
+}
+
 // The positive booking-time stamp on the visit's series anchor, or null —
 // the completion rail collects a stamped setup on its own, so a staff page
 // about that setup must be disclosure-only (codex #3591 r65 P1).
@@ -555,8 +575,19 @@ async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = f
   // rail the funnel routed here for.
   const serviceKey = await authoritativeServiceKey(db, visit);
   if (customer.billing_mode === 'per_application' && serviceKey !== 'rodent_bait') return null;
+  // A COVERED lane (membership dues, an annual-prepay lane, or an
+  // overlapping term below) makes the prepay option unsellable — but a
+  // residential bait program still owes its per-series setup and this page
+  // is its disclosure rail (codex #3591 r66 P1: the lane may cover an
+  // unrelated service such as palm injection). The rodent exception keeps
+  // the page with the prepay option suppressed; everything else stays
+  // card-only.
+  let prepayUnavailable = false;
   const lane = resolveBillingLane(customer);
-  if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') return null;
+  if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') {
+    if (serviceKey !== 'rodent_bait') return null;
+    prepayUnavailable = true;
+  }
 
   const isRecurring = !!visit.is_recurring || !!visit.recurring_pattern;
   if (!isRecurring) {
@@ -588,7 +619,10 @@ async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = f
     .orderBy('term_end', 'desc')
     .first('id', 'term_end');
   const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
-  if (overlapEnd && today <= overlapEnd) return null;
+  if (overlapEnd && today <= overlapEnd) {
+    if (serviceKey !== 'rodent_bait') return null;
+    prepayUnavailable = true;
+  }
 
   // Direct (non-estimate) rodent bait series: the non-member $99 setup is
   // assessed here too, not only at estimate conversion (codex #3591 r9 P1).
@@ -620,7 +654,9 @@ async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = f
     perVisit: cents(perVisit),
     visitsPerYear,
     annualBase: pricing.annualBase,
-    prepay: pricing.prepay,
+    // null = prepay not sellable here (covered lane / overlapping term);
+    // the page renders per-application + the setup disclosure only.
+    prepay: prepayUnavailable ? null : pricing.prepay,
     setupFee: pricing.setupFee,
     selected: request?.selected_plan || null,
   };
@@ -724,6 +760,7 @@ async function selectSecurePlan({ token, plan }) {
 
   const context = await buildSecurePlanContext({ request, visitId: visit.id, consumeDisclosure: true });
   if (!context) throw fail('plan_unavailable');
+  if (plan === 'prepay_annual' && !context.prepay) throw fail('plan_unavailable');
 
   if (plan === 'per_application') {
     if (context.mode !== 'recurring') throw fail('plan_unavailable');
@@ -1149,6 +1186,7 @@ module.exports = {
   recordSetupFeeClaimForInvoice,
   settledSetupClaimForInvoice,
   settledSetupClaimForEstimate,
+  estimateSetupCarriedElsewhere,
   stampedSetupForVisit,
   anchorSetupFeeClaim,
   retireDirectSetupClaimForPrepay,

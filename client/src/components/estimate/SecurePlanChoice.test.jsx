@@ -43,6 +43,16 @@ describe('SecurePlanChoice', () => {
     expect(oneTime).toBeEmptyDOMElement();
   });
 
+  it('renders ONLY the per-application option (with its setup disclosure) when the server suppresses prepay', () => {
+    const onSelect = vi.fn();
+    render(<SecurePlanChoice planContext={{ ...FEE_WAIVER_CONTEXT, planClass: 'discount', prepay: null, setupFee: { amount: 99, waivedWithPrepay: false } }} onSelect={onSelect} />);
+    expect(screen.getByText('Pay per application')).toBeInTheDocument();
+    expect(screen.getByText('$99.00 setup fee applies')).toBeInTheDocument();
+    expect(screen.queryByText(/Prepay the year/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Pay per application'));
+    expect(onSelect).toHaveBeenCalledWith('per_application');
+  });
+
   it('fee-waiver mix: setup fee amount and waiver copy come from the payload (no hardcoded $99)', () => {
     render(<SecurePlanChoice planContext={FEE_WAIVER_CONTEXT} selected={null} onSelect={() => {}} />);
     expect(screen.getByText('Pay per application')).toBeInTheDocument();

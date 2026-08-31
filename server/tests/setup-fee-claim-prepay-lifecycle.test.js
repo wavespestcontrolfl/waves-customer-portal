@@ -137,6 +137,14 @@ describe('settlement + stamp probes for the booking route (codex #3591 r64/r65 P
     // No term for the estimate (standard accept won the race) = no settlement.
     expect(await settledSetupClaimForEstimate(conn({ claim: claimRow, prepayTerm: null }), 'est-1')).toBeNull();
   });
+  test('estimateSetupCarriedElsewhere: a live stamp or a claim on ANOTHER root of the estimate blocks a second stamp (codex #3591 r66 P1)', async () => {
+    const { estimateSetupCarriedElsewhere } = plans;
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: '99.00' }] }), 'est-1', 'root-new')).toBe(true);
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: { id: 'claim-a' } }), 'est-1', 'root-new')).toBe(true);
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [{ id: 'root-a', pending_setup_fee: null }], claim: null }), 'est-1', 'root-new')).toBe(false);
+    expect(await estimateSetupCarriedElsewhere(conn({ rootsForCoverage: [] }), 'est-1', 'root-new')).toBe(false);
+    expect(await estimateSetupCarriedElsewhere(conn(), null)).toBe(false);
+  });
   test('anchorSetupFeeClaim fills only an EMPTY anchor; stampedSetupForVisit reads the positive anchor stamp', async () => {
     const c = conn({ updateResult: 1 });
     expect(await anchorSetupFeeClaim(c, { claimId: 'claim-1', anchorId: 'svc-parent' })).toBe(true);
@@ -453,6 +461,10 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(adminSchedule).toMatch(/if \(isRecurring && \(!linkedEstimateId \|\| acceptEstimateOnBook\)\) \{\s+const \{ resolveDirectRodentSetupObligation \} = require\('\.\.\/services\/secure-appointment-plans'\);/);
     // The stamp is recorded for the post-commit acceptance to retire…
     expect(adminSchedule).toMatch(/directRodentSetupStamp = owedSetup;/);
+    // A PREVIOUSLY accepted estimate booked afterward stamps its DISCLOSED
+    // figure unless settled (term claim) or carried by another of its
+    // series (codex #3591 r66 P1) — the standard Mark Won never billed it.
+    expect(adminSchedule).toMatch(/\} else if \(isRecurring && linkedEstimateId\) \{[\s\S]*?plans\.isRodentBaitProgramKey\(await plans\.authoritativeServiceKey\(trx, svc\)\)[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+if \(disclosed > 0\s+&& !\(await plans\.settledSetupClaimForEstimate\(trx, linkedEstimateId\)\)\s+&& !\(await plans\.estimateSetupCarriedElsewhere\(trx, linkedEstimateId, svc\.id\)\)\) \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: disclosed, updated_at: new Date\(\) \}\);/);
     // …and BOTH acceptance-success paths (main accept and the overlap-race
     // standard downgrade) retire it, CAS'd on the exact stamped amount.
     expect(adminSchedule).toMatch(/await retireRodentSetupStampAfterAcceptance\(acceptResult\);/);

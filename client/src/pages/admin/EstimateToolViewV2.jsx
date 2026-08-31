@@ -1223,6 +1223,22 @@ function fallbackCadenceForPreview(E) {
       period: "/quarter",
     };
   }
+  // SOLO per-application rodent bait (2026-08-29 realignment): the row bills
+  // per application on its own cadence, but the fallback would show
+  // annual/12 as "/mo" — the customer's estimate says "$X per application".
+  // Keyed on the billing-unit marker so a pinned LEGACY monthly rodent row
+  // (no marker) keeps the monthly path. Solo only, same bundle rule as the
+  // commercial branch below.
+  const perApplicationRodent = services.length === 1 && services[0]?.perApplicationBilled === true ? services[0] : null;
+  if (perApplicationRodent) {
+    const visits = Number(perApplicationRodent.visitsPerYear ?? perApplicationRodent.visits) || 4;
+    if (visits < 6) {
+      return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/application" };
+    }
+    if (visits < 12) {
+      return { key: "bi_monthly", label: "Bi-monthly", intervalMonths: 2, period: "/application" };
+    }
+  }
   // SOLO commercial pest sells one cadence (risk bucket / estimator override)
   // and has no residential pest tiers, so without this the preview takes the
   // monthly path and shows annual/12 as "$X/mo" even for a 4x/6x program.

@@ -236,6 +236,33 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
   });
 
+  test('a COVERED lane (membership dues / annual-prepay lane / overlapping term) keeps the rodent disclosure page with prepay suppressed (codex #3591 r66 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    for (const customerPatch of [{ billing_mode: 'monthly_membership' }, { billing_mode: 'annual_prepay' }]) {
+      setTables({
+        visit: { ...baseVisit, service_type: 'Rodent Bait Stations' },
+        customer: { ...baseCustomer, ...customerPatch },
+      });
+      const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+      expect(ctx).not.toBeNull();
+      expect(ctx.prepay).toBeNull();
+      expect(ctx.setupFee).toEqual({ amount: Number(RODENT.baitSetupFee), waivedWithPrepay: false });
+      expect(ctx.perVisit).toBeGreaterThan(0);
+    }
+    // An overlapping term (palm prepay) covers the year for prepay only.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Stations' },
+      customer: { ...baseCustomer },
+      term: { id: 't1', term_end: '2099-12-31' },
+    });
+    const overlapped = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(overlapped).not.toBeNull();
+    expect(overlapped.prepay).toBeNull();
+    // Selecting prepay against a suppressed option is refused server-side.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    expect(src).toMatch(/if \(plan === 'prepay_annual' && !context\.prepay\) throw fail\('plan_unavailable'\);/);
+  });
+
   test('a CHILD of an ESTIMATE-origin root owes nothing — provenance resolves at the anchor (codex #3591 r47 local P0)', async () => {
     mockQualifyingKeys = async () => [];
     setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' } });

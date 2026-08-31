@@ -5370,6 +5370,28 @@ router.post('/', requireAdmin, async (req, res, next) => {
           directRodentSetupStamp = owedSetup;
           logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on booking ${svc.id} — billed at first completion unless estimate acceptance bills it`);
         }
+      } else if (isRecurring && linkedEstimateId) {
+        // A PREVIOUSLY accepted estimate booked afterward (codex #3591 r66
+        // P1): the standard Mark Won already ran with skipSetupInvoice, so
+        // nothing recorded the DISCLOSED setup — without a stamp the first
+        // completion bills only the application. Stamp the estimate's
+        // frozen figure unless an acceptance settled it (prepay claim via
+        // the term), the estimate disclosed none, or another series booked
+        // from it already carries/collected it.
+        const plans = require('../services/secure-appointment-plans');
+        if (plans.isRodentBaitProgramKey(await plans.authoritativeServiceKey(trx, svc))) {
+          const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+          const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
+          if (disclosed > 0
+            && !(await plans.settledSetupClaimForEstimate(trx, linkedEstimateId))
+            && !(await plans.estimateSetupCarriedElsewhere(trx, linkedEstimateId, svc.id))) {
+            await trx('scheduled_services')
+              .where({ id: svc.id })
+              .whereNull('pending_setup_fee')
+              .update({ pending_setup_fee: disclosed, updated_at: new Date() });
+            logger.info(`[schedule] rodent bait setup ($${disclosed}, disclosed on accepted estimate ${linkedEstimateId}) stamped on booking ${svc.id} — billed at first completion`);
+          }
+        }
       }
 
       // Re-align the customer's WaveGuard tier from the just-created recurring rows
