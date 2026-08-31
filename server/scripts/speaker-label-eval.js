@@ -28,8 +28,8 @@
  *     node server/scripts/speaker-label-eval.js --sheet [--days=60] [--limit=10] [--ids=a,b] [--out=path]
  *
  * Needs DATABASE_URL; score mode also needs OPENAI_API_KEY.
- * Exit codes: 0 = ok; 1 = a case errored or accuracy fell below --floor;
- * 2 = runner crashed. To compare a challenger model, set
+ * Exit codes: 0 = ok; 1 = a case was unscored or EITHER word- or
+ * segment-level accuracy fell below --floor (0..1); 2 = runner crashed. To compare a challenger model, set
  * OPENAI_TRANSCRIPT_LABEL_MODEL and re-run score mode.
  */
 
@@ -72,7 +72,12 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (key === 'days') opts.days = Math.max(1, Number(value) || 60);
     else if (key === 'limit') opts.limit = Math.min(25, Math.max(1, Number(value) || 10));
     else if (key === 'ids') opts.ids = String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
-    else if (key === 'floor') opts.floor = Number(value);
+    else if (key === 'floor') {
+      // A malformed floor must not silently disable the gate.
+      const floor = value === undefined || String(value).trim() === '' ? NaN : Number(value); // Number('') is 0
+      if (!Number.isFinite(floor) || floor < 0 || floor > 1) throw new Error(`--floor must be a number between 0 and 1 (got "${value}")`);
+      opts.floor = floor;
+    }
     else if (key === 'fixture') opts.fixturePath = path.resolve(process.cwd(), value);
     else if (key === 'out') opts.out = path.resolve(process.cwd(), value);
     else throw new Error(`Unknown argument: ${arg}`);
@@ -418,6 +423,17 @@ async function runSheet(opts, deps) {
   return { status: 'sheet', candidates: picked.length, out: written };
 }
 
+// Exit-code gate for score mode: any unscored case fails, and when a floor is
+// set BOTH advertised metrics must clear it — a model can ace one long
+// segment (high word accuracy) while flipping many short turns.
+function scoreRunFailed(summary, floor) {
+  if (summary.status !== 'scored') return false;
+  if (summary.unscored.length > 0) return true;
+  if (floor === null || floor === undefined) return false;
+  if (summary.wordAccuracy === null || summary.segmentAccuracy === null) return true; // nothing scored -> cannot claim the floor
+  return summary.wordAccuracy < floor || summary.segmentAccuracy < floor;
+}
+
 async function main() {
   const opts = parseArgs();
   const db = require('../models/db');
@@ -455,10 +471,7 @@ async function main() {
       }
       console.log('');
     }
-    const failed = summary.status === 'scored'
-      && (summary.unscored.length > 0
-        || (Number.isFinite(opts.floor) && summary.wordAccuracy !== null && summary.wordAccuracy < opts.floor));
-    if (failed) process.exitCode = 1;
+    if (scoreRunFailed(summary, opts.floor)) process.exitCode = 1;
   } finally {
     try { await db.destroy(); } catch { /* pool not open */ }
   }
@@ -486,6 +499,7 @@ module.exports = {
   runScore,
   runSheet,
   scoreLabeling,
+  scoreRunFailed,
   sha256,
   suggestedSegmentSpeakers,
   writePrivateSheet,

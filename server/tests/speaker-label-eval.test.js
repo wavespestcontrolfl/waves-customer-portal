@@ -11,9 +11,11 @@ const {
   goldWordStream,
   loadFixture,
   modelWordStream,
+  parseArgs,
   runScore,
   runSheet,
   scoreLabeling,
+  scoreRunFailed,
   sha256,
   suggestedSegmentSpeakers,
   writePrivateSheet,
@@ -244,6 +246,23 @@ describe('speaker label eval', () => {
     } finally {
       fs.rmSync(tmp, { force: true });
     }
+  });
+
+  test('--floor gates BOTH metrics and rejects malformed values', () => {
+    const summary = (wordAccuracy, segmentAccuracy, unscored = []) => ({ status: 'scored', wordAccuracy, segmentAccuracy, unscored });
+    expect(scoreRunFailed(summary(0.99, 0.99), 0.95)).toBe(false);
+    // High word accuracy from one long segment, many short turns flipped.
+    expect(scoreRunFailed(summary(0.97, 0.60), 0.95)).toBe(true);
+    expect(scoreRunFailed(summary(0.90, 0.99), 0.95)).toBe(true);
+    expect(scoreRunFailed(summary(0.50, 0.50), null)).toBe(false); // no floor -> report only
+    expect(scoreRunFailed(summary(1, 1, [{ caseId: 'x', status: 'transcript_drift' }]), null)).toBe(true);
+    expect(scoreRunFailed(summary(null, null), 0.95)).toBe(true); // nothing scored cannot claim the floor
+    expect(scoreRunFailed({ status: 'no_cases' }, 0.95)).toBe(false);
+
+    expect(parseArgs(['--floor=0.9']).floor).toBe(0.9);
+    expect(() => parseArgs(['--floor=bad'])).toThrow(/--floor must be a number between 0 and 1/);
+    expect(() => parseArgs(['--floor=95'])).toThrow(/between 0 and 1/);
+    expect(() => parseArgs(['--floor='])).toThrow(/between 0 and 1/);
   });
 
   test('runScore with an empty fixture reports no_cases instead of a vacuous pass', async () => {
