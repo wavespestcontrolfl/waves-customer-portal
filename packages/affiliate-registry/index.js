@@ -166,7 +166,7 @@ function normalizeHostname(hostname) {
   // At most ONE DNS root dot is stripped; any empty label left (amazon.com..,
   // .amazon.com, a..b) is malformed → '' (fails every host check).
   const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
-  if (!h || h.startsWith('.') || h.includes('..')) return '';
+  if (!h || h.startsWith('.') || h.endsWith('.') || h.includes('..')) return '';
   return h.replace(/^www\./, '');
 }
 function isAffiliateNetworkHost(hostname) {

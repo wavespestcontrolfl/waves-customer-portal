@@ -647,8 +647,14 @@ function blankNonRenderedCode(src: string): string {
   // CommonMark fences: 3+ backticks or tildes, up to 3 leading spaces, any
   // info string; the closing fence uses the same character with a length
   // >= the opener (a longer closer is valid) and nothing but whitespace after.
-  let out = src.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[`~]*[ \t]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
-  out = out.replace(/(`+)(?!`)[\s\S]*?\1/g, (m) => m.replace(/[^\n]/g, ' '));
+  // Backtick and tilde fences are handled separately so the closer must use
+  // the OPENER's character (a tilde fence is not closed by backticks) and a
+  // backtick fence's info string may not contain a backtick (CommonMark).
+  let out = src.replace(/^ {0,3}(`{3,})[^`\n]*\n[\s\S]*?^ {0,3}\1`*[ \t]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
+  out = out.replace(/^ {0,3}(~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1~*[ \t]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
+  // Inline code spans: opener and closer are EQUAL-length backtick runs
+  // (CommonMark) — a 4-run never closes against part of a 5-run.
+  out = out.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (m) => m.replace(/[^\n]/g, ' '));
   // An indented code line follows a blank line (or another code line).
   const lines = out.split('\n');
   let prevBlankOrCode = true;
@@ -728,13 +734,18 @@ function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolea
 // `hidden(attrs, name)`, matched to its BALANCED closing tag (same-name
 // nesting counted, quote-aware) — a hidden <div> containing another <div>
 // is blanked to the outer close, never to the first inner one.
-function blankBalancedElements(src: string, hidden: (attrs: string, name: string) => boolean): string {
+// `scanSrc` (same length as `src` — every view is length-preserving) is
+// the view TAGS AND ATTRS are read from: predicates must see expression
+// values (style={{display:'none'}}, open={false}) that the structural
+// view has already blanked, so scanning happens on the pre-expression
+// view while the blanking applies to `src`.
+function blankBalancedElements(src: string, hidden: (attrs: string, name: string) => boolean, scanSrc: string = src): string {
   const out = src.split('');
   const openRe = /<([A-Za-z][\w-]*)\b/g;
   let m: RegExpExecArray | null;
-  while ((m = openRe.exec(src)) !== null) {
+  while ((m = openRe.exec(scanSrc)) !== null) {
     const name = m[1];
-    const attrs = tagAttrsAt(src, m.index);
+    const attrs = tagAttrsAt(scanSrc, m.index);
     if (attrs === null) continue;
     const openEnd = m.index + 1 + name.length + attrs.length; // index of '>'
     if (attrs.trimEnd().endsWith('/')) continue; // self-closing: nothing to hide
@@ -743,9 +754,9 @@ function blankBalancedElements(src: string, hidden: (attrs: string, name: string
     const tagRe = new RegExp(`<(\\/?)${name}\\b`, 'gi');
     tagRe.lastIndex = openEnd + 1;
     let depth = 1; let t: RegExpExecArray | null; let closeEnd = -1;
-    while ((t = tagRe.exec(src)) !== null) {
-      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = src.indexOf('>', t.index); closeEnd = gt === -1 ? src.length - 1 : gt; break; } }
-      else { const a = tagAttrsAt(src, t.index); if (a !== null && !a.trimEnd().endsWith('/')) depth += 1; }
+    while ((t = tagRe.exec(scanSrc)) !== null) {
+      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = scanSrc.indexOf('>', t.index); closeEnd = gt === -1 ? scanSrc.length - 1 : gt; break; } }
+      else { const a = tagAttrsAt(scanSrc, t.index); if (a !== null && !a.trimEnd().endsWith('/')) depth += 1; }
     }
     if (closeEnd === -1) continue; // unbalanced — leave as is
     for (let k = m.index; k <= closeEnd; k += 1) if (out[k] !== '\n') out[k] = ' ';
@@ -804,6 +815,54 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
 const SERVICE_ROUTE_PATH_RE =
   /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
 
+// The hub's own hosts: an absolute https URL on one of these is the same
+// destination as its root-relative path (the portal's guardrails make the
+// equivalent Waves-host classification). Spoke hosts are NOT here — the
+// service routes above are hub routes, and a spoke-host spelling of one is
+// not verified to exist (fail closed).
+const WAVES_HUB_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+// A service-route destination: a root-relative service path, or the same
+// path spelled as an absolute https URL on a hub host.
+function isServiceCtaHref(href: string): boolean {
+  const t = href.trim();
+  if (t.startsWith('/')) return SERVICE_ROUTE_PATH_RE.test(t);
+  if (!/^https:\/\//i.test(t)) return false;
+  try {
+    const u = new URL(t);
+    if (!WAVES_HUB_HOSTS.has(u.hostname.toLowerCase().replace(/\.$/, ''))) return false;
+    return SERVICE_ROUTE_PATH_RE.test(`${u.pathname}${u.search}${u.hash}`);
+  } catch { return false; }
+}
+
+// Length-preserving mask for Markdown images. Labels may nest balanced
+// brackets (![Request [a quote]](/x/)) and destinations balanced parens —
+// a flat [^\]]* regex stops at the inner bracket and leaves `](/x/)`
+// behind for the CTA regex to false-match.
+function maskMarkdownImages(src: string): string {
+  const out = src.split('');
+  let i = 0;
+  while (i < src.length - 1) {
+    if (src[i] !== '!' || src[i + 1] !== '[') { i += 1; continue; }
+    let depth = 1; let j = i + 2;
+    for (; j < src.length && depth > 0; j += 1) {
+      if (src[j] === '\\') { j += 1; continue; }
+      if (src[j] === '[') depth += 1;
+      else if (src[j] === ']') depth -= 1;
+    }
+    if (depth !== 0 || src[j] !== '(') { i += 2; continue; }
+    let pd = 1; let k = j + 1;
+    for (; k < src.length && pd > 0; k += 1) {
+      if (src[k] === '\\') { k += 1; continue; }
+      if (src[k] === '(') pd += 1;
+      else if (src[k] === ')') pd -= 1;
+    }
+    if (pd !== 0) { i += 2; continue; }
+    for (let t = i; t < k; t += 1) if (out[t] !== '\n') out[t] = ' ';
+    i = k;
+  }
+  return out.join('');
+}
+
 // True when the (masked) prefix carries a Waves service CTA: a markdown
 // link to a service route, or an <InlineCTA> that LEADS to one — no
 // ctaHref (the component defaults to the quote page) or a quoted literal
@@ -811,21 +870,30 @@ const SERVICE_ROUTE_PATH_RE =
 // not the required CTA (fail closed).
 function hasServiceCtaBefore(prefix: string): boolean {
   // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
-  // images (and raw <img> tags) before the link test.
-  const p2 = prefix
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => ' '.repeat(m.length))
+  // images (balanced labels/destinations) and raw <img> tags before the
+  // link test.
+  const p2 = maskMarkdownImages(prefix)
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   if (SERVICE_CTA_LINK_RE.test(p2)) return true;
-  const prefixForTags = p2;
-  return hasInlineCtaService(prefixForTags);
+  // An absolute-URL markdown link on a hub host counts like its path form.
+  const absLink = /\]\(\s*(https:\/\/[^)\s]+)\s*\)/gi;
+  let am: RegExpExecArray | null;
+  while ((am = absLink.exec(p2)) !== null) if (isServiceCtaHref(am[1])) return true;
+  return hasInlineCtaService(p2);
 }
+
+// A JSX SPREAD ({...expr}) delivers props no literal-attribute scan can
+// see — a spread can override ctaHref/product/placement at render time, so
+// any tag carrying one can never be validated (fail closed).
+const JSX_SPREAD_RE = /\{\s*\.\.\./;
 
 function hasInlineCtaService(prefix: string): boolean {
   for (const { attrs } of tagsNamed(prefix, 'InlineCTA')) {
     if (attrs === null) continue; // unterminated — never counts
+    if (JSX_SPREAD_RE.test(attrs)) continue; // spread can override the destination
     if (!/\bctaHref\s*=/.test(attrs)) return true;
     const href = literalAttr(attrs, 'ctaHref'); // duplicated/dynamic → null → not counted
-    if (href && SERVICE_ROUTE_PATH_RE.test(href.trim())) return true;
+    if (href && isServiceCtaHref(href)) return true;
   }
   return false;
 }
@@ -860,10 +928,21 @@ export function validateAffiliateUsage(
   // STRUCTURAL view (CTA/heading rules) additionally blanks hidden markup:
   // a CTA a reader cannot see is no CTA.
   let structural = blankMdxExpressions(cleaned, { keepJsx: false });
+  // Visibility predicates read the PRE-EXPRESSION view (code/comments
+  // blanked, expressions intact): style={{display:'none'}} and
+  // open={false} live inside expressions the structural view has already
+  // erased — evaluating them on `structural` would see neither.
+  const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   // Definitely-hidden markup never satisfies a reader-facing rule: elements
-  // carrying `hidden`, an inline display:none, or a closed <details> body
-  // are blanked (length-preserving) — on the structural view only.
-  structural = blankBalancedElements(structural, (attrs) => /(?:^|\s)hidden(?=[\s>/=]|$)|display\s*:\s*none/i.test(attrs));
+  // carrying `hidden` (unless hidden={false}), an inline display:none
+  // (literal or expression-valued), or a closed <details> body — including
+  // open={false}, which renders closed — are blanked (length-preserving),
+  // on the structural view only.
+  structural = blankBalancedElements(structural, (attrs) => {
+    if (/(?:^|\s)hidden\s*=\s*\{\s*false\s*\}/i.test(attrs)) return false;
+    // display:none in a CSS string OR a JSX style object ({display:'none'}).
+    return /(?:^|\s)hidden(?=[\s>/=]|$)|display\s*['"]?\s*:\s*['"]?\s*none/i.test(attrs);
+  }, unmasked);
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
   structural = blankBalancedElements(structural, (attrs) => {
@@ -872,10 +951,9 @@ export function validateAffiliateUsage(
     // Responsively-visible wrappers (class="hidden md:block") stay: mask
     // only elements hidden at EVERY breakpoint.
     return !/\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
-  });
-  structural = blankBalancedElements(structural, (attrs, name) => name === 'details' && !/(?:^|\s)open(?=[\s>/=]|$)/i.test(attrs));
-
-  const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  }, unmasked);
+  structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
+    && (!/(?:^|\s)open(?=[\s>/=]|$)/i.test(attrs) || /(?:^|\s)open\s*=\s*\{\s*false\s*\}/i.test(attrs)), unmasked);
   const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
@@ -884,7 +962,12 @@ export function validateAffiliateUsage(
   // duplicated value cannot be validated against the https/root-relative
   // rule, so it is a blocker in EVERY post, affiliate or not.
   for (const { attrs } of tagsNamed(unmasked, 'InlineCTA')) {
-    if (attrs !== null && /\bctaHref\s*=/.test(attrs) && literalAttr(attrs, 'ctaHref') === null) {
+    if (attrs === null) continue;
+    if (JSX_SPREAD_RE.test(attrs)) {
+      blockers.push('<InlineCTA> may not carry a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated');
+      break;
+    }
+    if (/\bctaHref\s*=/.test(attrs) && literalAttr(attrs, 'ctaHref') === null) {
       blockers.push('<InlineCTA ctaHref> must be a single quoted literal (root-relative path or https URL) — expression-valued destinations cannot be validated');
       break;
     }
@@ -918,6 +1001,10 @@ export function validateAffiliateUsage(
   // value the gate never validated.
   const checked = new Set<string>();
   for (const { attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
+    if (attrs !== null && JSX_SPREAD_RE.test(attrs)) {
+      blockers.push('<AffiliateLink> may not carry a JSX spread ({...}) — a spread can override product/placement at render time, so the invocation cannot be validated against the registry');
+      continue;
+    }
     const id = attrs === null ? null : literalAttr(attrs, 'product');
     const placement = attrs === null ? null : literalAttr(attrs, 'placement');
     if (!id || !placement) {

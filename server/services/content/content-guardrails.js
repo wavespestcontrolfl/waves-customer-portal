@@ -1894,7 +1894,7 @@ function normalizeAffiliateHost(hostname) {
   // At most ONE DNS root dot is stripped; an empty label (a..b, .host) is
   // malformed → '' (matches nothing — the URL still fails the host allowlist).
   const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
-  if (!h || h.startsWith('.') || h.includes('..')) return '';
+  if (!h || h.startsWith('.') || h.endsWith('.') || h.includes('..')) return '';
   return h.replace(/^www\./, '');
 }
 
