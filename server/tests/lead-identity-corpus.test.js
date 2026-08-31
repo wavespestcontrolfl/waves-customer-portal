@@ -131,7 +131,10 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     }
   });
 
-  test('no unknown fields: case, checks, and contact keys are exact allowlists; contact values are scalar strings (or null — the nameless-shell cases)', () => {
+  test('no unknown fields: root, case, checks, and contact keys are exact allowlists; contact values are scalar strings (or null — the nameless-shell cases)', () => {
+    // The fixture ROOT too — a top-level sibling of `cases` would carry data
+    // no hygiene loop ever inspects.
+    expect(Object.keys(corpus).sort()).toEqual(['$comment', 'cases']);
     for (const c of CASES) {
       for (const k of Object.keys(c)) {
         expect({ id: c.id, key: k, known: CASE_FIELDS.has(k) })

@@ -102,7 +102,9 @@ function walk(dir, out = []) {
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
       walk(path.join(dir, entry.name), out);
-    } else if (entry.name.endsWith('.js')) {
+    } else if (/\.(?:js|jsx|cjs|mjs)$/.test(entry.name)) {
+      // Every executable JS extension the repo's lint config accepts — a
+      // writer in a .cjs/.mjs module must not escape the scan.
       out.push(path.join(dir, entry.name));
     }
   }
