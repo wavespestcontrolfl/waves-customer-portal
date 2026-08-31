@@ -421,30 +421,34 @@ async function computeDashboardAlertsUncached() {
       }
       // The in-process carry is empty after a restart / on another replica.
       // The DB-backed dashboard_alert_state row is the shared truth: the
-      // cron deletes it ONLY when the alert is genuinely absent, so an
-      // active row + unreadable visits = hold the alert as it last stood.
-      if (!gapIds.length && unreadableIds.length) {
-        const held = await db('dashboard_alert_state')
+      // cron deletes it ONLY when the alert is genuinely absent. Whenever ANY
+      // visit is unreadable, reconcile against that row (same ET date only):
+      // hold count = max(readable, persisted) and omit members — an
+      // incomplete read knows a floor, not the set — so an outage can neither
+      // clear the alert nor make its recovery read as an escalation.
+      let held = null;
+      if (unreadableIds.length) {
+        const row = await db('dashboard_alert_state')
           .where({ alert_id: 'closeout_gaps_today' })
           .first('current_count', 'last_label', 'last_seen_at')
           .catch(() => null);
-        // Same ET service date only — yesterday's row never becomes today's gap.
-        const sameDay = held && held.last_seen_at && etDateString(new Date(held.last_seen_at)) === today;
-        if (sameDay) {
-          alerts.push({
-            id: 'closeout_gaps_today',
-            kind: 'action',
-            severity: 'warn',
-            count: Number(held.current_count || 1),
-            // Deliberately NO members: an outage snapshot knows the count, not
-            // the set — it must not seed a membership-aware dismissal.
-            label: held.last_label || `${Number(held.current_count || 1)} completed visit(s) today not closed out — closeout lookup temporarily unavailable`,
-            href: '/admin/dispatch',
-            heldThroughOutage: true,
-          });
-        }
+        const sameDay = row && row.last_seen_at && etDateString(new Date(row.last_seen_at)) === today;
+        if (sameDay) held = row;
       }
-      if (gapIds.length) {
+      if (held) {
+        const count = Math.max(gapIds.length, Number(held.current_count || 0), 1);
+        alerts.push({
+          id: 'closeout_gaps_today',
+          kind: 'action',
+          severity: 'warn',
+          count,
+          label: gapIds.length
+            ? `${count} completed visit${count === 1 ? '' : 's'} today not closed out (closeout lookup partially unavailable)`
+            : (held.last_label || `${count} completed visit(s) today not closed out — closeout lookup temporarily unavailable`),
+          href: '/admin/dispatch',
+          heldThroughOutage: true,
+        });
+      } else if (gapIds.length) {
         alerts.push({
           id: 'closeout_gaps_today',
           kind: 'action',

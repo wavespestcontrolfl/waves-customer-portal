@@ -378,6 +378,22 @@ describe('Action Inbox generators', () => {
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toBeUndefined();
   });
 
+  test('closeout_gaps_today: partial outage with one readable gap holds count = max(readable, persisted), no members (codex r8)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    const gap = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' } } };
+    primeDb({
+      scheduled_services: [{ id: 'svc-a' }, { id: 'svc-b' }],
+      dashboard_alert_state: { alert_id: 'closeout_gaps_today', current_count: 2, last_label: 'x', last_seen_at: new Date().toISOString() },
+    });
+    loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', gap], ['svc-b', null]]));
+    const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(item).toMatchObject({ count: 2, heldThroughOutage: true });
+    expect(item.members).toBeUndefined();
+    expect(item.label).toMatch(/partially unavailable/);
+  });
+
   test('closeout_sweep_incomplete: a day over the cap surfaces the unchecked count instead of a silent false-clean (codex r7)', async () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     const { __private } = require('../services/dashboard-alerts');
