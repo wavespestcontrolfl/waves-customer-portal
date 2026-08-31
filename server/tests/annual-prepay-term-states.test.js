@@ -135,7 +135,7 @@ function statusWriteSites(src) {
     if (/\.\.\./.test(body)) out.push({ expr: '<spread in write object>', guards });
     if (/\[\s*['"]status['"]\s*\]\s*:/.test(body)) out.push({ expr: '<computed status key>', guards });
     if (/(?:^|,|\{)\s*status\s*(?:,|$)/.test(body.trim())) out.push({ expr: '<shorthand status key>', guards });
-    for (const s of body.matchAll(/\bstatus:\s*((?:[^,\n]|,(?!\s*[\w[\]]+\s*:))+)/g)) {
+    for (const s of body.matchAll(/(?:\b|['"])status['"]?\s*:\s*((?:[^,\n]|,(?!\s*['"[\]\w]+\s*:))+)/g)) {
       out.push({ expr: s[1].replace(/,\s*$/, '').trim(), guards });
     }
   };
@@ -217,7 +217,7 @@ function resolveStatusExpression(expr) {
   const set = new Set();
   for (let branch of branches) {
     branch = branch.trim();
-    if (/^'[a-z_]+'$/.test(branch)) { set.add(branch.slice(1, -1)); continue; }
+    if (/^['"][a-z_]+['"]$/.test(branch)) { set.add(branch.slice(1, -1)); continue; }
     if (KNOWN_STATUS_EXPRESSIONS[branch]) { KNOWN_STATUS_EXPRESSIONS[branch].forEach((s) => set.add(s)); continue; }
     return null; // a value source this guard does not know — document it and add it above
   }
@@ -271,6 +271,11 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
       .toEqual([]); // two-arg form on a non-status column is not a status write
     expect(statusWriteExpressions("await db('annual_prepay_terms').update(buildPayload(term));"))
       .toEqual(['<unclassifiable write args: buildPayload(term)>']);
+    // Quoted property keys.
+    expect(statusWriteExpressions('await db(\'annual_prepay_terms\').update({ "status": "refunded" });'))
+      .toEqual(['"refunded"']);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ 'status': 'canceled' });"))
+      .toEqual(["'canceled'"]);
     // Upsert merge carrying a status.
     expect(statusWriteExpressions("await db('annual_prepay_terms').insert({ id }).onConflict('id').merge({ status: 'refunded' });"))
       .toEqual(["'refunded'"]);
