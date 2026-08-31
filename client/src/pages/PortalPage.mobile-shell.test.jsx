@@ -24,7 +24,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { ScheduleTab, DashboardTab } from './PortalPage';
+import { ScheduleTab, DashboardTab, BillingTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -55,6 +55,8 @@ beforeEach(() => {
   api.getBlogPosts.mockResolvedValue({ posts: [] });
   api.getNewsletterPosts.mockResolvedValue({ posts: [] });
   api.getRequests.mockResolvedValue({ requests: [] });
+  api.getPayments.mockResolvedValue({ payments: [], hasMore: false });
+  api.getCards.mockResolvedValue({ cards: [] });
 });
 
 afterEach(() => {
@@ -79,6 +81,10 @@ describe('reminder settings rows', () => {
     for (const name of switchNames) {
       expect(await screen.findByRole('switch', { name })).toBeInTheDocument();
     }
+
+    const row = document.querySelector('[data-reminder-row]');
+    expect(row).toBeTruthy();
+    expect(row.style.flexWrap).toBe('wrap');
   });
 
   it('keeps labelled channel selects on the alerts that offer delivery choice', async () => {
@@ -98,6 +104,16 @@ describe('reminder settings rows', () => {
     expect(screen.queryByRole('combobox', { name: /Tech Arrived Alert/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: /Weather & Property Alerts/i })).not.toBeInTheDocument();
   });
+
+  it('stacks the channel select and switch on a compact phone width', async () => {
+    window.innerWidth = 360;
+    render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
+
+    await screen.findByRole('switch', { name: 'New Appointment Confirmation' });
+    const row = document.querySelector('[data-reminder-row]');
+    expect(row.lastElementChild.style.flex).toContain('1 0 100%');
+    expect(row.firstElementChild.style.flex).toContain('1 1 160px');
+  });
 });
 
 describe('home quick actions on compact widths', () => {
@@ -111,9 +127,19 @@ describe('home quick actions on compact widths', () => {
       expect(screen.getByRole('button', { name })).toBeInTheDocument();
     }
 
-    // 2-up grid on compact. jsdom doesn't reliably parse grid shorthand
-    // inline styles, so only assert when the value is readable.
-    const cols = request.parentElement?.style?.gridTemplateColumns;
-    if (cols) expect(cols).toContain('repeat(2');
+    expect(request.parentElement?.style?.gridTemplateColumns).toContain('repeat(2');
+  });
+});
+
+describe('billing reminder channel selects', () => {
+  it('keeps 16px type and a 44px hit target so iOS does not zoom', async () => {
+    render(<BillingTab customer={customer} />);
+
+    const billing = await screen.findByRole('combobox', { name: 'Delivery method for billing reminders' });
+    const payment = screen.getByRole('combobox', { name: 'Delivery method for payment confirmations' });
+    for (const el of [billing, payment]) {
+      expect(el.style.fontSize).toBe('16px');
+      expect(el.style.minHeight).toBe('44px');
+    }
   });
 });

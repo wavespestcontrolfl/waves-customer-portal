@@ -4775,18 +4775,19 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               return (
-                <div key={p.key} style={{
-                  // flexWrap + minWidth:0 on the text cluster: long labels
-                  // ("72-Hour Appointment Reminder") plus the select and the
-                  // switch overflowed ~320px viewports; on narrow screens the
-                  // controls cluster wraps onto its own line instead.
+                <div key={p.key} data-reminder-row="" style={{
+                  // On compact, force the select+switch onto their own row
+                  // (flex: 1 0 100%). A shrink-only text cluster still left
+                  // ~57px for "72-Hour Appointment Reminder" next to ~140px
+                  // of controls at 320px — no overflow, but the labels
+                  // collided. Wide layouts keep the inline row.
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   flexWrap: 'wrap',
                   padding: '12px 0',
                   borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 160px', minWidth: 0 }}>
                     <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
@@ -4800,7 +4801,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   </div>
                   {/* Select + switch travel together so a wrap never splits
                       the controls across lines. */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 'auto' }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+                    marginLeft: compact ? 0 : 'auto',
+                    flex: compact ? '1 0 100%' : '0 0 auto',
+                    justifyContent: compact ? 'flex-end' : undefined,
+                  }}>
                   {p.channelKey && (() => {
                     // Email/Both can only be offered once an email is on file —
                     // otherwise the backend silently falls back to SMS and the
@@ -4815,7 +4821,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
                         style={{
-                          fontSize: 12, fontWeight: 800, color: B.glassNavy,
+                          fontSize: 16, fontWeight: 800, color: B.glassNavy,
                           border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                           background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                           cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
@@ -6664,6 +6670,7 @@ function BillingTab({ customer, refreshCustomer }) {
 
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           {/* No on/off toggle (owner ruling 2026-08-01): billing reminders
@@ -6684,8 +6691,8 @@ function BillingTab({ customer, refreshCustomer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for billing reminders"
                 style={{
-                  fontSize: 12, fontWeight: 800, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 36,
+                  fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
@@ -6698,6 +6705,7 @@ function BillingTab({ customer, refreshCustomer }) {
 
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           <div style={{ minWidth: 0, flex: 1 }}>
@@ -6748,8 +6756,8 @@ function BillingTab({ customer, refreshCustomer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for payment confirmations"
                 style={{
-                  fontSize: 12, fontWeight: 800, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 36,
+                  fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
@@ -9517,7 +9525,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         position: 'relative',
         width: '100%',
         maxWidth: 860,
-        maxHeight: compact ? 'calc(100vh - 10px)' : 'calc(100vh - 40px)',
+        maxHeight: compact ? 'calc(100dvh - 10px)' : 'calc(100dvh - 40px)',
         overflowY: 'auto',
         background: PORTAL_SHELL.page,
         border: `1px solid ${PORTAL_SHELL.border}`,

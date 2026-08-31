@@ -130,15 +130,21 @@ export default function InstallPrompt() {
           boxShadow: '0 8px 20px rgba(180,110,0,0.22), inset 0 1px 0 rgba(255,255,255,0.4)',
         }}>Install</button>
 
-        {/* Dismiss */}
+        {/* Dismiss — 44×44 hit target; the × stays visually small. */}
         <button onClick={dismiss} aria-label="Dismiss install prompt" style={{
           background: 'none',
           border: 'none',
           color: '#04395E',
           fontSize: 18,
           cursor: 'pointer',
-          padding: '0 4px',
+          padding: 0,
           lineHeight: 1,
+          width: 44,
+          height: 44,
+          flexShrink: 0,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}>&times;</button>
       </div>
     </div>
