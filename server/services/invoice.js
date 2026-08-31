@@ -1861,6 +1861,45 @@ const InvoiceService = {
    * Create an invoice directly from a service record + simple amount.
    * Convenience method for post-service flow.
    */
+  /**
+   * Retention offer (cancel-flow C1): the negative line for a GRANTED
+   * offer on this visit's service family. Applies only to a RECURRING,
+   * non-callback scheduled visit — the offer discounts "the next charges
+   * of the kept service", never one-time work. Pure lookup + math; the
+   * CAS consumption happens in the mint transaction after create.
+   */
+  async buildRetentionOfferLineForMint({ customerId, scheduledServiceId, lineItems, database }) {
+    if (!customerId || !scheduledServiceId) return null;
+    const dbh = database || db;
+    const visit = await dbh("scheduled_services")
+      .where({ id: scheduledServiceId })
+      .first("service_type", "is_recurring", "recurring_ongoing", "is_callback", "source");
+    if (!visit) return null;
+    if (visit.is_callback === true) return null;
+    if (!(visit.is_recurring === true || visit.recurring_ongoing === true)) return null;
+    const { familyOfServiceRow } = require("./cancellation-processor");
+    const family = familyOfServiceRow(visit);
+    if (!family) return null;
+    const offer = await dbh("retention_offers")
+      .where({ customer_id: customerId, family_key: family, status: "granted" })
+      .orderBy("granted_at", "asc")
+      .first();
+    if (!offer) return null;
+    const { retentionDiscountForInvoice } = require("./cancellation-resolution/retention-offer");
+    // Eligible subtotal = the visit's net recurring charge (positive lines
+    // minus stored visit discounts) — already post-tier-discount by design.
+    const eligibleSubtotal = (lineItems || []).reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    const application = retentionDiscountForInvoice(offer, eligibleSubtotal, {});
+    if (!application) return null;
+    return {
+      offerId: offer.id,
+      expectedChargesApplied: Number(offer.charges_applied) || 0,
+      amount: application.amount,
+      lineItem: application.lineItem,
+      exhaustsOffer: application.exhaustsOffer,
+    };
+  },
+
   async createFromService(
     serviceRecordId,
     {
@@ -1929,7 +1968,9 @@ const InvoiceService = {
     // concurrent reprice (the tier-extension apply holds the same lock)
     // either commits first and is billed, or waits for this mint. The
     // explicit-amount path bills the operator's figure and needs no lock.
+    let retentionOfferApplication = null;
     const buildParams = async (conn = null) => {
+      retentionOfferApplication = null;
       if (replayFromScheduled && conn) {
         const {
           acquireScheduledMintLockChain,
@@ -1984,6 +2025,24 @@ const InvoiceService = {
       if (Array.isArray(extraLineItems) && extraLineItems.length) {
         lineItems = [...lineItems, ...extraLineItems];
       }
+      // Retention offer (cancel-flow C1, 15% × 2 charges / $75 cap): a
+      // GRANTED offer for this visit's service family discounts the
+      // recurring subtotal as its OWN negative line. Fail-soft — a lookup
+      // problem never blocks the invoice; consumption is CAS'd post-create.
+      try {
+        const retention = await this.buildRetentionOfferLineForMint({
+          customerId: sr.customer_id,
+          scheduledServiceId: sr.scheduled_service_id || null,
+          lineItems,
+          database: conn,
+        });
+        if (retention) {
+          lineItems = [...lineItems, retention.lineItem];
+          retentionOfferApplication = retention;
+        }
+      } catch (retentionErr) {
+        logger.warn(`[invoice] retention-offer check failed for customer ${sr.customer_id}: ${retentionErr.message}`);
+      }
       return {
         customerId: sr.customer_id,
         serviceRecordId,
@@ -2034,6 +2093,34 @@ const InvoiceService = {
     // visit lock, the latter two inside buildParams), then adopt any
     // non-terminal invoice that landed — the caller's reuse filters ran
     // before this transaction and cannot have seen it.
+    // CAS-consume inside the SAME transaction as the mint: the line and the
+    // ledger move together. A lost CAS (concurrent mint spent the offer)
+    // cannot unwind a created invoice — it parks a money-review task instead.
+    const settleRetention = async (created, dbh) => {
+      if (!retentionOfferApplication || !created || !created.id) return;
+      const { consumeRetentionOffer } = require("./cancellation-resolution/retention-offer");
+      const okc = await consumeRetentionOffer({
+        offerId: retentionOfferApplication.offerId,
+        expectedChargesApplied: retentionOfferApplication.expectedChargesApplied,
+        amount: retentionOfferApplication.amount,
+        invoiceId: created.id,
+        exhaustsOffer: retentionOfferApplication.exhaustsOffer,
+      }, dbh || db);
+      if (!okc) {
+        logger.error(`[invoice] retention-offer consume lost the CAS for invoice ${created.id} (offer ${retentionOfferApplication.offerId}) — money review`);
+        try {
+          const { notifyAdmin } = require("./notification-service");
+          await notifyAdmin("billing", "Retention discount needs review", `Invoice ${created.id} carries a retention line whose offer could not be consumed (concurrent charge). Verify the discount.`, {
+            bell: true,
+            dedupeKey: `retention_consume_review:${created.id}`,
+            metadata: { kind: "retention_consume_review", invoiceId: created.id, offerId: retentionOfferApplication.offerId },
+          });
+        } catch (notifyErr) {
+          logger.error(`[invoice] retention review alert failed: ${notifyErr.message}`);
+        }
+      }
+    };
+
     const adoptUnderMintLock = async (trx) => {
       if (!replayFromScheduled) return null;
       const { adoptScheduledInvoiceUnderMintLock } = require("./scheduled-invoice-mint");
@@ -2094,6 +2181,7 @@ const InvoiceService = {
               database: trx,
               depositCredit: { amount: requested, estimateId: sourceEstimateId },
             });
+            await settleRetention(created, trx);
             const effective = Number(created?.applied_deposit_credit) || 0;
             if (created?.id && effective > 0) {
               const allocated = await consumeDepositCredit({
@@ -2138,7 +2226,9 @@ const InvoiceService = {
       return runMintTransaction(async (trx) => {
         const adopted = await adoptUnderMintLock(trx);
         if (adopted) return adopted;
-        return this.create({ ...(await buildParams(trx)), database: trx });
+        const created = await this.create({ ...(await buildParams(trx)), database: trx });
+        await settleRetention(created, trx);
+        return created;
       });
     }
     // LINKED explicit-amount mints serialize under the same advisory mint
@@ -2152,13 +2242,19 @@ const InvoiceService = {
       return runMintTransaction(async (trx) => {
         const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
         await acquireScheduledInvoiceMintLock(trx, sr.scheduled_service_id);
-        return this.create({ ...(await buildParams(trx)), database: trx });
+        const created = await this.create({ ...(await buildParams(trx)), database: trx });
+        await settleRetention(created, trx);
+        return created;
       });
     }
-    return this.create({
-      ...(await buildParams(null)),
-      ...(database ? { database } : {}),
-    });
+    {
+      const created = await this.create({
+        ...(await buildParams(null)),
+        ...(database ? { database } : {}),
+      });
+      await settleRetention(created, database || null);
+      return created;
+    }
   },
 
   /**

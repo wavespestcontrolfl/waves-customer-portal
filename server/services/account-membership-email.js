@@ -359,11 +359,23 @@ async function sendCancellationReceived({
   // is finishing it by hand. Defaults to the neutral line — never claim
   // billing stopped unless the caller proved it.
   processed = false,
+  // Scoped (per-service) cancel: { cancelled: [labels], remaining: [labels],
+  // tierAfter } — the account stays, so the line names what stopped and
+  // what continues; never "your plan is cancelled" (ruling C-3).
+  scope = null,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
   const submittedAt = request.created_at || request.createdAt || new Date();
+  const scopedLabels = scope && Array.isArray(scope.cancelled) && scope.cancelled.length ? scope.cancelled : null;
+  const remainingLabels = scope && Array.isArray(scope.remaining) ? scope.remaining.filter(Boolean) : [];
   const outcomeLine = processed === true
-    ? `Your plan is cancelled as of ${displayDate(submittedAt)}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`
+    ? (scopedLabels
+      ? `${scopedLabels.join(' and ')} ${scopedLabels.length > 1 ? 'are' : 'is'} cancelled as of ${displayDate(submittedAt)}: those upcoming visits are off the calendar.`
+        + (remainingLabels.length
+          ? ` ${remainingLabels.join(' and ')} continue${remainingLabels.length > 1 ? '' : 's'}${scope.tierAfter ? ` under WaveGuard ${scope.tierAfter}` : ''}, and AutoPay stays as it was for ${remainingLabels.length > 1 ? 'them' : 'it'}.`
+          : '')
+        + ' Charges for visits already completed remain payable.'
+      : `Your plan is cancelled as of ${displayDate(submittedAt)}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`)
     : 'Our office is closing out your plan by hand and will confirm exactly what has stopped within 1 business day.';
   return sendTemplate({
     customerId,
@@ -395,6 +407,29 @@ async function sendCancellationReceived({
 // billing notices carry no per-purpose opt-out.) The SMS leg's prefs are enforced inside send-customer-message —
 // this is the email leg's equivalent, shared with the sweep so hasEmailLeg
 // is only declared when the email can actually send.
+/**
+ * Accepted-resolution receipt (cancel-flow C1): the customer kept the plan
+ * and accepted the one card — the durable record of exactly what was set
+ * up. Effects are the executor's customer-facing sentences, joined into
+ * the body; nothing here is phrased at runtime beyond that join.
+ */
+async function sendResolutionAccepted({ customerId, caseId, reference, summary, effects = [], idempotencyKey } = {}) {
+  if (!caseId) return { ok: false, skipped: true, reason: 'missing_case' };
+  return sendTemplate({
+    customerId,
+    templateKey: 'account.resolution_accepted',
+    eventType: 'account.resolution_accepted',
+    payload: {
+      reference: String(reference || '').slice(0, 12),
+      summary_line: String(summary || '').slice(0, 300),
+      effects_text: (effects || []).map((line) => String(line)).join(' ').slice(0, 900),
+    },
+    idempotencyKey: idempotencyKey || `account.resolution_accepted:${caseId}`,
+    categories: ['resolution_accepted'],
+    metadata: { cancellation_case_id: caseId },
+  });
+}
+
 async function resolvePrevisitBalanceEmailRecipient(customerId) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { recipient: null, reason: 'customer_not_found' };
@@ -805,6 +840,7 @@ module.exports = {
   sendAccountUpdated,
   sendRequestReceived,
   sendCancellationReceived,
+  sendResolutionAccepted,
   sendRequestUpdated,
   sendMembershipStarted,
   sendAppIntro,

@@ -16,6 +16,7 @@ import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
+import CancelFlow from '../components/portal/CancelFlow';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -9851,7 +9852,7 @@ function PlanStationMap({ map }) {
   );
 }
 
-function MyPlanTab({ customer, focusService }) {
+function MyPlanTab({ customer, focusService, onOpenRequest }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -9874,21 +9875,6 @@ function MyPlanTab({ customer, focusService }) {
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
-  const [showCancelForm, setShowCancelForm] = useState(false);
-  const [cancelReason, setCancelReason] = useState('');
-  const [cancelDetails, setCancelDetails] = useState('');
-  const [cancelSubmitted, setCancelSubmitted] = useState(false);
-  // Server-reported outcome of the synchronous cancel (H0): true = the plan
-  // is already closed; false = the office is finishing it by hand.
-  const [cancelProcessed, setCancelProcessed] = useState(false);
-  const [cancelConfirmation, setCancelConfirmation] = useState(null);
-  // Channels the server actually ACCEPTED the confirmation on (additive
-  // `confirmationChannels`); the copy below names exactly those, never more.
-  const [cancelConfirmationChannels, setCancelConfirmationChannels] = useState([]);
-  // ET calendar date the server reports the cancel took effect (YYYY-MM-DD);
-  // on a retry this is the ORIGINAL request's date, never "today".
-  const [cancelEffectiveDate, setCancelEffectiveDate] = useState(null);
-  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [showTierExplorer, setShowTierExplorer] = useState(false);
   const lawnHealth = useLawnHealth(customer.id);
   const compact = useIsMobile(760);
@@ -10743,96 +10729,14 @@ function MyPlanTab({ customer, focusService }) {
           {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Cancel your plan any time.</div>
-            {!showCancelForm && !cancelSubmitted && (
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
-                <button type="button" onClick={() => setShowCancelForm(true)} style={smallLinkButton}>Cancel</button>
-              </div>
-            )}
-
-            {showCancelForm && !cancelSubmitted && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Cancel My Plan</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  {/* Truth copy (H0): the cancel runs the moment it is submitted —
-                      say so, and never imply a pause is a live product. */}
-                  This takes effect right away: upcoming visits come off the calendar and autopay turns off. There is no cancellation fee; charges for visits already completed stay payable, and a visit already inside its late-cancellation window keeps the scheduled-visit fee from your booking.
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
-                  {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
-                    <button key={r} type="button" onClick={() => setCancelReason(r)} className="waves-focus-ring" style={{
-                      padding: '13px 16px',
-                      borderRadius: 999,
-                      fontSize: 14,
-                      fontWeight: 800,
-                      border: `1px solid ${cancelReason === r ? B.red : '#D8D0C0'}`,
-                      background: cancelReason === r ? `${B.red}10` : '#fff',
-                      color: cancelReason === r ? B.red : B.grayDark,
-                      cursor: 'pointer',
-                      fontFamily: FONTS.body,
-                    }}>{r}</button>
-                  ))}
-                </div>
-                <textarea
-                  value={cancelDetails}
-                  onChange={e => setCancelDetails(e.target.value)}
-                  placeholder="Anything else you'd like us to know?"
-                  aria-label="Cancellation details"
-                  rows={3}
-                  className="waves-focus-ring"
-                  style={{
-                    width: '100%',
-                    marginTop: 10,
-                    padding: '12px 14px',
-                    borderRadius: 8,
-                    fontSize: 16,
-                    border: '1px solid #D8D0C0',
-                    fontFamily: FONTS.body,
-                    resize: 'vertical',
-                    boxSizing: 'border-box',
-                  }}
-                />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                  <button
-                    type="button"
-                    disabled={cancelSubmitting}
-                    onClick={async () => {
-                      if (cancelSubmitting) return;
-                      setCancelSubmitting(true);
-                      try {
-                        const result = await api.createRequest?.({
-                          category: 'cancellation',
-                          subject: `Cancel WaveGuard ${tierName} plan`,
-                          description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
-                        });
-                        setCancelProcessed(result?.cancellation?.processed === true);
-                        setCancelConfirmation(['sms', 'email'].includes(result?.cancellation?.confirmation) ? result.cancellation.confirmation : null);
-                        setCancelConfirmationChannels(Array.isArray(result?.cancellation?.confirmationChannels) ? result.cancellation.confirmationChannels.filter((c) => ['sms', 'email'].includes(c)) : []);
-                        setCancelEffectiveDate(/^\d{4}-\d{2}-\d{2}$/.test(result?.cancellation?.effectiveDate || '') ? result.cancellation.effectiveDate : null);
-                        setCancelSubmitted(true);
-                        setShowCancelForm(false);
-                      } catch (err) {
-                        showCustomerAlert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                      } finally {
-                        setCancelSubmitting(false);
-                      }
-                    }}
-                    style={{ ...primaryButton, background: B.grayMid, minHeight: 44, fontSize: 16, opacity: cancelSubmitting ? 0.65 : 1, cursor: cancelSubmitting ? 'wait' : 'pointer' }}
-                  >
-                    {cancelSubmitting ? 'Cancelling...' : 'Cancel My Plan'}
-                  </button>
-                  <button data-glass-accent="" type="button" onClick={() => setShowCancelForm(false)} style={{ ...secondaryButton, minHeight: 44, fontSize: 16 }}>Keep My Plan</button>
-                </div>
-              </div>
-            )}
-
-            {cancelSubmitted && (
-              <div style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
-                {cancelProcessed
-                  ? `Your plan is cancelled${cancelEffectiveDate ? ` as of ${(() => { const [y, m, d] = cancelEffectiveDate.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); })()}` : ''}. Upcoming visits are off the calendar and autopay is off. Nothing more is charged for future service; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${cancelConfirmationChannels.includes('sms') && cancelConfirmationChannels.includes('email') ? ' A confirmation text and email are on the way.' : cancelConfirmation === 'sms' ? ' A confirmation text is on its way.' : cancelConfirmation === 'email' ? ' A confirmation email is on its way.' : ' Keep this screen as your confirmation.'} Changed your mind? Call (941) 297-5749 and we will put it back.`
-                  : 'We received your cancellation and are closing out your plan by hand. You will hear from us within 1 business day to confirm exactly what has stopped.'}
-              </div>
-            )}
+            {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
+                the H0 single-step form inside the component when the gate is off. */}
+            <CancelFlow
+              tierName={tierName}
+              compact={compact}
+              onOpenRequest={onOpenRequest}
+              styles={{ muted, subtle, primaryButton, secondaryButton, smallLinkButton }}
+            />
           </section>
           )}
         </aside>
@@ -15774,7 +15678,7 @@ export default function PortalPage() {
         )}
         <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the

@@ -3,7 +3,7 @@
 // schedules, money, or outcomes the server doesn't back.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Any api method not explicitly mocked returns a forever-pending promise, so
@@ -22,7 +22,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { ScheduleTab, ServiceTracker, DashboardTab } from './PortalPage';
+import { ScheduleTab, ServiceTracker, DashboardTab, MyPlanTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -124,6 +124,32 @@ describe('dashboard billing honesty', () => {
 
     expect(await screen.findByText('Per visit')).toBeInTheDocument();
     expect(screen.queryByText('Monthly rate')).not.toBeInTheDocument();
+  });
+});
+
+describe('plan tab cancel flow', () => {
+  it('opens the C1 review screen from the Account Options card with server facts only', async () => {
+    api.getSchedule.mockResolvedValue({ upcoming: [], hasCancellableWork: true });
+    api.getStationMap.mockResolvedValue({ available: false });
+    api.cancelResolutionPreview.mockResolvedValue({
+      kind: 'none', reasonCode: null, scope: [],
+      impact: {
+        families: [{ key: 'pest_control', label: 'Pest Control', monthlyRate: 49, perAppRate: null, upcomingVisits: 1, nextVisitDate: '2026-09-05', prepay: null }],
+        tierBefore: 'Bronze', tierAfter: null, tierDiscountBefore: 5, tierDiscountAfter: 0,
+        accountMonthlyBefore: 49, accountMonthlyAfter: 0, remaining: [],
+        visitsCancelled: 1, nextVisitCancelled: '2026-09-05', lateCancelFee: 0, openBalance: 0, payUrl: null,
+        prepay: null, autopayOn: false, termiteRental: false, effectiveDate: '2026-08-31', billingMode: 'monthly',
+      },
+    });
+
+    render(<MyPlanTab customer={{ ...customer, tier: 'Bronze' }} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByRole('heading', { name: 'Review cancelling my plan' })).toBeInTheDocument();
+    expect(screen.getByText('$49.00 → $0.00')).toBeInTheDocument();
+    expect(screen.queryByText(/pause/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Keep my plan' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeInTheDocument();
   });
 });
 

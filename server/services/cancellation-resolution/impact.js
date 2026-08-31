@@ -1,0 +1,143 @@
+'use strict';
+
+/**
+ * Cancel-flow C1 — the SERVER-computed before/after facts for screen 1.
+ *
+ * The portal deliberately renders no client-computed dollars (static-catalog
+ * "savings" math was removed for lying); every number on the impact screen
+ * comes from here, derived from the same authorities the processor uses:
+ * planScopedWindDown (ledger components + live tier discounts) for the money
+ * table, the eligibility sweep for visit counts, open-balance for what is
+ * owed, coveredTermsAsOf for prepay. Nulls mean "not applicable / unknown" —
+ * the UI omits the row rather than guessing.
+ */
+
+const db = require('../../models/db');
+const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
+const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
+const { familyLabel } = require('./templates');
+
+const labelOf = (key) => familyLabel(key) || String(key || '').replace(/_/g, ' ');
+
+async function buildCancellationImpact(customerId, requestedFamilies = []) {
+  const { planScopedWindDown, familyOfServiceRow } = require('../cancellation-processor');
+  const { inferTierFromServiceCount } = require('../self-booking-plan-sync');
+
+  const customer = await db('customers').where({ id: customerId })
+    .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'per_application_fee', 'autopay_enabled', 'next_charge_date', 'termite_stations_rented');
+  if (!customer) return null;
+
+  const today = etDateString();
+  const rows = await db('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .where(function liveOrRecurring() {
+      this.where('s.recurring_ongoing', true)
+        .orWhere(function upcoming() {
+          this.whereIn('s.status', CANCELLABLE_STATUSES)
+            .where(function dateOrRescheduled() {
+              this.where('s.scheduled_date', '>=', today).orWhere('s.status', 'rescheduled');
+            });
+        });
+    })
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+
+  const perFamily = new Map();
+  for (const row of rows) {
+    const family = familyOfServiceRow(row);
+    if (!family) continue;
+    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, nextVisitDate: null });
+    const slot = perFamily.get(family);
+    const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (String(row.scheduled_date).slice(0, 10) >= today || row.status === 'rescheduled');
+    if (upcoming) {
+      slot.upcoming += 1;
+      const d = String(row.scheduled_date).slice(0, 10);
+      if (!slot.nextVisitDate || d < slot.nextVisitDate) slot.nextVisitDate = d;
+    }
+  }
+  const owned = [...perFamily.keys()];
+
+  // Money table: the wind-down PLAN is the single authority (never applied
+  // here). For a whole-account selection there is nothing remaining to
+  // reprice — tierAfter is null and the totals go to zero.
+  const scope = (requestedFamilies || []).filter((f) => owned.includes(f));
+  const wholeAccount = !scope.length || scope.length === owned.length;
+  let plan = null;
+  if (!wholeAccount) {
+    try {
+      plan = await planScopedWindDown(customerId, scope);
+      if (!plan.ok) plan = null;
+    } catch (err) {
+      logger.warn(`[cancel-impact] wind-down plan failed for ${customerId}: ${err.message}`);
+      plan = null;
+    }
+  }
+
+  const { loadComponents } = require('../plan-rate-ledger');
+  let components = [];
+  try { components = await loadComponents(db, customerId); } catch (err) { components = []; }
+  const rateOf = (family) => {
+    const row = components.find((c) => c.family_key === family);
+    return row ? Number(row.monthly_rate) : null;
+  };
+
+  let openBalance = null;
+  try {
+    const { openBalanceInvoices } = require('../open-balance');
+    const open = await openBalanceInvoices(customerId);
+    if (Array.isArray(open)) openBalance = Math.round(open.reduce((s, inv) => s + (Number(inv.balance ?? inv.total) || 0), 0) * 100) / 100;
+  } catch (err) { openBalance = null; }
+
+  let prepay = null;
+  try {
+    const { coveredTermsAsOf } = require('../annual-prepay-renewals');
+    const term = await coveredTermsAsOf(db, today).where('t.customer_id', customerId).first('t.id', 't.term_end', 't.covered_visits_remaining');
+    if (term) prepay = { covered: true, endsAt: term.term_end ? String(term.term_end).slice(0, 10) : null, visitsRemaining: term.covered_visits_remaining ?? null };
+  } catch (err) { prepay = null; }
+
+  const cancelledFamilies = wholeAccount ? owned : scope;
+  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.upcoming || 0), 0);
+  const nextVisitCancelled = cancelledFamilies
+    .map((f) => perFamily.get(f)?.nextVisitDate)
+    .filter(Boolean)
+    .sort()[0] || null;
+
+  const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
+  const monthly = customer.monthly_rate == null ? null : Number(customer.monthly_rate);
+
+  return {
+    families: owned.map((f) => ({
+      key: f,
+      label: labelOf(f),
+      monthlyRate: rateOf(f),
+      perAppRate: null,
+      upcomingVisits: perFamily.get(f)?.upcoming || 0,
+      nextVisitDate: perFamily.get(f)?.nextVisitDate || null,
+      prepay: !!prepay,
+    })),
+    tierBefore,
+    tierAfter: wholeAccount ? null : (plan ? plan.tierAfter : null),
+    tierDiscountBefore: plan ? plan.discountBefore : null,
+    tierDiscountAfter: wholeAccount ? null : (plan ? plan.discountAfter : null),
+    accountMonthlyBefore: monthly,
+    accountMonthlyAfter: wholeAccount ? (monthly == null ? null : 0) : (plan ? plan.scalarAfter : null),
+    remaining: wholeAccount ? [] : (plan ? plan.remainingRates.map((r) => ({ key: r.family, label: labelOf(r.family), monthlyBefore: r.before, monthlyAfter: r.after })) : []),
+    visitsCancelled,
+    nextVisitCancelled,
+    lateCancelFee: null,
+    openBalance,
+    payUrl: null,
+    prepay,
+    autopayOn: customer.autopay_enabled === true,
+    termiteRental: customer.termite_stations_rented === true || cancelledFamilies.includes('termite_bait'),
+    effectiveDate: today,
+    billingMode: customer.billing_mode || null,
+    wholeAccount,
+    // Scoped-cancel feasibility for the picker: when a partial selection
+    // cannot be priced the UI disables per-service and says why.
+    scopedSupported: wholeAccount ? null : !!plan,
+  };
+}
+
+module.exports = { buildCancellationImpact };

@@ -104,10 +104,178 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null) {
   return { raised: true, stationCount: count };
 }
 
-async function processCancellationRequest({ customerId, reason, requestId } = {}) {
+// Family key of a scheduled_services row (joined with services.*), or null
+// when the row is not WaveGuard plan evidence — the same classifier the
+// cancellation facts use, so a scoped cancel and the preview agree on which
+// visits belong to a family.
+function familyOfServiceRow(row) {
+  const {
+    detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
+  } = require('./self-booking-plan-sync');
+  if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return null;
+  const families = uniqueServiceFamilies(detectWaveGuardPlanKeys(row));
+  return families[0] || null;
+}
+
+async function familyScopedServiceIds(customerId, families) {
+  const rows = await db('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .where(function liveOrRecurring() {
+      this.where('s.recurring_ongoing', true)
+        .orWhere(function upcoming() {
+          this.whereIn('s.status', CANCELLABLE_STATUSES)
+            .where(function dateOrRescheduled() {
+              this.where('s.scheduled_date', '>=', etDateString()).orWhere('s.status', 'rescheduled');
+            });
+        });
+    })
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+  const ids = new Set();
+  for (const row of rows) {
+    const family = familyOfServiceRow(row);
+    if (family && families.includes(family)) ids.add(row.id);
+  }
+  return ids;
+}
+
+function tierDiscountRate(tier) {
+  const { WAVEGUARD } = require('./pricing-engine/constants');
+  const key = String(tier || '').toLowerCase();
+  const rate = Number(WAVEGUARD?.tiers?.[key]?.discount);
+  return Number.isFinite(rate) ? rate : 0;
+}
+
+/**
+ * Plan the per-family billing wind-down WITHOUT writing: which ledger
+ * components drop, what the remaining families reprice to at the demoted
+ * tier, and the resulting scalar. Components are slices of the BILLED
+ * monthly (net of the current tier discount), so a remaining family's new
+ * rate = gross at the old discount × (1 − new discount). Per-application
+ * and prepay lanes carry no monthly components to reprice — only the tier
+ * label moves. Fails closed when a monthly lane's ledger cannot attribute
+ * the scoped families (unattributed-only scalar).
+ */
+async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
+  const { inferTierFromServiceCount, uniqueServiceFamilies, detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  const { loadComponents } = require('./plan-rate-ledger');
+  const customer = await dbh('customers').where({ id: customerId })
+    .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'active');
+  if (!customer) return { ok: false, error: 'customer_missing' };
+  const rows = await dbh('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .where(function liveOrRecurring() {
+      this.where('s.recurring_ongoing', true)
+        .orWhere(function upcoming() {
+          this.whereIn('s.status', CANCELLABLE_STATUSES)
+            .where(function dateOrRescheduled() {
+              this.where('s.scheduled_date', '>=', etDateString()).orWhere('s.status', 'rescheduled');
+            });
+        });
+    })
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+  const owned = [];
+  for (const row of rows) {
+    if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+    for (const f of uniqueServiceFamilies(detectWaveGuardPlanKeys(row))) if (!owned.includes(f)) owned.push(f);
+  }
+  const inScope = scopedFamilies.filter((f) => owned.includes(f));
+  if (!inScope.length) return { ok: false, error: 'scope_not_owned' };
+  const remaining = owned.filter((f) => !inScope.includes(f));
+  if (!remaining.length) return { ok: false, error: 'scope_is_whole_account' };
+
+  const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
+  const tierAfter = inferTierFromServiceCount(remaining.length);
+  const discountBefore = tierDiscountRate(tierBefore);
+  const discountAfter = tierDiscountRate(tierAfter);
+
+  const components = await loadComponents(dbh, customerId);
+  const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';
+  const byFamily = new Map(components.map((c) => [c.family_key, Number(c.monthly_rate) || 0]));
+  const attributed = inScope.every((f) => byFamily.has(f)) && remaining.every((f) => byFamily.has(f));
+  if (monthlyLane && !attributed) return { ok: false, error: 'scoped_unattributed' };
+
+  const reprice = (rate) => {
+    if (!(rate > 0)) return 0;
+    const gross = discountBefore < 1 ? rate / (1 - discountBefore) : rate;
+    return Math.round(gross * (1 - discountAfter) * 100) / 100;
+  };
+  const remainingRates = remaining.map((f) => ({ family: f, before: byFamily.get(f) ?? null, after: monthlyLane ? reprice(byFamily.get(f) || 0) : null }));
+  const scalarAfter = monthlyLane
+    ? Math.round(remainingRates.reduce((sum, r) => sum + (r.after || 0), 0) * 100) / 100
+    : (customer.monthly_rate == null ? null : Number(customer.monthly_rate));
+  return {
+    ok: true, owned, inScope, remaining, tierBefore, tierAfter, discountBefore, discountAfter,
+    monthlyLane, remainingRates, scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
+  };
+}
+
+async function applyScopedWindDown(customerId, plan, { requestId } = {}) {
+  await db.transaction(async (trx) => {
+    if (plan.monthlyLane) {
+      await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
+      for (const r of plan.remainingRates) {
+        await trx('customer_plan_rates').where({ customer_id: customerId, family_key: r.family })
+          .update({ monthly_rate: r.after, source: 'cancellation_scoped', effective_at: new Date(), updated_at: new Date() });
+      }
+    }
+    const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };
+    if (plan.monthlyLane) update.monthly_rate = plan.scalarAfter;
+    await trx('customers').where({ id: customerId }).update(update);
+  });
+  try {
+    const rateLine = plan.monthlyLane
+      ? ` Monthly ${plan.scalarBefore} → ${plan.scalarAfter}; ${plan.remainingRates.map((r) => `${r.family} ${r.before} → ${r.after}`).join(', ')}.`
+      : '';
+    await db('customer_interactions').insert({
+      customer_id: customerId,
+      interaction_type: 'note',
+      subject: `Cancelled ${plan.inScope.join(', ')} — plan continues with ${plan.remaining.join(', ')}`,
+      body: `Portal cancellation request ${requestId || ''}`.trim()
+        + `. WaveGuard ${plan.tierBefore} → ${plan.tierAfter}.${rateLine}`,
+    });
+  } catch (noteErr) {
+    logger.warn(`[cancellation-processor] scoped audit note failed for ${customerId}: ${noteErr.message}`);
+  }
+}
+
+/**
+ * Whole-account (default) or FAMILY-SCOPED (`families` non-empty) cancel.
+ *
+ * Scoped: the customer stays active; only the named families' recurrence
+ * stops and their upcoming visits are pulled (the same per-visit
+ * follow-through as a whole-account cancel), the plan-rate ledger drops
+ * those components, and the scalar rate + WaveGuard tier are recomputed
+ * from what remains — the tier DEMOTES (ruling C-3: per-service cancel is
+ * real, so the bundle discount must follow the bundle). Termite retrieval
+ * is raised only when termite_bait is in scope. The result carries `scope`
+ * and `remaining` so the route reports exactly what happened.
+ */
+async function processCancellationRequest({ customerId, reason, requestId, families } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
   const errors = [];
+  const scopedFamilies = Array.isArray(families) ? families.filter(Boolean) : [];
+  const scoped = scopedFamilies.length > 0;
+  let scopedIds = null;
+  let scopedPlan = null;
+  if (scoped) {
+    try {
+      scopedIds = await familyScopedServiceIds(customerId, scopedFamilies);
+      // MONEY OUTRANKS the visit sweep: prove the wind-down is attributable
+      // BEFORE any visit is touched. A ledger that only carries the
+      // unattributed scalar cannot price "the families that stay" — fail
+      // closed and let the route offer a whole-account cancel instead.
+      scopedPlan = await planScopedWindDown(customerId, scopedFamilies);
+      if (!scopedPlan.ok) {
+        return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors: [scopedPlan.error], scope: scopedFamilies };
+      }
+    } catch (err) {
+      logger.error(`[cancellation-processor] scoped family resolution failed for ${customerId}: ${err.message}`);
+      return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors: ['scope_resolution'], scope: scopedFamilies };
+    }
+  }
 
   // 1. Churn + stop all billing FIRST — before the (potentially slow,
   // Stripe-touching) visit sweep. The monthly charge loop preselects
@@ -116,7 +284,9 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // window for a billing cron to charge a customer who just cancelled.
   let churned = false;
   let wasChurnedStage = false;
-  try {
+  // A scoped cancel never churns the account — the customer keeps the
+  // families that stay; their billing wind-down happens per family below.
+  if (!scoped) try {
     const customer = await db('customers')
       .where({ id: customerId })
       .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
@@ -254,7 +424,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // Only once the churn actually persisted: a failed customer update leaves
   // the account active and billable, and staff must never be told to pull
   // hardware from a live program.
-  if (churned) {
+  if (churned || (scoped && scopedFamilies.includes('termite_bait'))) {
     try {
       await raiseTermiteRetrievalTask(customerId, requestId);
     } catch (err) {
@@ -265,9 +435,9 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
 
   let recurrenceStopped = 0;
   try {
-    recurrenceStopped = await db('scheduled_services')
-      .where({ customer_id: customerId, recurring_ongoing: true })
-      .update({ recurring_ongoing: false, updated_at: new Date() });
+    let stopQuery = db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
+    if (scopedIds) stopQuery = stopQuery.whereIn('id', [...scopedIds]);
+    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, updated_at: new Date() });
   } catch (err) {
     errors.push('stop_recurrence');
     logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
@@ -292,6 +462,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       .whereNotIn('status', ['en_route', 'on_site', 'completed', 'cancelled', 'skipped', 'no_show'])
       .select('id');
     for (const row of [...inProgressByStatus, ...inProgressByTrack]) {
+      if (scopedIds && !scopedIds.has(row.id)) continue;
       errors.push(`in_progress_visit:${row.id}`);
       logger.warn(`[cancellation-processor] visit ${row.id} is in progress — left for manual handling`);
     }
@@ -338,7 +509,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   const processed = new Set();
 
   function sweepCancellable() {
-    return db('scheduled_services')
+    let query = db('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('status', CANCELLABLE_STATUSES)
       .where(function () {
@@ -355,8 +526,9 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       // flips first; the status sync is best-effort), so a status-only filter
       // would sweep a visit a tech is actively working. NULL-safe for legacy
       // rows with no track_state.
-      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))")
-      .select('id', 'status');
+      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'en_route', 'on_property'))");
+    if (scopedIds) query = query.whereIn('id', [...scopedIds]);
+    return query.select('id', 'status');
   }
 
   async function processVisit(svc) {
@@ -597,6 +769,21 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
 
   // Audit trail on the customer timeline — only the first time we churn, and
   // written AFTER the sweep so the note carries the final visit count.
+  // Scoped wind-down AFTER the sweep (the plan was proven attributable up
+  // front, so this cannot fail on attribution; a write failure is reported
+  // and leaves the visits cancelled — the office repairs the rate, never the
+  // reverse).
+  let scopedWoundDown = false;
+  if (scoped && scopedPlan?.ok) {
+    try {
+      await applyScopedWindDown(customerId, scopedPlan, { requestId });
+      scopedWoundDown = true;
+    } catch (err) {
+      errors.push('scoped_wind_down');
+      logger.error(`[cancellation-processor] scoped wind-down failed for ${customerId}: ${err.message}`);
+    }
+  }
+
   if (churned && !wasChurnedStage) {
     try {
       await db('customer_interactions').insert({
@@ -637,7 +824,19 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       (ok ? '' : ` (errors: ${errors.join(', ')})`)
   );
 
-  return { cancelledCount, recurrenceStopped, churned, ok, errors };
+  return {
+    cancelledCount, recurrenceStopped, churned, ok, errors,
+    ...(scoped ? {
+      scope: scopedPlan?.inScope || scopedFamilies,
+      remaining: scopedPlan?.remaining || [],
+      tierBefore: scopedPlan?.tierBefore ?? null,
+      tierAfter: scopedPlan?.tierAfter ?? null,
+      scopedWoundDown,
+    } : {}),
+  };
 }
 
-module.exports = { processCancellationRequest, raiseTermiteRetrievalTask, CHURN_REASON, CANCELLABLE_STATUSES };
+module.exports = {
+  processCancellationRequest, raiseTermiteRetrievalTask, planScopedWindDown, familyOfServiceRow,
+  CHURN_REASON, CANCELLABLE_STATUSES,
+};
