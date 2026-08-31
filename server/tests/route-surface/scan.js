@@ -91,16 +91,10 @@ function isRequireCall(node) {
     && node.arguments[0].type === 'StringLiteral';
 }
 
-function isRouterFactoryCall(node) {
-  if (!node || node.type !== 'CallExpression') return false;
-  const c = node.callee;
-  if (c.type === 'Identifier' && c.name === 'Router') return true;
-  if (c.type === 'MemberExpression' && !c.computed && c.property.name === 'Router') {
-    if (c.object.type === 'Identifier') return true; // express.Router()
-    if (isRequireCall(c.object) && c.object.arguments[0].value === 'express') return true;
-  }
-  return false;
-}
+// NOTE: Router-factory detection is provenance-checked per module — see
+// ModuleAnalysis.isRouterFactory(). A call merely NAMED Router() from an
+// in-repo helper is NOT a router (it could be terminal middleware wearing
+// the name), so there is deliberately no context-free syntactic version.
 
 function stringLiteralArray(node) {
   if (!node || node.type !== 'ArrayExpression') return null;
@@ -228,6 +222,12 @@ class ModuleAnalysis {
         && node.left.property.name === 'exports'
         && node.right.type === 'Identifier') {
         this.exportCandidate = node.right.name;
+      } else if (node.type === 'AssignmentExpression' && node.operator === '='
+        && node.left.type === 'Identifier') {
+        // `let api; api = router;` — an assignment binds exactly like a
+        // declarator (alias, router factory, require, ...); without this a
+        // registration through the assigned name would be silently dropped.
+        this.recordBinding(node.left.name, node.right, ctx.topLevel);
       } else if (node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression'
         && (node.callee.object.type === 'Identifier' || node.callee.object.type === 'CallExpression')) {
@@ -254,11 +254,11 @@ class ModuleAnalysis {
           objName = node.callee.object.name;
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
           let base = node.callee.object;
-          while (base && base.type === 'CallExpression' && !isRouterFactoryCall(base)) {
+          while (base && base.type === 'CallExpression' && !this.isRouterFactory(base)) {
             base = base.callee && base.callee.type === 'MemberExpression' ? base.callee.object : null;
           }
           if (base && base.type === 'Identifier') objName = base.name;
-          else if (base && isRouterFactoryCall(base)) {
+          else if (base && this.isRouterFactory(base)) {
             this.problems.push(`${this.loc(node)}: ${method}() chained on an inline Router() call — bind the router to a const so its routes can be attributed`);
           }
         }
@@ -321,6 +321,30 @@ class ModuleAnalysis {
     }
   }
 
+  /**
+   * True only for a call PROVEN to construct an Express router: the callee
+   * must resolve to require('express').Router (whole-module or destructured
+   * import). A call merely named Router() from any other source is not
+   * trusted — it could return terminal middleware wearing the name.
+   */
+  isRouterFactory(node) {
+    if (!node || node.type !== 'CallExpression') return false;
+    const c = node.callee;
+    if (c.type === 'Identifier') {
+      const b = this.bindings.get(c.name);
+      return Boolean(b && b.kind === 'requireMember' && b.module === null
+        && b.spec === 'express' && b.name === 'Router');
+    }
+    if (c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier' && c.property.name === 'Router') {
+      if (isRequireCall(c.object)) return c.object.arguments[0].value === 'express';
+      if (c.object.type === 'Identifier') {
+        const b = this.bindings.get(c.object.name);
+        return Boolean(b && b.kind === 'require' && b.module === null && b.spec === 'express');
+      }
+    }
+    return false;
+  }
+
   /** Follow `const a = b` alias chains to the canonical name. */
   canonName(name) {
     const seen = new Set();
@@ -346,7 +370,7 @@ class ModuleAnalysis {
   }
 
   recordBinding(name, init, topLevel) {
-    if (isRouterFactoryCall(init)) {
+    if (this.isRouterFactory(init)) {
       this.routers.add(name);
       this.setBinding(name, { kind: 'router', topLevel });
     } else if (isRequireCall(init)) {
@@ -585,7 +609,7 @@ class ModuleAnalysis {
         if (isRequireCall(node)) {
           return [this.scanner.moduleRef(resolveModulePath(this.file, node.arguments[0].value), node.arguments[0].value)];
         }
-        if (isRouterFactoryCall(node)) return [{ type: 'opaque', desc: 'inline Router() call' }];
+        if (this.isRouterFactory(node)) return [{ type: 'opaque', desc: 'inline Router() call' }];
         const c = node.callee;
         if (c.type === 'MemberExpression' && !c.computed && c.property.name === 'static'
           && (c.object.type === 'Identifier' || isRequireCall(c.object))) {
@@ -969,6 +993,24 @@ class Scanner {
     for (const r of this.routes) {
       if (!r.resolved && r.public) {
         problems.push(`${r.loc}: unguarded route with an unresolvable path (${r.method} ${r.path}) — the scanner cannot prove what it exposes`);
+      }
+    }
+    // Two PUBLIC routes from different source locations must never share one
+    // allowlist identity — the second would silently reuse the first's
+    // approval (e.g. a new anonymous pathless middleware landing on the
+    // already-approved `USE / (inline function)` key). Identical keys from
+    // ONE registration (path normalization of '/estimate' + '/estimate/')
+    // are a single responder and stay legal.
+    const byKey = new Map();
+    for (const r of this.routes) {
+      if (!r.public) continue;
+      const key = routeKey(r);
+      if (!byKey.has(key)) byKey.set(key, new Set());
+      byKey.get(key).add(r.loc);
+    }
+    for (const [key, locs] of byKey) {
+      if (locs.size > 1) {
+        problems.push(`${[...locs].join(', ')}: ${locs.size} public routes share the allowlist identity "${key}" — give each a distinct shape (a named middleware function, a distinct scope) so approvals cannot be reused`);
       }
     }
     return {

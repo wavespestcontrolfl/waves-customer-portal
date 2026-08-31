@@ -126,6 +126,12 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
     const src = fs.readFileSync(path.join(REPO_ROOT, 'server/routes/admin-email.js'), 'utf8');
     const m = src.match(/OAUTH_PUBLIC_PATHS\s*=\s*new Set\(\[([^\]]*)\]\)/);
     expect(m).not.toBeNull();
+    // The initializer must be the ONLY source of members: a later mutation
+    // (`OAUTH_PUBLIC_PATHS.add(...)`) would widen the runtime exemption
+    // invisibly to this comparison. Only .has() reads are allowed.
+    const mutations = [...src.matchAll(/OAUTH_PUBLIC_PATHS\s*\.\s*(\w+)/g)]
+      .map((x) => x[1]).filter((method) => method !== 'has');
+    expect(mutations).toEqual([]);
     const runtimePaths = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] || x[2]).sort();
     const guard = registry.guards.find((g) => g.name === 'adminAuthenticateExceptOauthCallback');
     expect(guard).toBeDefined();
@@ -515,6 +521,62 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     });
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
       .toEqual(['CHECKOUT /api/x/leak2', 'TRACE /api/x/leak']);
+  });
+
+  test('two indistinguishable public responders sharing one allowlist identity is a problem', () => {
+    // A second anonymous pathless middleware would land on the SAME
+    // `USE / (inline function)` key as an already-approved one and reuse its
+    // approval — the scanner must refuse identical keys from distinct
+    // source locations.
+    const res = scanOf({
+      'server/index.js': app([
+        'app.use((req, res) => res.json({ a: 1 }));',
+        'app.use((req, res) => res.json({ b: 2 }));',
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('share the allowlist identity'))).toBe(true);
+  });
+
+  test('path normalization within ONE registration does not trip the duplicate-identity check', () => {
+    const res = scanOf({
+      'server/index.js': app("app.get(['/thing', '/thing/'], (req, res) => res.json({}));"),
+    });
+    expect(res.problems).toEqual([]);
+  });
+
+  test('a router alias established by ASSIGNMENT is not lost', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'let api;',
+        'api = router;',
+        "api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a Router() factory NOT proven to come from Express is not trusted as a router', () => {
+    // helper.Router() could return terminal middleware wearing the name; the
+    // module then has no provable exported Express router and mounting it is
+    // a reported problem instead of silent acceptance.
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const helper = require('../services/router-lookalike');",
+        'const router = helper.Router();',
+        "router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/router-lookalike.js': [
+        'function Router() { return (req, res) => res.json({ secret: 1 }); }',
+        'module.exports = { Router };',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('is not a router') || p.includes('no exported Router'))).toBe(true);
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual([]);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
