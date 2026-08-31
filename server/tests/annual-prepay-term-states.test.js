@@ -155,11 +155,10 @@ function chainAfter(src, start) {
 // normalized to compact strings so each documented move's guard can be
 // pinned exactly.
 function chainGuards(chain) {
-  const upTo = chain.search(/\.(?:update|insert)\(/);
-  const head = upTo === -1 ? chain : chain.slice(0, upTo);
-  // orWhere* included: appending an OR branch loosens a guard and must
-  // change the pinned array.
-  return [...head.matchAll(/\.((?:orW|w)here[A-Za-z]*)\(([^)]*)/g)]
+  // The WHOLE chain (predicates may legally follow the mutation call), and
+  // the whole where-family: where*/orWhere*/andWhere*. Appending any
+  // predicate variant changes the pinned array.
+  return [...chain.matchAll(/\.((?:orW|andW|w)here[A-Za-z]*)\(([^)]*)/g)]
     .map((g) => `${g[1]}(${g[2].replace(/\s+/g, ' ').trim()})`);
 }
 
@@ -182,8 +181,12 @@ function statusWriteSites(src) {
     // Identifier-computed keys (`[column]: …`) could be 'status' at runtime.
     // The only sanctioned identifiers are the *Col notice/reminder column
     // helpers, whose outputs are behaviorally pinned non-status below.
-    for (const k of body.matchAll(/\[\s*([A-Za-z_$][\w$]*)\s*\]\s*:/g)) {
-      if (!SANCTIONED_KEY_IDENTIFIERS.includes(k[1])) out.push({ expr: `<computed identifier key ${k[1]}>`, guards });
+    for (const k of body.matchAll(/\[\s*([^\]]+?)\s*\]\s*:/g)) {
+      const key = k[1].trim();
+      if (/^['"][a-z_]+['"]$/.test(key)) continue; // quoted non-status literal (status handled above)
+      if (SANCTIONED_KEY_IDENTIFIERS.includes(key)) continue;
+      // Bare unsanctioned identifier OR any expression (fn(), a + b, …).
+      out.push({ expr: `<computed identifier key ${key}>`, guards });
     }
     if (/(?:^|,|\{)\s*status\s*(?:,|$)/.test(body.trim())) out.push({ expr: '<shorthand status key>', guards });
     for (const s of body.matchAll(/(?:\b|['"])status['"]?\s*:\s*((?:[^,\n]|,(?!\s*['"[\]\w]+\s*:))+)/g)) {
@@ -214,9 +217,17 @@ function statusWriteSites(src) {
     }
     if (a.startsWith('[')) {
       // Array-of-rows insert.
+      // Each top-level row object, walked with balanced delimiters so a
+      // nested object before `status` cannot end the row early.
       const inner = argSpan(a, 0);
       let found = false;
-      for (const o of inner.matchAll(/\{([\s\S]*?)\}/g)) { objectStatuses(o[1], guards); found = true; }
+      let depth = 0;
+      walkSyntax(inner, 0, (ch, i) => {
+        if (ch === '{' && depth === 0) { objectStatuses(argSpan(inner, i), guards); found = true; }
+        if ('({['.includes(ch)) depth += 1;
+        else if (')}]'.includes(ch)) depth -= 1;
+        return true;
+      });
       if (!found) out.push({ expr: `<unclassifiable write args: ${a.slice(0, 40)}>`, guards });
       return;
     }
@@ -242,6 +253,11 @@ function statusWriteSites(src) {
       if (new RegExp(`\\b${a}\\[`).test(src)) {
         out.push({ expr: `<computed assignment to write object ${a}>`, guards });
       }
+      // Indirect mutation forms (Object.assign(x, …), reassignment) cannot
+      // be followed textually — fail closed.
+      if (new RegExp(`Object\\.assign\\(\\s*${a}\\b`).test(src) || new RegExp(`(?<![.\\w$])${a}\\s*=(?!=)`).test(src.replace(new RegExp(`const ${a} = \\{`, 'g'), ''))) {
+        out.push({ expr: `<indirect mutation of write object ${a}>`, guards });
+      }
       return;
     }
     out.push({ expr: `<unclassifiable write args: ${a.slice(0, 40)}>`, guards });
@@ -261,11 +277,18 @@ function statusWriteSites(src) {
   // Split builders: `const q = db('annual_prepay_terms'); … q.update({...});`
   const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]\\)`, 'g');
   for (const m of src.matchAll(splitRe)) {
-    const rest = src.slice(m.index + m[0].length);
-    for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:[\\w$]+\\([^()]*\\)\\s*\\.\\s*)*(?:update|insert|merge)\\s*\\(`, 'g'))) {
-      const args = argSpan(rest, w.index + w[0].length - 1);
-      if (!args.trim()) continue; // bare merge() reuses already-scanned insert values
-      classifyWriteArgs(args, ['<split-builder>'], m.index);
+    const restStart = m.index + m[0].length;
+    const rest = src.slice(restStart);
+    // Scope: until the end of the declaring top-level function body (`\n}\n`),
+    // so an unrelated later variable of the same name is not scanned.
+    const scopeEnd = rest.search(/\n\}\n/);
+    const scope = scopeEnd === -1 ? rest : rest.slice(0, scopeEnd);
+    // Every later statement that starts a chain on the builder variable,
+    // walked depth-aware so callback predicates (`.where(function () {…})`)
+    // don't hide the mutation behind nested parens.
+    for (const w of scope.matchAll(new RegExp(`(?<![.\\w$])${m[1]}\\s*\\.`, 'g'))) {
+      const chain = chainAfter(scope, w.index);
+      scanChain(chain, restStart + w.index, ['<split-builder>', ...chainGuards(chain)]);
     }
   }
   return out;
@@ -370,6 +393,23 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     // Sanctioned identifiers (notice/reminder columns, pinned non-status) pass.
     expect(statusWriteExpressions("await db('annual_prepay_terms').update({ [claimCol]: now });"))
       .toEqual([]);
+    // Computed key EXPRESSIONS (not bare identifiers) fail closed too.
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ [columnName()]: 'refunded' });"))
+      .toEqual(['<computed identifier key columnName()>']);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ [prefix + suffix]: 'refunded' });"))
+      .toEqual(['<computed identifier key prefix + suffix>']);
+    // Indirect payload mutation (Object.assign) fails closed.
+    expect(statusWriteExpressions("const payload = { updated_at: now };\nObject.assign(payload, { status: 'refunded' });\nawait db('annual_prepay_terms').update(payload);"))
+      .toEqual(['<indirect mutation of write object payload>']);
+    // Nested object before status inside an array-insert row.
+    expect(statusWriteExpressions("await db('annual_prepay_terms').insert([{ metadata: { source: 'admin' }, status: 'refunded' }]);"))
+      .toEqual(["'refunded'"]);
+    // Split builder with a callback predicate before the mutation.
+    expect(statusWriteExpressions("const q = db('annual_prepay_terms');\nawait q.where(function () { this.whereNull('renewal_decision'); }).update({ status: 'refunded' });"))
+      .toEqual(["'refunded'"]);
+    // Guards chained AFTER the mutation call are captured.
+    expect(statusWriteSites("await db('annual_prepay_terms').update({ status: 'refunded' }).where({ id }).andWhereNot('x', 1);")[0].guards)
+      .toEqual(['where({ id })', "andWhereNot('x', 1)"]);
     // A Col-suffixed but UNsanctioned identifier still fails closed.
     expect(statusWriteExpressions("const statusCol = 'status';\nawait db('annual_prepay_terms').update({ [statusCol]: 'refunded' });"))
       .toEqual(['<computed identifier key statusCol>']);
@@ -422,7 +462,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // Fail closed on mutation forms the scanner cannot read: raw SQL that
       // updates/inserts this table's status, or indirect builder forms. Any
       // hit means the scanner (and the doc) must be extended first.
-      if (new RegExp(`(?:UPDATE|INSERT\\s+INTO)\\s+(?:["'\`]?\\w+["'\`]?\\.)?["'\`]?${TABLE}["'\`]?[\\s\\S]{0,400}?["'\`]?\\bstatus\\b`, 'i').test(src)) {
+      if (new RegExp(`(?:UPDATE|INSERT\\s+INTO|MERGE\\s+INTO)\\s+(?:["'\`]?\\w+["'\`]?\\.)?["'\`]?${TABLE}["'\`]?[\\s\\S]{0,400}?["'\`]?\\bstatus\\b`, 'i').test(src)) {
         unscannable.push(`${rel}: raw SQL UPDATE/INSERT touching ${TABLE} status`);
       }
       if (new RegExp(`\\.table\\(\\s*['"]${TABLE}`).test(src)) {
@@ -670,6 +710,18 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       expect(payload.status).toBe(status);
       if (decision) expect(payload.renewal_decision).toBe(decision);
       else expect(payload).not.toHaveProperty('renewal_decision');
+    });
+
+    test('the accepted action set is exactly the four documented moves (source pin — adding an action is a new trigger)', () => {
+      const src = read('server/services/annual-prepay-renewals.js');
+      expect(src).toContain("const allowed = new Set(['contacted', 'renew', 'cancel', 'switch_plan']);");
+      // statusAfterDecision's branches, exhaustively.
+      const fn = src.match(/function statusAfterDecision\(action\) \{[\s\S]*?\n\}/)[0];
+      expect(fn).toContain("if (action === 'renew') return 'renewed';");
+      expect(fn).toContain("if (action === 'cancel') return 'cancelled';");
+      expect(fn).toContain("if (action === 'switch_plan') return 'switch_plan';");
+      expect(fn).toContain("return 'renewal_pending';");
+      expect((fn.match(/return '/g) || []).length).toBe(4);
     });
 
     test('rejects any action that is not a documented move', async () => {
