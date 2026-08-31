@@ -264,10 +264,18 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     expect(affiliateBeltVerdict({}, '---\ntitle: x\n---\nplain body').ok).toBe(true);
     expect(affiliateBeltVerdict({}, null).ok).toBe(false);
   });
-  test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it', () => {
+  test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', () => {
     const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
-    expect(affiliateBeltVerdict({ trust_build_approved_by: null }, body).ok).toBe(false);
-    expect(affiliateBeltVerdict({ trust_build_approved_by: 'adam' }, body).ok).toBe(true);
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body }) };
+    expect(affiliateBeltVerdict({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body).ok).toBe(false);
+    expect(affiliateBeltVerdict(approved, body).ok).toBe(true);
+    expect(affiliateBeltVerdict(approved, { content: body }).ok).toBe(true);
+    // A product added on the branch AFTER approval is not approved.
+    const extra = `${body}\n<AffiliateLink product="ant-bait" placement="alt-rec">y</AffiliateLink>`;
+    expect(affiliateBeltVerdict(approved, extra)).toMatchObject({ ok: false, reason: expect.stringMatching(/ant-bait/) });
+  });
+  test('non-blog refresh targets (no blog file path) are not subject to the belt', () => {
+    expect(affiliateBeltVerdict({}, { notBlog: true }).ok).toBe(true);
   });
 });
 

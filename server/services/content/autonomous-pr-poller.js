@@ -302,11 +302,13 @@ async function recheckTopicTargeting(run, pr, gh) {
 // Head blog file content for lanes that don't run the topic recheck
 // (refresh PRs): same candidate-path probe as recheckTopicTargeting, null
 // when unreadable (the belt then fails closed).
+// → { content } | { notBlog: true } (no blog file path derivable — service/
+// city-page refreshes have no affiliate surface) | null (unreadable).
 async function headBlogFileContent(run, pr, gh) {
   let brief = {};
   try { brief = await briefCategorySignalsForRun(run); } catch (_) { return null; }
   const candidates = blogFileCandidatesForRun(run, brief);
-  if (!candidates) return null;
+  if (!candidates) return { notBlog: true };
   let parse;
   try { ({ parse } = require('../content-astro/frontmatter')); } catch (_) { return null; }
   for (const path of candidates.paths) {
@@ -317,16 +319,30 @@ async function headBlogFileContent(run, pr, gh) {
     let existingSlug = '';
     try { existingSlug = parse(found.content)?.data?.slug || ''; } catch (_) { existingSlug = ''; }
     if (existingSlug && candidates.slugKey(existingSlug) !== candidates.routeKey) continue;
-    return found.content;
+    return { content: found.content };
   }
   return null;
 }
 
-function affiliateBeltVerdict(run, headContent) {
-  if (typeof headContent !== 'string') return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
-  if (!/<AffiliateLink\b/.test(headContent)) return { ok: true };
-  if (run?.trust_build_approved_by) return { ok: true };
-  return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
+// head: a string (the topic recheck's content), { content }, { notBlog }
+// (no affiliate surface — pass), or null/undefined (unreadable — fail
+// closed). The approval is BOUND to the reviewed draft: every affiliate
+// product id on the head must be one the approved draft_payload body
+// referenced, so a branch push after approval cannot add products.
+function affiliateBeltVerdict(run, head) {
+  if (head && typeof head === 'object' && head.notBlog) return { ok: true };
+  const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
+  if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
+  if (!/<AffiliateLink\b/.test(content)) return { ok: true };
+  if (!run?.trust_build_approved_by) {
+    return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
+  }
+  let ids;
+  try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
+  const approved = new Set(ids(parseJsonObject(run.draft_payload)?.body || ''));
+  const extra = ids(content).filter((id) => !approved.has(id));
+  if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
+  return { ok: true };
 }
 
 const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
