@@ -638,9 +638,13 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   const classification = getClassification(r);
   const action = getActionStatus(r);
 
-  // Update local state when parent selection changes
+  // Update local state when parent selection changes. The verdict is cleared
+  // with it: this component persists across selections, so a message left
+  // over from the previous call would sit under the new call's Process
+  // button and describe the wrong recording.
   useEffect(() => {
     setR(recording);
+    setProcessVerdict(null);
   }, [recording]);
 
   const handleProcess = async () => {
