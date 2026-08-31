@@ -2093,11 +2093,13 @@ router.post('/confirm-action', async (req, res, next) => {
       }
     }
     if (action.tool_name === 'cancel_appointment') {
-      // Re-validate the frozen money posture (W0B): the fee rail outcome
-      // and the voidable-invoice set must still match what the card
-      // disclosed, or the operator approved a different effect set.
+      // Re-validate the frozen effect set (W0B): visit identity/state, fee
+      // posture, and voidable-invoice set must still match what the card
+      // disclosed. This is the cheap fast-fail; the executor re-checks the
+      // SAME fingerprint inside its cancelling transaction under row locks
+      // (the pin stays in execParams for that), closing the check→execute
+      // window.
       const approved = execParams._cancellation_fingerprint;
-      delete execParams._cancellation_fingerprint;
       if (approved) {
         const { previewCancellationEffects, cancellationFingerprint } = require('../services/intelligence-bar/cancellation-preview');
         const live = await previewCancellationEffects(String(execParams.appointment_id));

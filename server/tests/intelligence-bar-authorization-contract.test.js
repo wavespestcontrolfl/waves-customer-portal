@@ -114,7 +114,7 @@ test('cancel_appointment discloses the late-cancel fee and invoice voids from th
       cancellation: {
         appointment: { id: 'ap1', scheduled_date: '2026-09-02', service_type: 'Quarterly Pest', status: 'scheduled', customer_name: 'acct-3001' },
         fee: { rail: 'card_hold', applies: true, amount: 49, unresolved: false },
-        invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, amount_paid: 0 }],
+        invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 0 }],
       },
     },
   });

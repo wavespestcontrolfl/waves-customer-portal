@@ -229,7 +229,7 @@ describe('W0B cancellation money effects', () => {
   const PREVIEW = {
     appointment: { id: 'ap1', scheduled_date: '2026-09-02', service_type: 'Quarterly Pest', status: 'scheduled', customer_name: 'acct-3001' },
     fee: { rail: 'card_hold', applies: true, amount: 49, unresolved: false },
-    invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, amount_paid: 0 }],
+    invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 0 }],
   };
   const { cancellationFingerprint } = jest.requireActual('../services/intelligence-bar/cancellation-preview');
 
@@ -283,7 +283,7 @@ describe('W0B cancellation money effects', () => {
     });
   });
 
-  test('/confirm-action executes when the money posture is unchanged, with the fingerprint stripped', async () => {
+  test('/confirm-action executes when the effect set is unchanged, passing the pin for the in-transaction re-check', async () => {
     mockClaimForConfirm.mockResolvedValue({
       action: {
         id: PENDING_ID, tool_name: 'cancel_appointment',
@@ -298,7 +298,26 @@ describe('W0B cancellation money effects', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('cancel_appointment', { appointment_id: 'ap1', reason: 'rain' });
+      expect(mockExecuteTool).toHaveBeenCalledWith('cancel_appointment', {
+        appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: cancellationFingerprint(PREVIEW),
+      });
+    });
+  });
+
+  test('a proposal is REFUSED (fail closed) when the financial preview cannot be completed', async () => {
+    mockPreviewCancellation.mockResolvedValue({ error: 'Could not verify the late-cancel fee for this visit — cancel it from the Dispatch screen instead.' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'ap1' } }],
+      [{ type: 'text', text: 'Could not propose.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(status).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toMatch(/Dispatch screen/);
     });
   });
 });

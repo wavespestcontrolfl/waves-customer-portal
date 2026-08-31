@@ -2277,9 +2277,30 @@ async function cancelAppointment(input) {
   // caller-owned transaction as the transition (Codex r5): a crash between
   // separate writes would report failure for a committed cancellation, and
   // the retry's already_cancelled return would never persist the reason.
+  // W0B authorization contract: a confirmed card carries the fingerprint of
+  // the effect set the operator approved (visit identity/state, fee posture,
+  // voidable invoices). It is re-checked INSIDE the cancelling transaction
+  // under FOR UPDATE locks on the visit, its invoices, and its card-fee rows,
+  // so nothing can move between the check and the commit; the follow-through
+  // then runs on the same rows immediately after. Drift ⇒ no transition, no
+  // follow-through, preview_changed back to the card.
+  const approvedFingerprint = input._cancellation_fingerprint ? String(input._cancellation_fingerprint) : null;
   try {
     const { transitionJobStatus } = require('../job-status');
     await db.transaction(async (trx) => {
+      if (approvedFingerprint) {
+        const { previewCancellationEffects, cancellationFingerprint } = require('./cancellation-preview');
+        await trx('scheduled_services').where('id', appointment_id).forUpdate().first('id');
+        await trx('invoices').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
+        await trx('estimate_card_holds').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
+        await trx('appointment_card_requests').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
+        const live = await previewCancellationEffects(appointment_id, { trx });
+        if (live?.error || cancellationFingerprint(live) !== approvedFingerprint) {
+          const err = new Error('cancellation_effects_changed');
+          err.previewChanged = true;
+          throw err;
+        }
+      }
       await transitionJobStatus({
         jobId: appointment_id,
         fromStatus: appt.status,
@@ -2296,6 +2317,12 @@ async function cancelAppointment(input) {
       }
     });
   } catch (err) {
+    if (err && err.previewChanged) {
+      return {
+        error: 'The fee or invoice effects of this cancellation changed after the card was shown. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
     }
