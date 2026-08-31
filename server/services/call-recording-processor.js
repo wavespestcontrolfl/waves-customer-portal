@@ -2251,6 +2251,100 @@ function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workab
   return out;
 }
 
+
+// Shared-phone sibling visibility. A fresh mint while ANOTHER open lead
+// exists on this phone is deliberate in several paths (the name-conflict
+// fail-closed rule for shared office lines, the ownership filters, a
+// lookup/insert race across two concurrently processed call legs) — the
+// fail-closed cost is "a recoverable duplicate". But recoverable requires
+// DISCOVERABLE, and nothing cross-referenced the rows: on 2026-08-31 a
+// property manager's voicemail lead held the sent-and-viewed estimate while
+// the owner's fuller lead sat at 'new' with no estimate, and nobody working
+// either lead could see the other. Cross-note BOTH timelines so whichever
+// row the office opens points at its sibling. Read + activity inserts only;
+// never throws, never blocks processing.
+async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {}, knownSiblingId = null }) {
+  if (!phone || !leadId) return null;
+  try {
+    // Prefer the EXACT sibling the caller identified (the row the
+    // name-conflict lookup or the bounced guarded write pointed at) — on a
+    // long-lived shared office/household number the newest open row can be a
+    // different prospect entirely, and a note naming the wrong lead would
+    // steer consolidation at the wrong pair. The newest-open query stays as
+    // the fallback for mints where no specific sibling is known.
+    let sibling = null;
+    if (knownSiblingId && knownSiblingId !== leadId) {
+      // Revalidated with the SAME open-lead filters as the fallback: the
+      // conflict was observed moments ago, but the sibling can have
+      // converted or been closed since, and a consolidation note pointing
+      // at a won/lost lead would misdirect the office.
+      sibling = await database('leads')
+        .whereNull('deleted_at')
+        // Phone revalidated like the fallback (codex r5): a concurrent edit
+        // can move that lead to a different number, and the note would then
+        // draw a consolidation arrow between two unrelated timelines.
+        .where({ id: knownSiblingId, phone })
+        .whereNotIn('status', TERMINAL_LEAD_STATUSES)
+        .whereNull('converted_at')
+        .first('id', 'first_name', 'last_name', 'status', 'estimate_id');
+    }
+    if (!sibling) {
+      const openSiblings = await database('leads')
+        .whereNull('deleted_at')
+        .where('phone', phone)
+        .whereNot('id', leadId)
+        .whereNotIn('status', TERMINAL_LEAD_STATUSES)
+        .whereNull('converted_at')
+        .orderBy('created_at', 'desc')
+        .limit(2);
+      // AMBIGUOUS fallback (2+ open siblings, no specific one identified):
+      // naming the newest would direct consolidation at an arbitrary pair on
+      // a shared office/household line. Note the situation on the NEW lead
+      // only, without electing a pair.
+      if (Array.isArray(openSiblings) && openSiblings.length > 1) {
+        await database('lead_activities').insert({
+          lead_id: leadId,
+          activity_type: 'note',
+          description: 'Shared phone: multiple other open leads exist on this number. Review them together before working this one — some may be the same inquiry.',
+          performed_by: 'AI Call Processor',
+          metadata: JSON.stringify({ shared_phone_open_sibling_count: openSiblings.length }),
+        });
+        logger.info(`[call-proc] shared-phone siblings (ambiguous) noted on lead ${leadId} (${maskPhone(phone)})`);
+        return null;
+      }
+      sibling = Array.isArray(openSiblings) ? openSiblings[0] : null;
+    }
+    if (!sibling) return null;
+    const newName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name)].filter(Boolean).join(' ') || 'this caller';
+    const sibName = [sibling.first_name, sibling.last_name].filter(Boolean).join(' ') || 'an unnamed caller';
+    const sibEstimate = sibling.estimate_id ? ' That lead already carries an estimate.' : '';
+    await database('lead_activities').insert([
+      {
+        lead_id: leadId,
+        activity_type: 'note',
+        description: `Shared phone: an open lead for ${sibName} (status ${sibling.status}) already exists on this number.${sibEstimate} If this is the same inquiry, work that lead and remove this one.`,
+        performed_by: 'AI Call Processor',
+        metadata: JSON.stringify({ shared_phone_sibling_lead_id: sibling.id }),
+      },
+      {
+        lead_id: sibling.id,
+        activity_type: 'note',
+        description: `Shared phone: a new call from this number just minted a separate lead for ${newName}. If it is the same inquiry, consolidate onto one lead.`,
+        performed_by: 'AI Call Processor',
+        metadata: JSON.stringify({ shared_phone_sibling_lead_id: leadId }),
+      },
+    ]);
+    logger.info(`[call-proc] shared-phone sibling noted: lead ${leadId} <-> ${sibling.id} (${maskPhone(phone)})`);
+    return sibling.id;
+  } catch (sibErr) {
+    // Sanitized code only — the query binds the caller phone and the
+    // inserts carry names; a raw driver message can echo either (AGENTS.md
+    // non-card PII logging rule).
+    logger.warn(`[call-proc] shared-phone sibling note skipped: ${sibErr.code || sibErr.name || 'db_error'}`);
+    return null;
+  }
+}
+
 async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null, stampedLeadVia = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
@@ -9082,7 +9176,7 @@ const CallRecordingProcessor = {
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
         };
-        const { lead: existingLead, matchedVia: existingLeadVia } = await findReusableCallLead(db, {
+        const { lead: existingLead, matchedVia: existingLeadVia, phoneNameConflictLeadId } = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
           firstName: extracted.first_name || null,
@@ -9354,6 +9448,10 @@ const CallRecordingProcessor = {
           // recovery mint below) and never throw — a notify failure must never
           // break call processing.
           await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
+
+          await noteSharedPhoneSibling(db, {
+            leadId, phone, extracted, knownSiblingId: phoneNameConflictLeadId || null,
+          });
         }
 
         // Dropped-call detector, phase 1 of 2 (owner directive 2026-08-01): a
@@ -10290,10 +10388,19 @@ const CallRecordingProcessor = {
                   status: 'new',
                 }).returning('*');
                 logger.warn(`[call-proc] shared-line name conflict on lead ${leadId} — minted fresh lead ${conflictFresh.id}`);
+                const conflictedSiblingId = leadId;
                 leadId = conflictFresh.id;
                 current = conflictFresh;
                 raceRecovered = true;
                 await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
+                // This mint is the shared-line duplicate case in person — the
+                // conflicting lead is the row the guarded write just bounced
+                // off. Cross-note both timelines like the lookup-miss mint
+                // (the helper's newest-open-sibling query finds it; never
+                // throws).
+                await noteSharedPhoneSibling(db, {
+                  leadId, phone, extracted, knownSiblingId: conflictedSiblingId,
+                });
                 continue;
               } catch (raceErr) {
                 // Sanitized code only — the insert carries the caller's
@@ -15166,6 +15273,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  noteSharedPhoneSibling,
   composeLeadAddress,
   analyzeLeadAddress,
   leadAddressCompareKey,
