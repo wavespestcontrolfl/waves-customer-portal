@@ -139,16 +139,24 @@ async function recordJobEnd(jobName, startedAtMs, error, conn) {
 // its queries through the shared pool while its lock connection is pinned,
 // so without a ceiling a big-enough herd of distinct jobs could pin every
 // pool connection and leave their own callbacks (and web routes) nothing to
-// run on. Ten of prod's 20 guarantees headroom; jobs over the cap skip the
-// tick exactly like a lease_held skip — every wrapped job is sweep-style,
-// so the next tick picks the work up.
-const MAX_LOCK_HOLDERS = 10;
+// run on. Half the ACTIVE pool maximum (read at tick time — DB_POOL_MAX is
+// tunable now, and dev/test pools are only 10) guarantees the other half
+// stays free; jobs over the cap skip the tick exactly like a lease_held
+// skip — every wrapped job is sweep-style, so the next tick picks the work
+// up.
+function lockHolderCap() {
+  const poolMax = Number(db.client?.pool?.max)
+    || Number(db.client?.config?.pool?.max)
+    || 20;
+  return Math.max(1, Math.floor(poolMax / 2));
+}
 let activeLockHolders = 0;
 
 async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
-  if (activeLockHolders >= MAX_LOCK_HOLDERS) {
-    logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${MAX_LOCK_HOLDERS}) — skipping tick to keep pool headroom`);
+  const cap = lockHolderCap();
+  if (activeLockHolders >= cap) {
+    logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${cap}) — skipping tick to keep pool headroom`);
     return { skipped: true, reason: 'lock_capacity' };
   }
   activeLockHolders += 1;

@@ -127,6 +127,29 @@ describe('cron-lock runExclusive', () => {
     expect(after).toBe('ran');
   });
 
+  test('the holder cap scales down with the active pool size (small dev/test pools)', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    // Dev/test pools max out at 10 — the cap must leave half of THAT, not
+    // assume prod's 20 (ten holders on a ten-connection pool is the
+    // deadlock this module exists to prevent).
+    db.client.pool = { max: 10 };
+    try {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const herd = Array.from({ length: 5 }, (_, i) =>
+        runExclusive(`small-${i}`, () => gate, { recordHealth: false }));
+
+      const overflow = await runExclusive('small-overflow', jest.fn(), { recordHealth: false });
+      expect(overflow).toEqual({ skipped: true, reason: 'lock_capacity' });
+
+      release('swept');
+      await expect(Promise.all(herd)).resolves.toEqual(Array(5).fill('swept'));
+    } finally {
+      delete db.client.pool;
+    }
+  });
+
   test('skips (without throwing) when no DB connection is available', async () => {
     db.client.acquireConnection.mockRejectedValue(new Error('pool exhausted'));
 
