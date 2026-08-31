@@ -128,9 +128,28 @@ function findTypographicChar(text) {
   return m ? m[0] : null;
 }
 
+// A personalized first name must not flip a whole customer SMS to UCS-2
+// (67 chars/segment): "Álvaro" turned a 2-segment cancellation text into
+// 3 (codex pre-push P1). GSM-7-native accents (é, ñ, ü, à, ö…) stay as
+// typed; only letters OUTSIDE the GSM table fold to their base letter
+// (Á → A). Anything that still cannot be expressed (CJK, emoji) drops, and
+// an empty result falls back to the house greeting word.
+function gsmSafeName(name, fallback = 'there') {
+  const { detectEncoding } = require('./segment-counter');
+  const out = [];
+  for (const ch of String(name || '').trim()) {
+    if (detectEncoding(ch).encoding === 'GSM_7') { out.push(ch); continue; }
+    const folded = ch.normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if (folded && detectEncoding(folded).encoding === 'GSM_7') out.push(folded);
+  }
+  const safe = out.join('').replace(/\s+/g, ' ').trim();
+  return safe || fallback;
+}
+
 module.exports = {
   normalizeGsmPunctuation,
   findTypographicChar,
+  gsmSafeName,
   // Exposed for tests
   _internals: { REPLACEMENTS, NORMALIZE_RE },
 };

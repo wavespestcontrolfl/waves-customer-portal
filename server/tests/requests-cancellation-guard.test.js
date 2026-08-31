@@ -189,7 +189,20 @@ describe('POST /api/requests cancellation guard', () => {
     sendCancellationReceived.mockResolvedValueOnce({ ok: true });
     res = await postCancellation(baseUrl);
     body = await res.json();
-    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, visitsPulled: 1, confirmation: 'email' }));
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, visitsPulled: 1, confirmation: 'email', confirmationChannels: ['email'] }));
+
+    // Customer-initiated ⇒ BOTH channels (owner ruling 2026-08-31): a
+    // delivered text does not suppress the email; 'sms' stays the reported
+    // channel because it is the one the customer sees first.
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+    processCancellationRequest.mockResolvedValueOnce({ ok: true, churned: true, cancelledCount: 1, recurrenceStopped: 1, errors: [] });
+    sendCancellationReceived.mockClear();
+    sendCancellationReceived.mockResolvedValueOnce({ ok: true });
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, confirmation: 'sms', confirmationChannels: ['sms', 'email'] }));
+    expect(sendCancellationReceived).toHaveBeenCalledTimes(1);
   }));
 
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {

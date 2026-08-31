@@ -7,6 +7,9 @@ const { authenticate, authenticateAllowInactive } = require('../middleware/auth'
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+// A non-GSM first name (Á) would flip the whole confirmation text to UCS-2
+// and past two segments — fold it before rendering (codex pre-push P1).
+const { gsmSafeName } = require('../services/messaging/gsm-normalize');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
@@ -29,7 +32,11 @@ function etDisplayDate(value) {
 // `effectiveDate` is the ET calendar date the cancellation took effect —
 // the ORIGINAL request's date on retries, so a next-day retry never says
 // "as of today".
-function cancellationOutcome(result, confirmation, effectiveAt) {
+// `confirmationChannels` (additive) lists EVERY channel that accepted —
+// a customer-initiated cancel sends both, and the portal copy must name
+// only what was actually accepted (codex pre-push P1: "text and email"
+// on an sms-only outcome).
+function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
   let effectiveDate = null;
   try {
     const at = effectiveAt ? new Date(effectiveAt) : new Date();
@@ -41,6 +48,7 @@ function cancellationOutcome(result, confirmation, effectiveAt) {
     processed: !!(result && result.ok && result.churned),
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
+    confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
     effectiveDate,
   };
 }
@@ -611,13 +619,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         : 'service_request_confirmation';
       const smsVars = isCancellation
         ? {
-            first_name: req.customer.first_name || 'there',
+            first_name: gsmSafeName(req.customer.first_name),
             // ET date of the request — a quiet-hours hold delivers this text
             // the next morning, so the body never says "today".
             effective_date: etDisplayDate(request.created_at),
           }
         : {
-            first_name: req.customer.first_name || 'there',
+            first_name: gsmSafeName(req.customer.first_name),
             category: categoryLabel,
             response_time: responseTime,
           };
@@ -669,7 +677,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }).catch((emailErr) => {
         logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
       });
-    } else if (!confirmationSmsSent) {
+    } else {
+      // A customer-initiated cancel gets BOTH the text and the email (owner
+      // ruling 2026-08-31 — the rule the non-cancellation branch already
+      // follows); the email is the durable artifact, not an SMS fallback.
       // Awaited (not fire-and-forget) so the response can say which channel
       // actually accepted the confirmation — a skipped/failed email must not
       // become "an email is on its way" on the customer's screen.
@@ -705,7 +716,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             cancellation: cancellationOutcome(
               cancellationResult,
               confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-              request.created_at
+              request.created_at,
+              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
             ),
           }
         : {}),
