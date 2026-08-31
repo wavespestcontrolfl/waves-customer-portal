@@ -332,6 +332,13 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       'server/routes/admin-invoices.js',
     ]));
 
+    // Files allowed to mutate tables through a DYNAMIC table expression
+    // (db(x)/trx(probe.table)/…). Each entry must be audited: customer-dedupe
+    // is the merge/undo machinery re-pointing customer_id/bookkeeping columns
+    // across many tables — audited 2026-08-31, it writes no status column on
+    // this table. A new dynamic writer fails here until audited + listed.
+    const AUDITED_DYNAMIC_WRITERS = ['server/services/customer-dedupe.js'];
+
     const writes = [];
     const unscannable = [];
     for (const rel of files) {
@@ -349,6 +356,17 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       if (new RegExp(`(?:const|let|var)\\s+[\\w$]+\\s*=\\s*['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]`).test(src)) {
         // db(SOME_CONST) indirection would make every chain invisible.
         unscannable.push(`${rel}: table name behind a constant`);
+      }
+      // A mutation through a DYNAMIC table expression (db(fn()), trx(cfg.x))
+      // could write this table's status invisibly — fail closed unless the
+      // file is on the audited allowlist above.
+      if (!AUDITED_DYNAMIC_WRITERS.includes(rel)) {
+        for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+          const chain = chainAfter(src, m.index + m[0].length);
+          if (/\.(?:update|insert|merge)\s*\(/.test(chain)) {
+            unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} — audit it and extend AUDITED_DYNAMIC_WRITERS`);
+          }
+        }
       }
     }
     expect(unscannable).toEqual([]);
