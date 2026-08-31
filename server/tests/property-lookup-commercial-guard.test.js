@@ -225,6 +225,38 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
     }), {})).toBe('COMMERCIAL');
   });
 
+  test('a builder/permit-sourced small count cannot suppress the verdict on a hybrid merge (codex P1, unitCount plumbing)', () => {
+    // The AI prompt allows unitCount 1 for ONE apartment unit's own record.
+    // A builder or permit page is authoritative for TYPE but not
+    // parcel-scoped for COUNT — merged with whole-building county
+    // dimensions it must not read as a county-attested small parcel.
+    for (const sourceType of ['builder', 'permit']) {
+      expect(detectCategory(countyDuplexParcel({
+        _source: 'hybrid',
+        unitCount: 1,
+        _parcel: undefined,
+        _fieldEvidence: {
+          propertyType: { value: 'Multifamily', sourceType: 'county' },
+          unitCount: { value: 1, sourceType },
+        },
+      }), {})).toBe('COMMERCIAL');
+    }
+  });
+
+  test('a parcel-scoped small count (county / cadastral / verified evidence) still suppresses the verdict', () => {
+    for (const sourceType of ['county', 'cadastral', 'verified']) {
+      expect(detectCategory(countyDuplexParcel({
+        _source: 'hybrid',
+        unitCount: 2,
+        _parcel: undefined,
+        _fieldEvidence: {
+          propertyType: { value: 'Multifamily', sourceType: 'county' },
+          unitCount: { value: 2, sourceType },
+        },
+      }), {})).toBe('RESIDENTIAL');
+    }
+  });
+
   test('a county Multifamily with NO unit data keeps the conservative COMMERCIAL vote', () => {
     expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
   });

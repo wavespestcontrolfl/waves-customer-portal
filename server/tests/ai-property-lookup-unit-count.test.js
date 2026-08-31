@@ -37,6 +37,48 @@ describe('parsePropertyJSON unitCount', () => {
   });
 });
 
+describe('parsePropertyJSON unitCount rejects ranges and fractions (codex P2)', () => {
+  test('ranges never concatenate into a large count', () => {
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: '4-8' })).unitCount).toBeNull();
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: '1 to 8' })).unitCount).toBeNull();
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: '4–8' })).unitCount).toBeNull();
+  });
+
+  test('fractional counts are unknown, not rounded', () => {
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: 4.5 })).unitCount).toBeNull();
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: '4.5' })).unitCount).toBeNull();
+  });
+
+  test('integer strings and a plain "units" suffix still parse; snake/camel aliases honored', () => {
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: '48' })).unitCount).toBe(48);
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unitCount: '48 units' })).unitCount).toBe(48);
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, unit_count: 12 })).unitCount).toBe(12);
+    expect(_private.parsePropertyJSON(JSON.stringify({ ...BASE_RAW, numberOfUnits: '6' })).unitCount).toBe(6);
+  });
+
+  test('coerceStrictInt contract', () => {
+    expect(_private.coerceStrictInt(48, 1, 2000)).toBe(48);
+    expect(_private.coerceStrictInt('4-8', 1, 2000)).toBeNull();
+    expect(_private.coerceStrictInt(2001, 1, 2000)).toBeNull();
+    expect(_private.coerceStrictInt(true, 1, 2000)).toBeNull();
+    expect(_private.coerceStrictInt(undefined, 1, 2000)).toBeNull();
+  });
+});
+
+describe('hasAnyPropertyFact treats a multi-unit count as a usable fact (codex P2)', () => {
+  const EMPTY = {
+    squareFootage: null, lotSize: null, yearBuilt: null, bedrooms: null,
+    bathrooms: null, stories: null, propertyType: null,
+  };
+  test('a count-only verified record is kept, not discarded', () => {
+    expect(_private.hasAnyPropertyFact({ ...EMPTY, unitCount: 48 })).toBe(true);
+  });
+  test('a bare 1 is not a fact — indistinguishable from the seed', () => {
+    expect(_private.hasAnyPropertyFact({ ...EMPTY, unitCount: 1 })).toBe(false);
+    expect(_private.hasAnyPropertyFact({ ...EMPTY, unitCount: null })).toBe(false);
+  });
+});
+
 describe('shapeAsPropertyRecord unitCount', () => {
   const ADDRESS = '1 Example Complex Dr, Testville, FL 00000';
 

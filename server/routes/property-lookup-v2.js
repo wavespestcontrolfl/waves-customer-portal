@@ -2668,6 +2668,15 @@ function hasStructuredCommercialAiSignal(ai = {}) {
 // SOURCE_TYPE_LABELS in services/property-lookup/ai-property-lookup.js).
 const AUTHORITATIVE_PROPERTY_TYPE_SOURCES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder']);
 
+// Sources whose unitCount is PARCEL-scoped by construction — a county roll,
+// cadastral FDOR roll, or a tech-verified read counts the whole parcel. A
+// permit or builder page can describe ONE unit's own record (the AI prompt
+// explicitly allows unitCount 1 for one apartment's record), so a small
+// count from those sources must never REMOVE protection — it may vote
+// COMMERCIAL (trustedUnitCount) but may not suppress the commercial verdict
+// (countyAttestedSmallResidential). Codex P1 on the unitCount plumbing.
+const PARCEL_SCOPED_UNIT_COUNT_SOURCES = new Set(['verified', 'county', 'cadastral']);
+
 // A record's type/zoning/land-use strings (and unit count) may only vote
 // COMMERCIAL when the record itself is trustworthy. Pure county / cadastral
 // merges always are, as are records with no evidence metadata (verified
@@ -2743,7 +2752,7 @@ function commercialSignalRecord(rc) {
 // county itself counts at ≤4 units. Only county-attested counts may suppress
 // the vote: _parcel.residentialUnits is county GIS by construction
 // (attachParcelMeta), and rc.unitCount only when the record is authoritative
-// (county/cadastral merge, or authoritative unitCount field evidence).
+// (parcel-scoped unitCount field evidence: county/cadastral/verified).
 // Synthetic defaults keep the text vote: shapeAsPropertyRecord seeds
 // unitCount: 1 on EVERY record (ai-property-lookup.js), so a record-level
 // count may only vote here on authoritative unitCount FIELD evidence — a
@@ -2763,7 +2772,12 @@ function countyAttestedSmallResidential(rc) {
   const evidence = rc._fieldEvidence?.unitCount;
   const evidenceSource = String(evidence?.sourceType || '').toLowerCase();
   const recordUnits = Number(rc.unitCount);
-  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(evidenceSource)
+  // Parcel-scoped provenance only: a builder/permit "1" may be one unit's
+  // own record inside a multifamily building — combined with whole-building
+  // county dimensions on a hybrid merge it would price the building
+  // residential (codex P1). Those sources keep the COMMERCIAL vote via
+  // trustedUnitCount; they just can't suppress it here.
+  if (PARCEL_SCOPED_UNIT_COUNT_SOURCES.has(evidenceSource)
     && Number.isFinite(recordUnits) && recordUnits > 0) counts.push(recordUnits);
   return counts.length > 0 && Math.max(...counts) <= 4;
 }

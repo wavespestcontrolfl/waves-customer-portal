@@ -4342,7 +4342,7 @@ function parsePropertyJSON(text) {
       // Total units on the record's parcel/building (estimator-engine audit
       // 2026-08-30 follow-up: the AI path hardcoded 1, blinding every
       // downstream multi-unit signal). Bounded like the parcel-layer count.
-      unitCount: coerceInt(raw.unitCount ?? raw.unit_count ?? raw.numberOfUnits, 1, 2000),
+      unitCount: coerceStrictInt(raw.unitCount ?? raw.unit_count ?? raw.numberOfUnits, 1, 2000),
       constructionMaterial: coerceEnum(raw.constructionMaterial, ['CBS', 'WOOD_FRAME', 'BRICK', 'METAL']),
       source: typeof raw.source === 'string' ? raw.source : null,
       confidence: typeof raw.confidence === 'string' ? raw.confidence.toLowerCase() : null,
@@ -4360,6 +4360,29 @@ function coerceInt(raw, min, max) {
   const rounded = Math.round(n);
   if (rounded < min || rounded > max) return null;
   return rounded;
+}
+
+// Strict integer parse for counts that DRIVE classification (unitCount):
+// coerceInt strips non-digits, so a model's "4-8" becomes 48 and "1 to 8"
+// becomes 18 — a malformed range would read as a large authoritative-looking
+// count (codex P2). Accepts an integer-valued number or a bare digit string
+// (optionally suffixed "unit"/"units"); ranges, fractions, and anything else
+// parse to null = unknown.
+function coerceStrictInt(raw, min, max) {
+  if (raw == null) return null;
+  let n;
+  if (typeof raw === 'number') {
+    if (!Number.isInteger(raw)) return null;
+    n = raw;
+  } else if (typeof raw === 'string') {
+    const m = raw.trim().match(/^(\d{1,6})(?:\s*units?)?$/i);
+    if (!m) return null;
+    n = Number(m[1]);
+  } else {
+    return null;
+  }
+  if (n < min || n > max) return null;
+  return n;
 }
 
 function coerceFirstInt(values, min, max) {
@@ -4696,8 +4719,14 @@ function normalizeLookupPropertyType(raw) {
 }
 
 function hasAnyPropertyFact(parsed) {
+  // A multi-unit count is a usable fact on its own — it is the one signal
+  // the multi-unit site-quote guard needs, and a provider may verify only
+  // it (codex P2). A bare 1 is NOT: it is indistinguishable from the
+  // truthy-1 seed and would shape an otherwise-empty record.
+  const multiUnit = Number(parsed?.unitCount) > 1;
   return !!(parsed?.squareFootage || parsed?.lotSize || parsed?.yearBuilt
-    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories || parsed?.propertyType);
+    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories || parsed?.propertyType
+    || multiUnit);
 }
 
 // Reshape AI output to match the normalized property-record shape
@@ -4756,7 +4785,7 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     // A parsed unit count rides in with evidence (PROPERTY_EVIDENCE_FIELDS);
     // absent one, the historical truthy-1 seed stands — consumers treat an
     // evidence-less 1 as "no multi-unit signal", never as an attest.
-    unitCount: coerceInt(p.unitCount, 1, 2000) || 1,
+    unitCount: coerceStrictInt(p.unitCount, 1, 2000) || 1,
     ownerType: null,
     ownerNames: [],
     lastSaleDate: null,
@@ -5215,6 +5244,7 @@ module.exports = {
     geoOpensCountyGate,
     hasCountyPricingCore,
     hasAnyPropertyFact,
+    coerceStrictInt,
     parseStoriesJSON,
     coerceBuildingSqftDetailed,
     coerceStoriesValue,
