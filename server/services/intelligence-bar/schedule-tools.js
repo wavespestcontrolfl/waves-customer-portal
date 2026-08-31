@@ -703,6 +703,35 @@ async function moveStopsToDay(input) {
     };
   }
 
+  // The stop set + lifecycle states the operator approved
+  // (`_verified_stops`, the route's fingerprint-verified re-preview) must
+  // match what this confirmed pass just re-read (pre-push r11 P1): the
+  // fingerprint bound the CARD, but this run's movable/status/rewind
+  // classification comes from its own fresh unlocked read — a stop that
+  // went en_route, gained rewind evidence, or moved during the pending
+  // window would otherwise get a workflow reset or tracker release the
+  // card never disclosed. Same consume-the-pin contract as
+  // assign_technician / swap_tech_assignments; the per-stop CAS below
+  // stays the read→write authority.
+  const approvedMoveStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
+  if (approvedMoveStops) {
+    const approvedById = new Map(approvedMoveStops.map((a) => [String(a.id), a]));
+    const drifted = approvedMoveStops.length !== stops.length
+      || stops.some((s) => {
+        const a = approvedById.get(String(s.id));
+        return !a
+          || String(a.status) !== String(s.status)
+          || (a.track_rewind === true) !== (s.track_rewind === true)
+          || stopDateOnly(a.old_date) !== stopDateOnly(s.old_date);
+      });
+    if (drifted) {
+      return {
+        error: 'The stops changed after the card was shown (status, tracker evidence, or date) — nothing was moved. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+  }
+
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
   const {
     LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
