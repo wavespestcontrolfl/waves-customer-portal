@@ -387,6 +387,11 @@ function GlobalCommandPalette(_props, ref) {
       setConversationHistory([]);
       setResponse(null);
       setPendingActions([]);
+      // Detach any persisted thread too — /query evaluates the gate at call
+      // time, so a threadId can exist even after the availability probe
+      // failed; appending a fresh conversation to it would corrupt the
+      // thread.
+      setThreadId(null);
     }
     resetAttachments();
   }, [context, resetAttachments]);
@@ -455,7 +460,13 @@ function GlobalCommandPalette(_props, ref) {
           setResponse(data.response);
           setPendingActions(data.pendingActions || []);
           setConversationHistory(data.conversationHistory || []);
-          if (data.threadId) setThreadId(data.threadId);
+          if (data.threadId) {
+            setThreadId(data.threadId);
+            // A returned thread id proves the server gate is on even if the
+            // availability probe failed earlier — switch to thread mode so
+            // route changes stop clearing the conversation.
+            threadsAvailableRef.current = true;
+          }
         }
       } catch (err) {
         if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
