@@ -645,7 +645,7 @@ const SERVICE_CTA_LINK_RE =
 // it renders as prose, so none of it may satisfy a structural rule.
 function blankNonRenderedCode(src: string): string {
   let out = src.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
-  out = out.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
+  out = out.replace(/(`+)(?!`)[\s\S]*?\1/g, (m) => m.replace(/[^\n]/g, ' '));
   // An indented code line follows a blank line (or another code line).
   const lines = out.split('\n');
   let prevBlankOrCode = true;
@@ -695,11 +695,19 @@ function blankMdxExpressions(src: string): string {
       const j = closeOfExpression(i);
       if (j > 0) {
         // An expression that can render JSX ({true && <AffiliateLink …/>})
-        // is NOT blanked: the component scans must still see it (fail
-        // closed — leftover expression text can only ADD blockers, never
-        // satisfy a CTA/heading rule by itself once quoted strings without
-        // JSX are gone).
-        if (!/<[A-Z]/.test(src.slice(i, j + 1))) blankRange(i, j);
+        // keeps its JSX visible for the component scans, but its STRING
+        // LITERALS are blanked either way — {'<InlineCTA/>'} renders as
+        // text, and {'[quote](/quote/)'} must never satisfy a CTA rule.
+        const expr = src.slice(i, j + 1);
+        if (!/<[A-Z]/.test(expr)) blankRange(i, j);
+        else {
+          let q: string | null = null; let qs = -1;
+          for (let k = i; k <= j; k += 1) {
+            const c = src[k];
+            if (q) { if (c === '\\') { k += 1; continue; } if (c === q) { blankRange(qs, k); q = null; } continue; }
+            if (c === '"' || c === "'" || c === '`') { q = c; qs = k; }
+          }
+        }
         i = j + 1; continue;
       }
     }
@@ -764,7 +772,17 @@ const SERVICE_ROUTE_PATH_RE =
 // service route. An InlineCTA with a dynamic or non-service destination is
 // not the required CTA (fail closed).
 function hasServiceCtaBefore(prefix: string): boolean {
-  if (SERVICE_CTA_LINK_RE.test(prefix)) return true;
+  // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
+  // images (and raw <img> tags) before the link test.
+  const p2 = prefix
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => ' '.repeat(m.length))
+    .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
+  if (SERVICE_CTA_LINK_RE.test(p2)) return true;
+  const prefixForTags = p2;
+  return hasInlineCtaService(prefixForTags);
+}
+
+function hasInlineCtaService(prefix: string): boolean {
   for (const { attrs } of tagsNamed(prefix, 'InlineCTA')) {
     if (attrs === null) continue; // unterminated — never counts
     if (!/\bctaHref\s*=/.test(attrs)) return true;
@@ -801,7 +819,11 @@ export function validateAffiliateUsage(
   cleaned = cleaned.replace(/<(\w+)\b[^>]*(?:\shidden(?=[\s>/=])|display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
-  cleaned = cleaned.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => ' '.repeat(m.length));
+  cleaned = cleaned.replace(/<(\w+)\b[^>]*\bclass(?:Name)?\s*=\s*(["'])(?:[^"']*\s)?(?:hidden|invisible|sr-only)(?=\s|\2)[^"']*\2[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => {
+    // Responsively-visible wrappers (class="hidden md:block") stay: mask
+    // only elements hidden at EVERY breakpoint.
+    return /\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(m.split('>')[0]) ? m : m.replace(/[^\n]/g, ' ');
+  });
   cleaned = cleaned.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
 
   const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);

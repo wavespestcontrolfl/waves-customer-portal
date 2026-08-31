@@ -1703,7 +1703,11 @@ function hasServiceCtaLink(body) {
   const text = String(body || '');
   const firstAffiliate = collectAffiliateLinkTags(text)[0];
   const prefix = firstAffiliate ? text.slice(0, firstAffiliate.start) : text;
-  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix)));
+  // A Markdown IMAGE (![alt](/quote/)) renders an <img>, not a link — mask
+  // images and raw <img> tags before collecting destinations.
+  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix)))
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => ' '.repeat(m.length))
+    .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   const isServiceRoute = (norm) => {
     if (SERVICE_CTA_ROUTES.has(norm)) return true;
     const m = CITY_SERVICE_LINK_RE.exec(norm);
@@ -1822,7 +1826,11 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   if (tags.length > AFFILIATE_LINK_MAX_PER_POST) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'count', `Draft carries ${tags.length} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post (affiliate is fallback monetization, never the point of the page).`);
   }
-  const firstHeading = String(body || '').search(/^#{2,3}\s/m);
+  // The first RENDERED section heading — code fences, comments, and hidden
+  // spans are masked (length-preserving, so tag offsets stay aligned): a
+  // "## fake" inside a fenced block or comment is not a section.
+  const structureMasked = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(String(body || ''))));
+  const firstHeading = structureMasked.search(/^#{2,3}\s/m);
   if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
   }
