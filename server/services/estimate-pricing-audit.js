@@ -177,7 +177,14 @@ function dimensionsFrom(data, resultOverride) {
   // stores the ACTUALLY PRICED area on the line — positive values outrank
   // the zero-input artifact (GH codex P1; unlike turf, bed zeros are not
   // measurements).
-  const lineBedAreas = (Array.isArray(result.lineItems) ? result.lineItems : []).map((li) => li?.bedArea);
+  // Scan EVERY persisted line container — mixed shapes keep result as the
+  // mapped object while extra engine lines (and their bedArea) live in
+  // engineResult (codex pre-push P1).
+  const lineBedAreas = [
+    ...(Array.isArray(result.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(data?.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(data?.result?.lineItems) ? data.result.lineItems : []),
+  ].map((li) => li?.bedArea);
   const bedCandidates = [inputs.bedArea, inputs.estimatedBedAreaSf, property.bedArea, property.estimatedBedAreaSf, property.estimatedBedSqFt, ...lineBedAreas];
   const positiveBed = bedCandidates.map(Number).find((v) => Number.isFinite(v) && v > 0);
   const bedArea = positiveBed ?? pick(...bedCandidates);
@@ -851,7 +858,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // firstVisitFees rows are the authority when present (GH codex P1).
   const bundleFees = data?.sendSnapshot?.pricingBundle?.firstVisitFees;
   const emitInitialFee = Array.isArray(bundleFees)
-    ? bundleFees.some((f) => Number(f?.priceAfterDiscount ?? f?.price) > 0 && /setup|membership/i.test(String(f?.service || f?.name || '')))
+    ? bundleFees.some((f) => Number(f?.priceAfterDiscount ?? f?.price ?? f?.amount) > 0 && /setup|membership/i.test(String(f?.service || f?.name || '')))
     : !(data?.operatorPriceAdjustment?.waiveSetupFee || data?.setupFeeQuote?.waived);
   if (data.proposal?.enabled !== true) {
     // Real rows can MIX shapes: mapped recurring/oneTime blocks plus

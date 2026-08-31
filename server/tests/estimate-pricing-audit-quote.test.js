@@ -376,6 +376,11 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 0 }] } },
     }));
     expect(frozenWaived.lines.some((l) => l.serviceKey === 'waveguard_membership')).toBe(false);
+    // Production rows carry the fee as { amount } — a charged bundle emits.
+    const frozenCharged = await buildEstimatePricingAudit(base({
+      sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
+    }));
+    expect(frozenCharged.lines.find((l) => l.serviceKey === 'waveguard_membership')).toMatchObject({ price: 99 });
   });
 
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
