@@ -339,11 +339,62 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(res.problems).toEqual([]);
-    // The scoped limiter mount is inventoried as USE surface (it is not a
-    // registered passthrough in this fixture registry); path-less use()
-    // calls (cors, the inline fn) are not.
+    // Every unproven-middleware use() is inventoried as USE surface, the
+    // path-less ones (cors, the inline fn) at scope '/' — none of these are
+    // registered passthroughs in this fixture registry.
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
-      .toEqual(['GET /api/x/thing', 'USE /api']);
+      .toEqual(['GET /api/x/thing', 'USE /', 'USE /', 'USE /api']);
+  });
+
+  test('PATHLESS terminal middleware is inventoried as USE / surface', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use((req, res) => res.json({ secret: 1 }));"),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['USE /']);
+  });
+
+  test('a fluent chain preserves EXECUTION order (get before chained use(guard))', () => {
+    // router.get('/leak', h).use(guardA) runs the get() FIRST — the chained
+    // guard must not retroactively protect it.
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        "router.get('/leak', (req, res) => res.json({})).use(guardA);",
+        "router.get('/after', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('an identifier bound to a string ARRAY in path position expands to its paths', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const PATHS = ['/a', '/leak'];",
+        'router.get(PATHS, (req, res) => res.json({}));',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/a', 'GET /api/x/leak']);
+  });
+
+  test('passing the app or a router to an unanalysed in-repo helper is a reported problem', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const { installRoutes } = require('./routes/helper');",
+        'installRoutes(app);',
+      ].join('\n')),
+      'server/routes/helper.js': [
+        "function installRoutes(a) { a.get('/leak', (req, res) => res.json({})); }",
+        'module.exports = { installRoutes };',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('unanalysed function'))).toBe(true);
   });
 
   test('registrations through a router ALIAS are not lost', () => {

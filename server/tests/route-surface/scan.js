@@ -180,7 +180,11 @@ class ModuleAnalysis {
 
   collect() {
     this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
+    const callsWithIdentifierArgs = [];
     walk(this.ast.program, (node, ctx) => {
+      if (node.type === 'CallExpression' && node.arguments.some((a) => a && a.type === 'Identifier')) {
+        callsWithIdentifierArgs.push(node);
+      }
       if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
         this.recordBinding(node.id.name, node.init, ctx.topLevel);
       } else if (node.type === 'VariableDeclarator' && node.id.type === 'ObjectPattern' && isRequireCall(node.init)) {
@@ -281,6 +285,33 @@ class ModuleAnalysis {
     }
     // Only registrations on real routers (or the app) matter.
     this.registrations = this.registrations.filter((r) => this.routers.has(r.object) || APP_IDENTIFIERS.has(r.object));
+    // A router (or the app) passed as an ARGUMENT to a function the scanner
+    // does not analyse could have routes registered on it inside that helper
+    // (`installRoutes(app)`), invisibly to the walk. Reject it (fail closed).
+    // Exempt: methods ON a known router/app (that IS the supported
+    // registration path — app.use('/x', router), app.listen, ...) and
+    // node_modules callees (http.createServer(app), Sentry error handler —
+    // only in-repo code can register in-repo route surface).
+    for (const call of callsWithIdentifierArgs) {
+      const passed = call.arguments
+        .filter((a) => a && a.type === 'Identifier')
+        .map((a) => this.canonName(a.name))
+        .filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
+      if (!passed.length) continue;
+      const c = call.callee;
+      if (c.type === 'MemberExpression' && c.object.type === 'Identifier') {
+        const objCanon = this.canonName(c.object.name);
+        if (this.routers.has(objCanon) || APP_IDENTIFIERS.has(objCanon)) continue;
+        if (this.isNodeModulesRef(c.object)) continue;
+      }
+      if (c.type === 'Identifier' && this.isNodeModulesRef(c)) continue;
+      this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level`);
+    }
+    // EXECUTION order, not AST pre-order: in a fluent chain the outer call's
+    // node encloses the inner one (`router.get('/x', h).use(guard)` runs the
+    // get FIRST), so ordering by node END position restores the order Express
+    // actually sees; separate statements keep their source order unchanged.
+    this.registrations.sort((a, b) => a.node.end - b.node.end);
     for (const r of this.registrations) {
       if (r.method === 'route') {
         this.problems.push(`${this.loc(r.node)}: ${r.object}.route(...) chains are not supported by the scanner — register with ${r.object}.<verb>() instead`);
@@ -443,7 +474,12 @@ class ModuleAnalysis {
     if (node.type === 'Identifier') {
       if (this.enumValuesAt(node.name, node.start)) return true;
       const b = this.bindings.get(node.name);
-      return Boolean(b && b.kind === 'string');
+      if (b && b.kind === 'string') return true;
+      // A const bound to an all-string array is a path list, matching the
+      // support in resolveStrings() (`const PATHS = ['/a', '/b']`).
+      if (b && b.kind === 'array'
+        && stringLiteralArray({ type: 'ArrayExpression', elements: b.elements })) return true;
+      return false;
     }
     return false;
   }
@@ -841,14 +877,13 @@ class Scanner {
         const middlewareDescs = handlers.filter((h) => h.type === 'middleware').map((h) => h.desc);
         for (const p of paths) {
           const scope = joinPaths(ctx.prefix, p);
-          if (middlewareDescs.length && scope !== '/') {
-            // Terminal-capable middleware on a scoped mount is real surface:
-            // Express runs it for every request under the scope and it may
-            // answer without calling next() (`app.use('/api/leak', (req, res)
-            // => res.json(data))`), so it is inventoried as a USE entry and
-            // must be allowlisted when unguarded. Registered passthroughs are
-            // exempt; a path-less app-level use() (body parsing, logging on
-            // scope '/') has no scope of its own and stays out.
+          if (middlewareDescs.length) {
+            // Terminal-capable middleware is real surface: Express runs it
+            // for every request under the scope (scope '/' = EVERY request)
+            // and it may answer without calling next() (`app.use('/api/leak',
+            // (req, res) => res.json(data))`), so it is inventoried as a USE
+            // entry and must be allowlisted when unguarded. Registered
+            // passthroughs are exempt.
             this.routes.push(this.makeRoute({
               method: 'USE', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...ownGuards, ...inEffectGuards(inEffect, scope)],

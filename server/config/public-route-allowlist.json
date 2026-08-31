@@ -13,8 +13,9 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Scoped pre-router middleware inventoried as USE surface: embed-CORS + privacy header stamps (pest-forecast, secure-card) and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A) — each either sets headers and next()s or 404s while its GATE_* is off",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A) — each either sets headers and next()s or 404s while its GATE_* is off",
       "routes": [
+        "USE / (inline function)",
         "USE /api/ai/chat/report (inline function)",
         "USE /api/pay/statement (inline function)",
         "USE /api/public/a2a (inline function)",
