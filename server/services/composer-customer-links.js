@@ -101,12 +101,11 @@ async function buildPayBalanceLink(customerIds) {
   // openBalanceInvoices deliberately never selects tokens, so the anchor's
   // token comes from its own scoped query.
   //
-  // The reported amount is scoped to the ANCHOR's customer row: the pay
-  // page's combined selection (pay-combined.js) reads
-  // openBalanceInvoices(anchorInvoice.customer_id), so on a multi-property
-  // account the link can display and settle only that one row's invoices —
-  // an account-wide sum would tell the operator the link covers balances
-  // the customer cannot pay through it.
+  // The reported amount comes from the pay page's OWN authority (below):
+  // anchor scoping alone still overclaims, because the combined flow is
+  // opt-in (GATE_PAY_INCLUDE_BALANCE) and excludes stopped-dunning siblings
+  // and rows owned by a live PaymentIntent — the figure must match what the
+  // linked page will actually display and charge.
   let anchor = null;
   let anchorSummary = null;
   let anchorIncomplete = false;
@@ -131,9 +130,28 @@ async function buildPayBalanceLink(customerIds) {
     return { url: null, line: '', reason: 'No open balance on this account' };
   }
 
-  const invoice = await db('invoices').where({ id: anchor.id }).first('id', 'token', 'customer_id');
+  // Full row: combinedEligibleSiblings and amountDueCents read payer/amount
+  // columns, not just the token.
+  const invoice = await db('invoices').where({ id: anchor.id }).first();
   if (!invoice?.token) {
     return { url: null, line: '', reason: 'No open balance on this account' };
+  }
+
+  // Derive the displayed figure from the pay page's combined-payment
+  // authority so the composer never announces a balance the link can't
+  // settle: combinedEligibleSiblings is exactly what GET /pay/:token uses —
+  // it returns null when the combined flow won't engage (gate off, payer
+  // resolution, incomplete read, no siblings) and otherwise the sibling
+  // rows it will itemize, already filtered for stopped dunning and live
+  // PaymentIntent ownership. It never throws; null degrades the figure to
+  // the anchor invoice alone, which is what the page will show and charge.
+  let balance = null;
+  if (!anchorIncomplete) {
+    const { combinedEligibleSiblings, amountDueCents } = require('./pay-combined');
+    const siblings = (await combinedEligibleSiblings(invoice)) || [];
+    const totalCents = amountDueCents(invoice)
+      + siblings.reduce((sum, sib) => sum + amountDueCents(sib), 0);
+    balance = { total: totalCents / 100, count: 1 + siblings.length };
   }
   const url = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
     kind: 'invoice',
@@ -149,10 +167,8 @@ async function buildPayBalanceLink(customerIds) {
     line: `You can view and pay your balance securely here: ${url}\n\n`,
     // An incomplete read (payer resolve failure / truncation) may understate
     // the total — say nothing about the amount rather than assert a wrong
-    // figure (the open-balance SMS-line rule).
-    balance: anchorIncomplete
-      ? null
-      : { total: Math.round(anchorSummary.total * 100) / 100, count: anchorSummary.count },
+    // figure (the open-balance SMS-line rule). balance stays null then.
+    balance,
   };
 }
 
@@ -194,7 +210,22 @@ async function buildLatestEstimateLink(customerIds) {
 }
 
 async function buildReferralLink(customerId) {
-  const { enrollPromoter } = require('./referral-engine');
+  const { enrollPromoter, getLiveSettings } = require('./referral-engine');
+  // Same STRICT settings read as the report referral endpoint
+  // (reports-public.js): no live row or inactive program = no enrollment
+  // and no link — enrollPromoter's own getSettings() falls back to
+  // permissive defaults, which would let an admin enroll a promoter and
+  // text a working, tracked referral after the owner disabled the program.
+  // FAIL CLOSED on an unavailable read too.
+  let liveSettings = null;
+  try {
+    liveSettings = await getLiveSettings();
+  } catch {
+    liveSettings = null;
+  }
+  if (!liveSettings?.program_active) {
+    return { url: null, line: '', reason: 'Referral program is not active' };
+  }
   let promoter;
   try {
     ({ promoter } = await enrollPromoter(customerId));

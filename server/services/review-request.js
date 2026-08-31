@@ -1771,12 +1771,51 @@ const ReviewService = {
     await db("review_requests")
       .where({ id: requestId })
       .whereNull("sms_sent_at")
-      .where("status", "pending")
+      // "sending" = the composer path's pre-send claim (claimInlineForSend);
+      // "pending" = the dispatch completion-SMS path, which sends under its
+      // own per-service row so it needs no claim.
+      .whereIn("status", ["pending", "sending"])
       .update({
         sms_sent_at: new Date(),
         scheduled_for: null,
         status: "sent",
       });
+  },
+
+  /**
+   * Atomically claim a pending inline row for an in-flight operator send.
+   * createInline deliberately hands every composer the SAME pending
+   * unscheduled row (single live token), so two tabs can both reach /sms
+   * holding this id before either's post-send mark lands — the conditional
+   * UPDATE lets exactly one through and the loser's send is rejected before
+   * the provider call, so at most one ask ever texts the customer. A claim
+   * orphaned by a crash between the claim and the post-send mark becomes
+   * reclaimable after 10 minutes (the row is unscheduled, so a stuck claim
+   * can never auto-send — the only cost is the operator waiting to retry).
+   */
+  async claimInlineForSend(requestId) {
+    if (!requestId) return false;
+    const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
+    const updated = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline" })
+      .whereNull("sms_sent_at")
+      .where((q) =>
+        q
+          .where({ status: "pending" })
+          .orWhere((qq) =>
+            qq.where({ status: "sending" }).where("updated_at", "<", staleBefore),
+          ),
+      )
+      .update({ status: "sending", updated_at: new Date() });
+    return updated > 0;
+  },
+
+  async releaseInlineClaim(requestId) {
+    if (!requestId) return;
+    await db("review_requests")
+      .where({ id: requestId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .update({ status: "pending", updated_at: new Date() });
   },
 
   /**

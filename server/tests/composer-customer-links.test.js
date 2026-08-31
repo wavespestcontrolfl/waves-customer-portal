@@ -13,7 +13,14 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'wpc-test'),
 }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
-jest.mock('../services/referral-engine', () => ({ enrollPromoter: jest.fn() }));
+jest.mock('../services/pay-combined', () => ({
+  combinedEligibleSiblings: jest.fn(async () => null),
+  amountDueCents: jest.fn((inv) => Math.round((inv.amount_due ?? 0) * 100)),
+}));
+jest.mock('../services/referral-engine', () => ({
+  enrollPromoter: jest.fn(),
+  getLiveSettings: jest.fn(async () => ({ program_active: true })),
+}));
 jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
@@ -28,7 +35,8 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
-const { enrollPromoter } = require('../services/referral-engine');
+const { combinedEligibleSiblings } = require('../services/pay-combined');
+const { enrollPromoter, getLiveSettings } = require('../services/referral-engine');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const ReviewService = require('../services/review-request');
 const {
@@ -71,16 +79,34 @@ describe('buildPayBalanceLink', () => {
         invoices: [{ id: 'inv-old', due_date: '2026-07-01', created_at: '2026-06-15' }],
       });
     mockBuilders = {
-      invoices: chainBuilder({ firstRow: { id: 'inv-old', token: 'tok-old', customer_id: 'c2' } }),
+      invoices: chainBuilder({ firstRow: { id: 'inv-old', token: 'tok-old', customer_id: 'c2', amount_due: 84 } }),
     };
 
     const r = await buildPayBalanceLink(['c1', 'c2']);
     expect(r.url).toContain('/pay/tok-old');
     expect(r.line).toContain(r.url);
-    // NOT 184/2: the pay page's combined selection is scoped to the anchor
-    // invoice's customer row, so the reported figure must be what the link
-    // can actually settle.
+    // NOT 184/2: combinedEligibleSiblings answered null (combined flow won't
+    // engage), so the figure is the anchor invoice alone — exactly what the
+    // linked page will display and charge.
     expect(r.balance).toEqual({ total: 84, count: 1 });
+    expect(combinedEligibleSiblings).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-old' }));
+  });
+
+  test('the figure includes exactly the siblings the pay page will itemize', async () => {
+    openBalanceSummary.mockResolvedValueOnce({
+      total: 200,
+      count: 3,
+      invoices: [{ id: 'inv-a', due_date: '2026-07-01', created_at: '2026-06-15' }],
+    });
+    mockBuilders = {
+      invoices: chainBuilder({ firstRow: { id: 'inv-a', token: 'tok-a', customer_id: 'c1', amount_due: 84 } }),
+    };
+    // Combined flow engages with ONE eligible sibling — the third open
+    // invoice (stopped dunning / owned by a live PI) must not be announced.
+    combinedEligibleSiblings.mockResolvedValueOnce([{ id: 'inv-b', amount_due: 30 }]);
+
+    const r = await buildPayBalanceLink(['c1']);
+    expect(r.balance).toEqual({ total: 114, count: 2 });
   });
 
   test('an incomplete read keeps the link but suppresses the amount', async () => {
@@ -211,5 +237,21 @@ describe('buildReferralLink', () => {
     const r = await buildReferralLink('c1');
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/Could not build/);
+  });
+
+  test('an inactive program refuses before any enrollment', async () => {
+    getLiveSettings.mockResolvedValueOnce({ program_active: false });
+    const r = await buildReferralLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/not active/);
+    expect(enrollPromoter).not.toHaveBeenCalled();
+  });
+
+  test('an unavailable settings read fails closed — no enrollment, no link', async () => {
+    getLiveSettings.mockRejectedValueOnce(new Error('db down'));
+    const r = await buildReferralLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/not active/);
+    expect(enrollPromoter).not.toHaveBeenCalled();
   });
 });

@@ -203,6 +203,7 @@ router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
   let manualReservationId = null;
   let parkedThreadIds = [];
+  let claimedReviewRequestId = null;
   const clearManualReservation = async () => {
     if (!manualReservationId) return;
     const id = manualReservationId;
@@ -396,6 +397,51 @@ router.post('/sms', async (req, res, next) => {
       return res.status(409).json({ error: 'An automated reply is going out to this conversation right now — refresh in a moment and resend if it is still needed.' });
     }
 
+    // A composer-inserted review link rides this body — CLAIM the inline row
+    // BEFORE the provider call. createInline deliberately hands every
+    // composer the SAME pending unscheduled row (single live token), so two
+    // tabs or operators can both reach here holding this id before either's
+    // post-send mark lands; the conditional claim lets exactly one through
+    // and rejects the loser here, so at most one ask ever texts the
+    // customer. Claimed only when the send would actually carry the ask
+    // (real inline row, recipient owns it, link still in the body) — a
+    // deleted link or mismatched recipient proceeds unclaimed exactly as
+    // before, and the post-send mark keys off the claim. FAIL CLOSED on a
+    // lookup error: sending without the claim could double-text the ask.
+    if (reviewRequestId) {
+      const abortUnsent = async (status, error) => {
+        await clearManualReservation();
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId, ...parkedThreadIds],
+          reason: 'Send was not attempted — suggestion reopened.',
+        });
+        return res.status(status).json({ error });
+      };
+      try {
+        const ReviewService = require('../services/review-request');
+        const rr = await db('review_requests')
+          .where({ id: String(reviewRequestId) })
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+        if (rr && rr.triggered_by === 'auto_inline') {
+          const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
+          const { existingShortUrlFor } = require('../services/short-url');
+          const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
+          const linkInBody = [short, rr.token]
+            .filter(Boolean)
+            .some((frag) => cleanBody.includes(String(frag).replace(/^https?:\/\//, '')));
+          if (linkInBody && owner && normalizePhoneLast10(owner.phone) === normalizePhoneLast10(to)) {
+            if (!(await ReviewService.claimInlineForSend(rr.id))) {
+              return abortUnsent(409, 'This review link was already sent or canceled — remove it from the message and re-insert if still needed.');
+            }
+            claimedReviewRequestId = rr.id;
+          }
+        }
+      } catch (claimErr) {
+        logger.warn(`[communications] inline review pre-send claim failed — aborting send (requestId=${reviewRequestId}): ${claimErr.message}`);
+        return abortUnsent(503, 'Could not verify the inserted review link — try again in a moment.');
+      }
+    }
+
     const sendStartedAt = new Date();
     // Human-authored only when the operator typed the body, not when an
     // unedited AI suggestion is being sent through. The stale-month guard
@@ -442,7 +488,10 @@ router.post('/sms', async (req, res, next) => {
     // a stuck 'sending' row blocking auto-sends to the thread.
     await clearManualReservation();
     if (result.blocked || result.sent === false) {
-      // The reply never left — release the claim and the parked cards.
+      // The reply never left — release the claims and the parked cards.
+      if (claimedReviewRequestId) {
+        await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId);
+      }
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was blocked or failed — suggestion reopened.',
@@ -454,35 +503,26 @@ router.post('/sms', async (req, res, next) => {
     }
 
     // A composer-inserted review link rode this body — the send that just
-    // left IS the ask, so stamp the inline row delivered (the row is minted
-    // unscheduled; see /customer-link). Guarded on a REAL provider send
-    // (same sentinel rule as the SLA stamp below — a suppressed send reports
-    // sent:true with nothing actually delivered, and marking then would
-    // silently drop the ask), the row still being a pending inline ask, the
-    // recipient owning it, and the link actually still in the sent body (a
-    // deleted link means no ask went out — the cancel endpoint owns that
-    // path). Fail-soft: bookkeeping never breaks a send that already
-    // happened.
-    if (reviewRequestId) {
+    // left IS the ask, so stamp the claimed inline row delivered (validation
+    // — real inline row, recipient owns it, link in body — already ran at
+    // the pre-send claim above; the claim is the key here). Guarded on a
+    // REAL provider send (same sentinel rule as the SLA stamp below — a
+    // suppressed send reports sent:true with nothing actually delivered, and
+    // marking then would silently drop the ask); a suppressed send hands the
+    // claim back instead. Fail-soft: bookkeeping never breaks a send that
+    // already happened — a stranded 'sending' claim self-expires after 10
+    // minutes (claimInlineForSend's stale-reclaim window).
+    if (claimedReviewRequestId) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
-        const rr = !isRealProviderSend(result) ? null : await db('review_requests')
-          .where({ id: String(reviewRequestId) })
-          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
-        if (rr && rr.triggered_by === 'auto_inline' && rr.status === 'pending' && !rr.sms_sent_at) {
-          const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
-          const { existingShortUrlFor } = require('../services/short-url');
-          const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
-          const linkInBody = [short, rr.token]
-            .filter(Boolean)
-            .some((frag) => cleanBody.includes(String(frag).replace(/^https?:\/\//, '')));
-          if (owner && normalizePhoneLast10(owner.phone) === normalizePhoneLast10(to) && linkInBody) {
-            const ReviewService = require('../services/review-request');
-            await ReviewService.markInlineDelivered(rr.id);
-          }
+        const ReviewService = require('../services/review-request');
+        if (isRealProviderSend(result)) {
+          await ReviewService.markInlineDelivered(claimedReviewRequestId);
+        } else {
+          await ReviewService.releaseInlineClaim(claimedReviewRequestId);
         }
       } catch (markErr) {
-        logger.warn(`[communications] inline review mark-delivered failed (requestId=${reviewRequestId}): ${markErr.message}`);
+        logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
       }
     }
 

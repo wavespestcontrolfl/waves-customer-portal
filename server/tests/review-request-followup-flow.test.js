@@ -545,7 +545,7 @@ describe('review request follow-up flow', () => {
     });
   });
 
-  test('marks inline delivery only for pending unsent rows', async () => {
+  test('marks inline delivery only for unsent pending/claimed rows', async () => {
     const updateQuery = chain();
     db.mockImplementation((table) => {
       if (table === 'review_requests') return updateQuery;
@@ -556,11 +556,44 @@ describe('review request follow-up flow', () => {
 
     expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline' });
     expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
-    expect(updateQuery.where).toHaveBeenCalledWith('status', 'pending');
+    // 'pending' = the dispatch path, 'sending' = the composer's pre-send claim.
+    expect(updateQuery.whereIn).toHaveBeenCalledWith('status', ['pending', 'sending']);
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_for: null,
       status: 'sent',
     }));
+  });
+
+  test('claimInlineForSend claims conditionally and reports a lost claim', async () => {
+    const updateQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return updateQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
+    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline' });
+    expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
+
+    // A colleague's send already holds the row — the conditional UPDATE
+    // matches nothing and the caller must reject its own send.
+    updateQuery.update.mockResolvedValueOnce(0);
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+  });
+
+  test('releaseInlineClaim hands a claimed row back to pending', async () => {
+    const updateQuery = chain();
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return updateQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await ReviewService.releaseInlineClaim('rr-inline');
+
+    expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', status: 'sending' });
+    expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending' }));
   });
 
   test('composer mint (armSafetyNet:false) inserts an UNSCHEDULED row', async () => {
