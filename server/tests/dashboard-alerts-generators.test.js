@@ -398,12 +398,27 @@ describe('Action Inbox generators', () => {
     const { loadCloseoutStatuses } = require('../services/closeout-alerts');
     const { __private } = require('../services/dashboard-alerts');
     __private.resetCloseoutCarry();
-    primeDb({ scheduled_services: Array.from({ length: 53 }, (_, i) => ({ id: `svc-${i}` })) });
+    const rows53 = Array.from({ length: 53 }, (_, i) => ({ id: `svc-${i}` }));
+    primeDb({ scheduled_services: (calls) => (calls.some((c) => c.method === 'count') ? { n: 53 } : rows53.slice(0, 51)) });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map());
     const { alerts } = await computeDashboardAlertsUncached();
-    // The query is capped at cap+1, so the generator sees 51 rows → overflow of 1 reported.
-    expect(alerts.find((a) => a.id === 'closeout_sweep_incomplete')).toMatchObject({ severity: 'warn', kind: 'alert', href: '/admin/dispatch' });
+    // The list query is capped at cap+1; the exact overflow comes from the COUNT query (codex r10).
+    expect(alerts.find((a) => a.id === 'closeout_sweep_incomplete')).toMatchObject({ severity: 'warn', kind: 'alert', href: '/admin/dispatch', count: 3 });
     expect(loadCloseoutStatuses.mock.calls[0][0]).toHaveLength(50);
+  });
+
+  test('closeout_gaps_today: a generator failure re-emits the held alert instead of clearing it (codex r10)', async () => {
+    const { loadCloseoutStatuses } = require('../services/closeout-alerts');
+    const { __private } = require('../services/dashboard-alerts');
+    __private.resetCloseoutCarry();
+    primeDb({
+      scheduled_services: [{ id: 'svc-a' }],
+      dashboard_alert_state: { alert_id: 'closeout_gaps_today', current_count: 2, last_label: 'held label', last_seen_at: new Date().toISOString() },
+    });
+    loadCloseoutStatuses.mockRejectedValueOnce(new Error('loader exploded'));
+    const item = (await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today');
+    expect(item).toMatchObject({ count: 2, heldThroughOutage: true, label: 'held label' });
+    expect(item.members).toBeUndefined();
   });
 
   test('closeout_gaps_today: absent when every completed visit is closed out or there are none', async () => {

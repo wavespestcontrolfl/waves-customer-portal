@@ -36,6 +36,27 @@ function closeoutCarryFor(date) {
   if (closeoutGapCarry.date !== date) closeoutGapCarry = { date, issueCounts: new Map() };
   return closeoutGapCarry.issueCounts;
 }
+// Same-day persisted closeout alert (the cron GCs this row only on a genuine
+// absence) — the shared, restart-proof floor a held snapshot stands on.
+async function persistedCloseoutAlertForDay(today) {
+  const row = await db('dashboard_alert_state')
+    .where({ alert_id: 'closeout_gaps_today' })
+    .first('current_count', 'last_label', 'last_seen_at')
+    .catch(() => null);
+  return row && row.last_seen_at && etDateString(new Date(row.last_seen_at)) === today ? row : null;
+}
+function heldCloseoutAlert({ count, label }) {
+  return {
+    id: 'closeout_gaps_today',
+    kind: 'action',
+    severity: 'warn',
+    count: Math.max(Number(count || 0), 1),
+    // Deliberately NO members: a held snapshot knows a floor, not the set.
+    label,
+    href: '/admin/dispatch',
+    heldThroughOutage: true,
+  };
+}
 
 // A lead is "waiting" once it has gone this long with no first response.
 // Mirrors the Response Speed tile's alert threshold order-of-magnitude but
@@ -388,12 +409,22 @@ async function computeDashboardAlertsUncached() {
     const sweepTruncated = completedRows.length > CLOSEOUT_SWEEP_CAP;
     const completedToday = sweepTruncated ? completedRows.slice(0, CLOSEOUT_SWEEP_CAP) : completedRows;
     if (sweepTruncated) {
+      // Exact overflow needs a count — cap+1 only proves "more".
+      const totalRow = await db('scheduled_services')
+        .where({ scheduled_date: today, status: 'completed' })
+        .count('* as n')
+        .first()
+        .catch(() => null);
+      const total = totalRow ? Number(totalRow.n || 0) : null;
+      const unchecked = total != null && total > CLOSEOUT_SWEEP_CAP ? total - CLOSEOUT_SWEEP_CAP : null;
       alerts.push({
         id: 'closeout_sweep_incomplete',
         kind: 'alert',
         severity: 'warn',
-        count: completedRows.length - CLOSEOUT_SWEEP_CAP,
-        label: `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — later visits unchecked`,
+        count: unchecked ?? 1,
+        label: unchecked != null
+          ? `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — ${unchecked} unchecked`
+          : `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — an unknown number unchecked`,
         href: '/admin/dispatch',
       });
     }
@@ -426,28 +457,15 @@ async function computeDashboardAlertsUncached() {
       // hold count = max(readable, persisted) and omit members — an
       // incomplete read knows a floor, not the set — so an outage can neither
       // clear the alert nor make its recovery read as an escalation.
-      let held = null;
-      if (unreadableIds.length) {
-        const row = await db('dashboard_alert_state')
-          .where({ alert_id: 'closeout_gaps_today' })
-          .first('current_count', 'last_label', 'last_seen_at')
-          .catch(() => null);
-        const sameDay = row && row.last_seen_at && etDateString(new Date(row.last_seen_at)) === today;
-        if (sameDay) held = row;
-      }
+      const held = unreadableIds.length ? await persistedCloseoutAlertForDay(today) : null;
       if (held) {
         const count = Math.max(gapIds.length, Number(held.current_count || 0), 1);
-        alerts.push({
-          id: 'closeout_gaps_today',
-          kind: 'action',
-          severity: 'warn',
+        alerts.push(heldCloseoutAlert({
           count,
           label: gapIds.length
             ? `${count} completed visit${count === 1 ? '' : 's'} today not closed out (closeout lookup partially unavailable)`
             : (held.last_label || `${count} completed visit(s) today not closed out — closeout lookup temporarily unavailable`),
-          href: '/admin/dispatch',
-          heldThroughOutage: true,
-        });
+        }));
       } else if (gapIds.length) {
         alerts.push({
           id: 'closeout_gaps_today',
@@ -462,7 +480,23 @@ async function computeDashboardAlertsUncached() {
         });
       }
     }
-  } catch (err) { logger.error(`[dashboard-alerts] closeout_gaps_today: ${err.message}`); }
+  } catch (err) {
+    logger.error(`[dashboard-alerts] closeout_gaps_today: ${err.message}`);
+    // A generator failure must not read as resolution: re-emit the alert
+    // as it last stood (same-day persisted row, else the in-process carry).
+    try {
+      if (!alerts.some((a) => a.id === 'closeout_gaps_today')) {
+        const held = await persistedCloseoutAlertForDay(today);
+        const carried = closeoutCarryFor(today).size;
+        if (held || carried) {
+          alerts.push(heldCloseoutAlert({
+            count: Math.max(Number(held?.current_count || 0), carried),
+            label: held?.last_label || `${Math.max(carried, 1)} completed visit(s) today not closed out — closeout check temporarily unavailable`,
+          }));
+        }
+      }
+    } catch (holdErr) { logger.error(`[dashboard-alerts] closeout_gaps_today hold: ${holdErr.message}`); }
+  }
 
   // 7. Persisted admin command-center alerts. These are event-backed
   // operating alerts created by domain workflows such as WaveGuard lawn
