@@ -1220,10 +1220,19 @@ function selectAutonomousVersusPlan(now = new Date()) {
   // only nudges the cycle, never repeats it.
   const seq = (year * 12 + month) * 8 + Math.floor((day - 2) / 4);
 
-  const eligible = PEST_VERSUS_PAIRS.filter((p) => !p.months || p.months.includes(month));
-  if (!eligible.length) return null;
-  const pair = eligible[seq % eligible.length];
-  const city = WAVES_LOCATIONS[seq % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  // Index the FULL bank with a fixed modulus and let an out-of-season slot
+  // yield to the (already seasonal) campaign lane. Filtering the bank first
+  // would shrink the modulus and shift the survivors' indices at every season
+  // boundary, replaying the prior month's cards within days.
+  const pair = PEST_VERSUS_PAIRS[seq % PEST_VERSUS_PAIRS.length];
+  if (pair.months && !pair.months.includes(month)) return null;
+  // The city also advances every fire, phase-shifted one slot per full pair
+  // cycle: bare seq % 4 shares a factor of 2 with the 6-pair bank, so half
+  // the pair+city combinations could never occur and identical cards would
+  // recur every 12 fires; the shift walks all 24 combinations before any
+  // repeat.
+  const pairCycle = Math.floor(seq / PEST_VERSUS_PAIRS.length);
+  const city = WAVES_LOCATIONS[(seq + pairCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
   const topic = `${pair.left.name} vs ${pair.right.name}`;
   const drafts = buildVersusDrafts(pair, city);
   const channels = AUTONOMOUS_FLAGS.channels;
@@ -1250,6 +1259,17 @@ function selectAutonomousVersusPlan(now = new Date()) {
       fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
     },
   };
+}
+
+// Approval-time counterpart of the selection months gate (same posture as
+// milestonePublishBlocker): a versus draft can sit in the queue past its
+// pair's season window, and publishing it then is exactly the stale
+// off-season content the gate exists to prevent. Null = publishable.
+function versusPublishBlocker(input, now = new Date()) {
+  const months = input?.versusPair?.months;
+  if (!Array.isArray(months) || !months.length) return null;
+  if (months.includes(etParts(now).month)) return null;
+  return 'versus pair is out of season — reject this draft so the lane can regenerate';
 }
 
 // ── Review-count milestone lane ─────────────────────────────────────────────
@@ -2716,6 +2736,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       const reason = await milestonePublishBlocker(input);
       if (reason) return { ok: false, status: 409, error: reason };
     }
+    // A season-gated versus draft (e.g. termite swarmers, Feb–Jun) must not
+    // publish once its window has passed.
+    const versusSeasonBlock = versusPublishBlocker(input);
+    if (versusSeasonBlock) return { ok: false, status: 409, error: versusSeasonBlock };
     const variants = runVariants(preview);
     const priorRecordFull = toJson(run.publish_result, {});
     const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)
@@ -3462,6 +3486,7 @@ module.exports = {
   buildVersusCardInput,
   buildVersusDrafts,
   selectAutonomousVersusPlan,
+  versusPublishBlocker,
   MILESTONE_WINDOW,
   buildMilestoneCardInput,
   buildMilestoneDrafts,
