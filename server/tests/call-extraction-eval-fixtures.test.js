@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { GOLD_FIELDS, isValidGoldValue } = require('../scripts/replay-call-extraction-variance');
 
 const fixturePath = path.join(__dirname, '../fixtures/call-extraction-eval/reviewed-calls.json');
 const ALLOWED_EXPECTATION_KEYS = new Set([
@@ -24,7 +25,7 @@ describe('call extraction eval fixtures', () => {
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
 
   test('reviewed call fixture has the expected shape without PII fields', () => {
-    expect(fixture.schemaVersion).toBe('call-extraction-reviewed-calls.v1');
+    expect(fixture.schemaVersion).toBe('call-extraction-reviewed-calls.v2');
     expect(fixture.cases.length).toBeGreaterThanOrEqual(5);
 
     const ids = new Set();
@@ -51,6 +52,41 @@ describe('call extraction eval fixtures', () => {
     }
 
     expect(ids.size).toBe(fixture.cases.length);
+  });
+
+  test('every reviewed case carries a per-field answer key made of GOLD_FIELDS values only', () => {
+    for (const item of fixture.cases) {
+      expect(item.gold).toEqual(expect.any(Object));
+      expect(item.gold_reviewed_at).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      const fields = Object.keys(item.gold);
+      expect(fields.length).toBeGreaterThan(0);
+      for (const field of fields) {
+        // Unknown keys would silently score nothing; PII-bearing fields
+        // (name/phone/email/address) are not in the registry by design.
+        expect(GOLD_FIELDS).toHaveProperty(field);
+        const value = item.gold[field];
+        const accepted = Array.isArray(value) ? value : [value];
+        expect(accepted.length).toBeGreaterThan(0);
+        // Domain check (boolean / schema enum / date / time): an enum typo or
+        // a boolean-as-string here would otherwise score as a permanent miss.
+        for (const entry of accepted) {
+          if (!isValidGoldValue(field, entry)) {
+            throw new Error(`${item.id}: gold.${field} value ${JSON.stringify(entry)} is outside the field's domain`);
+          }
+        }
+      }
+    }
+  });
+
+  test('answer key never carries free text, only enum/boolean/date tokens', () => {
+    const tokenPattern = /^(\d{4}-\d{2}-\d{2}|\d{2}:\d{2}|[a-z0-9_]+)$/;
+    for (const item of fixture.cases) {
+      for (const value of Object.values(item.gold)) {
+        for (const entry of Array.isArray(value) ? value : [value]) {
+          if (typeof entry === 'string') expect(entry).toMatch(tokenPattern);
+        }
+      }
+    }
   });
 
   test('reviewed call metadata keeps production PII out of the committed fixture', () => {

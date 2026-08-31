@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "call-extraction-reviewed-calls.v1",
-  "description": "Reviewed call-recording replay cases: June 2026 v2 hardening pass plus the July 2026 regression-net expansion mined from call_audit_findings, route_decisions, and triage_items. Cases reference call_log ids only; no transcript text or customer PII is stored here.",
+  "schemaVersion": "call-extraction-reviewed-calls.v2",
+  "description": "Reviewed call-recording replay cases: June 2026 v2 hardening pass plus the July 2026 regression-net expansion mined from call_audit_findings, route_decisions, and triage_items. Cases reference call_log ids only; no transcript text or customer PII is stored here. Since 2026-08-31 each case also carries a per-field answer key (`gold`): reviewer-confirmed values for the enum/boolean/date fields listed in GOLD_FIELDS (replay-call-extraction-variance.js). An array value means any of those values is correct. Gold values come from the reviewed_outcome notes only; fields the note does not settle are left unlabeled rather than guessed.",
   "cases": [
     {
       "id": "name-email-address-ground-truth",
@@ -18,6 +18,11 @@
           "address_unverifiable",
           "missing_service_address"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false
       }
     },
     {
@@ -39,6 +44,13 @@
           "name_email_mismatch",
           "address_unverifiable"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "schedule_date": "2026-06-11",
+        "schedule_window_start": "15:00"
       }
     },
     {
@@ -52,6 +64,14 @@
         "current_schedule_date": "2026-06-15",
         "current_schedule_window_start": "11:00",
         "legacy_scheduled_created": false
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "scheduling_status": "confirmed",
+        "schedule_date": "2026-06-15",
+        "schedule_window_start": "11:00"
       }
     },
     {
@@ -65,6 +85,11 @@
         "current_flags_include": [
           "name_email_mismatch"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false
       }
     },
     {
@@ -79,6 +104,11 @@
         "current_flags_include": [
           "missing_service_address"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false
       }
     },
     {
@@ -94,6 +124,13 @@
         "current_flags_include": [
           "quote_promised"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "quote_promised": true
       }
     },
     {
@@ -105,6 +142,13 @@
         "current_status": "valid",
         "current_scheduling_status": "confirmed",
         "legacy_scheduled_created": false
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "scheduling_status": "confirmed",
+        "agent_committed_booking": true
       }
     },
     {
@@ -115,6 +159,18 @@
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "scheduling_status": [
+          "none",
+          "requested",
+          "offered",
+          "ambiguous"
+        ],
+        "agent_committed_booking": false
       }
     },
     {
@@ -125,6 +181,18 @@
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "scheduling_status": [
+          "none",
+          "requested",
+          "offered",
+          "ambiguous"
+        ],
+        "agent_committed_booking": false
       }
     },
     {
@@ -137,6 +205,10 @@
         "current_flags_exclude": [
           "spam_or_wrong_number"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_spam": false
       }
     },
     {
@@ -148,6 +220,14 @@
         "current_status": "valid",
         "current_flags_exclude": [
           "spam_or_wrong_number"
+        ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_spam": false,
+        "call_nature": [
+          "existing_customer_service",
+          "existing_customer_scheduling"
         ]
       }
     },
@@ -161,6 +241,10 @@
         "current_flags_exclude": [
           "spam_or_wrong_number"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_spam": false
       }
     },
     {
@@ -174,6 +258,11 @@
           "voicemail"
         ],
         "current_would_auto_route": false
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": true,
+        "is_spam": false
       }
     },
     {
@@ -187,6 +276,15 @@
           "voicemail"
         ],
         "current_would_auto_route": false
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": true,
+        "is_spam": false,
+        "urgency": [
+          "emergency_same_day",
+          "within_48_hours"
+        ]
       }
     },
     {
@@ -203,6 +301,17 @@
           "callback_task_created",
           "lead_response_flow_triggered"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": true,
+        "is_spam": false,
+        "primary_service_category": "pest_general",
+        "service_intent": "active_infestation_treatment",
+        "recommended_disposition": [
+          "callback_task_created",
+          "lead_response_flow_triggered"
+        ]
       }
     },
     {
@@ -215,6 +324,12 @@
         "current_flags_include": [
           "quote_promised"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "quote_promised": true
       }
     },
     {
@@ -228,6 +343,11 @@
           "voicemail",
           "prior_complaint_unresolved"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": true,
+        "is_spam": false
       }
     },
     {
@@ -242,6 +362,22 @@
           "new_lead"
         ],
         "current_recommended_disposition_in": [
+          "estimate_send",
+          "lead_response_flow_triggered",
+          "callback_task_created"
+        ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "primary_service_category": "wdo",
+        "service_intent": [
+          "inspection_only",
+          "quote_only"
+        ],
+        "recommended_disposition": [
           "estimate_send",
           "lead_response_flow_triggered",
           "callback_task_created"
@@ -262,6 +398,19 @@
         "current_call_nature_in": [
           "new_lead"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "scheduling_status": [
+          "none",
+          "requested",
+          "offered",
+          "ambiguous"
+        ],
+        "agent_committed_booking": false
       }
     },
     {
@@ -277,6 +426,14 @@
         "current_call_nature_in": [
           "new_lead"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "primary_service_category": "pest_general",
+        "service_intent": "active_infestation_treatment"
       }
     },
     {
@@ -292,6 +449,13 @@
         "current_call_nature_in": [
           "new_lead"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "primary_service_category": "termite"
       }
     },
     {
@@ -305,6 +469,14 @@
         "current_flags_include": [
           "out_of_service_area"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "primary_service_category": "pest_general",
+        "lead_quality": "out_of_service_area"
       }
     },
     {
@@ -317,6 +489,17 @@
         "current_would_auto_route": false,
         "current_flags_include": [
           "commercial_requires_quote"
+        ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": "new_lead",
+        "property_type": [
+          "commercial",
+          "hoa_common_area",
+          "multi_family"
         ]
       }
     },
@@ -331,6 +514,12 @@
         "current_flags_include": [
           "quote_promised"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "quote_promised": true
       }
     },
     {
@@ -349,6 +538,23 @@
           "spam_solicitation",
           "robocall"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_spam": true,
+        "call_nature": [
+          "wrong_number",
+          "spam_solicitation",
+          "robocall"
+        ],
+        "recommended_disposition": [
+          "spam_discarded",
+          "wrong_number_closed"
+        ],
+        "lead_quality": [
+          "wrong_number",
+          "spam_or_solicitation"
+        ]
       }
     },
     {
@@ -366,6 +572,17 @@
         "current_recommended_disposition_in": [
           "existing_customer_routed"
         ]
+      },
+      "gold_reviewed_at": "2026-08-31",
+      "gold": {
+        "is_voicemail": false,
+        "is_spam": false,
+        "call_nature": [
+          "existing_customer_service",
+          "existing_customer_scheduling"
+        ],
+        "recommended_disposition": "existing_customer_routed",
+        "customer_history_status": "current_active"
       }
     }
   ]

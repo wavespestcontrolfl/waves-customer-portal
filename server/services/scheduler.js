@@ -2499,9 +2499,12 @@ function initScheduledJobs() {
     logger.info('Running: call extraction replay eval');
     try {
       await runExclusive('call-extraction-replay-eval', async () => {
-        const { runCallExtractionReplayEval } = require('./eval/call-extraction-replay');
+        const { runCallExtractionReplayEval, goldAccuracyLine } = require('./eval/call-extraction-replay');
         const result = await runCallExtractionReplayEval();
-        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0}`);
+        // goldAccuracyLine carries per-field misses + case ids: medium/low
+        // answer-key misses keep the run green, so this log line is where a
+        // quiet field regression stays visible week to week.
+        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} | ${goldAccuracyLine(result.goldAccuracy)}`);
       });
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
