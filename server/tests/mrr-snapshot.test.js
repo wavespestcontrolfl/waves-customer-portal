@@ -1,5 +1,6 @@
 jest.mock('../services/mrr-breakdown', () => ({ computeMrrBreakdown: jest.fn() }));
 
+const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const {
   recordMrrSnapshot,
@@ -21,6 +22,7 @@ function makeFakeDb({ tierRows = [], customerRows = [], capture = {}, custFail =
     const b = {
       where: () => b,
       whereNull: () => b,
+      whereRaw: (sql) => { capture.whereRaw = sql; return b; },
       whereNotIn: (col, list) => { capture.tierExcluded = list; return b; },
       modify: (fn) => { fn(b); return b; },
       select: () => b,
@@ -82,6 +84,8 @@ describe('tierBreakdown', () => {
     const db = makeFakeDb({ tierRows: [], capture });
     await tierBreakdown(db);
     expect(capture.tierExcluded).toEqual(INTERNAL_TEST_CUSTOMERS);
+    // Snapshot population = monthly LANE, not merely monthly_rate > 0 (#3140).
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
 });
 
@@ -103,6 +107,8 @@ describe('customerRateRows', () => {
     const capture = {};
     await customerRateRows(makeFakeDb({ customerRows: [], capture }));
     expect(capture.tierExcluded).toEqual(INTERNAL_TEST_CUSTOMERS);
+    // Snapshot population = monthly LANE, not merely monthly_rate > 0 (#3140).
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
 });
 

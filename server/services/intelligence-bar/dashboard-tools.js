@@ -7,6 +7,7 @@
  */
 
 const db = require('../../models/db');
+const { MONTHLY_LANE_SQL } = require('../billing-lane');
 const logger = require('../logger');
 const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -257,7 +258,7 @@ async function getKpiSnapshot() {
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
     ).first(),
-    db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+    db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL).sum('monthly_rate as total').first(),
     // Source-of-truth filter for "outstanding" — paid_at IS NULL and not
     // a draft/void. Mirrors the cleaner pattern used by /core-kpis AR
     // Days; the prior status whitelist would silently drop any new
@@ -485,6 +486,7 @@ async function getMrrTrend(months) {
       db({ c: 'customers' })
         .where('c.created_at', '<=', endIso)
         .where('c.monthly_rate', '>', 0)
+        .whereRaw(MONTHLY_LANE_SQL)
         .where(function () {
           this.where('c.active', true).orWhereNotNull('c.churned_at');
         })

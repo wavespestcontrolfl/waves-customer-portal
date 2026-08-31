@@ -168,6 +168,7 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   const { etMonthStart, etDateString } = require('../utils/datetime-et');
   const { CONVERSION_DATE_SQL, CUSTOMER_STAGES } = require('./customer-stages');
   const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+  const { MONTHLY_LANE_SQL } = require('./billing-lane');
 
   const n = Math.max(2, Math.min(12, parseInt(months, 10) || 6));
   const currentMonthKey = etMonthStart();
@@ -234,7 +235,8 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     try {
       const qb = db('customers')
         .whereIn('pipeline_stage', [...CUSTOMER_STAGES, 'churned', 'dormant'])
-        .where('monthly_rate', '>', 0);
+        .where('monthly_rate', '>', 0)
+        .whereRaw(MONTHLY_LANE_SQL);
       if (INTERNAL_TEST_CUSTOMERS.length) {
         qb.whereNotIn(
           db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),

@@ -2,6 +2,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   getPaymentPendingCustomerIds: jest.fn(),
 }));
 
+const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const {
   computeMrrBreakdown,
@@ -18,6 +19,7 @@ function makeFakeDb(rows) {
   const builder = {
     where: () => builder,
     whereNull: () => builder,
+    whereRaw: (sql) => { rawCalls.push({ whereRaw: sql }); return builder; },
     whereNotIn: () => builder,
     modify: (fn) => { fn(builder); return builder; },
     select: () => builder,
@@ -80,7 +82,9 @@ describe('computeMrrBreakdown', () => {
   test('asOf flows into the predicate binding and the prepay helper', async () => {
     const db = makeFakeDb([]);
     await computeMrrBreakdown(db, '2026-06-19');
-    const atRiskRaw = db._rawCalls.find(c => c.sql.includes('at_risk'));
+    // Headline population = monthly LANE, not merely monthly_rate > 0 (#3140).
+    expect(db._rawCalls.some((c) => c.whereRaw === MONTHLY_LANE_SQL)).toBe(true);
+    const atRiskRaw = db._rawCalls.find(c => c.sql && c.sql.includes('at_risk'));
     expect(atRiskRaw.bindings).toEqual(['2026-06-19', '2026-06-19']);
     expect(getPaymentPendingCustomerIds).toHaveBeenCalledWith('2026-06-19', db);
   });

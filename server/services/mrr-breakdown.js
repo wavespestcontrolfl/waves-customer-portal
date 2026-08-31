@@ -1,5 +1,6 @@
 const { etDateString } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+const { MONTHLY_LANE_SQL } = require('./billing-lane');
 
 // An active recurring account is "at risk" — i.e. its next monthly charge is
 // NOT something the business can count on landing — when any of these is
@@ -70,6 +71,7 @@ function mrrPopulationQuery(conn) {
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .where('c.monthly_rate', '>', 0)
+    .whereRaw(MONTHLY_LANE_SQL)
     // Exclude internal/test accounts so they never inflate MRR — the same
     // population the live trend (excludeInternalCustomers) and the snapshot use.
     .modify((qb) => {

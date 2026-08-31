@@ -9,6 +9,7 @@
  */
 
 const db = require('../models/db');
+const { MONTHLY_LANE_SQL } = require('./billing-lane');
 const logger = require('./logger');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 
@@ -338,6 +339,7 @@ class PricingIntelligence {
       .whereNull('deleted_at')
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .select('monthly_rate', 'waveguard_tier');
 
     const monthlyRecurring = recurringCustomers.reduce((sum, c) => sum + parseFloat(c.monthly_rate || 0), 0);

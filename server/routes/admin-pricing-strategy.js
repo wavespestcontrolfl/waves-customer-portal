@@ -13,6 +13,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const PricingIntelligence = require('../services/pricing-intelligence');
 const logger = require('../services/logger');
@@ -61,6 +62,7 @@ router.get('/dashboard', async (req, res, next) => {
       .whereIn('waveguard_tier', ['Bronze', 'Silver'])
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .select('id', 'first_name', 'last_name', 'waveguard_tier', 'monthly_rate', 'phone')
       .orderBy('monthly_rate', 'desc')
       .limit(20);
@@ -223,6 +225,7 @@ router.get('/upsell-opportunities', async (req, res, next) => {
       .whereIn('waveguard_tier', ['Bronze', 'Silver'])
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .select('id', 'first_name', 'last_name', 'waveguard_tier', 'monthly_rate', 'phone')
       .limit(50);
 

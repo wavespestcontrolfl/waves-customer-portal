@@ -1,6 +1,7 @@
 const { computeMrrBreakdown } = require('./mrr-breakdown');
 const { etMonthStart, etDateString } = require('../utils/datetime-et');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+const { MONTHLY_LANE_SQL } = require('./billing-lane');
 const logger = require('./logger');
 
 // By-tier MRR over the SAME population computeMrrBreakdown uses (active,
@@ -13,6 +14,7 @@ async function tierBreakdown(conn) {
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .where('c.monthly_rate', '>', 0)
+    .whereRaw(MONTHLY_LANE_SQL)
     .modify((qb) => {
       if (INTERNAL_TEST_CUSTOMERS.length) {
         qb.whereNotIn(
@@ -41,6 +43,7 @@ async function customerRateRows(conn) {
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .where('c.monthly_rate', '>', 0)
+    .whereRaw(MONTHLY_LANE_SQL)
     .modify((qb) => {
       if (INTERNAL_TEST_CUSTOMERS.length) {
         qb.whereNotIn(

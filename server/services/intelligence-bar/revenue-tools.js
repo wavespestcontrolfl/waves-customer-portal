@@ -8,6 +8,7 @@
  */
 
 const db = require('../../models/db');
+const { MONTHLY_LANE_SQL } = require('../billing-lane');
 const logger = require('../logger');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 
@@ -176,7 +177,7 @@ async function getRevenueOverview(period = 'month') {
   const prevServices = await fetchServiceRecords(prevStart, prevEnd);
   const prevTopline = computeTopline(prevServices);
 
-  const mrr = await db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
+  const mrr = await db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL).sum('monthly_rate as total').first();
   const mrrVal = parseFloat(mrr?.total || 0);
 
   return {
