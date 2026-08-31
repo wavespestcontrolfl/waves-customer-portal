@@ -55,8 +55,13 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // being carried/restored. Anything else is an undocumented write.
 const KNOWN_STATUS_EXPRESSIONS = {
   PAYMENT_PENDING_STATUS: ['payment_pending'],
-  nextStatus: WRITTEN_STATUSES,               // invoiceTermStatus(...) result
-  'statusAfterDecision(action)': WRITTEN_STATUSES,
+  // invoiceTermStatus(...) result — its full range is behaviorally pinned in
+  // the invoiceTermStatus test below; widening it there must widen this too.
+  nextStatus: ['payment_pending', 'active', 'cancelled'],
+  // Behaviorally pinned by the recordDecision test.each over all 4 actions.
+  'statusAfterDecision(action)': ['renewal_pending', 'renewed', 'cancelled', 'switch_plan'],
+  // Row-status pass-throughs: the value was read from the column, so it is
+  // whatever the CHECK already allowed — carried, not chosen.
   previousStatus: WRITTEN_STATUSES,           // sendCustomerTermNotice release
   'term.status': WRITTEN_STATUSES,            // carried through (ternary else)
   'existing.status': WRITTEN_STATUSES,        // createTerm keeps decided status
@@ -302,6 +307,14 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
   test('the DB CHECK is exactly the written stages plus the two legacy names', () => {
     const inCheck = migrationCheckStatuses().sort();
     expect(inCheck).toEqual([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES].sort());
+  });
+
+  test('the pinned migration is still the ONLY one defining the status CHECK (a later re-definition must update this suite + doc)', () => {
+    const dir = path.join(ROOT, 'server', 'models', 'migrations');
+    const definers = fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.js'))
+      .filter((f) => fs.readFileSync(path.join(dir, f), 'utf8').includes('annual_prepay_terms_status_check'));
+    expect(definers).toEqual(['20260614000001_annual_prepay_terms_checks.js']);
   });
 
   test('every status written to annual_prepay_terms anywhere in server/ or ops/ resolves to a documented written stage', () => {
