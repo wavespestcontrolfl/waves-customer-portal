@@ -1115,6 +1115,34 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getFile.mock.calls.map((c) => c[0])).toEqual(['src/content/blog/pest-control/test-post.mdx', 'src/content/blog/pest-control/test-post.md', 'src/content/blog/test-post.mdx']);
   });
 
+  test('affiliate belt (full polling path): a head carrying <AffiliateLink> is withheld without the owner approval stamp and merges with it (Codex PR3 r6)', async () => {
+    const affiliateFile = { content: '---\ntitle: Affiliate Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' };
+    const arm = () => {
+      process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+      gh.getPr.mockResolvedValue(openPr());
+      pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+      pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+      pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+      publisher.assertCodexReviewClear.mockResolvedValue(true);
+      gh.mergePr.mockResolvedValue({ merged: true });
+      gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/test-post.mdx' ? affiliateFile : null));
+    };
+    // 1. No approval stamp → withheld, never merged.
+    arm();
+    setupDb({ pending: [makeRun({ trust_build_approved_by: null })] });
+    let res = await poller.pollPending();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
+    // 2. Approved, and the approved draft referenced the same product → merges.
+    jest.clearAllMocks();
+    arm();
+    const base = makeRun();
+    const dp = JSON.parse(base.draft_payload);
+    setupDb({ pending: [makeRun({ trust_build_approved_by: 'adam', trust_build_approved_at: new Date(), draft_payload: JSON.stringify({ ...dp, body: affiliateFile.content }) })] });
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalled();
+  });
+
   test('a same-leaf flat file under ANOTHER category is not this post (fails closed like an unreadable file)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });

@@ -1725,6 +1725,9 @@ async function pollPending() {
         'id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url',
         'draft_payload', 'reviewer_notes', 'created_at',
         'poll_pending_reason', 'poll_pending_since', 'poll_pending_annotated_at',
+        // the affiliate belt's approval stamp (Codex PR3 r6: without these the
+        // belt read undefined and withheld every approved affiliate PR)
+        'trust_build_approved_by', 'trust_build_approved_at',
       );
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
