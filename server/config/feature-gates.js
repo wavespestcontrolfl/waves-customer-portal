@@ -1261,6 +1261,20 @@ const gates = {
   // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
   namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
+  // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
+  // When ON, content-guardrails resolves <AffiliateLink product="…"> tags
+  // against the vendored @waves/affiliate-registry (product rows the owner
+  // approved by merging their astro registry PR); when OFF — the default —
+  // the product index is empty, so EVERY AffiliateLink is a P0
+  // UNREGISTERED_AFFILIATE_LINK and the lane is fully dark. Raw affiliate
+  // URLs never pass regardless (DISALLOWED_EXTERNAL_LINK), and channel
+  // stripping (newsletter/social) runs regardless of this flag. OFF in
+  // EVERY environment unless explicitly set (policy flag, same posture as
+  // GATE_NAMED_COMPETITOR_AUTOPUBLISH); consumers read it at CALL time via
+  // gateEnvValue('GATE_AFFILIATE_LINKS') so flips and tests take effect
+  // immediately; kill switch = unset GATE_AFFILIATE_LINKS.
+  affiliateLinks: gateEnvValue('GATE_AFFILIATE_LINKS'),
+
   // aeo_gap opportunity mining — feeds answer-engine (LLM) visibility gaps into
   // the content engine's opportunity_queue. Default OFF in prod: ships dormant
   // so it can be enabled (GATE_AEO_GAP_MINING=true) only after the
