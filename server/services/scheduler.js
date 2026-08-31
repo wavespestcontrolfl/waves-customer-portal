@@ -6087,6 +6087,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Plan-hold lifecycle (cancel-flow C2, ruling C-4): 7-day restart texts,
+  // then auto-resume — visits were already moved to the resume date when the
+  // hold started, so resume only restores the billing component and tier
+  // protection. No-op while the cancel-flow gate is off.
+  // =========================================================================
+  cron.schedule('18 10 * * *', async () => {
+    try {
+      const { cancelFlowV2Enabled } = require('./cancellation-resolution');
+      if (!cancelFlowV2Enabled()) return;
+      await runExclusive('plan-hold-lifecycle', async () => {
+        const { runPlanHoldLifecycle } = require('./cancellation-resolution/holds');
+        const result = await runPlanHoldLifecycle();
+        if (result.reminded || result.resumed || result.errors.length) {
+          logger.info(`Plan-hold lifecycle: ${result.reminded} reminded, ${result.resumed} resumed${result.errors.length ? ` (errors: ${result.errors.join(', ')})` : ''}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Plan-hold lifecycle failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY MONDAY 10AM — Seasonal reactivation campaign (drafts V1)
   // =========================================================================
   // NEVER sends. Writes message_drafts status='pending' rows for owner

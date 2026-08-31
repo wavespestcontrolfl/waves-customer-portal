@@ -95,6 +95,7 @@ test('gate on → card verdict serialized without facts', async () => {
   expect(res.body).toEqual({
     kind: 'card',
     reasonCode: 'price',
+    scope: [],
     card: { templateId: 'price_offer', headline: 'H', body: 'B', action: { type: 'retention_offer' } },
   });
   expect(JSON.stringify(res.body)).not.toContain('monthlyRate');
@@ -109,7 +110,7 @@ test('hard stop serializes reviewType only', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   mockPreview.mockResolvedValue({ facts: {}, resolution: { kind: 'hard_stop', reasonCode: 'billing_issue', reviewType: 'billing' } });
   const res = await post({ reason: 'billing_issue' });
-  expect(res.body).toEqual({ kind: 'hard_stop', reasonCode: 'billing_issue', reviewType: 'billing' });
+  expect(res.body).toEqual({ kind: 'hard_stop', reasonCode: 'billing_issue', reviewType: 'billing', scope: [] });
 });
 
 test('new_address verdicts map to the resolver context', async () => {

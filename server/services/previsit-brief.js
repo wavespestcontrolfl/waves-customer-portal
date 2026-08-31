@@ -795,6 +795,11 @@ async function assembleGrounding(svc, dbh = db) {
     } catch { svcPrefs = null; }
     const flags = {};
     if (typeof svcPrefs?.interior_spray === 'boolean') flags.interiorSpray = svcPrefs.interior_spray;
+    // Away Mode (cancel-flow C2): a dated exterior-only state — while the
+    // date is ahead, interior work is off regardless of the base pref.
+    if (prefs?.away_mode_until && String(prefs.away_mode_until).slice(0, 10) >= require('../utils/datetime-et').etDateString()) {
+      flags.interiorSpray = false;
+    }
     if (typeof svcPrefs?.exterior_sweep === 'boolean') flags.exteriorSweep = svcPrefs.exterior_sweep;
     if (Object.keys(flags).length) servicePrefFlags = flags;
   }

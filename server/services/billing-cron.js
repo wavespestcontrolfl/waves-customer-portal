@@ -302,7 +302,8 @@ const BillingCron = {
 
         // Log success + update next_charge_date (next month, same billing_day)
         await logAutopay(customer.id, 'charge_success', {
-          amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
+          // Below monthly_rate when a retention offer slot applied this month — log the charged amount.
+          amountCents: Math.round(parseFloat(paymentResult?.amount ?? customer.monthly_rate) * 100),
           paymentMethodId: customer.autopay_payment_method_id || null,
           paymentId: paymentResult?.id || null,
           details: { source: 'autopay', tier: customer.waveguard_tier },

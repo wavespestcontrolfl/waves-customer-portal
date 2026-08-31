@@ -36,6 +36,22 @@ function etDisplayDate(value) {
 // a customer-initiated cancel sends both, and the portal copy must name
 // only what was actually accepted (codex pre-push P1: "text and email"
 // on an sms-only outcome).
+// Scope a cancellation request was COMMITTED with — retries and repairs
+// must never widen an empty response into a whole-account churn (codex r1
+// P1: the 60s dedupe re-ran without families). The case row is the durable
+// record; no case or empty scope = whole account, exactly as committed.
+async function committedScopeFor(serviceRequestId) {
+  try {
+    const row = await db('cancellation_cases').where({ service_request_id: serviceRequestId }).first('scope');
+    if (!row) return null; // case write failed or not yet landed — fail closed (codex P0)
+    const scope = typeof row.scope === 'string' ? JSON.parse(row.scope) : row.scope;
+    return Array.isArray(scope) ? scope.filter(Boolean) : [];
+  } catch (err) {
+    logger.warn(`[requests] scope recovery failed for request ${serviceRequestId}: ${err.message}`);
+    return null; // unknown — caller must fail safe, never assume whole account
+  }
+}
+
 function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
   let effectiveDate = null;
   try {
@@ -45,7 +61,10 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     effectiveDate = null;
   }
   return {
-    processed: !!(result && result.ok && result.churned),
+    // Scoped cancels never churn — "processed" means the selected families'
+    // visits are pulled AND the remaining plan repriced (codex r1 P2: the
+    // portal showed the manual-closeout copy while the scoped SMS said done).
+    processed: !!(result && result.ok && (result.churned || result.scopedWoundDown)),
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
@@ -168,6 +187,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
 
     const cleanSubject = stripHtml(subject);
     const cleanDescription = stripHtml(description || '');
+    // Families a scoped (per-service) cancel is limited to; [] = whole plan.
+    let scopedFamilies = [];
 
     // Reject the whole submission when an attachment is unreadable or too
     // large. Silently dropping a photo makes the customer believe staff saw
@@ -200,10 +221,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       let retryOutcome = null;
       if (category === 'cancellation') {
         try {
+          const recoveredScope = await committedScopeFor(dupe.id);
+          if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
           const retry = await processCancellationRequest({
             customerId: req.customer.id,
             reason: `Portal cancellation request ${dupe.id}`,
             requestId: dupe.id,
+            families: recoveredScope,
           });
           retryOutcome = retry;
           logger.info(
@@ -274,10 +298,15 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
       let retryOutcome = null;
       try {
+        const recoveredScope = await committedScopeFor(priorCancellation.id);
+        // Fail closed exactly like the dedupe branch: an unrecoverable
+        // scope must never widen into a whole-account churn (codex P0).
+        if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
         const retry = await processCancellationRequest({
           customerId: req.customer.id,
           reason: `Portal cancellation request ${priorCancellation.id}`,
           requestId: priorCancellation.id,
+          families: recoveredScope,
         });
         retryOutcome = retry;
         logger.info(
@@ -359,16 +388,30 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // the partial-failure repair paths are the 60s dedupe above and the
     // inactive-retry path, and a partial run already raised a review alert.
     if (category === 'cancellation') {
-      // Scoped (per-family) cancellation is C1 scope: the processor below
-      // churns the WHOLE account, so accepting a family list here would let
-      // a customer selecting one plan lose everything. Reject until the
-      // per-family processor exists; the preview endpoint still accepts
-      // scope for card resolution.
+      // Scoped (per-family) cancellation (ruling C-3): the processor keeps
+      // the account and winds down only the named families. Prove the
+      // wind-down is attributable BEFORE the request row exists — a
+      // fail-closed plan must not leave a "cancellation" ticket behind.
+      // Gate off: families are ignored and the whole plan cancels (H0).
       if (CancellationResolution.cancelFlowV2Enabled() && Array.isArray(value.families) && value.families.length) {
-        return res.status(400).json({
-          error: 'Cancelling individual services is not available yet. Submit without a service selection to cancel the whole plan, or call our office.',
-          code: 'scoped_cancellation_unsupported',
-        });
+        const { planScopedWindDown } = require('../services/cancellation-processor');
+        const plan = await planScopedWindDown(req.customer.id, value.families);
+        if (!plan.ok) {
+          if (plan.error === 'scope_is_whole_account') {
+            // Every owned family selected = a whole-account cancel; fall
+            // through with no scope so the customer gets exactly that.
+            scopedFamilies = [];
+          } else {
+            return res.status(409).json({
+              error: plan.error === 'scope_not_owned'
+                ? 'That service is not on your plan any more. Refresh and try again.'
+                : 'We could not price the services that would stay. Cancel the whole plan here, or call our office and we will cancel just that service by hand.',
+              code: plan.error === 'scope_not_owned' ? 'scope_not_owned' : 'scoped_cancellation_unattributed',
+            });
+          }
+        } else {
+          scopedFamilies = plan.inScope;
+        }
       }
       if (!(await hasCancellableWork(req.customer.id))) {
         return res.status(400).json({
@@ -466,11 +509,15 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           reason: `Portal cancellation request ${request.id}`,
           requestId: request.id,
+          families: scopedFamilies,
         });
       } catch (cancelErr) {
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }
-      cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
+      // Scoped: "processed" means the families' visits are pulled AND the
+      // remaining plan repriced — not a churn.
+      cancellationProcessed = !!(cancellationResult && cancellationResult.ok
+        && (cancellationResult.churned || cancellationResult.scopedWoundDown));
 
       // Moving branch: the paid Google validation runs ONLY NOW — after
       // the billing wind-down — and only refines the audit verdict (an
@@ -522,7 +569,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           requestId: request.id,
           value,
-          families: serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [],
+          // The scope the processor actually RAN with is the durable record
+          // (codex P0: a reason-less scoped cancel stored [] and a retry
+          // then churned the whole account).
+          // Whole-account = [] — NEVER the resolver's "all owned" list (codex
+          // r2 P1: that made a retry look scoped and skip the repair).
+          families: Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length
+            ? cancellationResult.scope
+            : scopedFamilies,
           reasonText: cleanDescription || null,
           resolution: serverResolution,
           resolutionOutcome: outcome,
@@ -549,7 +603,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       const cancellationSummary = isCancellation
         ? (cancellationResult && cancellationResult.ok
             ? `\n\nAuto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled, ` +
-              'recurrence stopped, account churned + billing stopped.'
+              (Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length
+                ? `recurrence stopped for ${cancellationResult.scope.join(', ')}; account stays active with ${(cancellationResult.remaining || []).join(', ') || 'its other services'} (tier ${cancellationResult.tierBefore || '—'} → ${cancellationResult.tierAfter || '—'}).`
+                : 'recurrence stopped, account churned + billing stopped.')
             : '\n\n⚠️ Auto-processing did not fully complete — review the calendar/account manually.' +
               (cancellationResult && cancellationResult.errors && cancellationResult.errors.length
                 ? ` (failed: ${cancellationResult.errors.join(', ')})`
@@ -605,6 +661,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // Send customer confirmation SMS. A cancellation is auto-processed, so it
     // gets a dedicated template with cancellation-specific next steps.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
+    const familyLabelOf = (key) => {
+      const { familyLabel } = require('../services/cancellation-resolution/templates');
+      return (typeof familyLabel === 'function' && familyLabel(key)) || String(key || '').replace(/_/g, ' ');
+    };
     let confirmationSmsSent = false;
     let confirmationEmailSent = false;
     try {
@@ -614,8 +674,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // one (in-progress visit, processor error) gets the "closing out by
       // hand" copy so nobody is told their plan is gone while an office
       // follow-up is still owed.
+      // A scoped cancel gets its own truthful template — the account is not
+      // cancelled, only the named service(s); the rest continue.
+      const scopedProcessed = cancellationProcessed && Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length > 0;
       const smsTemplateKey = isCancellation
-        ? (cancellationProcessed ? 'service_cancellation_confirmation' : 'service_cancellation_received')
+        ? (cancellationProcessed
+          ? (scopedProcessed ? 'service_cancellation_scoped_confirmation' : 'service_cancellation_confirmation')
+          : 'service_cancellation_received')
         : 'service_request_confirmation';
       const smsVars = isCancellation
         ? {
@@ -623,6 +688,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             // ET date of the request — a quiet-hours hold delivers this text
             // the next morning, so the body never says "today".
             effective_date: etDisplayDate(request.created_at),
+            ...(scopedProcessed ? {
+              service: cancellationResult.scope.map(familyLabelOf).join(' and '),
+              remaining: (cancellationResult.remaining || []).map(familyLabelOf).join(' and ') || 'your other services',
+            } : {}),
           }
         : {
             first_name: gsmSafeName(req.customer.first_name),
@@ -689,6 +758,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           request,
           processed: cancellationProcessed,
+          ...(Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length ? {
+            scope: {
+              cancelled: cancellationResult.scope.map(familyLabelOf),
+              remaining: (cancellationResult.remaining || []).map(familyLabelOf),
+              tierAfter: cancellationResult.tierAfter || null,
+            },
+          } : {}),
         });
         confirmationEmailSent = !!(emailResult && emailResult.ok);
       } catch (emailErr) {
@@ -713,12 +789,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // account is already churned when `processed` is true.
       ...(isCancellation
         ? {
-            cancellation: cancellationOutcome(
-              cancellationResult,
-              confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-              request.created_at,
-              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
-            ),
+            cancellation: {
+              ...cancellationOutcome(
+                cancellationResult,
+                confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
+                request.created_at,
+                [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
+              ),
+              // Scoped cancels report exactly what stopped and what stays.
+              scope: Array.isArray(cancellationResult?.scope) ? cancellationResult.scope : [],
+              remaining: Array.isArray(cancellationResult?.remaining) ? cancellationResult.remaining : [],
+              ...(cancellationResult?.tierAfter !== undefined ? { tierBefore: cancellationResult.tierBefore, tierAfter: cancellationResult.tierAfter } : {}),
+            },
           }
         : {}),
     });
@@ -790,14 +872,251 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
     if (!preview) return res.status(404).json({ error: 'Not found' });
 
     const { resolution } = preview;
+    // C1: the screens render ONLY server facts — scope for the picker,
+    // blockers for honesty, and the before/after impact table (the portal
+    // computes no dollars client-side by design).
+    let impact = null;
+    try {
+      const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+      impact = await buildCancellationImpact(req.customer.id, families);
+    } catch (impactErr) {
+      logger.warn(`[cancel-resolution] impact build failed for ${req.customer.id}: ${impactErr.message}`);
+    }
     res.json({
       kind: resolution.kind,
       reasonCode: resolution.reasonCode || null,
+      scope: Array.isArray(resolution.scope) ? resolution.scope : [],
+      ...(Array.isArray(resolution.offerBlockers) && resolution.offerBlockers.length ? { offerBlockers: resolution.offerBlockers } : {}),
       ...(resolution.kind === 'hard_stop' ? { reviewType: resolution.reviewType } : {}),
       ...(resolution.kind === 'card'
         ? { card: { templateId: resolution.card.templateId, headline: resolution.card.headline, body: resolution.card.body, action: resolution.card.action } }
         : {}),
+      ...(impact ? { impact } : {}),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const cancelResolutionAcceptSchema = Joi.object({
+  reasonCode: Joi.string().valid(...REASON_CODE_VALUES).required(),
+  families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),
+  templateId: Joi.string().trim().max(60).required(),
+  params: Joi.object({
+    resumeDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    preferredDay: Joi.string().trim().max(40).optional(),
+    preferredTime: Joi.string().trim().max(40).optional(),
+    newAddress: Joi.string().trim().max(400).optional(),
+    keepFamilies: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),
+    note: Joi.string().trim().max(300).optional(),
+  }).optional(),
+});
+
+// POST /api/requests/cancel-resolution/accept — the customer accepted the
+// ONE card. The server re-resolves from its own facts, refuses a card it
+// would not show right now (template mismatch = stale screen), mints the
+// committed + accepted cancellation_cases row, executes the action, and
+// confirms by text AND email. The cancel itself is NOT performed — accepting
+// the card means the plan stays.
+router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
+    const { value, error } = cancelResolutionAcceptSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const families = Array.isArray(value.families) ? value.families : [];
+
+    const { isAcceptableAction, executeAcceptedAction } = require('../services/cancellation-resolution/actions');
+
+    // Double-tap / crash-retry idempotency (codex r1 P1): a prior accepted
+    // case is REUSED only when it was the SAME accept — template, reason,
+    // requested scope, and params (codex P1: a different family, resume
+    // date, or preference must execute, not replay the old receipt). With
+    // a receipt it returns; without one the action re-runs under the SAME
+    // case id, so executor dedupe keys and the per-case grant guard hold.
+    const acceptKey = JSON.stringify({
+      t: value.templateId,
+      r: value.reasonCode,
+      f: [...families].sort(),
+      p: value.params || {},
+    });
+    // Check + mint under a per-customer advisory lock (codex P1: two
+    // concurrent taps both saw "no prior" and executed twice). The lock
+    // covers only the durable claim; execution runs after it, protected by
+    // per-case idempotency (executor dedupe keys + the grant's case guard).
+    // The re-resolve is read-only and runs OUTSIDE the lock; the durable
+    // claim (prior lookup + case mint) runs INSIDE it (codex r2 P1: the
+    // lock must cover the insert, or two taps still mint two cases).
+    const findPrior = async (dbh) => {
+      const candidates = await dbh('cancellation_cases')
+        .where({ customer_id: req.customer.id, resolution_template_id: value.templateId, resolution_outcome: 'accepted' })
+        .where('created_at', '>=', new Date(Date.now() - 24 * 3600 * 1000))
+        .orderBy('created_at', 'desc')
+        .select('*');
+      return (candidates || []).find((row) => {
+        const snap = typeof row.snapshot === 'string' ? JSON.parse(row.snapshot) : (row.snapshot || {});
+        return snap.accept_key === acceptKey;
+      }) || null;
+    };
+    let priorCase = await findPrior(db);
+    if (priorCase) {
+      const receipt = priorCase.snapshot && priorCase.snapshot.accept_receipt;
+      if (receipt) return res.json({ ok: true, deduped: true, receipt });
+    }
+
+    let caseRow = priorCase || null;
+    let cardAction = null;
+    let cardHeadline = null;
+    let caseScope = [];
+    const loadFromCase = (row) => {
+      cardAction = typeof row.resolution_action === 'string' ? JSON.parse(row.resolution_action) : row.resolution_action;
+      cardHeadline = null;
+      caseScope = (typeof row.scope === 'string' ? JSON.parse(row.scope) : row.scope) || [];
+    };
+    if (caseRow) {
+      loadFromCase(caseRow);
+    } else {
+      // The transfer card only exists behind a VERIFIED in-area address —
+      // re-run the verdict from the submitted address or the accept can
+      // never match the preview (codex r1 P1).
+      let newAddressInServiceArea = null;
+      if (value.params?.newAddress && value.reasonCode === 'moving_or_property_change') {
+        const { validateAddress, STATUSES } = require('../services/address-validation');
+        const verdict = await validateAddress({ addressLines: [value.params.newAddress] });
+        newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);
+      }
+      const preview = await CancellationResolution.previewCancellationResolution({
+        customerId: req.customer.id,
+        reasonCode: value.reasonCode,
+        families,
+        context: {
+          newAddressInServiceArea,
+          hasCompetitorQuote: false,
+          adverseEvent: false,
+          safetyComplaint: false,
+        },
+      });
+      if (!preview) return res.status(404).json({ error: 'Not found' });
+      const { resolution } = preview;
+      if (resolution.kind !== 'card' || resolution.card.templateId !== value.templateId) {
+        return res.status(409).json({
+          error: 'That option is no longer available. Review your plan again.',
+          code: 'resolution_stale',
+        });
+      }
+      if (!isAcceptableAction(resolution.card.action)) {
+        return res.status(409).json({ error: 'That option is informational only.', code: 'action_not_acceptable' });
+      }
+      const minted = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${req.customer.id}`]);
+        const raced = await findPrior(trx);
+        if (raced) return { row: raced, reused: true };
+        const row = await CancellationResolution.openCancellationCase({
+          customerId: req.customer.id,
+          serviceRequestId: null,
+          families: resolution.scope,
+          reasonCode: value.reasonCode,
+          reasonText: null,
+          resolution,
+          resolutionOutcome: 'accepted',
+          snapshot: { accepted_at: new Date().toISOString(), accepted_params: value.params || {}, accept_key: acceptKey },
+          // An accepted resolution IS final — committed, or the ledger's
+          // grant guard rejects the very offer the card promised (codex r1 P1).
+          processed: true,
+        }, trx);
+        return { row, reused: false };
+      });
+      caseRow = minted.row;
+      if (minted.reused) {
+        const receipt = caseRow.snapshot && (typeof caseRow.snapshot === 'string' ? JSON.parse(caseRow.snapshot) : caseRow.snapshot).accept_receipt;
+        if (receipt) return res.json({ ok: true, deduped: true, receipt });
+        loadFromCase(caseRow);
+      } else {
+        cardAction = resolution.card.action;
+        cardHeadline = resolution.card.headline;
+        caseScope = resolution.scope;
+      }
+    }
+    if (!isAcceptableAction(cardAction)) {
+      return res.status(409).json({ error: 'That option is informational only.', code: 'action_not_acceptable' });
+    }
+
+    let execution;
+    try {
+      execution = await executeAcceptedAction({
+        customerId: req.customer.id,
+        caseRow,
+        action: cardAction,
+        params: { ...(value.params || {}) },
+        families: caseScope,
+      });
+    } catch (execErr) {
+      logger.error(`[cancel-resolution] accepted action failed for case ${caseRow?.id}: ${execErr.message}`);
+      return res.status(execErr.code ? 409 : 500).json({
+        error: execErr.code
+          ? execErr.message
+          : 'We could not set that up. Nothing about your plan has changed — call our office and we will do it by hand.',
+        ...(execErr.code ? { code: execErr.code } : {}),
+      });
+    }
+
+    const reference = String(caseRow.id).slice(0, 8).toUpperCase();
+    const summary = execution.effects && execution.effects.length ? execution.effects[0] : (cardHeadline || 'Done');
+    const receipt = {
+      reference,
+      actionType: execution.actionType,
+      summary,
+      effects: execution.effects || [],
+      ...(execution.reserviceUrl ? { reserviceUrl: execution.reserviceUrl } : {}),
+      confirmationChannels: [],
+    };
+
+    // Customer-initiated ⇒ text AND email (owner ruling 2026-08-31), each
+    // fail-soft; the receipt names only the channels that accepted.
+    try {
+      const body = await renderRequiredSmsTemplate('service_resolution_confirmation', {
+        first_name: gsmSafeName(req.customer.first_name),
+        summary: String(summary).slice(0, 120),
+        reference,
+      }, { workflow: 'service_resolution_confirmation', entity_type: 'cancellation_case', entity_id: caseRow.id });
+      const smsResult = await sendCustomerMessage({
+        to: req.customer.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'support_resolution',
+        customerId: req.customer.id,
+        identityTrustLevel: 'authenticated_portal',
+        entryPoint: 'customer_service_request',
+        metadata: { original_message_type: 'service_resolution_confirmation', cancellation_case_id: caseRow.id },
+      });
+      if (smsResult.sent) receipt.confirmationChannels.push('sms');
+    } catch (smsErr) {
+      logger.warn(`[cancel-resolution] accept SMS failed for case ${caseRow.id}: ${smsErr.message}`);
+    }
+    try {
+      const emailResult = await AccountMembershipEmail.sendResolutionAccepted({
+        customerId: req.customer.id,
+        caseId: caseRow.id,
+        reference,
+        summary,
+        effects: execution.effects || [],
+      });
+      if (emailResult && emailResult.ok) receipt.confirmationChannels.push('email');
+    } catch (emailErr) {
+      logger.warn(`[cancel-resolution] accept email failed for case ${caseRow.id}: ${emailErr.message}`);
+    }
+
+    // Stash the receipt on the case for the 24h idempotency window.
+    try {
+      await db('cancellation_cases').where({ id: caseRow.id }).update({
+        snapshot: db.raw("COALESCE(snapshot, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ accept_receipt: receipt })]),
+        updated_at: new Date(),
+      });
+    } catch (stashErr) {
+      logger.warn(`[cancel-resolution] receipt stash failed for case ${caseRow.id}: ${stashErr.message}`);
+    }
+
+    res.status(201).json({ ok: true, receipt });
   } catch (err) {
     next(err);
   }
