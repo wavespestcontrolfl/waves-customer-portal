@@ -686,7 +686,23 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       // cadence the customer accepted, not the stale quote line's.
       if (route.primaryUsesAcceptFrequency && acceptPattern
         && explicitServiceCadence(primary) !== acceptPattern) {
-        remaining[primaryIdx] = { ...primary, frequency: acceptPattern };
+        // The combined path deliberately discarded stale counts on
+        // accept-resolved pest lines (r12): a monthly quote's
+        // visitsPerYear: 12 carried onto a quarterly-accepted separated
+        // line would seed 12 quarterly visits — three years of billable
+        // service (audit P0). Keep a count only when it agrees with the
+        // accepted cadence; the alias vocabulary is visitCountAliasValues'.
+        const restamped = { ...primary, frequency: acceptPattern };
+        const count = visitsPerYearForRecurringService(primary);
+        const countAgrees = !!count
+          && RecurringAppointmentSeeder.patternFromVisitsPerYear(count) === acceptPattern;
+        if (!countAgrees) {
+          for (const field of ['visitsPerYear', 'visits_per_year', 'appsPerYear', 'apps_per_year',
+            'visits', 'apps', 'treatmentsPerYear', 'treatments_per_year']) {
+            delete restamped[field];
+          }
+        }
+        remaining[primaryIdx] = restamped;
       }
       const companion = remaining[companionIdx];
       const visits = visitsPerYearForRecurringService(companion);

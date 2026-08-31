@@ -99,6 +99,27 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining[0].frequency).toBe('quarterly'); // accept wins over the stale line
   });
 
+  test('restamping strips a stale count that disagrees with the accepted cadence (r12 parity)', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control Plan', frequency: 'monthly', visitsPerYear: 12 },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ], { acceptFrequency: 'quarterly' });
+    expect(standalone).toHaveLength(1);
+    expect(remaining[0].frequency).toBe('quarterly');
+    expect(remaining[0].visitsPerYear).toBeUndefined(); // 12 would seed 3 years of quarterly visits
+  });
+
+  test('an AGREEING count survives the restamp', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control Plan', frequency: 'monthly', visitsPerYear: 4 },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ], { acceptFrequency: 'quarterly' });
+    expect(remaining[0].frequency).toBe('quarterly');
+    expect(remaining[0].visitsPerYear).toBe(4);
+  });
+
   test('a cadence-less pest line with no accepted selection never separates-with-rewrite', () => {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     const { remaining, standalone } = combineRecurringServicesForScheduling([
