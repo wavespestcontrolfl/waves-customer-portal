@@ -32,7 +32,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -3178,6 +3178,24 @@ function noCardOnFileAlert({ hasChargeableMethod, prediction }) {
   return { type: 'no_card_on_file', text: 'NO CARD ON FILE — collect payment on site' };
 }
 
+// "This visit will bill nothing, and not on purpose" alert — the money-gap
+// half of a no_charge prediction (see unbilledCompletionGap). Deliberately
+// NON-BLOCKING: the owner ruled 2026-08-31 that completion warns and never
+// stops the tech, mirroring the 2026-07-27 ruling that removed the blocking
+// completion pre-gate. Sibling of noCardOnFileAlert rather than an extension
+// of it: that badge means "money is due and you must collect it here", this
+// one means "no money is due at all and it should have been".
+function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
+  const gap = unbilledCompletionGap({ prediction, hasChargeableMethod });
+  if (!gap) return null;
+  return {
+    type: 'unbilled_visit',
+    text: gap.noPaymentMethod === true
+      ? 'NOTHING WILL BILL — no rate set and no card on file'
+      : 'NOTHING WILL BILL — no rate or price set for this visit',
+  };
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -3504,7 +3522,11 @@ router.get('/', async (req, res, next) => {
       // just any payment_methods row. Fail toward NOT flagging, like the
       // reads above: a wrong badge on a covered customer teaches the tech
       // to ignore it.
-      if (billingLane.prediction?.kind === 'invoice') {
+      // Wallet read now also covers the unbilled-gap prediction: the warning
+      // says "and no card on file", so it needs the same chargeable-method
+      // truth the no_card badge uses rather than a second, looser test.
+      if (billingLane.prediction?.kind === 'invoice'
+        || unbilledCompletionGap({ prediction: billingLane.prediction })) {
         let hasChargeableMethod = true;
         try {
           const methods = await db('payment_methods')
@@ -3534,6 +3556,17 @@ router.get('/', async (req, res, next) => {
           prediction: billingLane.prediction,
         });
         if (noCardAlert) alerts.push(noCardAlert);
+        const unbilledAlert = unbilledVisitAlert({
+          hasChargeableMethod,
+          prediction: billingLane.prediction,
+        });
+        if (unbilledAlert) alerts.push(unbilledAlert);
+        // Rendered by BillingLaneCard as the amber money-gap note. Computed
+        // here, with the wallet, so the card stays a pure renderer.
+        billingLane.unbilledGap = unbilledCompletionGap({
+          prediction: billingLane.prediction,
+          hasChargeableMethod,
+        });
       }
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
@@ -16501,6 +16534,7 @@ router._test = {
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,
   noCardOnFileAlert,
+  unbilledVisitAlert,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,

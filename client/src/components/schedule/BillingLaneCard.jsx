@@ -52,7 +52,7 @@ function predictionLine(prediction) {
   }
 }
 
-export default function BillingLaneCard({ billingLane, style }) {
+export default function BillingLaneCard({ billingLane, style, onSendCardLink, sendingCardLink }) {
   if (!billingLane || !billingLane.mode) return null;
   const laneLabel = LANE_LABEL[billingLane.mode] || billingLane.mode;
   const rate = Number(billingLane.monthlyRate);
@@ -74,6 +74,11 @@ export default function BillingLaneCard({ billingLane, style }) {
   const showBalance = Number.isFinite(balance) && balance > 0 && invoiceCount > 0;
 
   const onHold = !!billingLane.servicePausedAt;
+  // Money gap — this visit bills nothing and nothing about it says it
+  // should. Amber, not alert red: the owner ruled 2026-08-31 that this
+  // warns and never blocks completion, so it must not read as a stop sign
+  // (the BILLING HOLD block above is the only genuine stop here).
+  const gap = billingLane.unbilledGap;
 
   return (
     <div style={style}>
@@ -95,6 +100,49 @@ export default function BillingLaneCard({ billingLane, style }) {
             BILLING HOLD — service is paused after failed dues collection. Resolve billing before running this visit.
           </div>
         )}
+        {gap && (
+          <div
+            role="note"
+            style={{
+              marginBottom: 8,
+              background: WARN.bg,
+              border: `1px solid ${WARN.border}`,
+              borderRadius: 4,
+              padding: '8px 10px',
+              color: WARN.ink,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 500 }}>
+              Nothing will bill for this visit.
+            </div>
+            <div style={{ fontSize: 12, marginTop: 2 }}>
+              {gap.noPaymentMethod === true
+                ? 'No rate or price is set, and there is no card on file.'
+                : 'No rate or price is set on this account.'}
+            </div>
+            {onSendCardLink && gap.noPaymentMethod === true && (
+              <button
+                type="button"
+                onClick={onSendCardLink}
+                disabled={sendingCardLink}
+                style={{
+                  marginTop: 8,
+                  width: '100%',
+                  padding: '9px 12px',
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: WARN.ink,
+                  background: '#FFFFFF',
+                  border: `1px solid ${WARN.border}`,
+                  borderRadius: 4,
+                  opacity: sendingCardLink ? 0.6 : 1,
+                }}
+              >
+                {sendingCardLink ? 'Sending...' : 'Text card / Auto Pay link'}
+              </button>
+            )}
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED, whiteSpace: 'nowrap' }}>
             Billing
@@ -109,7 +157,10 @@ export default function BillingLaneCard({ billingLane, style }) {
             <span style={{ fontSize: 11, color: MUTED }}>(inferred — set it on the customer profile)</span>
           )}
         </div>
-        {line && (
+        {/* The gap note already says "nothing will bill", and says it with the
+            reason — the muted prediction line under it would repeat the same
+            sentence in weaker words. */}
+        {line && !gap && (
           <div style={{ fontSize: 13, color: line.color, marginTop: 6 }}>
             {line.text}
           </div>

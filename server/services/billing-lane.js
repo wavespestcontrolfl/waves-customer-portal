@@ -207,7 +207,14 @@ function predictCompletionBilling({
   completionAutopayChargeEnabled = false,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
-  const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
+  // no_charge is two different worlds and the office must be able to tell
+  // them apart. A callback / always-free type / renewal-owned visit is
+  // SUPPOSED to bill nothing. An unpriced self-pay visit bills nothing only
+  // because nobody put a number on the account — that one is a money gap
+  // (2026-08-31: a hand-booked customer took four recurring visits at
+  // monthly_rate 0 and the sheet said only "nothing bills"). Same kind, same
+  // amount, different `reason` — see UNBILLED_MONEY_GAP_REASONS.
+  const noCharge = (reason) => ({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason });
   if (payerBilled) return { kind: 'payer', amount: hasVisitPrice ? Number(estimatedPrice) : null, conflictStampedPrice: false };
   // Completion's numeric prepaid fallback covers ONLY out-of-band methods
   // (cash/Zelle) — an annual_prepay_invoice stamp is governed exclusively
@@ -224,7 +231,7 @@ function predictCompletionBilling({
   // promises an invoice completion will not cut (Codex r7).
   if ((billingMode === 'per_visit' || billingMode === 'one_time')
     && (isCallback || isAlwaysFreeServiceType(serviceType))) {
-    return none;
+    return noCharge(isCallback ? 'callback' : 'always_free_service_type');
   }
   if (lane === 'annual_prepay') {
     // Coverage is the TERM-VALIDATED per-visit stamp (prepaid_method
@@ -244,7 +251,8 @@ function predictCompletionBilling({
     if (stampCovered) {
       return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
     }
-    if (!hasVisitPrice) return none;
+    // Owned by the renewal flow, not a data gap — bills nothing BY DESIGN.
+    if (!hasVisitPrice) return noCharge('annual_renewal_owned');
     const amount = Number(estimatedPrice);
     if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
     return {
@@ -261,11 +269,15 @@ function predictCompletionBilling({
     // applications only — never a callback or an always-free type
     // (estimate / re-service / follow-up), even when a fee is on file
     // (Codex r1).
-    if (isCallback || isAlwaysFreeServiceType(serviceType)) return none;
+    if (isCallback || isAlwaysFreeServiceType(serviceType)) {
+      return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+    }
     const amount = completionInvoiceAmount({
       estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
     });
-    if (!(amount > 0)) return none;
+    // Per-application lane with no fee on file — the acceptance fee never
+    // got stamped. A money gap, not a free visit.
+    if (!(amount > 0)) return noCharge('no_amount_on_file');
     // Completion only suppresses when the prepayment covers the WHOLE
     // amount; a partial prepay is applied as credit and the remainder
     // still collects (Codex r1).
@@ -291,7 +303,12 @@ function predictCompletionBilling({
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
   });
-  if (!(amount > 0)) return none;
+  // The 2026-08-31 shape: self-pay lane, visit performed, and NO number
+  // anywhere — no stamped visit price, no monthly rate. Nothing bills, and
+  // nothing about the visit says it should be free.
+  if (!(amount > 0)) {
+    return noCharge((isCallback || isAlwaysFreeServiceType(serviceType)) ? (isCallback ? 'callback' : 'always_free_service_type') : 'no_amount_on_file');
+  }
   if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
   return {
     // Same no-cost exclusion as the annual branch (manual-audit P1).
@@ -574,8 +591,42 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
   return !!row;
 }
 
+// Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
+// free visit: nothing bills only because no number is on the account.
+// 'callback' / 'always_free_service_type' / 'annual_renewal_owned' are the
+// by-design half and never appear here.
+const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file']);
+
+/**
+ * Does completing this visit leave money on the table? Reads the SAME
+ * prediction the sheet renders and the completion path mirrors — no second
+ * classifier (the 2026-07 double-billing incident came from exactly that).
+ *
+ * `hasChargeableMethod` is advisory context, NOT part of the gap test: a
+ * per-visit customer with a real price and no card still gets a payable
+ * invoice, which is normal and must not warn (that case is already the
+ * no_card_on_file alert's job). The wallet only sharpens the message when
+ * the visit is billing nothing anyway. Same vocabulary as
+ * noCardOnFileAlert — a non-expired card, or usable bank method — not a
+ * bare payment_methods row.
+ *
+ * Returns null when there is no gap, else { reason, noPaymentMethod }.
+ */
+function unbilledCompletionGap({ prediction, hasChargeableMethod = null }) {
+  if (!prediction || prediction.kind !== 'no_charge') return null;
+  if (!UNBILLED_MONEY_GAP_REASONS.has(prediction.reason)) return null;
+  return {
+    reason: prediction.reason,
+    // null = unknown (caller could not read the wallet); only `true` asserts
+    // it, so an unreadable wallet never invents "no card on file".
+    noPaymentMethod: hasChargeableMethod == null ? null : hasChargeableMethod === false,
+  };
+}
+
 module.exports = {
   BILLING_MODES,
+  UNBILLED_MONEY_GAP_REASONS,
+  unbilledCompletionGap,
   MONTHLY_LANE_SQL,
   isMembershipTier,
   impliedMonthlyStampForWrite,

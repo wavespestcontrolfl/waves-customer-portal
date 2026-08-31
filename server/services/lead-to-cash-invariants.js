@@ -171,6 +171,78 @@ const DETECTORS = Object.freeze([
     },
   },
   {
+    key: 'unbilled_completed_visits',
+    label: "Yesterday's completed visits that billed nothing because no rate or price was on the account",
+    href: '/admin/dispatch',
+    provenance: 'prod 2026-08-31 — a hand-booked customer took recurring visits at monthly_rate 0; the sheet said "nothing bills" and nothing else did',
+    async run({ now }) {
+      const { resolveBillingLane, predictCompletionBilling, unbilledCompletionGap } = require('./billing-lane');
+      const yesterday = etDateString(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+      // Re-runs the SAME prediction the sheet and the completion path use —
+      // never a SQL re-derivation of the billing decision (the 2026-07
+      // double-billing incident came from a second classifier).
+      const visits = await db('scheduled_services as ss')
+        .leftJoin('customers as c', 'c.id', 'ss.customer_id')
+        .where({ 'ss.status': 'completed', 'ss.scheduled_date': yesterday })
+        .orderBy('ss.id')
+        .limit(CLOSEOUT_VISIT_CAP + 1)
+        .select(
+          'ss.id', 'ss.estimated_price', 'ss.is_callback', 'ss.is_recurring', 'ss.service_type',
+          'ss.billed_to_payer_id', 'ss.prepaid_amount', 'ss.prepaid_method',
+          'c.billing_mode', 'c.monthly_rate', 'c.waveguard_tier', 'c.per_application_fee',
+        );
+      const truncated = visits.length > CLOSEOUT_VISIT_CAP;
+      const ids = [];
+      if (truncated) {
+        // FAIL CLOSED on the cap, exactly like closeout_failed_facts.
+        const overflow = await db('scheduled_services')
+          .where({ status: 'completed', scheduled_date: yesterday }).count({ n: 'id' }).first();
+        const notEvaluated = Math.max(1, (Number(overflow?.n) || 0) - CLOSEOUT_VISIT_CAP);
+        ids.push(`[truncated: ${notEvaluated} completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`);
+      }
+      // An invoice that DID mint settles the question regardless of what the
+      // prediction says now — completion may have stamped a price the
+      // prediction can no longer see.
+      const evaluated = visits.slice(0, CLOSEOUT_VISIT_CAP);
+      const invoicedIds = new Set(
+        evaluated.length
+          ? (await db('invoices').whereIn('scheduled_service_id', evaluated.map((v) => v.id)).select('scheduled_service_id'))
+            .map((r) => r.scheduled_service_id)
+          : [],
+      );
+      for (const v of evaluated) {
+        if (invoicedIds.has(v.id)) continue;
+        const lane = resolveBillingLane({
+          billing_mode: v.billing_mode,
+          waveguard_tier: v.waveguard_tier,
+          monthly_rate: v.monthly_rate,
+        });
+        const prediction = predictCompletionBilling({
+          lane: lane.mode,
+          billingMode: v.billing_mode || null,
+          // Autopay/dues state is a SETTLEMENT detail; the gap this detector
+          // hunts is "no number exists at all", which neither can create or
+          // cure. Left at the conservative defaults so an unreadable wallet
+          // never manufactures a finding.
+          autopayActive: false,
+          estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
+          monthlyRate: v.monthly_rate,
+          perApplicationFee: v.per_application_fee,
+          isRecurring: !!v.is_recurring,
+          isCallback: !!v.is_callback,
+          serviceType: v.service_type,
+          payerBilled: !!v.billed_to_payer_id,
+          prepaidAmount: v.prepaid_amount,
+          prepaidMethod: v.prepaid_method || null,
+        });
+        // hasChargeableMethod omitted: the wallet only sharpens the tech's
+        // on-site message, and this detector reports ids only (PII rule).
+        if (unbilledCompletionGap({ prediction })) ids.push(`${v.id} [${prediction.reason}]`);
+      }
+      return { count: ids.length, ids, detail: { checked: evaluated.length, date: yesterday, truncated } };
+    },
+  },
+  {
     key: 'closeout_failed_facts',
     label: "Yesterday's completed visits with a failed closeout fact or a contradiction",
     href: '/admin/dispatch',

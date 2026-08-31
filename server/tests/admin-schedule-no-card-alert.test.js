@@ -37,3 +37,43 @@ describe('noCardOnFileAlert (day-view propertyAlerts payment flag)', () => {
     expect(noCardOnFileAlert({ hasChargeableMethod: false, prediction: null })).toBeNull();
   });
 });
+
+describe('unbilledVisitAlert (day-view money-gap flag)', () => {
+  const { unbilledVisitAlert } = adminScheduleRouter._test;
+
+  const gapPrediction = { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' };
+
+  test('flags a visit that will bill nothing for lack of a number', () => {
+    expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: gapPrediction }))
+      .toEqual({ type: 'unbilled_visit', text: 'NOTHING WILL BILL — no rate set and no card on file' });
+  });
+
+  test('drops the card clause when the customer HAS a chargeable method', () => {
+    expect(unbilledVisitAlert({ hasChargeableMethod: true, prediction: gapPrediction }))
+      .toEqual({ type: 'unbilled_visit', text: 'NOTHING WILL BILL — no rate or price set for this visit' });
+  });
+
+  test('never claims "no card on file" when the wallet was not read', () => {
+    expect(unbilledVisitAlert({ prediction: gapPrediction }).text)
+      .toBe('NOTHING WILL BILL — no rate or price set for this visit');
+  });
+
+  test('stays silent on visits that are free BY DESIGN', () => {
+    for (const reason of ['callback', 'always_free_service_type', 'annual_renewal_owned']) {
+      expect(unbilledVisitAlert({
+        hasChargeableMethod: false,
+        prediction: { ...gapPrediction, reason },
+      })).toBeNull();
+    }
+  });
+
+  test('stays silent whenever money IS moving', () => {
+    for (const kind of ['invoice', 'auto_charge', 'payer', 'prepaid', 'covered_membership', 'covered_annual']) {
+      expect(unbilledVisitAlert({
+        hasChargeableMethod: false,
+        prediction: { kind, amount: 183, conflictStampedPrice: false },
+      })).toBeNull();
+    }
+    expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: null })).toBeNull();
+  });
+});

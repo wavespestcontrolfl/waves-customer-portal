@@ -140,3 +140,66 @@ describe('MobileAppointmentDetailSheet billing-lane card', () => {
     expect(screen.queryByText(/On completion:/)).not.toBeInTheDocument();
   });
 });
+
+describe('MobileAppointmentDetailSheet money-gap warning', () => {
+  // Prod 2026-08-31: hand-booked customer, monthly_rate 0, no card, four
+  // recurring visits — the sheet said only "nothing bills for this visit".
+  const GAP_SERVICE = {
+    ...BASE_SERVICE,
+    estimatedPrice: null,
+    customerId: 'cust-1',
+    billingLane: {
+      mode: 'per_visit',
+      source: 'inferred',
+      monthlyRate: null,
+      prediction: { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' },
+      unbilledGap: { reason: 'no_amount_on_file', noPaymentMethod: true },
+    },
+  };
+
+  it('warns that nothing will bill, and names the empty wallet', () => {
+    render(<MobileAppointmentDetailSheet service={GAP_SERVICE} onClose={() => {}} />);
+    expect(screen.getByText(/Nothing will bill for this visit/i)).toBeInTheDocument();
+    expect(screen.getByText(/no rate or price is set, and there is no card on file/i)).toBeInTheDocument();
+  });
+
+  it('drops the card clause when the customer has a payment method', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...GAP_SERVICE,
+          billingLane: { ...GAP_SERVICE.billingLane, unbilledGap: { reason: 'no_amount_on_file', noPaymentMethod: false } },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Nothing will bill for this visit/i)).toBeInTheDocument();
+    expect(screen.getByText(/No rate or price is set on this account/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no card on file/i)).not.toBeInTheDocument();
+  });
+
+  it('stays silent on a visit that is free BY DESIGN', () => {
+    // Same no_charge kind, by-design reason — the server sends no unbilledGap.
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...GAP_SERVICE,
+          billingLane: {
+            ...GAP_SERVICE.billingLane,
+            prediction: { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' },
+            unbilledGap: null,
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/Nothing will bill for this visit/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/nothing bills for this visit/i)).toBeInTheDocument();
+  });
+
+  it('never blocks completion — the owner ruled warn-only (2026-08-31)', () => {
+    render(<MobileAppointmentDetailSheet service={GAP_SERVICE} onClose={() => {}} />);
+    const complete = screen.getByRole('button', { name: /Complete service/i });
+    expect(complete).toBeEnabled();
+  });
+});

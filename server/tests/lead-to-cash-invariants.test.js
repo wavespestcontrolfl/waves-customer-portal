@@ -303,6 +303,37 @@ describe('detector adapters', () => {
     expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 2 });
   });
 
+  test('unbilled_completed_visits flags only the money-gap visits, and skips the ones that DID invoice', async () => {
+    // v1 = the reported shape (no price, no rate, self-pay) → finding.
+    // v2 = same shape but a callback → free BY DESIGN, no finding.
+    // v3 = same shape as v1, but completion minted an invoice → settled.
+    // v4 = priced visit → invoice predicted, no finding.
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
+      { id: 'v2', estimated_price: null, is_callback: true, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
+      { id: 'v3', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
+      { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze' },
+    ] });
+    mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }] });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.count).toBe(1);
+    expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
+    expect(out.detail).toMatchObject({ checked: 4, truncated: false });
+  });
+
+  test('unbilled_completed_visits: visits beyond the cap make the day a finding, never a silent pass', async () => {
+    const rows = Array.from({ length: CLOSEOUT_VISIT_CAP + 1 }, (_, i) => ({
+      id: `v${i}`, estimated_price: 100, is_callback: false, is_recurring: false,
+      service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze',
+    }));
+    mockTables.scheduled_services = mockChain({ select: rows, first: { n: String(CLOSEOUT_VISIT_CAP + 4) } });
+    mockTables.invoices = mockChain({ select: [] });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.count).toBe(1);
+    expect(out.ids).toEqual([`[truncated: 4 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);
+    expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
+  });
+
   test('closeout_failed_facts flags failed facts/contradictions and treats unevaluable visits as findings', async () => {
     mockTables.scheduled_services = mockChain({ select: [{ id: 'v1' }, { id: 'v2' }, { id: 'v3' }, { id: 'v4' }] });
     getCloseoutStatus
