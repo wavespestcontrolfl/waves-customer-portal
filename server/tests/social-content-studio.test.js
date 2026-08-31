@@ -540,6 +540,20 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(Studio.versusPublishBlocker({ versusPair: { key: 'gone_from_bank' } }, etNoon('2026-08-14'))).toBeNull();
   });
 
+  test('the season is evaluated at publish time, so a run crossing ET midnight is caught', () => {
+    // Direct-publish mode renders and uploads between selection and publish
+    // (Codex finding): a run selected at 23:58 ET Jun 30 can reach the
+    // pre-publish gate after ET midnight, and must not post a swarmer card
+    // in July. The blocker takes `now` so both call sites evaluate the
+    // CURRENT month rather than the selection month.
+    const swarmer = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'termite_swarmer_vs_winged_ant');
+    const plan = { versusPair: swarmer };
+    // 23:58 ET Jun 30 2026 = 03:58 UTC Jul 1 — still June in ET, publishable.
+    expect(Studio.versusPublishBlocker(plan, new Date('2026-07-01T03:58:00Z'))).toBeNull();
+    // 00:02 ET Jul 1 2026 = 04:02 UTC — now July in ET, blocked.
+    expect(Studio.versusPublishBlocker(plan, new Date('2026-07-01T04:02:00Z'))).toMatch(/out of season/);
+  });
+
   test('every pair in the bank produces drafts that pass the compliance validators', () => {
     for (const pair of Studio.PEST_VERSUS_PAIRS) {
       const drafts = Studio.buildVersusDrafts(pair, 'Sarasota');

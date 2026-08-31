@@ -2239,6 +2239,18 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       }
     }
 
+    // Versus counterpart: the season was checked at selection, and the
+    // render/upload between there and here can cross ET midnight — a run
+    // selected in the last minutes of June must not post a swarmer card in
+    // July. Same re-check the approval path applies to a queued draft.
+    if (isVersusRun) {
+      const reason = versusPublishBlocker(plan);
+      if (reason) {
+        await updateAutonomousRun(run?.id, { status: 'failed', preview: finalPreview, skipReason: reason });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
+    }
+
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
     // The link was probed when the preview was built; creative rendering and
     // uploads sit between that and here. Re-probe once more so the URL that
