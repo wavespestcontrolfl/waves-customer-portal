@@ -658,12 +658,25 @@ describe('review request follow-up flow', () => {
     expect(rrQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
-  test('reviewSmsAllowedNow refuses an exclusive email channel and fails closed on a prefs read failure', async () => {
+  test('reviewSmsAllowedNow refuses deleted / already-reviewed customers, an exclusive email channel, and fails closed on a read failure', async () => {
     const prefsQuery = chain();
+    const customersQuery = chain();
+    customersQuery.first.mockResolvedValue({ id: 'cust-1', deleted_at: null, has_left_google_review: false });
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') return prefsQuery;
+      if (table === 'customers') return customersQuery;
       throw new Error(`Unexpected table query: ${table}`);
     });
+
+    // Live customer state the mint-time check can't see: a draft can outlive
+    // an archive or the CSR's already-reviewed toggle.
+    customersQuery.first.mockResolvedValueOnce({ id: 'cust-1', deleted_at: new Date(), has_left_google_review: false });
+    prefsQuery.first.mockResolvedValueOnce(null);
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'customer_deleted' });
+
+    customersQuery.first.mockResolvedValueOnce({ id: 'cust-1', deleted_at: null, has_left_google_review: true });
+    prefsQuery.first.mockResolvedValueOnce(null);
+    expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'already_reviewed' });
 
     prefsQuery.first.mockResolvedValueOnce({ review_request: true, sms_enabled: true, review_request_channel: 'email' });
     expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'email_only' });

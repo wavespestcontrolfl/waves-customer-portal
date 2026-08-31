@@ -259,9 +259,14 @@ const TwilioService = {
     const twilioClient = getClient();
     if (!twilioClient || !to) return { unavailable: true };
     try {
+      // The SDK serializes dateSentAfter to whole seconds as a STRICT
+      // DateSent> filter, so an acceptance in the same second as the claim
+      // would be excluded — search from a minute earlier; the recipient +
+      // body-fragment checks below keep the match exact.
+      const from = sentAfter ? new Date(new Date(sentAfter).getTime() - 60 * 1000) : undefined;
       const messages = await twilioClient.messages.list({
         to,
-        dateSentAfter: sentAfter ? new Date(sentAfter) : undefined,
+        dateSentAfter: from,
         limit,
       });
       const frag = String(bodyFragment || "").toLowerCase();

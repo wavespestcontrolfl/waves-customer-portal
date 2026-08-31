@@ -480,7 +480,7 @@ router.post('/sms', async (req, res, next) => {
           return abortUnsent(409, 'A review request to this customer is already being sent — try again in a moment.');
         }
         if (seam.consent) {
-          return abortUnsent(422, 'This customer no longer takes review requests by text — remove the review link before sending.');
+          return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');

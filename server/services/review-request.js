@@ -1905,12 +1905,19 @@ const ReviewService = {
    * preferences, so an unverified state must not text.
    */
   async reviewSmsAllowedNow(customerId) {
+    // Live CUSTOMER eligibility first — the same suppressions sendSMS
+    // applies (soft-deleted, CSR already-reviewed flag); a draft can outlive
+    // either change.
+    let customer;
     let prefs;
     try {
+      customer = await db("customers").where({ id: customerId }).first("id", "deleted_at", "has_left_google_review");
       prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
     } catch {
       return { allowed: false, reason: "prefs_unavailable" };
     }
+    if (!customer || customer.deleted_at) return { allowed: false, reason: "customer_deleted" };
+    if (customer.has_left_google_review) return { allowed: false, reason: "already_reviewed" };
     if (prefs && prefs.review_request === false) return { allowed: false, reason: "review_off" };
     if (prefs && prefs.sms_enabled === false) return { allowed: false, reason: "sms_off" };
     if (prefs && prefs.review_request_channel === "email") return { allowed: false, reason: "email_only" };
