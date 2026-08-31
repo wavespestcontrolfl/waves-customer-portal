@@ -6028,6 +6028,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over
+  // existing detectors; emails contact@ only on a violation or an unrunnable
+  // check). 6:55 is deliberately AFTER the 6:00 estimate conversion guard and
+  // the 6:40 schedule-integrity watchdog: one of its checks asserts the guard
+  // converged. Minute unused elsewhere in this file (#3208 rule). Self-gated
+  // on GATE_LEAD_TO_CASH_SWEEP; cross-replica serialized here.
+  // =========================================================================
+  cron.schedule('55 6 * * *', async () => {
+    try {
+      await runExclusive('lead-to-cash-invariants', async () => {
+        const { runLeadToCashInvariantSweep } = require('./lead-to-cash-invariants');
+        const result = await runLeadToCashInvariantSweep();
+        logger.info(`[l2c-invariants] cron run: ${JSON.stringify({ sent: result?.sent || false, skipped: result?.skipped || null, violations: result?.violations ?? null, unavailable: result?.unavailable ?? null })}`);
+        // A sweep that found exceptions but could not deliver them must read
+        // as a FAILED run in job_health — rethrow so runExclusive records it.
+        if (result?.error || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`lead-to-cash invariants sweep did not complete (${result.error || result.skipped})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Lead-to-cash invariants sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40PM — Stale-visit sweep (past-dated open appointments)
   // =========================================================================
   // Runs after the 6PM missed-appointment check on purpose: that check only

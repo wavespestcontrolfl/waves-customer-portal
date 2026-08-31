@@ -15,17 +15,26 @@
  *
  * Prints a summary and one line per account (id + which flags). Never
  * writes. Usage: node server/scripts/audit-churned-accounts-live-state.js
- * [--json]
+ * [--json]. Also exported for the daily lead-to-cash invariants sweep
+ * (server/services/lead-to-cash-invariants.js).
  */
 
-const db = require('../models/db');
+const defaultDb = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
 
 const JSON_OUT = process.argv.includes('--json');
 const CANCELLABLE = ['pending', 'confirmed', 'scheduled', 'rescheduled'];
 
-async function main() {
-  const today = etDateString();
+/**
+ * Read-only detect step (also the lead-to-cash invariants sweep's
+ * `churned_live_state` detector). Returns customer IDs + flag names only —
+ * never names, phones, or emails — so the result is safe to summarize in an
+ * ops email or a dashboard alert.
+ *
+ * @param {{ db?: import('knex').Knex, today?: string }} [opts]
+ * @returns {Promise<{ churned: number, withLiveState: number, counts: Record<string, number>, findings: Array<{ id: string, stage: string|null, active: boolean|null, churned_at: any, flags: string[] }> }>}
+ */
+async function auditChurnedAccountsLiveState({ db = defaultDb, today = etDateString() } = {}) {
   const churned = await db('customers')
     .where(function () {
       this.where({ pipeline_stage: 'churned' }).orWhere({ active: false });
@@ -33,8 +42,7 @@ async function main() {
     .select('id', 'pipeline_stage', 'active', 'waveguard_tier', 'monthly_rate', 'billing_mode', 'autopay_enabled', 'churned_at');
   const ids = churned.map((c) => c.id);
   if (!ids.length) {
-    console.log('No churned/inactive customers.');
-    return;
+    return { churned: 0, withLiveState: 0, counts: {}, findings: [] };
   }
 
   const hasPlanRates = await db.schema.hasTable('customer_plan_rates');
@@ -80,11 +88,22 @@ async function main() {
   const counts = {};
   for (const f of findings) for (const flag of f.flags) counts[flag.split('=')[0]] = (counts[flag.split('=')[0]] || 0) + 1;
 
-  if (JSON_OUT) {
-    console.log(JSON.stringify({ churned: churned.length, withLiveState: findings.length, counts, findings }, null, 2));
+  return { churned: churned.length, withLiveState: findings.length, counts, findings };
+}
+
+async function main() {
+  const result = await auditChurnedAccountsLiveState();
+  const { churned, findings, counts } = result;
+  if (!churned) {
+    console.log('No churned/inactive customers.');
     return;
   }
-  console.log(`Churned/inactive customers: ${churned.length}`);
+
+  if (JSON_OUT) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Churned/inactive customers: ${churned}`);
   console.log(`With live plan state:      ${findings.length}`);
   for (const [k, v] of Object.entries(counts).sort((a, b) => b[1] - a[1])) console.log(`  ${k.padEnd(26)} ${v}`);
   console.log('');
@@ -93,9 +112,13 @@ async function main() {
   }
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  })
-  .finally(() => db.destroy());
+if (require.main === module) {
+  main()
+    .catch((err) => {
+      console.error(err);
+      process.exitCode = 1;
+    })
+    .finally(() => defaultDb.destroy());
+}
+
+module.exports = { auditChurnedAccountsLiveState, CANCELLABLE };
