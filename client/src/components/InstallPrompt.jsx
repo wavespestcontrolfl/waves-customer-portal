@@ -66,6 +66,8 @@ export default function InstallPrompt() {
       right: 0,
       zIndex: 9999,
       padding: '0 12px 12px',
+      // Clear the iOS home indicator (viewport-fit=cover PWA shell).
+      paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
       pointerEvents: 'none',
     }}>
       {/* Glass card (owner 2026-07-07: match the glass UI) — frosted white

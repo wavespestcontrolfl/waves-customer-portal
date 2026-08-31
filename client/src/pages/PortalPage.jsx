@@ -478,8 +478,9 @@ function ShellCloseButton({ onClick, label = 'Close' }) {
       onClick={onClick}
       aria-label={label}
       style={{
-        width: 36,
-        height: 36,
+        // 44x44 minimum touch target on customer surfaces.
+        width: 44,
+        height: 44,
         borderRadius: 8,
         border: `1px solid ${PORTAL_SHELL.borderStrong}`,
         background: PORTAL_SHELL.surface,
@@ -3022,11 +3023,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           </button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
+        {/* 2-up on phones: four columns squeezed the chips to ~66px on
+            320-390px viewports. */}
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
             <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
-              <div style={{ fontSize: compact ? 12 : 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
+              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
               {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
             </button>
           ))}
@@ -4773,23 +4776,31 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               return (
                 <div key={p.key} style={{
+                  // flexWrap + minWidth:0 on the text cluster: long labels
+                  // ("72-Hour Appointment Reminder") plus the select and the
+                  // switch overflowed ~320px viewports; on narrow screens the
+                  // controls cluster wraps onto its own line instead.
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  flexWrap: 'wrap',
                   padding: '12px 0',
                   borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
                     <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
-                    <div>
+                    <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>{p.label}</div>
-                      <div style={{ fontSize: 12, color: muted }}>{p.desc}</div>
+                      <div style={{ fontSize: 12, color: muted, whiteSpace: 'normal' }}>{p.desc}</div>
                       {p.locked && (
                         <div style={{ fontSize: 12, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
+                  {/* Select + switch travel together so a wrap never splits
+                      the controls across lines. */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 'auto' }}>
                   {p.channelKey && (() => {
                     // Email/Both can only be offered once an email is on file —
                     // otherwise the backend silently falls back to SMS and the
@@ -4805,7 +4816,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         aria-label={`Delivery method for ${p.label}`}
                         style={{
                           fontSize: 12, fontWeight: 800, color: B.glassNavy,
-                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 36,
+                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                           background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                           cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                         }}
@@ -4825,23 +4836,32 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       disabled={p.locked}
                       onClick={p.locked ? undefined : () => handleToggle(p.key)}
                       style={{
-                        width: 44, height: 24, borderRadius: 12, border: 'none', padding: 0,
+                        // 44x44 hit target; the gold 44x24 track is the inner
+                        // visual (owner 2026-08-28: keep the gold on/off look).
+                        width: 44, height: 44, border: 'none', padding: 0,
+                        background: 'transparent',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                         cursor: p.locked ? 'default' : 'pointer',
-                        // Gold = on, pale gold = off (owner 2026-08-28)
-                        background: isOn ? B.yellow : `${B.yellow}55`,
-                        position: 'relative', transition: 'background 0.3s',
                         opacity: p.locked ? 0.85 : 1,
                       }}
                     >
-                      <span style={{
-                        position: 'absolute', top: 2, width: 20, height: 20,
-                        borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-                        left: isOn ? 22 : 2, transition: 'left 0.3s',
-                      }} />
+                      <span aria-hidden="true" style={{
+                        width: 44, height: 24, borderRadius: 12, flexShrink: 0,
+                        // Gold = on, pale gold = off (owner 2026-08-28)
+                        background: isOn ? B.yellow : `${B.yellow}55`,
+                        position: 'relative', display: 'inline-block', transition: 'background 0.3s',
+                      }}>
+                        <span style={{
+                          position: 'absolute', top: 2, width: 20, height: 20,
+                          borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+                          left: isOn ? 22 : 2, transition: 'left 0.3s',
+                        }} />
+                      </span>
                     </button>
                     {p.locked && (
                       <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
+                  </div>
                   </div>
                 </div>
               );
@@ -14228,15 +14248,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                           onClick={() => removePhoto(i)}
                           aria-label={`Remove photo ${i + 1}`}
                           style={{
+                            // 44x44 hit target; the visible 26x26 chip stays
+                            // small so it doesn't swallow the thumbnail.
                             position: 'absolute',
-                            top: 5,
-                            right: 5,
-                            width: 26,
-                            height: 26,
-                            borderRadius: 8,
-                            background: 'rgba(15,23,42,0.82)',
-                            color: '#fff',
-                            border: '1px solid rgba(255,255,255,0.65)',
+                            top: -4,
+                            right: -4,
+                            width: 44,
+                            height: 44,
+                            background: 'transparent',
+                            border: 'none',
                             cursor: 'pointer',
                             display: 'inline-flex',
                             alignItems: 'center',
@@ -14244,7 +14264,19 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                             padding: 0,
                           }}
                         >
-                          <Icon name="close" size={13} strokeWidth={2.2} />
+                          <span aria-hidden="true" style={{
+                            width: 26,
+                            height: 26,
+                            borderRadius: 8,
+                            background: 'rgba(15,23,42,0.82)',
+                            color: '#fff',
+                            border: '1px solid rgba(255,255,255,0.65)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}>
+                            <Icon name="close" size={13} strokeWidth={2.2} />
+                          </span>
                         </button>
                       </div>
                     ))}
@@ -14488,7 +14520,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
       style={{
-        flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+        flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'center', gap: 4, padding: '7px 2px', border: 'none',
         background: 'transparent', cursor: 'pointer', minHeight: 58,
         color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
@@ -14505,7 +14537,13 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
         background: B.yellow,
       }} />}
       <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
-      <span style={{ fontSize: 10, fontWeight: isActive ? 850 : 700, letterSpacing: 0 }}>{t.label}</span>
+      {/* 12px is the ceiling that keeps "Billing"/"Visits" fitting 5-across
+          on 320px — tab captions only, never body copy. */}
+      <span style={{
+        fontSize: 12, fontWeight: isActive ? 850 : 700, letterSpacing: 0,
+        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap', lineHeight: 1.2,
+      }}>{t.label}</span>
     </button>
   );
   return (
@@ -14589,7 +14627,8 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
-        maxHeight: 'calc(100vh - 16px)',
+        // dvh: 100vh over-measures behind the iOS Safari toolbar.
+        maxHeight: 'calc(100dvh - 16px)',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
@@ -15685,7 +15724,10 @@ export default function PortalPage() {
       {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
           that are programmatically focusable — without it the skip link
           scrolls but Tab keeps walking the header. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: `24px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
+      {/* Mobile bottom padding budgets the floating nav (minHeight 58 + 8px
+          float) plus the iOS home-indicator inset — a flat 92px left the last
+          card underneath the bar on notched phones. */}
+      <main id="portal-main" tabIndex={-1} style={{ padding: isMobileShell ? '24px 16px calc(108px + env(safe-area-inset-bottom, 0px))' : '24px 16px 32px', maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
         {/* No shell-level h1: every non-dashboard tab renders its own visible
             h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
