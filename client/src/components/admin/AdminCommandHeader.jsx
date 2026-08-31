@@ -55,7 +55,14 @@ export default function AdminCommandHeader({
   return (
     <div
       className={cn(
-        sticky && "md:sticky md:top-0",
+        // Sticky on every breakpoint. Below md the shell's fixed top bar
+        // (AdminLayoutV2, 52px + safe-area, z-90) overlays the top of the
+        // .admin-main scroll container, so the sticky offset must clear it;
+        // at md+ there is no fixed bar and the header pins to the scrollport
+        // top. z-20 stays under the shell chrome (top bar 90 / tab bar 95 /
+        // backdrop 99 / sidebar 100) and Dialog overlays.
+        sticky &&
+          "sticky top-[calc(52px_+_env(safe-area-inset-top))] md:top-0",
         "z-20 mb-5 bg-surface-page/95 pb-3",
         className,
       )}

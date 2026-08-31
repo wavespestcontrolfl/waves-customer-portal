@@ -3197,7 +3197,7 @@ export function MobileEstimateRow({
             type="button"
             onClick={openPanel}
             aria-label={`Open ${customerName} customer estimate history`}
-            className="text-14 font-medium text-blue-700 underline decoration-dotted underline-offset-2 truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+            className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
           >
             {customerName}
           </button>

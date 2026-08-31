@@ -14,7 +14,13 @@ describe("AdminCommandHeader heading hierarchy", () => {
     expect(
       screen.getByRole("heading", { level: 1, name: "Services" }),
     ).toHaveClass("text-22");
-    expect(container.firstChild).toHaveClass("md:sticky");
+    // Sticky on all breakpoints; below md the offset clears the shell's
+    // fixed 52px + safe-area top bar.
+    expect(container.firstChild).toHaveClass(
+      "sticky",
+      "top-[calc(52px_+_env(safe-area-inset-top))]",
+      "md:top-0",
+    );
     expect(container.querySelector(".border-b")).not.toBeInTheDocument();
   });
 
@@ -33,7 +39,7 @@ describe("AdminCommandHeader heading hierarchy", () => {
         name: "Protocol & Readiness",
       }),
     ).toHaveClass("text-18");
-    expect(container.firstChild).not.toHaveClass("md:sticky");
+    expect(container.firstChild).not.toHaveClass("sticky");
   });
 
   it("keeps section targets touch-safe and compact on larger screens", () => {

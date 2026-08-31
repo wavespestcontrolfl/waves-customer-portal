@@ -3468,7 +3468,10 @@ function BacklinkAgentPanel() {
           >
             Queue ({queue.length})
           </div>{" "}
-          <div style={{ maxHeight: 400, overflowY: "auto" }}>
+          {/* overflowX spelled explicitly (overflow-y alone computes x to auto
+              but never serializes "overflow-x: auto", so the index.css
+              scroll-shadow affordance selector would miss this wrapper). */}
+          <div style={{ maxHeight: 400, overflowY: "auto", overflowX: "auto" }}>
             {queue.length === 0 ? (
               <div
                 style={{
