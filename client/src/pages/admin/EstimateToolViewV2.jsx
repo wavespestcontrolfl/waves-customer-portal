@@ -3689,6 +3689,11 @@ export default function EstimateToolViewV2({
           _poolCageSizeEdited: false,
           _storiesEdited: false,
           _unitCountEdited: false,
+          // Every lookup re-seeds the count for ITS address — a value typed
+          // for the previous address must never linger where an edit could
+          // verify it against the wrong parcel (pre-push codex P1 r5).
+          // The truthy-1 seed renders blank: it is "no signal", not a fact.
+          unitCount: Number(ep.unitCount) > 1 ? String(ep.unitCount) : "",
         };
         // With derivation suppressed nothing would refresh a previous
         // address's auto-derived footprint — clear it (manual entries keep
