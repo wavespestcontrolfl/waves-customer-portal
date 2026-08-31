@@ -479,7 +479,11 @@ export default function ServiceReportDocument({ data, token }) {
   const callbackSchematicSuppressed = data.isCallback === true
     && data.reserviceGateOn === true
     && Boolean(data.reserviceReport);
-  const schematicSvg = callbackSchematicSuppressed
+  // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31): the whole pest line —
+  // recurring, one-time, re-service — prints a traced map or nothing; the
+  // '-ton1' PDF key suffix re-renders cached pest documents once.
+  const schematicSuppressed = callbackSchematicSuppressed || data.pestTraceOrNothing === true;
+  const schematicSvg = schematicSuppressed
     ? null
     : (data.treatmentMap?.schematic?.svg || data.mapSvg || null);
   const schematicSrc = schematicSvg

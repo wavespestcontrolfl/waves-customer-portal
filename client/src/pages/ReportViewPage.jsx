@@ -9022,6 +9022,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               token={token}
               mode={mode}
               tracedMap={data.treatmentMap?.traced || null}
+              traceOrNothing={data.pestTraceOrNothing === true}
               /* Pressure trend rides INSIDE the hero (owner 2026-07-30:
                  "merge into one block") — the standalone card below is
                  suppressed whenever this slot is filled. */

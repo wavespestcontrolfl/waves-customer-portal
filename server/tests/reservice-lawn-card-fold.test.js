@@ -288,6 +288,39 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     expect(performed.treatmentMap.traced?.snapshotUrl).toBeTruthy();
   });
 
+  test('R4 REVERSED (owner 2026-08-31): callbacks ask for a review again even with the gate on', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const data = await buildReportV1Data(lawnCallbackService(), 'tok-fold-r4', makeKnex());
+    expect(data.isCallback).toBe(true);
+    expect(data.reviewRequestEligible).toBe(true);
+  });
+
+  test('pestTraceOrNothing payload flag: pest line + gate on only', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    try {
+      const lawn = await buildReportV1Data(lawnCallbackService(), 'tok-ton-1', makeKnex());
+      expect(lawn.pestTraceOrNothing).toBe(false);
+      const pest = await buildReportV1Data(lawnCallbackService({
+        service_line: 'pest',
+        service_type: 'Quarterly Pest Control Service',
+        is_callback: false,
+        service_data: '{}',
+        structured_notes: '{}',
+        technician_notes: '',
+      }), 'tok-ton-2', makeKnex());
+      expect(pest.pestTraceOrNothing).toBe(true);
+      delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+      const dark = await buildReportV1Data(lawnCallbackService({
+        service_line: 'pest', service_type: 'Quarterly Pest Control Service', is_callback: false,
+        service_data: '{}', structured_notes: '{}', technician_notes: '',
+      }), 'tok-ton-3', makeKnex());
+      expect(dark.pestTraceOrNothing).toBe(false);
+    } finally {
+      delete process.env.GATE_PEST_TRACE_OR_NOTHING;
+    }
+  });
+
   test('callback with NO reviewed narrative keeps every card — removal never loses the sole record', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const svc = lawnCallbackService({ technician_notes: '' });
