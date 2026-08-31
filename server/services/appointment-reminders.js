@@ -2167,9 +2167,12 @@ const AppointmentReminders = {
   // a row born at the wrong time never self-corrects (four series visits
   // drifted this way 08-30; #3625 repaired the data, this closes the
   // path). Reads the row back and prefers it; the caller's values are
-  // the fallback only when the row is not visible yet or unreadable. A
-  // windowless row keeps the 08:00 convention (the UPDATE trigger
-  // re-arms it once a real window is set). Returns null with no date.
+  // the fallback only when the row is not visible yet or unreadable.
+  // Returns null with no date, else { appointmentTime, windowless }:
+  // a windowless row resolves to the canonical date+08:00 slot AND
+  // windowless=true — the caller must pass that as closeReminderWindows
+  // so the row registers as a non-delivering placeholder (see
+  // registerAppointment) instead of an armed 08:00 nobody chose.
   async resolveCommittedVisitTime(scheduledServiceId, { date, windowStart } = {}, conn = db) {
     let resolvedDate = date || null;
     let resolvedStart = windowStart || null;
@@ -2192,7 +2195,10 @@ const AppointmentReminders = {
       logger.warn(`[appt-remind] could not read back visit ${scheduledServiceId} for its reminder time (${err.message}) — using the caller's values`);
     }
     if (!resolvedDate) return null;
-    return `${resolvedDate}T${resolvedStart || '08:00'}`;
+    return {
+      appointmentTime: `${resolvedDate}T${resolvedStart || '08:00'}`,
+      windowless: !resolvedStart,
+    };
   },
 
   async registerAppointment(scheduledServiceId, customerId, appointmentTime, serviceType, source, options = {}) {

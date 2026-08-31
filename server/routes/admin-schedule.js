@@ -1257,16 +1257,18 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
     const AppointmentReminders = require('../services/appointment-reminders');
     // Time comes from the committed row, not the caller's copy — see
     // resolveCommittedVisitTime for why (UPDATE-only sync trigger).
-    const appointmentTime = await AppointmentReminders.resolveCommittedVisitTime(
+    const resolved = await AppointmentReminders.resolveCommittedVisitTime(
       scheduledServiceId,
       { date: scheduledDate, windowStart: normalizeHHMM(windowStart) || null },
     );
-    if (!appointmentTime) return;
+    if (!resolved) return;
     await AppointmentReminders.registerAppointment(
       scheduledServiceId, customerId,
-      appointmentTime,
+      resolved.appointmentTime,
       serviceType, source,
-      { sendConfirmation: false },
+      // A windowless visit registers as a non-delivering placeholder, never
+      // an armed 08:00 — the UPDATE trigger re-arms it once a window is set.
+      { sendConfirmation: false, closeReminderWindows: resolved.windowless },
     );
   } catch (e) {
     logger.error(`[schedule] Reminder registration failed for spawned visit ${scheduledServiceId}: ${e.message}`);
@@ -5547,14 +5549,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
         try {
           // Committed row is the truth for the time (UPDATE-only sync
           // trigger — a reminder born at the wrong time never heals).
-          const appointmentTime = await AppointmentReminders.resolveCommittedVisitTime(
+          const resolved = await AppointmentReminders.resolveCommittedVisitTime(
             appt.id, { date: appt.date, windowStart: windowStart || null },
-          ) || `${appt.date}T${windowStart || '08:00'}`;
+          ) || { appointmentTime: `${appt.date}T${windowStart || '08:00'}`, windowless: !windowStart };
           await AppointmentReminders.registerAppointment(
             appt.id, customerId,
-            appointmentTime,
+            resolved.appointmentTime,
             serviceType, 'admin_manual',
-            { sendConfirmation: !!appt.confirmation, deferConfirmation: true }
+            // Windowless → non-delivering placeholder (no confirmation, no
+            // 72h/24h texts "at 8:00 AM" for a time nobody chose).
+            { sendConfirmation: !!appt.confirmation, deferConfirmation: true, closeReminderWindows: resolved.windowless }
           );
         } catch (e) {
           logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
@@ -16499,6 +16503,7 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,
   noCardOnFileAlert,

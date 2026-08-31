@@ -28,43 +28,43 @@ describe('resolveCommittedVisitTime — the committed row is the truth for a rem
     // never corrected it.
     rowReader({ scheduled_date: '2026-09-15', window_start: '11:00:00' });
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: null }))
-      .resolves.toBe('2026-09-15T11:00');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T11:00', windowless: false });
   });
 
   test('the row wins over a caller value that disagrees', async () => {
     rowReader({ scheduled_date: '2026-09-15', window_start: '11:00:00' });
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-14', windowStart: '08:00' }))
-      .resolves.toBe('2026-09-15T11:00');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T11:00', windowless: false });
   });
 
   test('a pg Date-typed scheduled_date resolves to its calendar day', async () => {
     rowReader({ scheduled_date: new Date('2026-09-15T00:00:00.000Z'), window_start: '09:30:00' });
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, {}))
-      .resolves.toBe('2026-09-15T09:30');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T09:30', windowless: false });
   });
 
   test('a windowless committed row keeps the 08:00 convention (UPDATE trigger re-arms it later)', async () => {
     rowReader({ scheduled_date: '2026-09-15', window_start: null });
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: null }))
-      .resolves.toBe('2026-09-15T08:00');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T08:00', windowless: true });
   });
 
   test('a windowless committed row overrides a stale non-null caller window (08:00 convention)', async () => {
     rowReader({ scheduled_date: '2026-09-15', window_start: null });
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: '13:00' }))
-      .resolves.toBe('2026-09-15T08:00');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T08:00', windowless: true });
   });
 
   test('row not visible (not committed yet) → the caller values stand', async () => {
     rowReader(undefined);
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: '10:00' }))
-      .resolves.toBe('2026-09-15T10:00');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T10:00', windowless: false });
   });
 
   test('read-back failure never blocks registration — caller values stand', async () => {
     rowReader(null, { throws: 'connection reset' });
     await expect(AppointmentReminders.resolveCommittedVisitTime(901, { date: '2026-09-15', windowStart: '10:00' }))
-      .resolves.toBe('2026-09-15T10:00');
+      .resolves.toEqual({ appointmentTime: '2026-09-15T10:00', windowless: false });
   });
 
   test('no date from anywhere → null (nothing to register)', async () => {
@@ -80,12 +80,14 @@ describe('admin-schedule registers spawned and created visits from the committed
     const start = src.indexOf('async function registerSpawnedVisitReminder(');
     const body = src.slice(start, src.indexOf('\n}\n', start));
     expect(body).toContain('resolveCommittedVisitTime(');
+    expect(body).toContain('closeReminderWindows: resolved.windowless');
     expect(body).not.toMatch(/T\$\{normalizeHHMM\(windowStart\) \|\| '08:00'\}/);
   });
 
   test('the POST create path resolves each created appointment through the committed row', () => {
     const at = src.indexOf("serviceType, 'admin_manual',\n            { sendConfirmation: !!appt.confirmation, deferConfirmation: true }");
     expect(at).toBeGreaterThan(0);
-    expect(src.slice(at - 600, at)).toContain('resolveCommittedVisitTime(');
+    expect(src.slice(at - 700, at)).toContain('resolveCommittedVisitTime(');
+    expect(src.slice(at, at + 200)).toContain('closeReminderWindows: resolved.windowless');
   });
 });
