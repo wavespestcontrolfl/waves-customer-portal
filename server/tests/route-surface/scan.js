@@ -145,12 +145,33 @@ const TOP_LEVEL_TRANSPARENT = new Set([
   'AwaitExpression', 'SequenceExpression',
 ]);
 
+/**
+ * Human-readable label for the construct that makes descendants conditional;
+ * null for plain blocks. The label becomes part of a conditional route's
+ * allowlist IDENTITY, so flipping a predicate (!== to ===) changes the key.
+ */
+function condLabel(node, src) {
+  if (node.type === 'IfStatement' || node.type === 'ConditionalExpression') {
+    return src.slice(node.test.start, node.test.end).replace(/\s+/g, ' ').slice(0, 80);
+  }
+  if (node.type === 'ForOfStatement' || node.type === 'ForInStatement'
+    || node.type === 'ForStatement' || node.type === 'WhileStatement' || node.type === 'DoWhileStatement') {
+    return 'loop';
+  }
+  if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+    return node.id && node.id.name ? `function ${node.id.name}` : 'function';
+  }
+  return null;
+}
+
 function nestedCtx(node, ctx) {
-  if (!ctx.topLevel) return ctx;
   if (TOP_LEVEL_TRANSPARENT.has(node.type)) return ctx;
   // Entering a function body, block, loop, conditional, etc. — anything
-  // registered below here is conditional / deferred.
-  return { ...ctx, topLevel: false };
+  // registered below here is conditional / deferred. Every predicate level
+  // is recorded so it can be encoded into the route identity.
+  const label = condLabel(node, ctx.src);
+  if (ctx.topLevel === false && !label) return ctx;
+  return { ...ctx, topLevel: false, conds: label ? [...ctx.conds, label] : ctx.conds };
 }
 
 class ModuleAnalysis {
@@ -174,9 +195,12 @@ class ModuleAnalysis {
 
   collect() {
     this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
+    this.bindingWrites = new Map(); // name -> count of value-bearing writes
+    this.reassignedNames = new Set(); // written more than once — ambiguous
     const callsWithIdentifierArgs = [];
     const optionalCalls = [];
     const objectLiterals = [];
+    const memberAssignments = [];
     walk(this.ast.program, (node, ctx) => {
       if (node.type === 'CallExpression' && node.arguments.some((a) => a && a.type === 'Identifier')) {
         callsWithIdentifierArgs.push(node);
@@ -194,9 +218,11 @@ class ModuleAnalysis {
           if (prop.type !== 'ObjectProperty' || prop.key.type !== 'Identifier') continue;
           const local = prop.value.type === 'Identifier' ? prop.value.name : null;
           if (!local) continue;
+          this.countWrite(local);
           this.setBinding(local, { kind: 'requireMember', module: mod, spec: node.init.arguments[0].value, name: prop.key.name, topLevel: ctx.topLevel });
         }
       } else if (node.type === 'FunctionDeclaration' && node.id) {
+        this.countWrite(node.id.name);
         this.setBinding(node.id.name, { kind: 'function', topLevel: ctx.topLevel });
       } else if (node.type === 'ForOfStatement'
         && node.left.type === 'VariableDeclaration'
@@ -229,6 +255,12 @@ class ModuleAnalysis {
         && node.left.property.name === 'exports') {
         if (node.right.type === 'Identifier') this.exportCandidate = node.right.name;
         else if (node.right.type === 'ObjectExpression') this.exportObjectNode = node.right;
+      } else if (node.type === 'AssignmentExpression' && node.operator === '='
+        && node.left.type === 'MemberExpression' && !node.left.computed
+        && node.left.property.type === 'Identifier') {
+        // `holder.api = router` — modeled post-walk (props may involve
+        // bindings declared later in the file).
+        memberAssignments.push({ objectNode: node.left.object, prop: node.left.property.name, right: node.right, node });
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
         && node.left.type === 'Identifier') {
         // `let api; api = router;` — an assignment binds exactly like a
@@ -266,7 +298,7 @@ class ModuleAnalysis {
           // objects (res.app, this.modules, ...) are dropped there like any
           // non-router object.
           if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
-            this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, node });
+            this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
           }
           return;
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
@@ -276,7 +308,7 @@ class ModuleAnalysis {
           }
           if (base && base.type === 'Identifier') objName = base.name;
           else if (base && base.type === 'MemberExpression') {
-            this.registrations.push({ object: null, objectNode: base, method, args: node.arguments, topLevel: ctx.topLevel, node });
+            this.registrations.push({ object: null, objectNode: base, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
             return;
           } else if (base && this.isRouterFactory(base)) {
             this.problems.push(`${this.loc(node)}: ${method}() chained on an inline Router() call — bind the router to a const so its routes can be attributed`);
@@ -285,18 +317,31 @@ class ModuleAnalysis {
         if (objName === null) {
           // not a chain we can attribute (or not a registration shape at all)
         } else if (unresolvedMethod) {
-          this.registrations.push({ object: objName, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, node });
+          this.registrations.push({ object: objName, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route')) {
-          this.registrations.push({ object: objName, method, args: node.arguments, topLevel: ctx.topLevel, node });
+          this.registrations.push({ object: objName, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
         }
       }
-    }, { topLevel: true });
+    }, { topLevel: true, conds: [], src: this.src });
     // Resolve identifier aliases (`const api = router`) to their canonical
     // binding so registrations made through the alias are still attributed to
     // the router (or the app) — a plain alias mounts routes just as well as
     // the original name, so dropping them would be a fail-open hole.
     for (const [name, b] of this.bindings) {
       if (b.kind === 'alias' && this.routers.has(this.canonName(name))) this.routers.add(name);
+    }
+    // `holder.api = router` — extend the modeled object's props; a router
+    // assigned into a shape the scanner cannot model is rejected.
+    for (const a of memberAssignments) {
+      const base = this.resolveMemberChain(a.objectNode);
+      const b = base ? this.bindings.get(base) : null;
+      if (b && b.kind === 'object' && a.right.type === 'Identifier') {
+        b.props.set(a.prop, a.right.name);
+        continue;
+      }
+      if (a.right.type === 'Identifier' && this.routers.has(this.canonName(a.right.name))) {
+        this.problems.push(`${this.loc(a.node)}: router ${a.right.name} assigned into an object shape the scanner cannot model — register routes via the router identifier, or a one-level object literal bound to a const`);
+      }
     }
     for (const r of this.registrations) {
       if (r.objectNode) r.object = this.resolveMemberChain(r.objectNode) || '<member>';
@@ -434,7 +479,15 @@ class ModuleAnalysis {
     this.bindings.set(name, desc);
   }
 
+  /** A value-bearing write; two or more make the name ambiguous to resolve. */
+  countWrite(name) {
+    const w = (this.bindingWrites.get(name) || 0) + 1;
+    this.bindingWrites.set(name, w);
+    if (w > 1) this.reassignedNames.add(name);
+  }
+
   recordBinding(name, init, topLevel) {
+    if (init) this.countWrite(name);
     if (this.isRouterFactory(init)) {
       this.routers.add(name);
       this.setBinding(name, { kind: 'router', topLevel });
@@ -553,10 +606,10 @@ class ModuleAnalysis {
     if (node.type === 'Identifier') {
       const enumValues = this.enumValuesAt(node.name, node.start);
       if (enumValues) return enumValues;
-      // A shadowed name could resolve to a DIFFERENT value at this position
-      // than the top-level binding we kept (`{ const PATH = '/leak'; ... }`)
-      // — refuse, so the path surfaces as unresolved instead of mis-scanned.
-      if (this.shadowedNames.has(node.name)) return null;
+      // A shadowed or reassigned name could resolve to a DIFFERENT value at
+      // this position than the binding we kept — refuse, so the path
+      // surfaces as unresolved instead of mis-scanned.
+      if (this.shadowedNames.has(node.name) || this.reassignedNames.has(node.name)) return null;
       const b = this.bindings.get(node.name);
       if (!b) return null;
       if (b.kind === 'string') return [b.value];
@@ -659,6 +712,12 @@ class ModuleAnalysis {
           // Which binding this reference resolves to depends on lexical scope
           // the flat model doesn't track — never credit a shadowed name.
           return [{ type: 'opaque', desc: `${node.name} (shadowed by a nested redeclaration)` }];
+        }
+        if (this.reassignedNames.has(node.name) || this.reassignedNames.has(canon)) {
+          // Written more than once — which value this reference sees depends
+          // on execution order (`let gate = noop; router.get('/x', gate, h);
+          // gate = realGuard;`). Never credit it.
+          return [{ type: 'opaque', desc: `${node.name} (reassigned — value depends on execution order)` }];
         }
         if (this.routers.has(canon)) return [{ type: 'localRouter', name: canon }];
         const b = this.bindings.get(canon);
@@ -1001,7 +1060,7 @@ class Scanner {
             this.routes.push(this.makeRoute({
               method: 'USE', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...ownGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
-              resolved: pathResolved, conditional: !reg.topLevel, extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
+              resolved: pathResolved, conditional: !reg.topLevel, cond: reg.cond, extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
             }));
           }
           if (routerRefs.length === 0 && statics.length === 0) {
@@ -1023,7 +1082,7 @@ class Scanner {
             this.routes.push(this.makeRoute({
               method: 'STATIC', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...s.precedingGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
-              resolved: pathResolved, conditional: !reg.topLevel, extra: s.desc, loc: m.loc(reg.node),
+              resolved: pathResolved, conditional: !reg.topLevel, cond: reg.cond, extra: s.desc, loc: m.loc(reg.node),
             }));
           }
           for (const ref of routerRefs) {
@@ -1065,13 +1124,13 @@ class Scanner {
             ...ownGuards.map((g) => ({ ...g, baseScope: ctx.prefix })),
             ...(reg.topLevel ? inEffectGuards(inEffect, fullPath) : []),
           ],
-          resolved: pathResolved, conditional: !reg.topLevel, loc: m.loc(reg.node),
+          resolved: pathResolved, conditional: !reg.topLevel, cond: reg.cond, loc: m.loc(reg.node),
         }));
       }
     }
   }
 
-  makeRoute({ method, fullPath, routerFile, mountPrefix, guards, resolved, conditional, extra, loc }) {
+  makeRoute({ method, fullPath, routerFile, mountPrefix, guards, resolved, conditional, cond, extra, loc }) {
     const effective = guards.filter((g) => !isExempt(g, method, fullPath));
     const names = [...new Set(effective.map((g) => g.name))];
     return {
@@ -1080,6 +1139,7 @@ class Scanner {
       router: routerFile,
       mount: mountPrefix,
       conditional: Boolean(conditional),
+      cond: conditional ? (cond || null) : null,
       guards: names,
       public: names.length === 0,
       resolved,
@@ -1157,7 +1217,7 @@ function isExempt(guard, method, fullPath) {
 // conditionally must re-enter review if it ever moves to unconditional
 // top-level registration — the key changes and the allowlist match breaks.
 function routeKey(r) {
-  return `${r.router} @ ${r.mount} :: ${r.method} ${r.path}${r.extra ? ` (${r.extra})` : ''}${r.conditional ? ' [conditional]' : ''}`;
+  return `${r.router} @ ${r.mount} :: ${r.method} ${r.path}${r.extra ? ` (${r.extra})` : ''}${r.conditional ? ` [conditional${r.cond ? `: ${r.cond}` : ''}]` : ''}`;
 }
 
 /** Group public routes into allowlist-shaped mounts (reasons blank). */
@@ -1166,7 +1226,7 @@ function toAllowlistShape(publicRoutes) {
   for (const r of publicRoutes) {
     const k = `${r.router} @ ${r.mount}`;
     if (!groups.has(k)) groups.set(k, { router: r.router, mount: r.mount, reason: '', routes: new Set() });
-    groups.get(k).routes.add(`${r.method} ${r.path}${r.extra ? ` (${r.extra})` : ''}${r.conditional ? ' [conditional]' : ''}`);
+    groups.get(k).routes.add(`${r.method} ${r.path}${r.extra ? ` (${r.extra})` : ''}${r.conditional ? ` [conditional${r.cond ? `: ${r.cond}` : ''}]` : ''}`);
   }
   return {
     mounts: [...groups.values()].map((g) => ({ ...g, routes: [...g.routes].sort() })),

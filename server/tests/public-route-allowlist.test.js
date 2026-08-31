@@ -592,6 +592,37 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
   });
 
+  test('a router assigned into an object PROPERTY (holder.api = router) is not lost', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const holder = {};',
+        'holder.api = router;',
+        "holder.api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a REASSIGNED name is never credited as a guard (value depends on execution order)', () => {
+    // `let gate = noop; router.get('/leak', gate, h); gate = guardA;` — the
+    // live route runs the no-op, so the later guard value must not count.
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'let gate = (req, res, next) => next();',
+        "router.get('/leak', gate, (req, res) => res.json({}));",
+        'gate = guardA;',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
   test('a router stored in an object shape the scanner cannot model is a problem', () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
@@ -686,7 +717,9 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/oauth/callback']);
   });
 
-  test('a CONDITIONAL registration carries [conditional] in its allowlist identity', () => {
+  test('a CONDITIONAL registration carries its PREDICATE in its allowlist identity', () => {
+    // Flipping the predicate (!== to ===) or moving the route to top level
+    // changes the key, so the existing approval cannot be reused.
     const res = scanOf({
       'server/index.js': app([
         "if (process.env.NODE_ENV !== 'production') {",
@@ -694,7 +727,8 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
         '}',
       ].join('\n')),
     });
-    expect(res.publicRoutes.map(routeKey)).toEqual(['server/index.js @ / :: GET /debug [conditional]']);
+    expect(res.publicRoutes.map(routeKey))
+      .toEqual(["server/index.js @ / :: GET /debug [conditional: process.env.NODE_ENV !== 'production']"]);
   });
 
   test('an optional-call registration (app?.get) on a known router is a reported problem', () => {
