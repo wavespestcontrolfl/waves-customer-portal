@@ -593,14 +593,25 @@ async function processCancellationRequest({
     const inProgressByStatus = await db('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('status', ['en_route', 'on_site'])
-      .select('id');
+      .select('id', 'scheduled_date');
     const inProgressByTrack = await db('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('track_state', LIVE_TRACK_STATES)
       .whereNotIn('status', ['en_route', 'on_site', 'completed', 'cancelled', 'skipped', 'no_show'])
-      .select('id');
+      .select('id', 'scheduled_date');
     for (const row of [...inProgressByStatus, ...inProgressByTrack]) {
       if (scopedIds && !scopedIds.has(row.id)) continue;
+      // Keep-through (end of paid coverage): a covered visit inside the
+      // retained window is deliberately staying on the calendar, so a tech
+      // mid-delivery on it needs no manual cancellation — flagging it would
+      // report an otherwise clean end-of-coverage cancel as partial and skip
+      // the term's cancel decision merely because a paid visit is underway.
+      if (keepIds && keepIds.includes(String(row.id))) {
+        const d = row.scheduled_date instanceof Date
+          ? row.scheduled_date.toISOString().slice(0, 10)
+          : String(row.scheduled_date || '').slice(0, 10);
+        if (d && d <= sweepAfter) continue;
+      }
       errors.push(`in_progress_visit:${row.id}`);
       logger.warn(`[cancellation-processor] visit ${row.id} is in progress — left for manual handling`);
     }

@@ -552,6 +552,37 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     }
     if (prior) {
       logger.info(`[admin-cancellation] duplicate cancel for customer ${customerId} matched case ${prior.id} — returning the recorded outcome`);
+      // Repair a lost refund task before answering the retry: a prior
+      // end_now_refund run whose term decision landed but whose office task
+      // did not persist recorded refund: null — echoing that outcome as
+      // clean would leave the unused-value refund without its actionable
+      // billing task forever (this latch is the only path a retry reaches).
+      // The task is deduped by TERM, so raising it here is idempotent when
+      // it actually exists; `refund` is computed above from the now-terminal
+      // covered rows, so the recorded amount is the post-sweep truth.
+      let repairedRefund = priorSnap && priorSnap.refund ? priorSnap.refund : null;
+      const repairErrors = [];
+      if (prepayPlan.prepayDisposition === 'end_now_refund' && !repairedRefund) {
+        try {
+          await raisePrepayRefundTask({
+            customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
+          });
+          repairedRefund = refund;
+          try {
+            const snap = { ...priorSnap, refund };
+            delete snap.proposedRefund;
+            await db('cancellation_cases').where({ id: prior.id })
+              .update({ snapshot: JSON.stringify(snap), updated_at: new Date() });
+          } catch (snapErr) {
+            // Task persisted (term-deduped) — a lost snapshot stamp only
+            // means the next retry re-raises into the dedupe.
+            logger.warn(`[admin-cancellation] refund repair stamp failed for case ${prior.id}: ${snapErr.message}`);
+          }
+        } catch (repairErr) {
+          repairErrors.push('prepay_refund_task_missing');
+          logger.error(`[admin-cancellation] refund task repair failed for case ${prior.id}: ${repairErr.message}`);
+        }
+      }
       // The recorded run's facts (what was pulled, what the customer was
       // sent) answer the retry — a lost response must not be reported as
       // "nothing pulled / nothing sent". Cases predating the outcome record
@@ -575,7 +606,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         confirmation: outcome ? outcome.confirmation ?? null : null,
         confirmationChannels: outcome && Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [],
         confirmationRequested: outcome ? outcome.confirmationRequested === true : false,
-        errors: [],
+        ...(repairedRefund ? { refund: repairedRefund } : {}),
+        errors: repairErrors,
       };
     }
   }
@@ -657,6 +689,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // (or a lost task) must not put "Refund recorded" on the case, the
   // response, or the IB card for a term that stands.
   let refundRecorded = false;
+  // What actually gets recorded: the pre-commit snapshot until the sweep
+  // runs, then the post-sweep recount (see the end_now_refund branch).
+  let refundFacts = refund;
   if (term && prepayPlan.prepayDisposition && !processed) {
     termOutcome = 'skipped_processor_failed';
     errors.push('prepay_term_disposition_skipped');
@@ -695,7 +730,24 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           logger.error(`[admin-cancellation] term ${term.id} carries a conflicting decision "${decision.conflictingDecision}" — refund NOT recorded (request ${request.id})`);
         } else {
           termOutcome = decision.fresh ? 'ended_now' : 'decision_already_recorded';
-          await raisePrepayRefundTask({ customer, request, term, refund, actorLabel });
+          // Post-sweep truth: the cancel lock serializes admin commits, not
+          // technician completion — a covered visit can complete between the
+          // pre-commit refund snapshot and the sweep reaching it (the sweep
+          // skips the newly terminal row benignly and still returns ok), and
+          // the stale remainingVisits would refund a slice the customer just
+          // consumed. Every covered row is terminal after the sweep, so this
+          // recount is stable; an unreadable recount degrades the task to
+          // the manual-calculation wording, and a changed amount flags the
+          // run for office review instead of silently recording numbers the
+          // operator never approved.
+          const recount = await computePrepayRefund({ ...term, customer_id: customerId });
+          if (refund && !refund.needsManualCalc
+            && (recount.needsManualCalc || recount.amount !== refund.amount)) {
+            errors.push('refund_recomputed_after_sweep');
+            logger.warn(`[admin-cancellation] refund recomputed after sweep for request ${request.id}: $${refund.amount} → ${recount.needsManualCalc ? 'manual' : `$${recount.amount}`}`);
+          }
+          refundFacts = recount;
+          await raisePrepayRefundTask({ customer, request, term, refund: recount, actorLabel });
           refundRecorded = true;
         }
       }
@@ -717,8 +769,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // A recorded refund is one whose cancel decision verified AND whose
     // office task persisted; anything else stays PROPOSED-only metadata so
     // the case never claims money that was not promised.
-    refund: refundRecorded ? refund : null,
-    ...(refund && !refundRecorded ? { proposedRefund: refund } : {}),
+    refund: refundRecorded ? refundFacts : null,
+    ...(refundFacts && !refundRecorded ? { proposedRefund: refundFacts } : {}),
     sendConfirmation: input.sendConfirmation,
     tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
     monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
@@ -837,7 +889,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         keep_through: prepayPlan.keepThrough,
         waive_late_fee: input.waiveLateFee,
         prepay_disposition: prepayPlan.prepayDisposition,
-        refund_amount: refundRecorded && refund ? refund.amount : null,
+        refund_amount: refundRecorded && refundFacts ? refundFacts.amount : null,
         send_confirmation: input.sendConfirmation,
         processed,
       },
@@ -862,7 +914,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     lateFeeWaived: result ? result.lateFeeWaived === true : false,
     prepayDisposition: prepayPlan.prepayDisposition,
     prepayTermOutcome: termOutcome,
-    ...(refundRecorded && refund ? { refund } : {}),
+    ...(refundRecorded && refundFacts ? { refund: refundFacts } : {}),
     confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
     confirmationChannels: confirmations.channels,
     confirmationRequested: input.sendConfirmation,

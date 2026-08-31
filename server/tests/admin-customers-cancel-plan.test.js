@@ -615,6 +615,89 @@ describe('POST /:id/cancel-plan', () => {
       expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('billing');
     }));
 
+    test('a covered visit completing DURING the commit re-prices the refund from the post-sweep rows and flags the run for review', () => withServer(async (baseUrl) => {
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      ];
+      // The lock serializes admin commits, not technician completion: s3
+      // completes while the sweep runs (the sweep skips it benignly).
+      mockProcess.mockImplementationOnce(async () => {
+        mockState.scheduled_services.find((r) => r.id === 's3').status = 'completed';
+        return { ...PROCESSED };
+      });
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      // Recorded money = the post-sweep truth (2 consumed, 2 remaining),
+      // never the stale pre-commit snapshot's $360.
+      expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240 }));
+      expect(body.errors).toContain('refund_recomputed_after_sweep');
+      expect(mockOpenCase.mock.calls[0][0].snapshot.refund).toEqual(expect.objectContaining({ amount: 240 }));
+      const billing = NotificationService.notifyAdmin.mock.calls.find((c) => c[0] === 'billing');
+      expect(billing[2]).toContain('$240.00');
+      expect(billing[2]).not.toContain('$360.00');
+      // The changed amount is an exception: office review bell + the
+      // manual-review confirmation wording.
+      expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[0])).toEqual(expect.arrayContaining(['billing', 'service']));
+      expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
+    }));
+
+    test('a retry whose prior run lost the refund task REPAIRS it (term-deduped) and stamps the case — never a clean echo with no task', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.scheduled_services = [
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+      ];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'now', prepayDisposition: 'end_now_refund',
+          refund: null, proposedRefund: { amount: 360, needsManualCalc: false },
+          outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+        }),
+      }];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-9', errors: [] }));
+      expect(body.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false }));
+      // The task is raised into the term dedupe (idempotent if it exists).
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      const [category, , , opts] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(category).toBe('billing');
+      expect(opts).toEqual(expect.objectContaining({ dedupeKey: 'prepay_refund:term:term-1' }));
+      // The case now records the refund; the proposed-only marker is gone.
+      const caseUpdate = (mockState.updates || []).find((u) => u.table === 'cancellation_cases');
+      const stamped = JSON.parse(caseUpdate.patch.snapshot);
+      expect(stamped.refund).toEqual(expect.objectContaining({ amount: 360 }));
+      expect(stamped.proposedRefund).toBeUndefined();
+      // Still a duplicate: no second request, processor run, or customer text.
+      expect(mockProcess).not.toHaveBeenCalled();
+      expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    }));
+
+    test('a failed repair reports the missing task instead of a clean duplicate; a recorded refund is never re-raised', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: null }),
+      }];
+      NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
+      let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.duplicate).toBe(true);
+      expect(body.errors).toEqual(['prepay_refund_task_missing']);
+      expect(body.refund).toBeUndefined();
+
+      // A prior run that DID record its refund answers as-is — no re-raise.
+      NotificationService.notifyAdmin.mockClear();
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: { amount: 360, needsManualCalc: false } }),
+      }];
+      body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body).toEqual(expect.objectContaining({ duplicate: true, errors: [] }));
+      expect(body.refund).toEqual(expect.objectContaining({ amount: 360 }));
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    }));
+
     test('a coverage visit completed BEFORE activation (deliberately unstamped) counts as consumed — its slice is never refunded', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },

@@ -889,6 +889,32 @@ describe('processCancellationRequest', () => {
       expect(result).toEqual(expect.objectContaining({ ok: true, cancelledCount: 1, keptThrough: '2099-02-28' }));
     });
 
+    test('an in-progress COVERED visit inside the keep window is not an error — retained live work needs no manual cancellation', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        // A tech mid-delivery on a paid visit that is deliberately staying
+        // on the calendar: flagging it would report the cancel as partial
+        // and skip the term's cancel decision.
+        { id: 'live', customer_id: 'c1', status: 'en_route', scheduled_date: '2099-01-10', track_state: 'en_route', cancelled_at: null, recurring_ongoing: true },
+        { id: 'in1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-01-20', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+        // Uncovered live work still needs office eyes.
+        { id: 'other', customer_id: 'c1', status: 'on_site', scheduled_date: '2099-01-11', track_state: 'on_property', cancelled_at: null, recurring_ongoing: false },
+      ];
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r9', requestId: 'r9', keepThrough: '2099-02-28', keepVisitIds: ['live', 'in1'] });
+      expect(result.errors).toEqual(['in_progress_visit:other']);
+      const byId = Object.fromEntries(db.__tables.scheduled_services.map((r) => [r.id, r]));
+      expect(byId.live.status).toBe('en_route');
+      expect(byId.in1.status).toBe('confirmed');
+
+      // Alone, the retained live visit leaves the cancel fully clean.
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 'live', customer_id: 'c1', status: 'en_route', scheduled_date: '2099-01-10', track_state: 'en_route', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const clean = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r10', requestId: 'r10', keepThrough: '2099-02-28', keepVisitIds: ['live'] });
+      expect(clean).toEqual(expect.objectContaining({ ok: true, churned: true, errors: [] }));
+    });
+
     test('keepThrough WITHOUT the covered-row set refuses before any write — a stamp or audit-linked term id is not coverage', async () => {
       seedActive();
       db.__tables.scheduled_services = [
