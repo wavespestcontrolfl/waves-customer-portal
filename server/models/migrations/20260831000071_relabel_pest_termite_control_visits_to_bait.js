@@ -30,7 +30,10 @@ const STATE_KEY = 'migration.20260831000071.state';
 const OLD_LABEL = 'Quarterly Pest + Termite Control Service';
 const NEW_LABEL = 'Termite Bait Station Service';
 const TARGET_KEY = 'termite_bait';
-const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+// 'rescheduled' included (audit P1): a pending-rebook placeholder is not
+// live for an identity rewrite — its historical identity and reminder
+// stay as they are.
+const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
 
 function openVisitStatus(q) {
   return q.where((b) => b.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES));

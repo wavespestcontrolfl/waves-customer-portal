@@ -10,7 +10,6 @@ jest.mock('../models/db', () => ({}), { virtual: false });
 const archive = require('../models/migrations/20260831000070_retire_two_program_combined_services');
 const relabel = require('../models/migrations/20260831000071_relabel_pest_termite_control_visits_to_bait');
 
-const TERMINAL = ['completed', 'cancelled', 'skipped', 'no_show'];
 
 function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
   const knex = (table) => {
@@ -103,6 +102,7 @@ describe('20260831000071 relabel pest+termite-control visits to termite bait', (
       { id: 'v1', service_type: relabel.OLD_LABEL, service_id: null, service_key_snapshot: null, status: 'pending' },
       { id: 'v2', service_type: relabel.OLD_LABEL, service_id: null, service_key_snapshot: null, status: null },
       { id: 'v-done', service_type: relabel.OLD_LABEL, service_id: null, service_key_snapshot: null, status: 'cancelled' },
+      { id: 'v-resched', service_type: relabel.OLD_LABEL, service_id: null, service_key_snapshot: null, status: 'rescheduled' },
       { id: 'v-snap', service_type: relabel.OLD_LABEL, service_id: null, service_key_snapshot: 'pest_general_quarterly', status: 'pending' },
       { id: 'v-other', service_type: 'Quarterly Pest + Termite Bait Station Service', service_id: 'svc-x', service_key_snapshot: null, status: 'pending' },
     ],
@@ -122,6 +122,7 @@ describe('20260831000071 relabel pest+termite-control visits to termite bait', (
       expect(row(db, id)).toMatchObject({ service_type: relabel.NEW_LABEL, service_id: 'svc-tb', service_key_snapshot: 'termite_bait' });
     }
     expect(row(db, 'v-done').service_type).toBe(relabel.OLD_LABEL); // history
+    expect(row(db, 'v-resched').service_type).toBe(relabel.OLD_LABEL); // pending-rebook placeholder: not live
     expect(row(db, 'v-snap').service_id).toBeNull(); // a snapshot is identity evidence — not ours
     expect(row(db, 'v-other').service_type).toBe('Quarterly Pest + Termite Bait Station Service');
     expect(db.appointment_reminders.find((r) => r.scheduled_service_id === 'v1').service_type).toBe(relabel.NEW_LABEL);
