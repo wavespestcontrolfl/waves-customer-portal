@@ -17,6 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
+const IbThreads = require('../services/intelligence-bar/threads');
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
@@ -1773,6 +1774,79 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // Table may not exist yet — non-critical
     }
 
+    // The exact turn pair the client stores — also what a persisted thread
+    // keeps. Images are never persisted (their text marker is); taint
+    // markers ride along so a resumed thread stays redaction-aware.
+    const persistedUserTurn = appendTaintMarker(
+      appendTaintMarker(
+        images.length
+          ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+          : prompt,
+        imageTainted,
+        IMAGE_TAINT_MARKER,
+      ),
+      piiTainted,
+      PII_TAINT_MARKER,
+    );
+    const persistedAssistantTurn = appendTaintMarker(
+      appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
+      piiTainted,
+      PII_TAINT_MARKER,
+    );
+
+    // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
+    // admin actors only, never tech or the isolated agent_estimate rail.
+    // Best-effort — a thread write failure must never fail the answer. A
+    // thread_id the actor doesn't own appends nothing and returns no id, so
+    // the client quietly falls back to its ephemeral history.
+    let persistedThreadId = null;
+    let persistedThreadSeq = null;
+    const threadPersistenceActive = IbThreads.threadsEnabled() && req.techRole === 'admin'
+      && context !== 'tech' && context !== 'agent_estimate';
+    if (threadPersistenceActive) {
+      try {
+        // Pending-action cards (and their confirmation ids) are deliberately
+        // client-only and are NOT restored on resume — annotate the stored
+        // turn so a resumed model never believes a proposal is still awaiting
+        // confirmation and the operator knows to re-ask.
+        const threadAssistantTurn = pendingProposals.length
+          ? `${persistedAssistantTurn}\n[This reply proposed ${pendingProposals.length} pending action(s); those confirmation cards expired with the session and were not restored. If the action is still wanted, propose it again.]`
+          : persistedAssistantTurn;
+        // thread_seq is the client's view of the thread tail — a mismatch
+        // means a concurrent append (another tab) landed first, so this
+        // exchange would interleave without having seen it; the append is
+        // rejected and the client detaches instead.
+        // Malformed thread_id would raise a Postgres uuid cast error inside
+        // the transaction — treat it as no thread (fresh, seeded) instead.
+        const requestedThreadId = typeof req.body.thread_id === 'string' && UUID_RE.test(req.body.thread_id)
+          ? req.body.thread_id : null;
+        const appended = await IbThreads.appendExchange({
+          actorId: getAdminActorId(req),
+          threadId: requestedThreadId,
+          expectedSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+          context,
+          userText: persistedUserTurn,
+          assistantText: threadAssistantTurn,
+          // A NEW thread is seeded with the same trimmed, marker-tainted
+          // history the model sees, so a conversation that started ephemeral
+          // (gate flipped mid-chat, or a detach after a rejected append)
+          // survives refresh instead of persisting an amnesiac thread. The
+          // service validates roles/content and caps the seed.
+          seedTurns: requestedThreadId ? null : conversationHistory.slice(-8),
+        });
+        persistedThreadId = appended?.threadId || null;
+        persistedThreadSeq = appended?.lastSeq ?? null;
+      } catch (err) {
+        // Never log the full error: knex enriches it with the SQL bindings,
+        // which here are the complete user/assistant turn text (customer
+        // PII). Code + constraint name are enough to diagnose.
+        logger.error(
+          `[intelligence-bar] thread persistence failed (code=${err?.code || 'unknown'}`
+          + `${err?.constraint ? `, constraint=${err.constraint}` : ''})`,
+        );
+      }
+    }
+
     res.json({
       response: finalResponse,
       toolCalls,
@@ -1789,29 +1863,15 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // are stripped before the history reaches the model.
       conversationHistory: [
         ...conversationHistory.slice(-8),
-        {
-          role: 'user',
-          content: appendTaintMarker(
-            appendTaintMarker(
-              images.length
-                ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-                : prompt,
-              imageTainted,
-              IMAGE_TAINT_MARKER,
-            ),
-            piiTainted,
-            PII_TAINT_MARKER,
-          ),
-        },
-        {
-          role: 'assistant',
-          content: appendTaintMarker(
-            appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
-            piiTainted,
-            PII_TAINT_MARKER,
-          ),
-        },
+        { role: 'user', content: persistedUserTurn },
+        { role: 'assistant', content: persistedAssistantTurn },
       ],
+      ...(persistedThreadId ? { threadId: persistedThreadId, threadSeq: persistedThreadSeq } : {}),
+      // Explicit availability so the client tracks a RUNTIME gate change:
+      // false detaches its thread state (the kill switch's exact-ephemeral
+      // promise), true keeps thread mode even when this exchange's append
+      // failed best-effort.
+      threadsEnabled: threadPersistenceActive,
     });
 
   } catch (err) {
@@ -2217,6 +2277,61 @@ router.get('/quick-actions', async (req, res, next) => {
   }
 });
 
+
+// ─── SERVER-PERSISTED THREADS (GATE_IB_THREADS) ─────────────────
+// Client-only endpoints, like /confirm-action — never model tools. Admin
+// actors only; every read is actor-bound inside the threads service.
+
+// Thread ids are uuid columns — validate shape at the request boundary so a
+// malformed id 404s instead of raising a Postgres cast error.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function threadsGuard(req, res) {
+  if (!IbThreads.threadsEnabled()) {
+    res.status(404).json({ error: 'Threads are not enabled' });
+    return false;
+  }
+  if (req.techRole !== 'admin') {
+    res.status(403).json({ error: 'Admin access required' });
+    return false;
+  }
+  return true;
+}
+
+router.get('/threads/latest', async (req, res, next) => {
+  try {
+    if (!threadsGuard(req, res)) return;
+    const thread = await IbThreads.latestThread(getAdminActorId(req));
+    res.json({ thread: thread || null });
+  } catch (err) {
+    logger.error('[intelligence-bar] threads/latest failed:', err);
+    next(err);
+  }
+});
+
+router.get('/threads', async (req, res, next) => {
+  try {
+    if (!threadsGuard(req, res)) return;
+    const threads = await IbThreads.listThreads(getAdminActorId(req), req.query.limit);
+    res.json({ threads });
+  } catch (err) {
+    logger.error('[intelligence-bar] threads list failed:', err);
+    next(err);
+  }
+});
+
+router.get('/threads/:id', async (req, res, next) => {
+  try {
+    if (!threadsGuard(req, res)) return;
+    if (!UUID_RE.test(String(req.params.id))) return res.status(404).json({ error: 'Thread not found' });
+    const thread = await IbThreads.getThread(getAdminActorId(req), String(req.params.id));
+    if (!thread) return res.status(404).json({ error: 'Thread not found' });
+    res.json({ thread });
+  } catch (err) {
+    logger.error('[intelligence-bar] thread fetch failed:', err);
+    next(err);
+  }
+});
 
 module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's

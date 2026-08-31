@@ -28,6 +28,18 @@ import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
+// Thread id the operator dismissed with "New chat" — a reload must not
+// resume it (it stays on the server for history/retention, just not as the
+// auto-resumed conversation). Keyed per admin account so staff sharing a
+// browser can't clear or resurrect each other's dismissal.
+const DISMISSED_THREAD_KEY = "admin_ib_dismissed_thread";
+function dismissedThreadKey() {
+  let uid = "";
+  try {
+    uid = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.id || "";
+  } catch { /* storage unavailable */ }
+  return uid ? `${DISMISSED_THREAD_KEY}:${uid}` : DISMISSED_THREAD_KEY;
+}
 const RECENTS_MAX = 5;
 const D = {
   bg: "#F1F5F9",
@@ -53,7 +65,9 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
-      throw new Error(body.message || body.error || `HTTP ${r.status}`);
+      const err = new Error(body.message || body.error || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
     }
     return r.json();
   });
@@ -290,6 +304,20 @@ function GlobalCommandPalette(_props, ref) {
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
+  // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
+  // the id is set from query responses and from resume-on-open.
+  const [threadId, setThreadId] = useState(null);
+  // The thread tail seq this client last saw — sent with each query so the
+  // server rejects an append that would interleave with another tab's.
+  const threadSeqRef = useRef(null);
+  const resumeAttemptedRef = useRef(false);
+  // Bumped by submit/"New chat" so a still-inflight resume or query response
+  // can't clobber newer state (it only applies if the epoch is unchanged).
+  const threadEpochRef = useRef(0);
+  // True once /threads/latest answered 200 — the server gate is on. While
+  // false the palette keeps the exact pre-thread ephemeral behavior
+  // (conversation cleared on route/context change).
+  const threadsAvailableRef = useRef(false);
   const [quickActions, setQuickActions] = useState([]);
   const [recents, setRecents] = useState(() => loadRecents());
   const [attachments, setAttachments] = useState([]);
@@ -364,18 +392,84 @@ function GlobalCommandPalette(_props, ref) {
     setAttachmentBusy(false);
   }, [setAttachmentBusy]);
 
-  // Clear conversation when context changes
+  // With threads enabled, a context change no longer wipes the conversation
+  // (operating-terminal scope, owner-ratified 2026-08-31): the thread
+  // survives route changes — the server trims what reaches the model, and
+  // tool availability is recalculated per request from the new context.
+  // Gate off (or not yet probed): the exact pre-thread ephemeral behavior —
+  // clear everything. Attachments stay per-message either way.
   useEffect(() => {
-    setConversationHistory([]);
-    setResponse(null);
-    setPendingActions([]);
+    if (!threadsAvailableRef.current) {
+      threadEpochRef.current += 1;
+      // Unlike New chat/submit (deliberate detach — no re-resume), a
+      // context-driven invalidation should let the next palette open retry
+      // the resume probe; otherwise a route change during the inflight
+      // probe disables resume for the component's lifetime.
+      resumeAttemptedRef.current = false;
+      setConversationHistory([]);
+      setResponse(null);
+      setPendingActions([]);
+      // Detach any persisted thread too — /query evaluates the gate at call
+      // time, so a threadId can exist even after the availability probe
+      // failed; appending a fresh conversation to it would corrupt the
+      // thread.
+      setThreadId(null);
+      threadSeqRef.current = null;
+    }
     resetAttachments();
   }, [context, resetAttachments]);
+
+  // Resume the latest server-persisted thread when the palette first opens
+  // with no local history. 404 = threads not enabled — quietly stay
+  // ephemeral (the pre-threads behavior).
+  useEffect(() => {
+    if (!open || resumeAttemptedRef.current || conversationHistory.length > 0) return;
+    resumeAttemptedRef.current = true;
+    const epoch = threadEpochRef.current;
+    adminFetch("/admin/intelligence-bar/threads/latest")
+      .then((data) => {
+        threadsAvailableRef.current = true; // 200 = gate on (thread may be null)
+        if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
+        let dismissedId = null;
+        try { dismissedId = localStorage.getItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
+        if (data?.thread?.id && data.thread.id === dismissedId) return; // operator dismissed it with New chat
+        const hist = data?.thread?.conversationHistory;
+        if (hist?.length) {
+          setConversationHistory(hist);
+          setThreadId(data.thread.id);
+          threadSeqRef.current = Number.isInteger(data.thread.lastSeq) ? data.thread.lastSeq : null;
+          try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
+          // Show the resumed conversation's last reply — otherwise the
+          // palette looks like a new chat while silently sending the old
+          // history with the next prompt. Server-side taint markers are
+          // presentation noise here; they stay on the stored turns.
+          const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
+          if (lastAssistant) {
+            setResponse(
+              String(lastAssistant.content || "")
+                .replace(/\n\[Image attachment context may contain PII\]/g, "")
+                .replace(/\n\[PII-bearing tool context may contain customer PII\]/g, ""),
+            );
+          }
+        }
+      })
+      .catch((err) => {
+        // 404 = gate off, 403 = not an admin — definitive, stay ephemeral.
+        // Anything else is transient (network/5xx): allow the next palette
+        // open to retry the probe instead of losing resume for the
+        // component's lifetime.
+        if (err?.status !== 404 && err?.status !== 403) {
+          resumeAttemptedRef.current = false;
+        }
+      });
+  }, [open, conversationHistory.length]);
 
   const submit = useCallback(
     async (text) => {
       const q = (text || prompt).trim();
       if (!q || loading || attachmentsLoadingRef.current) return;
+      threadEpochRef.current += 1; // invalidate any inflight thread resume
+      const epoch = threadEpochRef.current;
       setLoading(true);
       setResponse(null);
       setPendingActions([]);
@@ -389,23 +483,56 @@ function GlobalCommandPalette(_props, ref) {
             prompt: q,
             conversationHistory,
             context,
+            ...(threadId
+              ? {
+                  thread_id: threadId,
+                  ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
+                }
+              : {}),
             pageData: { route: location.pathname },
             ...(attachments.length
               ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
               : {}),
           }),
         });
-        setResponse(data.response);
-        setPendingActions(data.pendingActions || []);
-        setConversationHistory(data.conversationHistory || []);
+        // "New chat" (or a context reset) while the query was inflight —
+        // drop the stale response instead of restoring the cleared thread.
+        if (threadEpochRef.current === epoch) {
+          setResponse(data.response);
+          setPendingActions(data.pendingActions || []);
+          setConversationHistory(data.conversationHistory || []);
+          if (data.threadId) {
+            setThreadId(data.threadId);
+            threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
+          } else if (data.threadsEnabled === true && threadId) {
+            // Threads are on but this exchange wasn't appended — the server
+            // rejected it (another tab appended first, or the thread is
+            // gone) or the best-effort write failed. Detach so the next
+            // exchange starts a fresh thread instead of interleaving.
+            setThreadId(null);
+            threadSeqRef.current = null;
+          }
+          // The server states thread availability on every query, so a
+          // RUNTIME gate change is reflected: off → detach and return to
+          // ephemeral mode (the kill switch's promise); on → thread mode
+          // even if the availability probe failed earlier or this
+          // exchange's best-effort append didn't return an id.
+          if (data.threadsEnabled === true) {
+            threadsAvailableRef.current = true;
+          } else if (data.threadsEnabled === false) {
+            threadsAvailableRef.current = false;
+            setThreadId(null);
+            threadSeqRef.current = null;
+          }
+        }
       } catch (err) {
-        setResponse(`Error: ${err.message}`);
+        if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
       }
       setLoading(false);
       setPrompt("");
       resetAttachments();
     },
-    [prompt, loading, conversationHistory, context, location.pathname, attachments, resetAttachments],
+    [prompt, loading, conversationHistory, context, threadId, location.pathname, attachments, resetAttachments],
   );
 
   const addAttachments = useCallback(
@@ -441,10 +568,20 @@ function GlobalCommandPalette(_props, ref) {
   };
 
   const clear = () => {
+    // "New chat": drops the local view AND detaches from the persisted
+    // thread — the next query starts a fresh thread (old ones remain until
+    // retention). The dismissed id is remembered so a reload doesn't
+    // resurrect the conversation the operator just cleared.
+    if (threadId) {
+      try { localStorage.setItem(dismissedThreadKey(), threadId); } catch { /* storage unavailable */ }
+    }
+    threadEpochRef.current += 1; // invalidate any inflight thread resume
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
     setPrompt("");
+    setThreadId(null);
+    threadSeqRef.current = null;
     resetAttachments();
   };
 
