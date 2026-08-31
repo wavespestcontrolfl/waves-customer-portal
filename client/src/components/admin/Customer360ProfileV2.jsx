@@ -3880,9 +3880,16 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
           const submittedTotal = coverageOnlyPrefill
             ? Math.round((Number(amount) + setupFee) * 100) / 100
             : Number(amount);
+          // Commercial invoices add county tax on top of the entered
+          // pre-tax amount and the taxed total is what the ledger records
+          // as paid (codex #3591 r78 P2) — say so, or staff confirm a
+          // figure ~7% below the recorded payment.
+          const taxNote = isCommercialCustomer
+            ? ` County sales tax is added on top — approximately $${(Math.round(submittedTotal * 1.07 * 100) / 100).toFixed(2)} will be recorded as paid (the invoice finalizes the exact county rate).`
+            : "";
           const ok = window.confirm(coverageOnlyPrefill
-            ? `${refusal.error}\n\nRecord $${Number(amount).toFixed(2)} coverage + $${setupFee.toFixed(2)} Bait Station Setup — total collected $${submittedTotal.toFixed(2)}?`
-            : `${refusal.error}\n\nRecord the $${setupFee.toFixed(2)} Bait Station Setup as its own line on this prepay? Confirm the $${Number(amount).toFixed(2)} you entered is the collected total INCLUDING the setup.`);
+            ? `${refusal.error}\n\nRecord $${Number(amount).toFixed(2)} coverage + $${setupFee.toFixed(2)} Bait Station Setup — pre-tax total $${submittedTotal.toFixed(2)}?${taxNote}`
+            : `${refusal.error}\n\nRecord the $${setupFee.toFixed(2)} Bait Station Setup as its own line on this prepay? Confirm the $${Number(amount).toFixed(2)} you entered is the pre-tax collected total INCLUDING the setup.${taxNote}`);
           if (!ok) throw new Error("Annual prepay not recorded — the bait-station setup must ride the invoice.");
           result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
             method: "POST",

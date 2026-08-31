@@ -8264,7 +8264,15 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const hasSetupWaiverEvidence = (obj) => Array.isArray(obj?.setupWaiverPriorQualifyingServices)
       && obj.setupWaiverPriorQualifyingServices.length > 0;
     const frozenSetupWaiver = hasSetupWaiverEvidence(estData) || replayShapes.some(hasSetupWaiverEvidence);
-    if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver) return;
+    // The INVERSE case arms the trigger too (codex #3591 r78 P1): an
+    // estimate saved with NO waiver carries a positive frozen bait-station
+    // setup — if the account GAINED a qualifying family since (a pest/lawn
+    // plan booked before viewing/accepting), the waiver rule now covers it
+    // and acceptance must not bill the frozen $99. Mirrors the booking
+    // handoff's gained-family re-read.
+    const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
+      && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
+    if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
     const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
     // The rodent setup waiver is re-validated INDEPENDENTLY of plan
     // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
@@ -8310,7 +8318,31 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
         return;
       }
     }
-    if (activeMember && !setupWaiverStale) return;
+    // Gained-family probe (codex #3591 r78 P1): the stored positive setup
+    // is re-checked against the LIVE families. Fail-open to the disclosed
+    // figure — gaining a waiver is a benefit, so an unprovable read leaves
+    // the agreed setup standing (no flag, no reprice) rather than blocking
+    // the accept.
+    if (frozenUnwaivedSetup) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
+        if (liveKeys.filter((key) => key !== 'rodent_bait').length > 0) {
+          verifiedWaiverKeys = liveKeys;
+          // Persist the server-derived evidence so later replays
+          // (extractEngineInputs) and the accept-side probes see the
+          // waiver the reprice below applies.
+          estData.setupWaiverPriorQualifyingServices = liveKeys;
+        }
+      } catch (probeErr) {
+        logger.warn(`[estimate-public] gained-family setup-waiver probe failed for estimate ${estimate.id}: ${probeErr.message} — the disclosed setup stands`);
+      }
+    }
+    if (activeMember && !setupWaiverStale && !(frozenUnwaivedSetup && verifiedWaiverKeys)) return;
+    // The gained-family case was the ONLY trigger and nothing was gained:
+    // done. When member artifacts also armed the trigger, the lapsed-member
+    // cleanup below still runs exactly as before.
+    if (frozenUnwaivedSetup && !verifiedWaiverKeys && !frozenSnapshot && !frozenRecurring) return;
     if (setupWaiverStale) {
       delete estData.setupWaiverPriorQualifyingServices;
       for (const shape of replayShapes) delete shape.setupWaiverPriorQualifyingServices;

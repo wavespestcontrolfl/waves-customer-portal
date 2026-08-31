@@ -458,17 +458,22 @@ async function liveAnchorlessCoverageSetupClaim(database, { customerId, rootId }
   if (!root) return null;
   const programKey = await authoritativeServiceKey(database, root);
   if (!isRodentBaitProgramKey(programKey)) return null;
-  // LIVE terms only (codex #3591 r77 P1): a lapsed/historical coverage
-  // prepay whose claim was never anchored must not be adopted by an
-  // unrelated later booking — the seeding path now anchors the claim to
-  // the covered root it creates, so an anchor-less claim under a live
+  // COVERED-as-of-today terms only, through the authoritative predicate
+  // (codex #3591 r77/r78 P1): a lapsed/historical coverage prepay whose
+  // claim was never anchored must not be adopted by an unrelated later
+  // booking, and a parallel status list drifts (a past 'renewed' term is
+  // not live forever; a decided-lapse 'cancelled' term riding out its paid
+  // window IS covered). coveredTermsAsOf is the same date+payment-state
+  // rule the completion gate uses; the seeding path anchors the claim to
+  // the covered root it creates, so an anchor-less claim under a covered
   // term means the covered series does not exist yet and this booking IS
   // plausibly it.
-  const terms = await database('annual_prepay_terms')
-    .where({ customer_id: customerId })
-    .whereNotNull('prepay_invoice_id')
-    .whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
-    .select('prepay_invoice_id', 'coverage_service_type');
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const { etDateString } = require('../utils/datetime-et');
+  const terms = await coveredTermsAsOf(database, etDateString())
+    .where('t.customer_id', customerId)
+    .whereNotNull('t.prepay_invoice_id')
+    .select('t.prepay_invoice_id as prepay_invoice_id', 't.coverage_service_type as coverage_service_type');
   for (const term of terms || []) {
     if (recurringServiceKey({ name: term.coverage_service_type }) !== programKey) continue;
     const claim = await database('setup_fee_claims')

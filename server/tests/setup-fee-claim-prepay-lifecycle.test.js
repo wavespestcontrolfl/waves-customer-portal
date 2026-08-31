@@ -21,9 +21,21 @@ jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => undefined),
 }));
 jest.mock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined) }));
+// coveredTermsAsOf is the authoritative coverage predicate the anchorless-
+// claim adoption reads (codex #3591 r78 P1) — faked as a chainable builder
+// over mockCoveredTermsRows so the unit fakes need no join support.
+let mockCoveredTermsRows = [];
 jest.mock('../services/annual-prepay-renewals', () => ({
   ...jest.requireActual('../services/annual-prepay-renewals'),
   syncTermForInvoicePayment: jest.fn(async () => undefined),
+  coveredTermsAsOf: jest.fn(() => {
+    const q = {
+      where: () => q,
+      whereNotNull: () => q,
+      select: async () => mockCoveredTermsRows,
+    };
+    return q;
+  }),
 }));
 jest.mock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn(async () => {}) } }));
 // The coverage-series obligation runs the shared qualifying-keys loader;
@@ -497,28 +509,47 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     expect(probeAt).toBeLessThan(insertAt);
   });
 
-  describe('liveAnchorlessCoverageSetupClaim — a booking consumes the coverage-only prepay claim instead of stamping (codex #3591 r73 P1)', () => {
+  describe('liveAnchorlessCoverageSetupClaim — a booking consumes the coverage-only prepay claim instead of stamping (codex #3591 r73 P1; covered-terms predicate r78 P1)', () => {
     const { liveAnchorlessCoverageSetupClaim } = plans;
     const term = { prepay_invoice_id: 'inv-prepay', coverage_service_type: 'Rodent Bait Stations' };
     const claimRow = { id: 'claim-1', invoice_id: 'inv-prepay', amount: 99 };
     const root = { id: 'root-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null, recurring_parent_id: null, pending_setup_fee: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' };
+    afterEach(() => { mockCoveredTermsRows = []; });
 
     test('a live term-backed anchor-less claim matching the root\'s coverage is returned', async () => {
-      const c = conn({ scheduledService: root, prepayTermsList: [term], claim: claimRow, invoice: { status: 'sent' } });
+      mockCoveredTermsRows = [term];
+      const c = conn({ scheduledService: root, claim: claimRow, invoice: { status: 'sent' } });
       expect(await liveAnchorlessCoverageSetupClaim(c, { customerId: 'cust-1', rootId: 'root-rb' })).toEqual(claimRow);
     });
 
     test('a terminal prepay invoice keeps its claim as an OPEN obligation — never consumed by a booking', async () => {
-      const c = conn({ scheduledService: root, prepayTermsList: [term], claim: claimRow, invoice: { status: 'refunded' } });
+      mockCoveredTermsRows = [term];
+      const c = conn({ scheduledService: root, claim: claimRow, invoice: { status: 'refunded' } });
       expect(await liveAnchorlessCoverageSetupClaim(c, { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
     });
 
+    test('a term OUTSIDE the covered predicate (lapsed/past window) donates nothing (codex #3591 r78 P1)', async () => {
+      mockCoveredTermsRows = [];
+      const c = conn({ scheduledService: root, claim: claimRow, invoice: { status: 'sent' } });
+      expect(await liveAnchorlessCoverageSetupClaim(c, { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      // …and the adoption reads through the AUTHORITATIVE predicate, never
+      // a parallel status list.
+      const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+      const helperBody = plansSrc.slice(
+        plansSrc.indexOf('async function liveAnchorlessCoverageSetupClaim'),
+        plansSrc.indexOf('async function findDirectRodentSetupObligationForCoverage'),
+      );
+      expect(helperBody).toMatch(/coveredTermsAsOf\(database, etDateString\(\)\)\s+\.where\('t\.customer_id', customerId\)\s+\.whereNotNull\('t\.prepay_invoice_id'\)/);
+      expect(helperBody).not.toMatch(/whereIn\('status'/);
+    });
+
     test('coverage naming another family, a non-rodent root, or no claim → null', async () => {
-      const pestTerm = { prepay_invoice_id: 'inv-prepay', coverage_service_type: 'Quarterly Pest Control' };
-      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: root, prepayTermsList: [pestTerm], claim: claimRow, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      mockCoveredTermsRows = [{ prepay_invoice_id: 'inv-prepay', coverage_service_type: 'Quarterly Pest Control' }];
+      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: root, claim: claimRow, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      mockCoveredTermsRows = [term];
       const pestRootRow = { ...root, service_type: 'Quarterly Pest Control' };
-      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: pestRootRow, prepayTermsList: [term], claim: claimRow, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
-      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: root, prepayTermsList: [term], claim: null, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: pestRootRow, claim: claimRow, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
+      expect(await liveAnchorlessCoverageSetupClaim(conn({ scheduledService: root, claim: null, invoice: { status: 'sent' } }), { customerId: 'cust-1', rootId: 'root-rb' })).toBeNull();
     });
 
     test('the direct booking branch anchors the claim instead of stamping (source contract)', () => {
@@ -657,9 +688,10 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(rederiveAt).toBeGreaterThan(custLockAt);
     // Per-application path: the customer lock precedes its re-derivation.
     expect(plansSrc).toMatch(/await trx\('customers'\)\.where\(\{ id: visit\.customer_id \}\)\.forUpdate\(\)\.first\('id'\);\s+try \{\s+owedNowCap = await module\.exports\.resolveDirectRodentSetupObligation\(trx, \{ id: visit\.id \}\);/);
-    // Anchorless-claim adoption reads LIVE terms only; the seeder anchors
+    // Anchorless-claim adoption reads COVERED terms via the authoritative
+    // predicate (r78 superseded the r77 status list); the seeder anchors
     // the claim to the covered root it creates.
-    expect(plansSrc).toMatch(/\.whereIn\('status', \['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'\]\)\s+\.select\('prepay_invoice_id', 'coverage_service_type'\);/);
+    expect(plansSrc).toMatch(/coveredTermsAsOf\(database, etDateString\(\)\)/);
     const renewalsSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
     expect(renewalsSrc).toMatch(/if \(term\?\.prepay_invoice_id && createdParentId\) \{[\s\S]*?whereNull\('scheduled_service_id'\)[\s\S]*?anchorSetupFeeClaim\(conn, \{ claimId: claimless\.id, anchorId: createdParentId \}\);/);
     // The strict probe's verified families reach the authoritative reprice.
