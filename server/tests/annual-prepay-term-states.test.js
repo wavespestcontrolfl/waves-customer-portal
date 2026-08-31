@@ -12,7 +12,9 @@
  * It deliberately does NOT restructure annual-prepay-renewals.js — the guard
  * reads the module as-is.
  *
- * SCOPE: the writer scan covers production files that NAME the table — every
+ * SCOPE: the writer scan covers production (non-test, non-migration) files
+ * that NAME the table — migrations are the CHECK side; their one-off DML is
+ * reviewed under the waves-db rules, not as recurring writers — every
  * literal-table Knex shape is classified (or fails closed), raw SQL and
  * table-name indirection defined in such a file fail closed, and dynamic-
  * table mutations are allowlisted per audited file with a site-count

@@ -8,8 +8,10 @@ written down — they lived as scattered `.update({ status })` calls with
 on `origin/main`; it is not a redesign.
 
 The guard test `server/tests/annual-prepay-term-states.test.js` pins the
-stage list to the migration, scans every non-test file under `server/` and
-`ops/` for status writes to this table and resolves each one to a documented
+stage list to the migration, scans every non-test, non-migration file under
+`server/` and `ops/` for status writes to this table (migrations are the CHECK
+side and are reviewed as one-off DML under the waves-db rules, not as
+recurring writers) and resolves each one to a documented
 stage, and pins the transition functions' guards. Change any side → update
 this page in the same PR.
 
@@ -55,7 +57,7 @@ replay-idempotent), never an error.
 | 9 | `payment_pending` / `active` / `renewal_pending` | `cancelled` **(a)** | Prepay invoice voided, refunded, or a `payments` refund lands (`syncTermForRefundedPayment`). Clears prepaid stamps, reverses WaveGuard extension credits, reopens covered visit invoices, resets billing mode. | `R` `syncTermForInvoicePayment` (`nextStatus === 'cancelled'`) | `renewal_decision IS NULL` |
 | 10 | `active` / `renewal_pending` | `payment_pending` | Dispute opened on the prepay invoice. Stamps `dispute_suspended_at`; coverage suspended (visits bill per-visit) until the dispute resolves. Dispute won → invoice back to paid → move 2 fires; the marker survives until the dues claw-back finishes, then `finishDisputeRecoveryForTerm` clears it. | `R` `suspendActiveTermsForDisputedInvoice` | `status IN ACTIVE_STATUSES` |
 | 11 | `cancelled` **(a)** | `active` | Lost-dispute revival: the dispute-cancelled term's invoice is re-paid in dunning. Restores extension credits. | `R` `syncTermForInvoicePayment` | `status = 'cancelled' AND renewal_decision IS NULL AND dispute_suspended_at IS NOT NULL` |
-| 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row, and move 9's `renewal_decision IS NULL` guard admits both legacy names — code never writes them, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
+| 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
 | 13 | *any* | `cancelled` | Admin removes the annual-prepay flag from an invoice (`DELETE /:id/annual-prepay`). Stamps cleared, attached visits detached; billing mode is NOT reset. **Unguarded** — the only path that can move a decided term. Re-marking the invoice later re-derives the status via move 1 **only for an undecided term**; a decided term stays `cancelled` (`renewal_decision` survives the DELETE and move 1 preserves the status when it is set). | `AI` `DELETE /:id/annual-prepay` | none |
 
 Everything not in the table is not a move. In particular there is **no**
@@ -81,7 +83,7 @@ These constants in `R` decide what each stage *means* to the rest of billing:
 - `canceled` and `refunded` sit in the CHECK but are dead names for the CODE.
   The 20260614 migration preserved any rows already carrying them (it only
   normalized values outside its list), so legacy rows may still exist in prod;
-  an undecided legacy row would be admitted by moves 9 and 12. Step 1 is a
+  an undecided legacy `refunded` row would be admitted by move 12 (move 9's select excludes legacy names). Step 1 is a
   prod row scan (`SELECT status, count(*) FROM annual_prepay_terms GROUP BY 1`);
   if zero, drop the two names from the CHECK (`DROP CONSTRAINT` + re-add); if
   non-zero, normalize them (`canceled`→`cancelled`, `refunded`→`cancelled` with
