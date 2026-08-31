@@ -1854,9 +1854,9 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         persistedThreadSeq = appended?.lastSeq ?? null;
         // Link this exchange's proposals to the thread so recall can join a
         // conversation to its receipts (actor-bound inside the service).
-        if (persistedThreadId && pendingProposals.length) {
+        if (persistedThreadId && Number.isInteger(persistedThreadSeq) && pendingProposals.length) {
           await PendingActions.attachThread(
-            pendingProposals.map(p => p.id), persistedThreadId, getAdminActorId(req),
+            pendingProposals.map(p => p.id), persistedThreadId, persistedThreadSeq, getAdminActorId(req),
           );
         }
       } catch (err) {

@@ -69,7 +69,16 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
   queue.push(
     [{ id: 'turn-2', thread_id: T1, seq: 2, role: 'assistant', created_at: '2026-08-30T01:00:00Z', title: 'Hesen reschedule', context: 'schedule', last_active_at: '2026-08-30T01:01:00Z', snippet: '…moved <b>Hesen</b> to Thursday…' }],
     [{ thread_id: T1, seq: 1, role: 'user', content: 'move hesen to thursday' }],
-    [{ id: 'pa-1', thread_id: T1, tool_name: 'reschedule_appointment', summary: 'Move Hesen → Thu', status: 'confirmed', created_at: '2026-08-30T01:00:30Z', consumed_at: '2026-08-30T01:02:00Z' }],
+    [
+      // This exchange (assistant seq 2): confirmed + success → executed
+      { id: 'pa-1', thread_id: T1, thread_turn_seq: 2, tool_name: 'reschedule_appointment', summary: 'Move → Thu', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:00:30Z', consumed_at: '2026-08-30T01:02:00Z' },
+      // Same exchange: confirmed but the run recorded an error → failed
+      { id: 'pa-2', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify', status: 'confirmed', result: JSON.stringify({ error: 'Twilio 21610' }), created_at: '2026-08-30T01:00:31Z', consumed_at: '2026-08-30T01:02:01Z' },
+      // Same exchange: expired → never_ran
+      { id: 'pa-3', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify again', status: 'expired', result: null, created_at: '2026-08-30T01:00:32Z', consumed_at: null },
+      // A LATER exchange in the same thread (assistant seq 4) → must NOT be attributed
+      { id: 'pa-9', thread_id: T1, thread_turn_seq: 4, tool_name: 'create_customer', summary: 'Unrelated', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:10:00Z', consumed_at: '2026-08-30T01:10:05Z' },
+    ],
   );
   const r = await executeHistoryTool('search_ib_history', { query: 'hesen', days: 30 }, { actorId: 'admin-1' });
 
@@ -78,7 +87,10 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
   const hit = r.results[0];
   expect(hit.thread_title).toBe('Hesen reschedule');
   expect(hit.paired_turn).toEqual({ role: 'user', content: 'move hesen to thursday', truncated: false });
-  expect(hit.receipts).toEqual([expect.objectContaining({ id: 'pa-1', status: 'confirmed', tool: 'reschedule_appointment' })]);
+  expect(hit.receipts.map((x) => [x.id, x.outcome])).toEqual([
+    ['pa-1', 'executed'], ['pa-2', 'failed'], ['pa-3', 'never_ran'],
+  ]);
+  expect(hit.receipts.find((x) => x.id === 'pa-9')).toBeUndefined();
 
   // Query 1 (FTS) is scoped to the actor and uses websearch_to_tsquery.
   const fts = calls[0];
@@ -108,16 +120,17 @@ test('no matches either way returns an empty, well-formed result', async () => {
   expect(r).toMatchObject({ total: 0, results: [], receipts: [] });
 });
 
-test('attachThread stamps only the actor\'s own unstamped proposals', async () => {
+test('attachThread stamps thread + exchange seq on only the actor\'s own unstamped proposals', async () => {
   queue.push(2);
-  const n = await attachThread(['pa-1', 'pa-2'], T1, 'admin-1');
+  const n = await attachThread(['pa-1', 'pa-2'], T1, 6, 'admin-1');
   expect(n).toBe(2);
   const upd = calls.find((c) => c.table === 'ib_pending_actions');
   expect(upd.whereIn).toEqual([['id', ['pa-1', 'pa-2']]]);
   expect(upd.where).toEqual(expect.arrayContaining([['requested_by', 'admin-1']]));
   expect(upd.whereNull).toEqual(['thread_id']);
-  expect(upd.update).toMatchObject({ thread_id: T1 });
+  expect(upd.update).toMatchObject({ thread_id: T1, thread_turn_seq: 6 });
 
-  expect(await attachThread([], T1, 'admin-1')).toBe(0);
-  expect(await attachThread(['pa-1'], null, 'admin-1')).toBe(0);
+  expect(await attachThread([], T1, 6, 'admin-1')).toBe(0);
+  expect(await attachThread(['pa-1'], null, 6, 'admin-1')).toBe(0);
+  expect(await attachThread(['pa-1'], T1, null, 'admin-1')).toBe(0);
 });

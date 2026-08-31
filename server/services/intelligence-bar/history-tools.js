@@ -47,7 +47,7 @@ Results are the operator's own threads only. Supports quoted phrases and -exclus
       columns: {
         ib_thread_turns: ['id', 'thread_id', 'seq', 'role', 'content', 'created_at'],
         ib_threads: ['id', 'admin_actor_id', 'title', 'context', 'last_active_at'],
-        ib_pending_actions: ['id', 'thread_id', 'requested_by', 'tool_name', 'summary', 'status', 'created_at', 'consumed_at'],
+        ib_pending_actions: ['id', 'thread_id', 'thread_turn_seq', 'requested_by', 'tool_name', 'summary', 'status', 'result', 'created_at', 'consumed_at'],
       },
       reason: 'Full-text search uses to_tsvector/websearch_to_tsquery/ts_headline in raw fragments.',
     },
@@ -138,9 +138,12 @@ async function searchIbHistory(input, actionContext) {
     .whereIn('thread_id', threadIds)
     .where('requested_by', actorId)
     .orderBy('created_at', 'desc')
-    .select('id', 'thread_id', 'tool_name', 'summary', 'status', 'created_at', 'consumed_at');
+    .select('id', 'thread_id', 'thread_turn_seq', 'tool_name', 'summary', 'status', 'result', 'created_at', 'consumed_at');
 
   const results = rows.map((r) => {
+    // The exchange = (user seq, assistant seq); receipts are stamped with
+    // the assistant seq, so attribute only the ones from THIS exchange.
+    const assistantSeq = r.role === 'assistant' ? r.seq : r.seq + 1;
     const pair = pairMap.get(`${r.thread_id}:${r.role === 'user' ? r.seq + 1 : r.seq - 1}`);
     return {
       thread_id: r.thread_id,
@@ -158,10 +161,13 @@ async function searchIbHistory(input, actionContext) {
           truncated: String(pair.content).length > PAIR_PREVIEW_CHARS,
         },
       } : {}),
-      receipts: receipts.filter((x) => x.thread_id === r.thread_id).map((x) => ({
-        id: x.id, tool: x.tool_name, summary: x.summary, status: x.status,
-        proposed_at: x.created_at, resolved_at: x.consumed_at,
-      })),
+      receipts: receipts
+        .filter((x) => x.thread_id === r.thread_id && x.thread_turn_seq === assistantSeq)
+        .map((x) => ({
+          id: x.id, tool: x.tool_name, summary: x.summary, status: x.status,
+          outcome: receiptOutcome(x),
+          proposed_at: x.created_at, resolved_at: x.consumed_at,
+        })),
     };
   });
 
@@ -171,8 +177,22 @@ async function searchIbHistory(input, actionContext) {
     mode,
     total: results.length,
     results,
-    note: 'Receipts are the audit trail of pending actions from the matched conversations: status confirmed = executed by the operator; pending/expired/cancelled = never ran.',
+    note: 'Receipts are the audit trail of pending actions proposed by that exact exchange. Trust `outcome`, not `status`: executed = the operator confirmed AND the run recorded success; failed = confirmed but the run recorded an error; unknown = confirmed but no result was recorded; never_ran = pending, expired, or cancelled.',
   };
+}
+
+// `status = confirmed` is set when the operator clicks Confirm, BEFORE the
+// action executes; a failed run keeps status confirmed with the error in
+// `result`. Never report a confirmed action as done without the result.
+function receiptOutcome(row) {
+  if (row.status !== 'confirmed') return 'never_ran';
+  let result = row.result;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { return 'unknown'; }
+  }
+  if (result === null || result === undefined) return 'unknown';
+  if (typeof result === 'object' && (result.error || result.failed === true)) return 'failed';
+  return 'executed';
 }
 
 module.exports = { HISTORY_TOOLS, executeHistoryTool };
