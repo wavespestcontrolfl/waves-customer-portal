@@ -64,8 +64,15 @@ const D = {
 };
 
 // A blocked claim is amber, not red: nothing broke, but nothing ran either.
+// The inline line reads ok as ordinary body text; the toast keeps its
+// established green success look, so the two share severities, not colors.
 const PROCESS_VERDICT_COLOR = {
   ok: D.muted,
+  blocked: D.amber,
+  failed: D.red,
+};
+const TOAST_COLOR = {
+  ok: D.green,
   blocked: D.amber,
   failed: D.red,
 };
@@ -199,7 +206,7 @@ export default function CallRecordingsPanel() {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [selected, setSelected] = useState(null);
-  const [toast, setToast] = useState("");
+  const [toast, setToast] = useState(null);
 
   const loadData = useCallback(async () => {
     const [s, r] = await Promise.all([
@@ -216,9 +223,13 @@ export default function CallRecordingsPanel() {
   useEffect(() => {
     loadData();
   }, [loadData]);
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 3500);
+  // A toast carries a severity, not just text: the shared toast is styled
+  // as a green check, so passing a "nothing ran" message through it kept
+  // the blocked result looking successful — the exact footgun this change
+  // exists to remove.
+  const showToast = (msg, severity = "ok") => {
+    setToast(msg ? { text: msg, severity } : null);
+    setTimeout(() => setToast(null), 3500);
   };
 
   const processAll = async () => {
@@ -230,7 +241,7 @@ export default function CallRecordingsPanel() {
       showToast(`Processed ${result.processed} recording(s)`);
       loadData();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      showToast(`Failed: ${e.message}`, "failed");
     }
     setProcessing(false);
   };
@@ -244,10 +255,11 @@ export default function CallRecordingsPanel() {
       );
       // "Recording processed" was a lie on every skip: a blocked claim comes
       // back HTTP 200 with success:true and nothing done.
-      showToast(describeProcessResult(res).text);
+      const verdict = describeProcessResult(res);
+      showToast(verdict.text, verdict.severity);
       loadData();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      showToast(`Failed: ${e.message}`, "failed");
     }
   };
 
@@ -590,7 +602,7 @@ export default function CallRecordingsPanel() {
           bottom: 20,
           right: 20,
           background: D.card,
-          border: `1px solid ${D.green}`,
+          border: `1px solid ${TOAST_COLOR[toast?.severity] || D.green}`,
           borderRadius: 8,
           padding: "10px 16px",
           display: "flex",
@@ -606,8 +618,10 @@ export default function CallRecordingsPanel() {
         }}
       >
         {" "}
-        <span style={{ color: D.green }}>{"\u2713"}</span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
+        <span style={{ color: TOAST_COLOR[toast?.severity] || D.green }}>
+          {toast?.severity === "ok" || !toast?.severity ? "\u2713" : "\u26A0"}
+        </span>
+        <span style={{ color: D.text }}>{toast?.text}</span>{" "}
       </div>{" "}
     </div>
   );
