@@ -649,7 +649,20 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
         name: route.name,
         frequency: primaryPattern,
         combinedCatalogServiceKey: route.catalogServiceKey,
-        ...(consistentVisits ? { visitsPerYear: consistentVisits } : {}),
+        // Under GATE_SEPARATE_COMBO_VISITS the rider (bait+bond) route now
+        // WINS the clean count-less bait the retired pest route used to
+        // consume, and termite seeding requires exactly 4 visits — without
+        // the quarterly default the sold series would stop after one check
+        // (audit P0). Pre-gate stays count-only.
+        ...(consistentVisits ? { visitsPerYear: consistentVisits }
+          : (separateComboVisits && route.primaryKey === 'termite_bait'
+            && primaryPattern === 'quarterly'
+            && !visitCountFieldsConflict(primary) && !visitCountFieldsInvalid(primary))
+            // Count-less OR cadence-disagreeing stale counts both
+            // normalize to the quarterly 4 (audit P0) — the r12 posture:
+            // cadence is the truth, disagreeing counts are debris. Only
+            // conflicted/invalid aliases decline.
+            ? { visitsPerYear: 4 } : {}),
       },
     });
   }
@@ -684,6 +697,17 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       // Stamp the accept-resolved cadence onto the separated primary so the
       // per-line scheduler and the reserved pest promotion derive the SAME
       // cadence the customer accepted, not the stale quote line's.
+      // The BAIT validates FIRST (audit P0): a mismatched/conflicted
+      // companion declines the whole rewrite, and the documented decline
+      // outcome is BOTH lines keeping their pre-existing per-line
+      // semantics — the pest line must not have been mutated already.
+      const companion = remaining[companionIdx];
+      const visits = visitsPerYearForRecurringService(companion);
+      const cadence = explicitServiceCadence(companion);
+      const clean = !visitCountFieldsConflict(companion) && !visitCountFieldsInvalid(companion)
+        && (visits == null || visits === 4)
+        && (!cadence || cadence === route.companionDefaultPattern);
+      if (!clean) continue;
       // Normalize the separated primary WHENEVER the rewrite succeeds, not
       // only when frequency changes (audit P0): a line already carrying
       // frequency 'quarterly' plus a stale visitsPerYear: 12 would seed 12
@@ -704,13 +728,6 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
         }
       }
       remaining[primaryIdx] = normalizedPrimary;
-      const companion = remaining[companionIdx];
-      const visits = visitsPerYearForRecurringService(companion);
-      const cadence = explicitServiceCadence(companion);
-      const clean = !visitCountFieldsConflict(companion) && !visitCountFieldsInvalid(companion)
-        && (visits == null || visits === 4)
-        && (!cadence || cadence === route.companionDefaultPattern);
-      if (!clean) continue;
       remaining.splice(companionIdx, 1);
       standaloneRewrites.push({
         catalogServiceKey: 'termite_bait',
@@ -808,6 +825,8 @@ function reservedRowComboRewrites(reservedRows = [], combos = []) {
 // r20 P1), so a label-only match would misclassify a bait reservation as
 // zero-match and double-schedule the bait+bond program — or, symmetric,
 // skip the rewrite it needs. Only the families combo routes name.
+const RETIRED_COMBINED_CATALOG_KEYS = new Set(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']);
+
 function comboRouteFamiliesFromCatalogKey(serviceKey) {
   const key = String(serviceKey || '');
   if (!key) return [];
@@ -2881,16 +2900,38 @@ const PREPAY_COVERAGE_INVALID = 'prepay_coverage_invalid';
 // link the id and change nothing else; duration keeps today's derivation.
 const IDENTITY_ONLY_CATALOG_KEYS = new Set([
   ...Object.values(LAWN_CADENCE_CATALOG_KEYS),
-  // Tree & Shrub rows store 45-minute defaults while the converter books
-  // T&S flat at 60 (owner directive) — same path-dependent-duration trap
-  // as lawn, so the gated T&S promotion links identity only (audit P2).
-  ...Object.values(TREE_SHRUB_CADENCE_CATALOG_KEYS),
   'palm_injection_semiannual',
 ]);
+
+// Tree & Shrub rows store 45-minute defaults while the converter books T&S
+// flat at 60 (owner directive) — the same path-dependent-duration trap as
+// lawn. Scoped to GATE_SEPARATE_COMBO_VISITS (audit P1): pre-gate T&S
+// units keep copying the catalog default so gate-off traffic is
+// byte-identical.
+const TREE_SHRUB_IDENTITY_ONLY_KEYS = new Set(Object.values(TREE_SHRUB_CADENCE_CATALOG_KEYS));
+function identityOnlyCatalogKey(catalogServiceKey) {
+  return IDENTITY_ONLY_CATALOG_KEYS.has(catalogServiceKey)
+    || (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+      && TREE_SHRUB_IDENTITY_ONLY_KEYS.has(catalogServiceKey));
+}
 
 function remainingUnitCatalogKey(svc = {}) {
   const key = String(svc.serviceKey || svc.service_key || '').trim();
   if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
+  // GATE_SEPARATE_COMBO_VISITS: a legacy lawn+T&S line carries only its
+  // name ("Tree & Shrub Care Program") — the combined route used to give
+  // it the combo identity, and without a key here the separated auto-path
+  // parent/children would carry NO catalog identity and complete under the
+  // generic profile (audit P0). Derive the cadence-specific key exactly as
+  // the reserved promotion does; the same pattern gate applies.
+  if (!key && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+    && seedingFamilyKey(svc) === 'tree_shrub'
+    && !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)) {
+    const pattern = converterFollowUpSeedingPattern(
+      svc, { service_type: svc.name || svc.serviceName || svc.service_name || 'Tree & Shrub' }, null,
+    );
+    if (pattern && TREE_SHRUB_CADENCE_CATALOG_KEYS[pattern]) return TREE_SHRUB_CADENCE_CATALOG_KEYS[pattern];
+  }
   // Recurring foam: key verified against the catalog 2026-08-08 — the
   // foam_recurring row ships in the same PR (20260808070000). The seeder
   // normalizer matches both the engine key (priceRecurringFoam returns
@@ -2958,12 +2999,15 @@ function guardServiceTypeFor(rawLabel) {
   return rawLabel;
 }
 
-function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
+function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}, identityFamily = null) {
   // Palm-first family matching (codex r9 P1): an adopted reserved row
   // labeled 'Palm Tree Injections' beside a Tree & Shrub line would
   // otherwise match the T&S line through the tree-first seeder resolver
   // and seed the WRONG cadence onto the palm parent.
-  const rowKey = seedingFamilyKey({}, scheduledRow);
+  // identityFamily (GATE_SEPARATE_COMBO_VISITS): catalog-first binding —
+  // the row's durable identity outranks its possibly-stale label, the
+  // same authority rule the promotion dedupe applies (audit P0).
+  const rowKey = identityFamily || seedingFamilyKey({}, scheduledRow);
   return recurringServices.find((svc) => seedingFamilyKey(svc) === rowKey)
     || recurringServices.find((svc) => recurringServiceKey(svc) === 'pest_control')
     || recurringServices[0]
@@ -4544,6 +4588,7 @@ const EstimateConverter = {
               const treeShrubPromotable = fam === 'tree_shrub'
                 && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
                 && (() => {
+                  if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)) return false;
                   const tsVisits = visitsPerYearForRecurringService(svc);
                   return !!tsVisits && remaining.some(
                     (other) => seedingFamilyKey(other) === 'lawn_care'
@@ -4611,6 +4656,9 @@ const EstimateConverter = {
       // the rewritten row span two lines. Aligning multi-service reserved
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
+      // Hoisted so the seed binding below the promotion try can read the
+      // same authoritative identities (audit P0).
+      let reservedServiceKeyById = new Map();
       // A separately-sold ONE-TIME palm injection item claims a
       // one-time-keyed reserved row (codex r23 P1): with BOTH palm
       // programs sold, the reserved one-time visit keeps its own
@@ -4711,7 +4759,7 @@ const EstimateConverter = {
         // so a label-only alreadyReserved check would promote a duplicate
         // parent + series beside it. Fail-soft: a failed lookup leaves the
         // map empty and the label check still applies.
-        const reservedServiceKeyById = new Map();
+        reservedServiceKeyById = new Map();
         try {
           const reservedIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
           if (reservedIds.length) {
@@ -4822,6 +4870,10 @@ const EstimateConverter = {
               // and its T&S line keeps the adjudicated office-scheduled
               // semantic. Parity with the route's requireVisitsMatch —
               // both halves carry explicit, EQUAL visits.
+              // Conflicted/invalid count aliases decline exactly as the
+              // retired combined route did — those legacy rows stay
+              // office-scheduled (audit P0).
+              if (visitCountFieldsConflict(line) || visitCountFieldsInvalid(line)) return false;
               const tsVisits = visitsPerYearForRecurringService(line);
               const lawnMatch = !!tsVisits && (remaining || []).some(
                 (other) => seedingFamilyKey(other) === 'lawn_care'
@@ -4884,8 +4936,14 @@ const EstimateConverter = {
             // companion work at completion — inserting a standalone bait or
             // T&S series beside it would double-schedule. Family overlap is
             // gate-scoped; pre-gate identity stays exact-key.
+            // ONLY the two retired combined identities cover both
+            // constituent families (audit P0): an ordinary stale
+            // cadence-specific identity (pest_general_monthly on a
+            // quarterly accept) must not suppress the correctly-cadenced
+            // promoted unit — those rows need exact identity or a relink.
             const retiredComboCover = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
               && !!unit.catalogServiceKey && !!reservedKey
+              && RETIRED_COMBINED_CATALOG_KEYS.has(reservedKey)
               && comboRouteFamiliesFromCatalogKey(reservedKey)
                 .some((famKey) => comboRouteFamiliesFromCatalogKey(unit.catalogServiceKey).includes(famKey));
             const identityMatch = !!unit.catalogServiceKey
@@ -4966,7 +5024,7 @@ const EstimateConverter = {
                 .first('id', 'default_duration_minutes');
               if (catalogRow) {
                 standaloneRow.service_id = catalogRow.id;
-                if (catalogRow.default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS.has(unit.catalogServiceKey)) {
+                if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
                   standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
                 }
               }
@@ -5170,8 +5228,21 @@ const EstimateConverter = {
         // catch is deliberately fail-soft (log and keep the acceptance),
         // which would swallow this refusal and complete the accept anyway
         // (pre-push P0 r9).
+        // Catalog-first binding under the gate (audit P0): an adopted row
+        // whose durable identity names exactly one route family seeds from
+        // THAT family's line, not its stale label — a pest-identified row
+        // labeled bait would otherwise bind the bait line, termite seeding
+        // declines, and the sold pest series stops after one visit.
+        const reservedIdentityFamily = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+          ? (() => {
+            const identity = reservedServiceKeyById.get(reservedStart.service_id)
+              || String(reservedStart.service_key_snapshot || '') || null;
+            const fams = comboRouteFamiliesFromCatalogKey(identity);
+            return fams.length === 1 ? fams[0] : null;
+          })()
+          : null;
         let reservedGuardSvc = reservedSeedSvc
-          || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+          || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart, reservedIdentityFamily);
         // With a separately-sold one-time palm item, a one-time-keyed
         // reserved row is the ONE-TIME item's visit (codex r23 P1) — the
         // recurring palm line must not bind to it (no relink, no seeding
@@ -5396,7 +5467,7 @@ const EstimateConverter = {
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
-              if (catalogRow.default_duration_minutes && !IDENTITY_ONLY_CATALOG_KEYS.has(unit.catalogServiceKey)) {
+              if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
             } else {
@@ -6673,6 +6744,7 @@ module.exports.identityAwareComboMatches = identityAwareComboMatches;
 module.exports.comboRouteFamiliesFromCatalogKey = comboRouteFamiliesFromCatalogKey;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
+module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;

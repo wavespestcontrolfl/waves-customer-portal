@@ -692,7 +692,7 @@ describe('the series creators consume the guard (source guards)', () => {
     // alreadyReserved must see an adopted row with a STALE label but the
     // CORRECT catalog id/snapshot — label-only matching promoted a
     // duplicate parent + series beside it.
-    expect(converterSrc).toContain('const reservedServiceKeyById = new Map();');
+    expect(converterSrc).toContain('let reservedServiceKeyById = new Map();'); // hoisted for the catalog-first seed binding
     expect(converterSrc).toContain('const identityMatch = !!unit.catalogServiceKey');
     expect(converterSrc).toContain('(reservedKey === unit.catalogServiceKey || retiredComboCover)');
     expect(converterSrc).toContain("String(row.service_key_snapshot || '')");
