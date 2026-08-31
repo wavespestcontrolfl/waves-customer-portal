@@ -361,7 +361,9 @@ describe('POST /:id/cancel-plan', () => {
 
     expect(order).toEqual(['insert:service_requests', 'processor', 'case', 'confirm']);
     const request = mockState.inserted.find((i) => i.table === 'service_requests').row;
-    expect(request).toEqual(expect.objectContaining({ customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new', description: 'Too expensive' }));
+    // Inserted 'new'; the clean run closes the acceptance to 'resolved' so a
+    // later cancel never reuses this request.
+    expect(request).toEqual(expect.objectContaining({ customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved', description: 'Too expensive' }));
     expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', requestId: request.id, families: [], keepThrough: null, waiveLateFee: true,
       actor: { type: 'admin', userId: 'admin-1' },
@@ -441,6 +443,13 @@ describe('POST /:id/cancel-plan', () => {
     // Both runs hand the processor the SAME request-id reason, so the
     // note-less fallback reason matches the first attempt's history notes.
     expect(mockProcess.mock.calls[0][0].reason).toBe(mockProcess.mock.calls[1][0].reason);
+    // The clean second run CLOSES the acceptance…
+    expect(mockState.service_requests.find((r) => r.id === second.requestId).status).toBe('resolved');
+    // …so a LATER cancel (win-back cancelled again) opens a fresh request
+    // with its own case/audit trail instead of reusing the finished one.
+    const third = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(third.requestId).not.toBe(first.requestId);
+    expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(2);
   }));
 
   test('a wound-down account with a lost follow-up step can still retry — the open acceptance beats nothing_to_cancel', () => withServer(async (baseUrl) => {

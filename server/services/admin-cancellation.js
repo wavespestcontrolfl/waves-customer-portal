@@ -1060,6 +1060,22 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     }
   }
 
+  // A CLEAN run closes its acceptance: findOpenAcceptance keys reuse on
+  // status 'new', so leaving a finished request open would hand a SECOND
+  // cancellation inside 24h (a win-back cancelled again) the prior run's
+  // request id, its UNIQUE case, and its request-scoped dedupe state. A
+  // partial/errored run stays 'new' — that is exactly the repairable
+  // acceptance the retry path needs. Best-effort: a lost stamp only risks
+  // an unnecessary reuse, never a lost cancel.
+  if (processed && errors.length === 0) {
+    try {
+      await db('service_requests').where({ id: request.id })
+        .update({ status: 'resolved', updated_at: new Date() });
+    } catch (closeErr) {
+      logger.warn(`[admin-cancellation] acceptance close failed for request ${request.id}: ${closeErr.message}`);
+    }
+  }
+
   // Exception-based: a partial run OR any post-processor failure (refund
   // task, term disposition, case write) bells the office — a missing refund
   // task must never disappear into logs behind a green processor result.
