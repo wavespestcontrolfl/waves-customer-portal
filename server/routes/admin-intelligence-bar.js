@@ -226,6 +226,13 @@ const PII_TOOL_NAMES = new Set([
   // Recall returns verbatim past conversation turns (which may embed
   // customer PII and carry taint markers) and its query is operator-typed.
   'search_ib_history',
+  // W0B proposal pins put the resolved customer name (reschedule visit,
+  // review-request recipient, estimate owner) into the model-visible tool
+  // result — redact like the other identity-bearing writes.
+  'reschedule_appointment',
+  'trigger_review_request',
+  'toggle_estimate_v2_view',
+  'toggle_show_one_time_option',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
@@ -582,6 +589,34 @@ async function resolveReviewRequestRecipient({ customer_id, customer_name }) {
   return null;
 }
 
+async function loadPriceApprovalPin(approvalId) {
+  const a = await db('price_approvals as pa')
+    .leftJoin('products_catalog as p', 'p.id', 'pa.product_id')
+    .leftJoin('vendors as v', 'v.id', 'pa.vendor_id')
+    .where('pa.id', approvalId)
+    .first('pa.id', 'pa.status', 'pa.product_id', 'pa.vendor_id', 'pa.new_price', 'pa.new_quantity', 'p.name as product_name', 'v.name as vendor_name');
+  if (!a) return null;
+  return {
+    id: a.id,
+    status: a.status,
+    product_id: a.product_id,
+    product_name: a.product_name || null,
+    vendor_name: a.vendor_name || null,
+    new_price: a.new_price == null ? null : Number(a.new_price),
+    new_quantity: a.new_quantity || null,
+  };
+}
+
+function priceApprovalFingerprint(a) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    String(a.id), a.status, String(a.product_id || ''), String(a.vendor_id || ''), a.new_price, a.new_quantity,
+  ])).digest('hex');
+}
+
+function estimatePinFingerprint(est, flag) {
+  return crypto.createHash('sha256').update(JSON.stringify([String(est.id), flag, est[flag] === true])).digest('hex');
+}
+
 function maskEmail(address) {
   const [local, domain] = String(address).split('@');
   if (!domain) return '***';
@@ -594,6 +629,21 @@ function confirmationDisplayParams(toolName, params, preview) {
   }
   if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
     return { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined };
+  }
+  if (toolName === 'approve_price' && preview?.pinned_approval) {
+    const a = preview.pinned_approval;
+    return {
+      ...params,
+      approval: `${a.product_name || 'product'}${a.vendor_name ? ` @ ${a.vendor_name}` : ''} — ${a.new_price != null ? `$${a.new_price.toFixed(2)}` : '?'}${a.new_quantity ? ` / ${a.new_quantity}` : ''} (${a.status})`,
+    };
+  }
+  if ((toolName === 'toggle_estimate_v2_view' || toolName === 'toggle_show_one_time_option') && preview?.pinned_estimate) {
+    const e = preview.pinned_estimate;
+    return {
+      ...params,
+      estimate: `${e.customer_name ? `${e.customer_name} — ` : ''}${e.token || e.id}`,
+      change: `${e.flag}: ${e.current} → ${e.next}`,
+    };
   }
   if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
     const a = preview.pinned_appointment;
@@ -757,8 +807,14 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       try {
         const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id));
         const amount = Number(projected?.amount ?? projected) || 0;
-        params._inspection_credit_amount = amount;
-        preview = { ...preview, inspection_credit: { amount } };
+        if (amount > 0) {
+          // The redemption is claimed post-commit by the executor (and the
+          // hourly sweep) — not pinnable to this card. Credit-bearing
+          // bookings are made where that money flow is visible.
+          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of inspection credit that this booking would redeem, which the confirmation card cannot pin exactly. Book it from the Schedule screen. Nothing was changed.` } };
+        }
+        params._inspection_credit_amount = 0;
+        preview = { ...preview, inspection_credit: { amount: 0 } };
       } catch (err) {
         return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
       }
@@ -804,6 +860,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!email) return { failed: true, modelResult: { error: 'Email not found — nothing was proposed.' } };
       if (!email.from_address) return { failed: true, modelResult: { error: 'Email has no sender address to reply to.' } };
       params._pinned_email = emailPinFingerprint(email);
+      // Carried INTO the executor: sendEmailReply refuses at the send
+      // boundary if the sender address no longer matches the card.
+      params._pinned_email_address = email.from_address;
       preview = {
         ...preview,
         pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null },
@@ -811,6 +870,45 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
     if (toolUse.name === 'cancel_appointment') {
       return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+    }
+    if (toolUse.name === 'approve_price' && params.approval_id) {
+      // The card must show WHAT price is being authorized (product, vendor,
+      // new price/quantity) — approving applies vendor pricing and
+      // recalculates the product's best price. Pin the pending row; a
+      // decided/changed approval refuses at Confirm.
+      const approval = await loadPriceApprovalPin(String(params.approval_id));
+      if (!approval) return { failed: true, modelResult: { error: 'Price approval not found — nothing was proposed.' } };
+      if (approval.status !== 'pending') {
+        return { failed: true, modelResult: { error: `This approval was already ${approval.status} — nothing to ${params.action || 'decide'}.` } };
+      }
+      params._approval_fingerprint = priceApprovalFingerprint(approval);
+      preview = { ...preview, pinned_approval: approval };
+    }
+    if ((toolUse.name === 'toggle_estimate_v2_view' || toolUse.name === 'toggle_show_one_time_option') && params.estimate_identifier) {
+      // Phone/token identifiers resolve to the NEWEST estimate at execution
+      // time, and an omitted `enabled` flips whatever the live flag is —
+      // both drift. Resolve the immutable estimate id and freeze the exact
+      // target flag value now; Confirm re-reads and refuses on drift.
+      const { resolveEstimateByIdentifier } = require('../services/intelligence-bar/estimate-tools');
+      const est = await resolveEstimateByIdentifier(params.estimate_identifier);
+      if (!est) return { failed: true, modelResult: { error: 'No estimate matches that identifier — nothing was proposed.' } };
+      const flag = toolUse.name === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
+      const current = est[flag] === true;
+      const next = typeof params.enabled === 'boolean' ? params.enabled : !current;
+      params.estimate_identifier = String(est.id);
+      params.enabled = next;
+      params._estimate_fingerprint = estimatePinFingerprint(est, flag);
+      preview = {
+        ...preview,
+        pinned_estimate: {
+          id: est.id,
+          token: est.token || null,
+          customer_name: est.customer_name || null,
+          flag,
+          current,
+          next,
+        },
+      };
     }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);
@@ -2257,10 +2355,13 @@ router.post('/confirm-action', async (req, res, next) => {
     // W0B proposal-time pins for legacy-bare writes: re-resolve exactly as
     // the proposal did and refuse on drift before anything is dispatched.
     {
+      // _pinned_phone / _pinned_email_address / _inspection_credit_amount
+      // stay IN execParams: the executors enforce them at the final send /
+      // insert boundary (review-tools, email-tools, tools.createAppointment).
+      // The route-level checks below are the cheap early refusal.
       const pinnedPhone = execParams._pinned_phone;
       const pinnedEmail = execParams._pinned_email;
       const pinnedAppointment = execParams._appointment_fingerprint;
-      delete execParams._pinned_phone;
       delete execParams._pinned_email;
       delete execParams._appointment_fingerprint;
       let drifted = false;
@@ -2274,8 +2375,21 @@ router.post('/confirm-action', async (req, res, next) => {
         const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
         drifted = !email || emailPinFingerprint(email) !== String(pinnedEmail);
       }
+      const pinnedApproval = execParams._approval_fingerprint;
+      delete execParams._approval_fingerprint;
+      if (!drifted && pinnedApproval) {
+        const a = await loadPriceApprovalPin(String(execParams.approval_id || ''));
+        drifted = !a || a.status !== 'pending' || priceApprovalFingerprint(a) !== pinnedApproval;
+      }
+      const pinnedEstimate = execParams._estimate_fingerprint;
+      delete execParams._estimate_fingerprint;
+      if (!drifted && pinnedEstimate) {
+        const { resolveEstimateByIdentifier } = require('../services/intelligence-bar/estimate-tools');
+        const est = await resolveEstimateByIdentifier(String(execParams.estimate_identifier || ''));
+        const flag = action.tool_name === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
+        drifted = !est || estimatePinFingerprint(est, flag) !== pinnedEstimate;
+      }
       const pinnedCredit = execParams._inspection_credit_amount;
-      delete execParams._inspection_credit_amount;
       if (!drifted && pinnedCredit !== undefined && execParams.customer_id) {
         // The booking's redemption amount the card disclosed must still hold.
         try {

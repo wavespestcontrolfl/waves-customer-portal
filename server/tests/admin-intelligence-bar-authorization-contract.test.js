@@ -62,7 +62,11 @@ jest.mock('../services/intelligence-bar/leads-tools', () => ({
   BULK_LEAD_UPDATE_CAP: 500,
 }));
 jest.mock('../services/intelligence-bar/email-tools', () => ({ EMAIL_TOOLS: [], executeEmailTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS: [], executeEstimateTool: jest.fn() }));
+const mockResolveEstimate = jest.fn();
+jest.mock('../services/intelligence-bar/estimate-tools', () => ({
+  ESTIMATE_TOOLS: [], executeEstimateTool: jest.fn(),
+  resolveEstimateByIdentifier: (...a) => mockResolveEstimate(...a),
+}));
 jest.mock('../services/intelligence-bar/banking-tools', () => ({
   BANKING_TOOLS: [], BANKING_QUERY_TOOLS: [], executeBankingTool: jest.fn(),
 }));
@@ -336,7 +340,7 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
     });
   });
 
-  test('trigger_review_request: unchanged recipient executes with the pin stripped', async () => {
+  test('trigger_review_request: unchanged recipient executes with the pin carried into the executor', async () => {
     mockClaimForConfirm.mockResolvedValue({
       // Name-pinned row (this suite's db stub has no query chain; the
       // customer_id path is exercised in the proposal test above).
@@ -350,12 +354,12 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('trigger_review_request', { customer_name: 'acct 1042' });
+      expect(mockExecuteTool).toHaveBeenCalledWith('trigger_review_request', { customer_name: 'acct 1042', _pinned_phone: '+19415550000' });
     });
   });
 });
 
-describe('W0B booking discloses and pins inspection-credit redemption', () => {
+describe('W0B booking is card-confirmable only when credit-free', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCreatePendingAction.mockResolvedValue({
@@ -363,30 +367,41 @@ describe('W0B booking discloses and pins inspection-credit redemption', () => {
     });
   });
 
-  test('proposal projects the credit, shows it as a billing effect, and pins the amount', async () => {
+  test('a customer with open inspection credit is refused → Schedule screen; nothing proposed', async () => {
     mockProjectCredit.mockResolvedValue({ amount: 49 });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', date: '2026-09-02', service_type: 'Quarterly Pest' } }],
+      [{ type: 'text', text: 'Use Schedule.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toMatch(/\$49\.00 of inspection credit/);
+      expect(toolResult.error).toMatch(/Schedule screen/);
+    });
+  });
+
+  test('credit-free booking is proposed with the zero pin carried into the executor', async () => {
+    mockProjectCredit.mockResolvedValue({ amount: 0 });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', date: '2026-09-02' } }],
       [{ type: 'text', text: 'Proposed.' }],
     ]);
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
       const stored = mockCreatePendingAction.mock.calls[0][0];
-      expect(mockProjectCredit).toHaveBeenCalledWith('c1');
-      expect(stored.params._inspection_credit_amount).toBe(49);
-      const labels = stored.contract.effects.map((e) => e.label);
-      expect(labels).toContainEqual("Redeems $49.00 of the customer's inspection credit toward this booking");
-      expect(labels).toContainEqual(expect.stringMatching(/no confirmation text is sent now/));
-      expect(stored.contract.notifies_customer).toBe(false);
+      expect(stored.params._inspection_credit_amount).toBe(0);
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual('No open inspection credit is redeemed by this booking (verified again at commit)');
       expect(body.pendingActions[0].params._inspection_credit_amount).toBeUndefined();
     });
-  });
-
-  test('confirm refuses when the redeemable credit changed since the card', async () => {
+    // Confirm: a credit appeared since the card → route refuses before the executor.
     mockClaimForConfirm.mockResolvedValue({
-      action: { id: PENDING_ID, tool_name: 'create_appointment', params: { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 49 } },
+      action: { id: PENDING_ID, tool_name: 'create_appointment', params: { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 0 } },
     });
-    mockProjectCredit.mockResolvedValue({ amount: 0 });
+    mockProjectCredit.mockResolvedValue({ amount: 49 });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
         method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
@@ -395,13 +410,8 @@ describe('W0B booking discloses and pins inspection-credit redemption', () => {
       expect(res.status).toBe(409);
       expect(mockExecuteTool).not.toHaveBeenCalled();
     });
-  });
-
-  test('confirm executes with the credit pin stripped when unchanged', async () => {
-    mockClaimForConfirm.mockResolvedValue({
-      action: { id: PENDING_ID, tool_name: 'create_appointment', params: { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 49 } },
-    });
-    mockProjectCredit.mockResolvedValue({ amount: 49 });
+    // Unchanged → executes WITH the zero pin (the executor re-verifies inside its transaction).
+    mockProjectCredit.mockResolvedValue({ amount: 0 });
     mockExecuteTool.mockResolvedValue({ success: true });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
@@ -409,7 +419,54 @@ describe('W0B booking discloses and pins inspection-credit redemption', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('create_appointment', { customer_id: 'c1', date: '2026-09-02' });
+      expect(mockExecuteTool).toHaveBeenCalledWith('create_appointment', { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 0 });
+    });
+  });
+});
+
+describe('W0B estimate toggle pin', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'toggle_show_one_time_option', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+
+  test('phone identifier resolves to the immutable estimate id; omitted enabled is frozen to the flip; Confirm refuses on drift', async () => {
+    mockResolveEstimate.mockResolvedValue({ id: 'e1', token: 'tok-1', customer_name: 'acct-3001', show_one_time_option: false });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'toggle_show_one_time_option', input: { estimate_identifier: '9415550100' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'show the one-time option', context: 'estimates' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.estimate_identifier).toBe('e1'); // canonicalized to the uuid
+      expect(stored.params.enabled).toBe(true); // frozen flip, not re-derived at commit
+      expect(stored.params._estimate_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual('Estimate tok-1 (acct-3001): one-time option off → on (customer-facing)');
+      expect(body.pendingActions[0].params.change).toBe('show_one_time_option: false → true');
+      expect(body.pendingActions[0].params._estimate_fingerprint).toBeUndefined();
+
+      // Confirm: someone already flipped it → drift.
+      mockClaimForConfirm.mockResolvedValue({ action: { id: PENDING_ID, tool_name: 'toggle_show_one_time_option', params: { ...stored.params } } });
+      mockResolveEstimate.mockResolvedValue({ id: 'e1', token: 'tok-1', show_one_time_option: true });
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(409);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+
+      // Unchanged → executes with the uuid + frozen flag, pin stripped.
+      mockResolveEstimate.mockResolvedValue({ id: 'e1', token: 'tok-1', show_one_time_option: false });
+      mockExecuteTool.mockResolvedValue({ success: true });
+      const ok = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(ok.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledWith('toggle_show_one_time_option', { estimate_identifier: 'e1', enabled: true });
     });
   });
 });

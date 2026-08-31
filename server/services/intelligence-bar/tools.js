@@ -1796,6 +1796,7 @@ async function createAppointment(input) {
   // still never blocks the booking.
   let appointment;
   let overlapAdvisory = null;
+  try {
   await db.transaction(async (trx) => {
     // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
     // occupancy lock + tech-blind probe FIRST, before the comms key (rung
@@ -1821,12 +1822,34 @@ async function createAppointment(input) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
+    // W0B authorization pin: a card-confirmed booking is approved as
+    // credit-FREE (credit-bearing bookings are refused at proposal). Verify
+    // inside the booking transaction — if an open credit appeared since the
+    // card, abort before the marker/redemption can consume it undisclosed.
+    if (input._inspection_credit_amount !== undefined) {
+      const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customer_id, { dbh: trx });
+      const live = Number(projected?.amount ?? projected) || 0;
+      if (live !== Number(input._inspection_credit_amount)) {
+        const err = new Error('booking_credit_changed');
+        err.previewChanged = true;
+        throw err;
+      }
+    }
     await require('../inspection-credit').markBookingForInspectionCredit(trx, {
       customerId: customer_id,
       scheduledServiceId: created.id,
       source: 'intelligence_bar',
     });
   });
+  } catch (err) {
+    if (err && err.previewChanged) {
+      return {
+        error: 'This customer\'s inspection credit changed after the card was shown — nothing was booked. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+    throw err;
+  }
 
   try {
     // Fast redemption post-commit, mirroring the admin-schedule/self-book

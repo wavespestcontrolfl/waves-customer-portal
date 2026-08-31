@@ -3568,6 +3568,9 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
 module.exports = {
   ESTIMATE_TOOLS,
   executeEstimateTool,
+  // Route-side proposal pin (W0B): resolve the toggle target ONCE at proposal
+  // so the card names the estimate and Confirm acts on that immutable id.
+  resolveEstimateByIdentifier,
   _private: {
     agentEstimatePayload,
     compactAgentLine,

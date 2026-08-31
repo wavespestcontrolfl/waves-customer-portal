@@ -400,10 +400,14 @@ Return ONLY the email body text, no subject line, no metadata.`
   }
 }
 
-async function sendEmailReply({ email_id, body }) {
+async function sendEmailReply({ email_id, body, _pinned_email_address }) {
   try {
     const email = await db('emails').where('id', email_id).first();
     if (!email) return { error: 'Email not found' };
+    // W0B pinned recipient: the reply goes to the address the card showed.
+    if (_pinned_email_address && String(email.from_address || '') !== String(_pinned_email_address)) {
+      return { error: 'The email\'s sender address changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+    }
 
     const gmailClient = require('../../services/email/gmail-client');
     const result = await gmailClient.sendMessage(
@@ -428,7 +432,7 @@ async function sendEmailReply({ email_id, body }) {
   }
 }
 
-async function replyViaSms({ email_id, customer_name, message, customer_id }) {
+async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone }) {
   try {
     let phone = null;
     let custName = customer_name;
@@ -474,6 +478,10 @@ async function replyViaSms({ email_id, customer_name, message, customer_id }) {
     }
 
     if (!phone) return { error: 'Could not find phone number for this customer' };
+    // W0B pinned recipient: enforce the approved phone at the send boundary.
+    if (_pinned_phone && String(phone) !== String(_pinned_phone)) {
+      return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+    }
 
     const smsResult = await sendCustomerMessage({
       to: phone,

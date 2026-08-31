@@ -407,6 +407,11 @@ async function triggerReviewRequest(input) {
   }
   if (!customer) return { error: 'Customer not found' };
   if (!customer.phone) return { error: `${customer.first_name} ${customer.last_name} has no phone number` };
+  // W0B pinned recipient: the operator approved THIS phone on the card —
+  // enforce at the send boundary, not only at the route's pre-check.
+  if (input._pinned_phone && String(customer.phone) !== String(input._pinned_phone)) {
+    return { error: 'The customer\'s phone changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+  }
 
   // Check if already sent recently. "Last 30 days" is a rolling DURATION, not a
   // calendar boundary, so compare created_at (a UTC timestamp) against the exact

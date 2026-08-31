@@ -158,14 +158,12 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
 });
 
-test('create_appointment discloses inspection-credit redemption and later reminders (no confirmation text now)', () => {
-  const withCredit = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { preview: true, inspection_credit: { amount: 49 } } });
-  const labels = withCredit.effects.map((e) => e.label);
-  expect(labels).toContainEqual("Redeems $49.00 of the customer's inspection credit toward this booking");
+test('create_appointment: card bookings are credit-free by construction; reminders register for later (no text now)', () => {
+  const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual('No open inspection credit is redeemed by this booking (verified again at commit)');
   expect(labels).toContainEqual(expect.stringMatching(/reminder rows .*no confirmation text is sent now/));
-  const noCredit = buildContract({ toolName: 'create_appointment', params: {}, displayParams: {}, preview: { preview: true, inspection_credit: { amount: 0 } } });
-  expect(noCredit.effects.some((e) => /Redeems/.test(e.label))).toBe(false);
-  expect(contractHash(withCredit)).not.toBe(contractHash(noCredit));
+  expect(c.notifies_customer).toBe(false);
 });
 
 test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {
@@ -208,6 +206,36 @@ test('bulk_update_leads: full name list under more_effects and a fingerprint of 
   const other = buildContract({ toolName: 'bulk_update_leads', params: { lead_ids: ['l1', 'l2', 'l9'], current_status: 'new', new_status: 'lost' }, displayParams: {}, preview: { all_names: ['acct-1', 'acct-2', 'acct-3'] } });
   expect(other.targets_fingerprint).not.toBe(c.targets_fingerprint);
   expect(contractHash(other)).not.toBe(contractHash(c));
+});
+
+test('irreversibility is derived from outbound effects, not only the allowlist', () => {
+  expect(buildContract({ toolName: 'move_stops_to_day', params: { notify_customers: true }, displayParams: { notify_customers: true } }).irreversible).toBe(true);
+  expect(buildContract({ toolName: 'move_stops_to_day', params: {}, displayParams: { notify_customers: false } }).irreversible).toBe(false);
+  expect(buildContract({ toolName: 'run_tax_advisor', params: {}, displayParams: {} }).irreversible).toBe(true);
+  expect(buildContract({ toolName: 'run_price_lookup', params: {}, displayParams: {} }).irreversible).toBe(true);
+  expect(buildContract({ toolName: 'update_customer', params: {}, displayParams: {} }).irreversible).toBe(false);
+});
+
+test('approve_price: pinned approval names product/vendor/price and the approve vs reject effect', () => {
+  const pinned = { id: 'pa1', status: 'pending', product_id: 'p1', vendor_name: 'VendorCo', product_name: 'Termidor SC 20oz', new_price: 89.5, new_quantity: '20 oz' };
+  const approve = buildContract({ toolName: 'approve_price', params: { approval_id: 'pa1', action: 'approve' }, displayParams: { approval_id: 'pa1', action: 'approve' }, preview: { pinned_approval: pinned } });
+  expect(approve.effects.map((e) => e.label)).toContainEqual('Approve $89.50 / 20 oz for Termidor SC 20oz from VendorCo — applies vendor pricing, records price history, and recalculates the product\'s best price');
+  expect(approve.effects.find((e) => e.label.startsWith('Approve')).kind).toBe('billing');
+  const reject = buildContract({ toolName: 'approve_price', params: { approval_id: 'pa1', action: 'reject' }, displayParams: { approval_id: 'pa1', action: 'reject' }, preview: { pinned_approval: pinned } });
+  expect(reject.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Reject the \$89\.50 price .* no pricing changes$/));
+  expect(approve.pinned_approval).toEqual(pinned);
+  expect(contractHash(approve)).not.toBe(contractHash(buildContract({ toolName: 'approve_price', params: { approval_id: 'pa1', action: 'approve' }, displayParams: { approval_id: 'pa1', action: 'approve' }, preview: { pinned_approval: { ...pinned, new_price: 79.5 } } })));
+});
+
+test('estimate toggles: pinned estimate + frozen before/after flag', () => {
+  const c = buildContract({
+    toolName: 'toggle_show_one_time_option',
+    params: { estimate_identifier: 'e1', enabled: true, _estimate_fingerprint: 'x' },
+    displayParams: { estimate_identifier: 'e1', enabled: true, estimate: 'acct-3001 — tok-1', change: 'show_one_time_option: false → true' },
+    preview: { pinned_estimate: { id: 'e1', token: 'tok-1', customer_name: 'acct-3001', flag: 'show_one_time_option', current: false, next: true } },
+  });
+  expect(c.effects).toContainEqual({ kind: 'customer', label: 'Estimate tok-1 (acct-3001): one-time option off → on (customer-facing)', before: 'off', after: 'on' });
+  expect(c.pinned_estimate.next).toBe(true);
 });
 
 test('hash is order-independent and sensitive to any effect change', () => {

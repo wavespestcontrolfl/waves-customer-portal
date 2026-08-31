@@ -229,14 +229,33 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       before: params?.current_status, after: params?.new_status,
     });
   }
+  if (toolName === 'approve_price' && preview?.pinned_approval) {
+    const a = preview.pinned_approval;
+    const price = a.new_price != null ? `$${Number(a.new_price).toFixed(2)}` : 'the proposed price';
+    if (params?.action === 'reject') {
+      push('operational', `Reject the ${price} price for ${a.product_name || 'this product'}${a.vendor_name ? ` from ${a.vendor_name}` : ''} — no pricing changes`);
+    } else {
+      push('billing', `Approve ${price}${a.new_quantity ? ` / ${a.new_quantity}` : ''} for ${a.product_name || 'this product'}${a.vendor_name ? ` from ${a.vendor_name}` : ''} — applies vendor pricing, records price history, and recalculates the product's best price`);
+    }
+  }
+  if ((toolName === 'toggle_estimate_v2_view' || toolName === 'toggle_show_one_time_option') && preview?.pinned_estimate) {
+    const e = preview.pinned_estimate;
+    const what = e.flag === 'use_v2_view' ? 'V2 estimate view' : 'one-time option';
+    push('customer', `Estimate ${e.token || e.id}${e.customer_name ? ` (${e.customer_name})` : ''}: ${what} ${e.current ? 'on' : 'off'} → ${e.next ? 'on' : 'off'} (customer-facing)`, {
+      before: e.current ? 'on' : 'off', after: e.next ? 'on' : 'off',
+    });
+  }
   for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
   if (toolName === 'create_appointment') {
     // Booking money + follow-on effects (codex P0/P1 on #3648): the open
     // inspection credit is redeemed post-commit, and reminder rows are
     // registered now but send LATER via the reminder schedule — no
     // confirmation SMS goes out on Confirm.
-    const credit = Number(preview?.inspection_credit?.amount) || 0;
-    if (credit > 0) push('billing', `Redeems $${credit.toFixed(2)} of the customer's inspection credit toward this booking`);
+    // Credit-bearing bookings are refused at proposal (the redemption is
+    // claimed post-commit and by the hourly sweep — not pinnable), so a card
+    // booking is always approved as credit-free and the executor verifies
+    // that inside the booking transaction.
+    if (preview?.inspection_credit) push('billing', 'No open inspection credit is redeemed by this booking (verified again at commit)');
     push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule); no confirmation text is sent now');
   }
   for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
@@ -361,7 +380,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     tier: tierFor(toolName),
     action_label: ACTION_LABELS[toolName] || humanKey(toolName),
     effects,
-    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName),
+    // Irreversibility is derived, not just allowlisted: anything that sends
+    // an outbound message (customer texts on a notifying move, the tax
+    // advisor's admin SMS) or spends externally (price research) cannot be
+    // undone from the portal.
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup',
     notifies_customer: notifiesCustomer,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
@@ -372,6 +395,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // appointment state) also bind the hash so the card can't drift.
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
+    ...(preview?.pinned_approval ? { pinned_approval: preview.pinned_approval } : {}),
+    ...(preview?.pinned_estimate ? { pinned_estimate: preview.pinned_estimate } : {}),
     // The card caps/truncates preview lines for presentation only — the
     // contract (and so its hash) still covers the COMPLETE resolved preview
     // through this fingerprint, so two plans that share a visible prefix
