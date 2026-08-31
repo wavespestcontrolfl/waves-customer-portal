@@ -125,6 +125,35 @@ describe('applyVerifiedOverrides', () => {
   });
 });
 
+describe('unitCount joins the verified-override flow (codex P1 r4)', () => {
+  const { sanitizeVerifiedValue } = require('../services/property-lookup/lookup-cache');
+
+  it('sanitizes as a STRICT integer in the parser bound', () => {
+    expect(sanitizeVerifiedValue('unitCount', 48)).toBe(48);
+    expect(sanitizeVerifiedValue('unitCount', '48')).toBe(48);
+    expect(sanitizeVerifiedValue('unitCount', '4-8')).toBeUndefined();
+    expect(sanitizeVerifiedValue('unitCount', 4.5)).toBeUndefined();
+    expect(sanitizeVerifiedValue('unitCount', 0)).toBeUndefined();
+    expect(sanitizeVerifiedValue('unitCount', 2001)).toBeUndefined();
+  });
+
+  it('applyVerifiedOverrides folds a corrected count with tech-verified provenance', () => {
+    const rec = applyVerifiedOverrides({
+      unitCount: 48,
+      _fieldEvidence: {
+        unitCount: { value: 48, sourceType: 'web_listing', fieldVerify: true, evidence: [] },
+      },
+    }, { unitCount: { value: 1, verifiedAt: '2026-08-31T00:00:00Z' } });
+    // A false multi-unit web count is now correctable: the verified 1
+    // replaces the cached 48 and carries parcel-scoped provenance, so the
+    // unit-address site-quote guard stops firing on the corrected address.
+    expect(rec.unitCount).toBe(1);
+    expect(rec._fieldEvidence.unitCount).toMatchObject({
+      value: 1, sourceType: 'verified', fieldVerify: false,
+    });
+  });
+});
+
 describe('getCachedLookup', () => {
   const freshRow = {
     // _source 'county': records WITHOUT county evidence age out on the

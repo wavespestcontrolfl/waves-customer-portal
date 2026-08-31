@@ -1938,9 +1938,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
     // so a plain fallback chain never reaches the aggregate figure when a
     // PAO record won the merge — codex P2 #2721).
-    unitCount: (rc?._parcel?.aggregated
+    // A tech-verified count beats the aggregate: the max() below exists to
+    // stop the truthy-1 seed hiding the association total, but it also let
+    // a stale parcel figure survive a person's on-site correction (codex
+    // P1 r5).
+    unitCount: verifiedUnitCountOf(rc) ?? ((rc?._parcel?.aggregated
       ? Math.max(Number(rc?.unitCount) || 0, Number(rc._parcel.residentialUnits) || 0)
-      : rc?.unitCount) || 1,
+      : rc?.unitCount) || 1),
     // Stacked-parcel association aggregate: distinct unit street numbers on
     // the roll (1 when the whole association shares one address).
     buildingCount,
@@ -2130,7 +2134,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       // unit-suffix guard needs the attested count for the 2–4-unit parcels
       // detectCategory now classifies residential — without it a "Unit B"
       // lead at a duplex would price off the whole building's sqft.
-      residentialUnits: Number(rc._parcel.residentialUnits) || null,
+      // A technician's verified count corrects THIS signal too (codex P1
+      // r7): unitOnMultiUnitParcelForcesSiteQuote maxes it with the
+      // top-level count, so a stale county 48 would keep forcing every
+      // unit-address quote into the site-confirmed path after a verified
+      // 48→1 correction. (verifiedUnitCountOf is null on aggregated
+      // records, so association parcels keep their aggregate figure.)
+      residentialUnits: verifiedUnitCountOf(rc) ?? (Number(rc._parcel.residentialUnits) || null),
       source: 'fdor_cadastral',
     } : null,
 
@@ -2668,6 +2678,15 @@ function hasStructuredCommercialAiSignal(ai = {}) {
 // SOURCE_TYPE_LABELS in services/property-lookup/ai-property-lookup.js).
 const AUTHORITATIVE_PROPERTY_TYPE_SOURCES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder']);
 
+// Sources whose unitCount is PARCEL-scoped by construction — a county roll,
+// cadastral FDOR roll, or a tech-verified read counts the whole parcel. A
+// permit or builder page can describe ONE unit's own record (the AI prompt
+// explicitly allows unitCount 1 for one apartment's record), so a small
+// count from those sources must never REMOVE protection — it may vote
+// COMMERCIAL (trustedUnitCount) but may not suppress the commercial verdict
+// (countyAttestedSmallResidential). Codex P1 on the unitCount plumbing.
+const PARCEL_SCOPED_UNIT_COUNT_SOURCES = new Set(['verified', 'county', 'cadastral']);
+
 // A record's type/zoning/land-use strings (and unit count) may only vote
 // COMMERCIAL when the record itself is trustworthy. Pure county / cadastral
 // merges always are, as are records with no evidence metadata (verified
@@ -2725,8 +2744,41 @@ function trustedUnitCount(rc) {
 // rd2 P1) — so strip ONLY the untrusted type strings and web-sourced unit
 // count, and keep the county signals. An AI-only merge has nothing
 // authoritative to keep.
+// A technician's verified unit count (applyVerifiedOverrides stamps
+// sourceType 'verified', weight 110) outranks EVERY remote source —
+// including the county aggregate riding _parcel.residentialUnits, which is
+// exactly the stale figure a correction exists to beat (codex P1 r5: a
+// 48→1 correction still produced a multi-unit/commercial profile because
+// every consumer took max(correction, parcel aggregate)). Returns the
+// verified count, or null when the field's evidence is not tech-verified.
+function verifiedUnitCountOf(rc) {
+  // An AGGREGATED parcel keeps aggregate scope (codex P1 r6): the stacked
+  // association shape is whole-association by construction — its dimensions
+  // ARE the aggregate living area/lot — so a verified "1" (true for one
+  // unit's own record) must not reclassify it residential while the profile
+  // still carries association-wide sqft: that is the condo-aggregation
+  // failure this pipeline exists to prevent. Verified counts correct
+  // RECORD-scoped counts on non-aggregated records only.
+  if (rc?._parcel?.aggregated === true) return null;
+  const entry = rc?._fieldEvidence?.unitCount;
+  const ev = Array.isArray(entry) ? entry[0] : entry;
+  if (String(ev?.sourceType || '').toLowerCase() !== 'verified') return null;
+  const n = Number(ev.value ?? rc.unitCount);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
 function commercialSignalRecord(rc) {
-  if (recordCommercialSignalTrusted(rc)) return rc;
+  if (recordCommercialSignalTrusted(rc)) {
+    // Type trust is not count trust (codex P1 r4): a hybrid with an
+    // authoritative county TYPE returns whole, but its only unitCount may
+    // be verify-flagged web evidence — now that the AI path reports counts,
+    // that >4 would reclassify a known-residential parcel COMMERCIAL in
+    // detectCategory. Sanitize the count on ITS OWN provenance; unflagged
+    // web counts still vote (Gateway-hole direction unchanged).
+    if (!rc) return rc;
+    const trusted = trustedUnitCount(rc);
+    return trusted === rc.unitCount ? rc : { ...rc, unitCount: trusted };
+  }
   if (rc?._source !== 'hybrid') return null;
   return {
     ...rc,
@@ -2743,7 +2795,7 @@ function commercialSignalRecord(rc) {
 // county itself counts at ≤4 units. Only county-attested counts may suppress
 // the vote: _parcel.residentialUnits is county GIS by construction
 // (attachParcelMeta), and rc.unitCount only when the record is authoritative
-// (county/cadastral merge, or authoritative unitCount field evidence).
+// (parcel-scoped unitCount field evidence: county/cadastral/verified).
 // Synthetic defaults keep the text vote: shapeAsPropertyRecord seeds
 // unitCount: 1 on EVERY record (ai-property-lookup.js), so a record-level
 // count may only vote here on authoritative unitCount FIELD evidence — a
@@ -2757,13 +2809,24 @@ function commercialSignalRecord(rc) {
 // _parcel.residentialUnits 30–48.
 function countyAttestedSmallResidential(rc) {
   if (!rc) return false;
+  // A tech-verified count settles the question alone — the stale parcel
+  // aggregate must not out-vote a person's 48→1 correction (codex P1 r5),
+  // and symmetrically a verified 48 must not let a stale parcel "1"
+  // suppress the commercial verdict.
+  const verified = verifiedUnitCountOf(rc);
+  if (verified != null) return verified <= 4;
   const counts = [];
   const parcelUnits = Number(rc._parcel?.residentialUnits);
   if (Number.isFinite(parcelUnits) && parcelUnits > 0) counts.push(parcelUnits);
   const evidence = rc._fieldEvidence?.unitCount;
   const evidenceSource = String(evidence?.sourceType || '').toLowerCase();
   const recordUnits = Number(rc.unitCount);
-  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(evidenceSource)
+  // Parcel-scoped provenance only: a builder/permit "1" may be one unit's
+  // own record inside a multifamily building — combined with whole-building
+  // county dimensions on a hybrid merge it would price the building
+  // residential (codex P1). Those sources keep the COMMERCIAL vote via
+  // trustedUnitCount; they just can't suppress it here.
+  if (PARCEL_SCOPED_UNIT_COUNT_SOURCES.has(evidenceSource)
     && Number.isFinite(recordUnits) && recordUnits > 0) counts.push(recordUnits);
   return counts.length > 0 && Math.max(...counts) <= 4;
 }
@@ -3243,10 +3306,31 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // trustedUnitCount, not the raw record count: commercialSignalRecord
   // returns the whole record when the TYPE is authoritative, so a hybrid
   // county-condo record with a web-sourced development unit count could
-  // otherwise exempt itself from the flag (codex P1 r6).
-  const unitLotTrustedUnitCount = unitLotSignalRc ? Number(trustedUnitCount(unitLotSignalRc)) : NaN;
-  const smallSharedParcel = (Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
-    || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2);
+  // otherwise exempt itself from the flag (codex P1 r6). Stricter still now
+  // that the AI web-search path REPORTS unit counts (unitCount plumbing):
+  // the exemption requires AUTHORITATIVE provenance — county/cadastral
+  // record, or authoritative unitCount field evidence — because
+  // trustedUnitCount passes an UNFLAGGED web count through, and a scraped
+  // "48 units" on a condo folio must not suppress the wrong-scope flag.
+  // PARCEL-scoped only (county / cadastral / verified): a builder or permit
+  // page counts the DEVELOPMENT, not this folio, so its 2+ would forward a
+  // shared development lot into unit pricing (pre-push codex P1 r3).
+  const unitLotCountEvidence = rc?._fieldEvidence?.unitCount;
+  const unitLotCountAuthoritative = unitLotCountEvidence
+    ? PARCEL_SCOPED_UNIT_COUNT_SOURCES.has(String(unitLotCountEvidence.sourceType || '').toLowerCase())
+    : (rc?._source === 'county' || rc?._source === 'cadastral');
+  const unitLotTrustedUnitCount = unitLotSignalRc && unitLotCountAuthoritative
+    ? Number(trustedUnitCount(unitLotSignalRc))
+    : NaN;
+  // A technician's verified count settles this alone — the stale parcel
+  // aggregate must not keep exempting the wrong-scope warning after a
+  // 48→1 on-site correction (pre-push codex P0 r5; same contract as
+  // detectCategory / masterUnitCount / the enriched profile).
+  const unitLotVerifiedCount = verifiedUnitCountOf(rc);
+  const smallSharedParcel = unitLotVerifiedCount != null
+    ? unitLotVerifiedCount >= 2
+    : ((Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
+      || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2));
   // Condo identity via the estimator's OWN predicate (isCondoRecord —
   // propertyType OR county land-use text, aggregated excluded), so an
   // "Office Condominium" land use behind a normalized 'Commercial' type is
@@ -3456,7 +3540,8 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     // Bounded like the aggregate seeding (ai-property-lookup coerceInt 2–2000)
     // so a bad layer response can't claim thousands of units.
     const parcelUnits = Math.min(Number(rc._parcel?.residentialUnits) || 0, 2000);
-    const masterUnitCount = Math.max(Number(trustedUnitCount(rc)) || 0, parcelUnits);
+    const masterUnitCount = verifiedUnitCountOf(rc)
+      ?? Math.max(Number(trustedUnitCount(rc)) || 0, parcelUnits);
     const masterParcelEvidence = masterUnitCount > 1 || Boolean(rc._parcel?.aggregated);
     if (masterParcelSubtype === 'hoa_common_area_residential'
         || (masterParcelSubtype === 'multifamily_common_area_residential' && masterParcelEvidence)) {

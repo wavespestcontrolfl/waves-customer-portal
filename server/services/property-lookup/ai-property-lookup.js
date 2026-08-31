@@ -156,6 +156,10 @@ const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao',
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
+  // Total units on the record's parcel/building — evidence provenance is
+  // what separates a REAL count from shapeAsPropertyRecord's truthy-1 seed
+  // (trustedUnitCount / countyAttestedSmallResidential key on it).
+  'unitCount',
   // Tri-state: true/false only when a county extra-features table was actually
   // parsed (pools are assessed improvements, so absence on a parsed roll is
   // meaningful); null = no signal, and isMissingPropertyValue(null) keeps
@@ -1093,6 +1097,24 @@ function buildCadastralRecord(parcel, address) {
     // per-unit commercial pricers read this). Bounded: a runaway aggregation
     // must not claim thousands of units off a bad layer response.
     record.unitCount = coerceInt(parcel.residentialUnits, 2, 2000) || 1;
+    // Explicit authoritative evidence for the county aggregate (pre-push
+    // codex P1): the merge only treats an EXPLICIT unitCount evidence entry
+    // as real (the truthy-1 seed must never become evidence), and this
+    // assignment happens after the record's evidence was built — without
+    // the entry, an AI listing count would be the merge's only candidate
+    // and could overwrite the county aggregate.
+    if (record.unitCount > 1) {
+      record._fieldEvidence = record._fieldEvidence || {};
+      record._fieldEvidence.unitCount = [{
+        field: 'unitCount',
+        value: record.unitCount,
+        provider,
+        url: null,
+        sourceType: 'county',
+        sourceQuality: SOURCE_TYPE_WEIGHTS.county,
+        providerConfidence: 'high',
+      }];
+    }
   }
   return record;
 }
@@ -4253,6 +4275,7 @@ Output rules:
 - Commercial/industrial properties: also search loopnet.com, crexi.com, and commercialcafe.com listings. "squareFootage" is the building square footage (these run larger than homes — report the true figure). When the address includes a unit/suite number, prefer THAT unit's square footage from the leasing listing over the whole building's.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
+- "unitCount" = the TOTAL number of dwelling/commercial units the record's parcel or building holds. 1 for a single-family home OR for one condo/apartment unit's own record; the building/complex total ONLY when the record describes the whole building or complex (an apartment community page, a whole-building listing). null when unknown — do NOT guess.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
 - Do NOT use generic city/category pages such as apartment directories, short-term-rental lists, or broad "homes for sale in city" pages as the source.
 - Use null for any field you can't verify — DO NOT guess. A null is more useful than a wrong number.
@@ -4266,6 +4289,7 @@ Respond with ONLY a JSON object — no preamble, no explanation, no markdown fen
   "bathrooms": <number 0.5-15 or null>,
   "stories": <int 1-4 or null>,
   "propertyType": <string or null>,
+  "unitCount": <int 1-2000 or null>,
   "constructionMaterial": <string or null>,
   "source": "<URL of primary source>",
   "confidence": "high" | "medium" | "low"
@@ -4315,6 +4339,10 @@ function parsePropertyJSON(text) {
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
       stories: coerceInt(raw.stories, 1, 4),
       propertyType: parsedType,
+      // Total units on the record's parcel/building (estimator-engine audit
+      // 2026-08-30 follow-up: the AI path hardcoded 1, blinding every
+      // downstream multi-unit signal). Bounded like the parcel-layer count.
+      unitCount: coerceStrictInt(raw.unitCount ?? raw.unit_count ?? raw.numberOfUnits, 1, 2000),
       constructionMaterial: coerceEnum(raw.constructionMaterial, ['CBS', 'WOOD_FRAME', 'BRICK', 'METAL']),
       source: typeof raw.source === 'string' ? raw.source : null,
       confidence: typeof raw.confidence === 'string' ? raw.confidence.toLowerCase() : null,
@@ -4332,6 +4360,29 @@ function coerceInt(raw, min, max) {
   const rounded = Math.round(n);
   if (rounded < min || rounded > max) return null;
   return rounded;
+}
+
+// Strict integer parse for counts that DRIVE classification (unitCount):
+// coerceInt strips non-digits, so a model's "4-8" becomes 48 and "1 to 8"
+// becomes 18 — a malformed range would read as a large authoritative-looking
+// count (codex P2). Accepts an integer-valued number or a bare digit string
+// (optionally suffixed "unit"/"units"); ranges, fractions, and anything else
+// parse to null = unknown.
+function coerceStrictInt(raw, min, max) {
+  if (raw == null) return null;
+  let n;
+  if (typeof raw === 'number') {
+    if (!Number.isInteger(raw)) return null;
+    n = raw;
+  } else if (typeof raw === 'string') {
+    const m = raw.trim().match(/^(\d{1,6})(?:\s*units?)?$/i);
+    if (!m) return null;
+    n = Number(m[1]);
+  } else {
+    return null;
+  }
+  if (n < min || n > max) return null;
+  return n;
 }
 
 function coerceFirstInt(values, min, max) {
@@ -4668,8 +4719,14 @@ function normalizeLookupPropertyType(raw) {
 }
 
 function hasAnyPropertyFact(parsed) {
+  // A multi-unit count is a usable fact on its own — it is the one signal
+  // the multi-unit site-quote guard needs, and a provider may verify only
+  // it (codex P2). A bare 1 is NOT: it is indistinguishable from the
+  // truthy-1 seed and would shape an otherwise-empty record.
+  const multiUnit = Number(parsed?.unitCount) > 1;
   return !!(parsed?.squareFootage || parsed?.lotSize || parsed?.yearBuilt
-    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories || parsed?.propertyType);
+    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories || parsed?.propertyType
+    || multiUnit);
 }
 
 // Reshape AI output to match the normalized property-record shape
@@ -4725,7 +4782,10 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     hasDetachedGarage: p.hasDetachedGarage ?? null,
     detachedGarageSqft: p.detachedGarageSqft || null,
     hasDock: p.hasDock ?? null,
-    unitCount: 1,
+    // A parsed unit count rides in with evidence (PROPERTY_EVIDENCE_FIELDS);
+    // absent one, the historical truthy-1 seed stands — consumers treat an
+    // evidence-less 1 as "no multi-unit signal", never as an attest.
+    unitCount: coerceStrictInt(p.unitCount, 1, 2000) || 1,
     ownerType: null,
     ownerNames: [],
     lastSaleDate: null,
@@ -4871,16 +4931,42 @@ function evidenceBaseScore(record) {
 
 function fieldEvidenceFromRecord(record, field) {
   if (!record || isMissingPropertyValue(record[field])) return null;
-  const existing = record._fieldEvidence?.[field]?.[0];
+  // unitCount is seeded to a truthy 1 on every shaped record — synthesizing
+  // evidence from the seed would promote "no signal" into an authoritative
+  // count after merging (countyAttestedSmallResidential could then suppress
+  // the conservative commercial verdict for a multifamily record whose true
+  // count is unknown — pre-push codex P1). Only an EXPLICIT evidence entry
+  // makes a unit count real.
+  // Shaped records carry ARRAY evidence; already-merged records carry the
+  // OBJECT shape — accept either so a re-merge keeps a real count.
+  // Normalize the entry shape ONCE and reuse it: reading `[0]` on the merged
+  // OBJECT shape yielded undefined, so a re-merge of a county-backed record
+  // fell back to _aiSourceType and a lower-authority listing count could
+  // overwrite the county count (pre-push codex P1 r3).
+  const entry = record._fieldEvidence?.[field];
+  const existing = Array.isArray(entry) ? entry[0] : entry;
+  if (field === 'unitCount' && !existing) return null;
+  // The merged OBJECT shape carries the winner's sourceType but no top-level
+  // sourceQuality / providerConfidence — those live on its evidence[0] (the
+  // winning candidate). Falling through to the RECORD-wide _aiSourceQuality
+  // let a hybrid whose unitCount came from a listing re-merge at county
+  // weight 100 and beat an authoritative cadastral count (pre-push codex
+  // P1 r3). Once a field has its own evidence, provenance comes from that
+  // evidence only — never inherited from the record.
+  const winnerEntry = Array.isArray(existing?.evidence) ? existing.evidence[0] : null;
   const sourceType = existing?.sourceType || record._aiSourceType || classifyPropertySource(record._aiSourceUrl).type;
-  const sourceWeight = existing?.sourceQuality || record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown;
-  const confidence = existing?.providerConfidence || record._aiConfidence;
+  const sourceWeight = existing
+    ? (existing.sourceQuality ?? winnerEntry?.sourceQuality ?? SOURCE_TYPE_WEIGHTS[sourceType] ?? SOURCE_TYPE_WEIGHTS.unknown)
+    : (record._aiSourceQuality || SOURCE_TYPE_WEIGHTS[sourceType] || SOURCE_TYPE_WEIGHTS.unknown);
+  const confidence = existing
+    ? (existing.providerConfidence ?? winnerEntry?.providerConfidence ?? null)
+    : record._aiConfidence;
   const score = Math.min(100, sourceWeight + confidenceRank(confidence) * 10);
   return {
     field,
     value: record[field],
-    provider: existing?.provider || record._provider || 'ai',
-    url: existing?.url || record._aiSourceUrl || null,
+    provider: existing?.provider || existing?.winningProvider || record._provider || 'ai',
+    url: existing?.url || existing?.winningSource || record._aiSourceUrl || null,
     sourceType,
     sourceQuality: sourceWeight,
     providerConfidence: confidence || null,
@@ -5172,6 +5258,7 @@ module.exports = {
     geoOpensCountyGate,
     hasCountyPricingCore,
     hasAnyPropertyFact,
+    coerceStrictInt,
     parseStoriesJSON,
     coerceBuildingSqftDetailed,
     coerceStoriesValue,
