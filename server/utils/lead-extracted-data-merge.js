@@ -118,6 +118,16 @@ function propertyUnitKey(entry) {
   return unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
 }
 
+// Key-sorted so two structurally identical entries serialize identically
+// whatever order Postgres handed their keys back in.
+function stablePropertyJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stablePropertyJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stablePropertyJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
 function propertyZip(entry) {
   if (!entry || typeof entry !== 'object') return '';
   return String(entry.zip || entry.postal_code || '').trim();
@@ -137,7 +147,7 @@ function propertyCity(entry) {
 function sameProperty(a, b) {
   const keyA = propertyStreetKey(a);
   const keyB = propertyStreetKey(b);
-  if (!keyA || !keyB) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  if (!keyA || !keyB) return stablePropertyJson(a) === stablePropertyJson(b);
   if (keyA !== keyB) return false;
   // Units decide before location does. Different units are different
   // properties however well the zip corroborates, and a unit on only ONE
@@ -156,8 +166,12 @@ function sameProperty(a, b) {
   const cityB = propertyCity(b);
   if (cityA && cityB) return cityA === cityB;
   // One side has a zip/city the other simply didn't capture: corroborate on
-  // whichever the partial side DOES carry, else keep them apart.
-  return false;
+  // whichever the partial side DOES carry, else keep them apart — EXCEPT when
+  // the two entries are literally the same record. Without that exception an
+  // address-only property was never equal even to itself, so the under-lock
+  // re-merge (which re-applies this pass's own payload over the locked row)
+  // appended another copy every time and one address read as several jobs.
+  return stablePropertyJson(a) === stablePropertyJson(b);
 }
 
 // Prior fields survive unless this payload supplies a real replacement.

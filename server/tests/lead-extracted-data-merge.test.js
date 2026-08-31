@@ -418,6 +418,17 @@ describe('units are part of a property\'s identity', () => {
     if (mixed) expect(mixed.address_line1).toBe('100 First St Apt 4');
   });
 
+  it('an address-only property does not accumulate copies of itself', () => {
+    // The under-lock pass re-applies this pass's own payload over the locked
+    // row, so an entry that never matched even itself appended a duplicate
+    // every time and one address read as several jobs.
+    const entry = { address_line1: '100 First St', notes: 'gate code at the rear' };
+    const afterCall1 = mergeLeadExtractedData({}, { additional_properties: [entry] }, RK);
+    const reMerged = mergeLeadExtractedData(afterCall1, { additional_properties: [entry] }, RK);
+    const again = mergeLeadExtractedData(reMerged, { additional_properties: [entry] }, RK);
+    expect(again.additional_properties).toHaveLength(1);
+  });
+
   it('a unit on only one side is ambiguous and never merges', () => {
     // Same stance the function already takes on a one-sided zip or city: the
     // cost of guessing wrong is losing a service address.
