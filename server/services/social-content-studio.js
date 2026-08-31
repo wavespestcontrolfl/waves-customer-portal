@@ -2770,10 +2770,6 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       const reason = await milestonePublishBlocker(input);
       if (reason) return { ok: false, status: 409, error: reason };
     }
-    // A season-gated versus draft (e.g. termite swarmers, Feb–Jun) must not
-    // publish once its window has passed.
-    const versusSeasonBlock = versusPublishBlocker(input);
-    if (versusSeasonBlock) return { ok: false, status: 409, error: versusSeasonBlock };
     const variants = runVariants(preview);
     const priorRecordFull = toJson(run.publish_result, {});
     const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)
@@ -2849,6 +2845,14 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     if (preview.suggestedLink && !approvedLink) {
       logger.warn(`[social-studio] approval link no longer live, publishing without it: ${preview.suggestedLink}`);
     }
+    // A season-gated versus draft (e.g. termite swarmers, Feb–Jun) must not
+    // publish once its window has passed. Sits AFTER the link probe for the
+    // same reason as the direct path's copy: an approval landing seconds
+    // before ET midnight would otherwise clear the gate in June and post in
+    // July while the probe (5s timeout) ran. Keep this the last await-free
+    // gate before the publish call.
+    const versusSeasonBlock = versusPublishBlocker(input);
+    if (versusSeasonBlock) return { ok: false, status: 409, error: versusSeasonBlock };
     const withPublishLock = (fn) => (input.milestone
       ? publishWithFleetStatsLease(input, fn, run.id)
       : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
