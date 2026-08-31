@@ -1195,9 +1195,12 @@ class AutonomousRunner {
       }
       // Remaining combinations are genuine human decisions (gate infra
       // errors, router-flagged briefs, named-competitor, trust-build ramp).
+      // affiliate_review OUTRANKS named_competitor_review: the latter is an
+      // email-approvable kind, and every affiliate-bearing draft must stay in
+      // the script-only lane (Codex r1 P1).
       const reason = !gatesPass ? 'gate_fail'
-        : forceNamedCompetitorReview ? 'named_competitor_review'
         : affiliateReview ? 'affiliate_review'
+        : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
       const trustBuildNote = (reason.startsWith('trust_build_') || reason === 'named_competitor_review' || reason === 'affiliate_review')
@@ -3052,27 +3055,32 @@ class AutonomousRunner {
     // without the refresh this claim is stale the moment it's taken —
     // recoverStaleClaims would bounce the row to 'pending' mid-publish and
     // a new run could re-draft an opportunity whose PR/post already exists.
+    // The parked KIND (named_competitor_review | affiliate_review) is the
+    // run's own skip_reason: the claim, the in-flight marker, and every
+    // rollback key off it so an affiliate approval can claim and revert its
+    // own rows (Codex r1 P1). The in-flight marker states are shared.
+    const parkedKind = run.skip_reason;
     const approvalClaimedAt = new Date();
     const oppClaimed = await db('opportunity_queue')
-      .where({ id: opportunityId, status: 'pending_review', skip_reason: 'named_competitor_review' })
+      .where({ id: opportunityId, status: 'pending_review', skip_reason: parkedKind })
       .update({ status: 'claimed', skip_reason: 'named_competitor_publishing', claimed_at: approvalClaimedAt, updated_at: new Date() });
     if (!oppClaimed) {
-      const e = new Error('This opportunity is no longer parked for named-competitor review'); e.statusCode = 409; throw e;
+      const e = new Error(`This opportunity is no longer parked for ${parkedKind}`); e.statusCode = 409; throw e;
     }
     const runClaimed = await db('autonomous_runs')
-      .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' })
+      .where({ id: run.id, outcome: 'completed_pending_review', skip_reason: parkedKind })
       .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
     if (!runClaimed) {
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
-        .update({ status: 'pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
-      const e = new Error('This named-competitor review is already being published'); e.statusCode = 409; throw e;
+        .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
+      const e = new Error(`This ${parkedKind} run is already being published`); e.statusCode = 409; throw e;
     }
 
     const revertClaims = async () => {
       await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
-        .update({ outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+        .update({ outcome: 'completed_pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
-        .update({ status: 'pending_review', skip_reason: 'named_competitor_review', updated_at: new Date() }).catch(() => {});
+        .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
     };
 
     // Operator-intercept posts must capture the publish-day Wayband/source
@@ -3254,7 +3262,7 @@ class AutonomousRunner {
         reviewRuns = await db('autonomous_runs')
           .whereIn('opportunity_id', stuckOppIds)
           .where('outcome', 'completed_pending_review')
-          .where('skip_reason', 'named_competitor_review')
+          .whereIn('skip_reason', APPROVABLE_PUBLISH_SKIP_REASONS)
           .update({
             skip_reason: REASON,
             reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),

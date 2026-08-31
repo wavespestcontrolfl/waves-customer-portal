@@ -3107,8 +3107,8 @@ describe('named-competitor autopublish gate', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('affiliate review (owner ruling 2026-08-31): a clean draft carrying <AffiliateLink> parks at affiliate_review even with the named-competitor gate ON', async () => {
-    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+  test('affiliate review (owner ruling 2026-08-31): a clean draft carrying <AffiliateLink> parks at affiliate_review — outranking named_competitor_review (email-approvable) even with the gate OFF', async () => {
+    delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
     const publisher = { publishOrUpdatePage: jest.fn() };
     const { runner, queue, claimedAt } = namedCompetitorScenario({
       publisher,
@@ -3379,6 +3379,20 @@ describe('approveAndPublishNamedCompetitor — stale named-competitor run guard'
     const runner = dbReturning([runB, runB]); // by-id → B, latest-parked → B (same)
     await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
       .rejects.toMatchObject({ statusCode: 422 }); // got past the stale-run guard
+  });
+
+  test('an affiliate_review park is an approvable-publish kind: passes the kind guard (422 missing-draft, not 400) — Codex PR3 r1', async () => {
+    const aff = { ...runB, skip_reason: 'affiliate_review' };
+    const runner = dbReturning([aff, aff]);
+    await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
+      .rejects.toMatchObject({ statusCode: 422 });
+  });
+
+  test('a trust-build park is NOT an approvable-publish kind (400)', async () => {
+    const tb = { ...runB, skip_reason: 'trust_build_1_of_3' };
+    const runner = dbReturning([tb, tb]);
+    await expect(runner.approveAndPublishNamedCompetitor(7, { runId: 2 }))
+      .rejects.toMatchObject({ statusCode: 400 });
   });
 });
 
