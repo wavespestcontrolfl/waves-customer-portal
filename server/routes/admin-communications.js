@@ -650,6 +650,24 @@ router.post('/sms', async (req, res, next) => {
     // Release the in-flight reservation so a throw mid-send can't strand a
     // 'sending' row that blocks auto-sends to the thread.
     await clearManualReservation();
+    // Same for the inline review claim: a throw with NO confirmed provider
+    // acceptance means the ask never left — hand the claim back so an
+    // immediate retry isn't blocked for the 10-minute stale window. A throw
+    // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
+    // same convention) means the ask DID text: stamp it delivered instead so
+    // it can never go out twice.
+    if (claimedReviewRequestId) {
+      try {
+        const ReviewService = require('../services/review-request');
+        if (err?.providerOutcome?.sent === true) {
+          await ReviewService.markInlineDelivered(claimedReviewRequestId);
+        } else {
+          await ReviewService.releaseInlineClaim(claimedReviewRequestId);
+        }
+      } catch (claimErr) {
+        logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
+      }
+    }
     // Guarded reopen: anything the send actually resolved before the throw
     // is no longer 'scheduled' and no-ops here.
     if (claimedDecisionId || parkedThreadIds.length) {
