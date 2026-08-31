@@ -638,15 +638,65 @@ export const AFFILIATE_LINK_MAX_PER_POST = 3;
 // Non-rendered Markdown CODE, length-preserving: backtick AND tilde fences,
 // inline code, and CommonMark indented (4-space / tab) code lines — none of
 // it renders as prose, so none of it may satisfy a structural rule.
+// Fenced-code intervals via a container-aware line scan (ported from the
+// portal's proven blanker — the fence rules the sibling regexes could not
+// express): fences open inside blockquotes ("> ```md") and as/under list
+// items ("- ~~~html"), close on a same-char >=length fence AT their
+// container, END WITH their container (a fence opened in a blockquote or
+// list item stops when content leaves that container — never running to
+// EOF past it), and an unclosed TOP-LEVEL fence runs to EOF (CommonMark).
+function fencedCodeIntervals(raw: string): Array<[number, number]> {
+  const intervals: Array<[number, number]> = [];
+  let pos = 0; let openCh: string | null = null; let openLen = 0; let start = 0; let openDepth = 0; let openListIndent = 0;
+  // Ambient (unquoted) list tracking: a fence opened on a list CONTINUATION
+  // line ("- item" then "  ~~~") scopes to that item's content column too.
+  let ambientListIndent = 0; let ambientListDepth = 0; let prevBlank = true;
+  for (const line of raw.split('\n')) {
+    const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
+    const depth = (quotePrefix.match(/>/g) || []).length;
+    const strippedLine = depth > 0 ? line.slice(quotePrefix.length) : line;
+    const blank = strippedLine.trim() === '';
+    const indent = (strippedLine.match(/^ */) || [''])[0].length;
+    if (openCh && !blank && (depth < openDepth || indent < openListIndent)) {
+      intervals.push([start, Math.max(start, pos - 1)]);
+      openCh = null;
+    }
+    if (openCh) {
+      const close = strippedLine.match(/^ *(`{3,}|~{3,})\s*$/);
+      if (close && close[1][0] === openCh && close[1].length >= openLen) { intervals.push([start, pos + line.length]); openCh = null; }
+    } else {
+      const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+      const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
+      if (!blank && depth < ambientListDepth) { ambientListIndent = 0; ambientListDepth = 0; }
+      if (marker && markerIndent <= (depth === ambientListDepth ? ambientListIndent : 0) + 3) {
+        ambientListIndent = marker[0].length;
+        ambientListDepth = depth;
+      } else if (!blank && depth === ambientListDepth && indent < ambientListIndent && prevBlank) ambientListIndent = 0;
+      const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
+      const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+        || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
+      if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
+        if (!marker && depth === ambientListDepth && indent < ambientListIndent) ambientListIndent = 0;
+        openCh = opener[1][0]; openLen = opener[1].length; start = pos;
+        openDepth = depth;
+        openListIndent = marker ? marker[0].length : (depth === ambientListDepth ? ambientListIndent : 0);
+      }
+      prevBlank = blank;
+    }
+    pos += line.length + 1;
+  }
+  if (openCh) intervals.push([start, raw.length]);
+  return intervals;
+}
+
 function blankNonRenderedCode(src: string): string {
-  // CommonMark fences: 3+ backticks or tildes, up to 3 leading spaces, any
-  // info string; the closing fence uses the same character with a length
-  // >= the opener (a longer closer is valid) and nothing but whitespace after.
-  // Backtick and tilde fences are handled separately so the closer must use
-  // the OPENER's character (a tilde fence is not closed by backticks) and a
-  // backtick fence's info string may not contain a backtick (CommonMark).
-  let out = src.replace(/^ {0,3}(`{3,})[^`\n]*\n[\s\S]*?^ {0,3}\1`*[ \t]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
-  out = out.replace(/^ {0,3}(~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1~*[ \t]*$/gm, (m) => m.replace(/[^\n]/g, ' '));
+  // Fences (container-aware, unclosed-runs-to-container-end/EOF) — see
+  // fencedCodeIntervals above.
+  const chars = src.split('');
+  for (const [a, b] of fencedCodeIntervals(src)) {
+    for (let k = a; k < Math.min(b, src.length); k += 1) if (chars[k] !== '\n') chars[k] = ' ';
+  }
+  let out = chars.join('');
   // Inline code spans: opener and closer are EQUAL-length backtick runs
   // (CommonMark) — a 4-run never closes against part of a 5-run.
   out = out.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (m) => m.replace(/[^\n]/g, ' '));
@@ -725,24 +775,48 @@ function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolea
   return out.join('');
 }
 
-// Length-preserving blank of every string literal that sits inside a brace
-// span — the BALANCING view for blankBalancedElements: tag-shaped text
-// inside an MDX expression string ({'</div>'}) is rendered TEXT, so the
-// open/close walk must never count it as markup. Quotes outside braces
-// (prose apostrophes, plain attr values) are untouched; an unterminated
-// string is left alone.
+// Length-preserving blank of every string AND regex literal that sits
+// inside a brace span — the BALANCING/position view: tag-shaped text
+// inside an MDX expression string ({'</div>'}) or regex ({/<div>/.test(x)})
+// is rendered TEXT, so tag scans must never count it as markup — and a
+// regex's quote character (/"/) must never be paired with a later real
+// attribute quote. Quotes outside braces (prose apostrophes, plain attr
+// values) are untouched; an unterminated literal is left alone.
+// Regex-vs-division: a `/` starts a regex only after an operator/opener
+// position (start of expression, or one of ({[,=&|!?:;+-*%~^<> and
+// whitespace-transparent) — after an identifier, number, `)`, or `]` it is
+// division and stays.
 function blankExpressionStrings(src: string): string {
   const out = src.split('');
   let depth = 0;
+  let prevSig = ''; // last significant char inside the current brace span
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
-    if (c === '{') { depth += 1; continue; }
-    if (c === '}') { if (depth > 0) depth -= 1; continue; }
-    if (depth > 0 && (c === '"' || c === "'" || c === '`')) {
-      let j = i + 1;
-      for (; j < src.length; j += 1) { if (src[j] === '\\') { j += 1; continue; } if (src[j] === c) break; }
-      if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; }
+    if (c === '{') { depth += 1; prevSig = '{'; continue; }
+    if (c === '}') { if (depth > 0) depth -= 1; prevSig = '}'; continue; }
+    if (depth > 0) {
+      if (c === '"' || c === "'" || c === '`') {
+        let j = i + 1;
+        for (; j < src.length; j += 1) { if (src[j] === '\\') { j += 1; continue; } if (src[j] === c) break; }
+        if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; }
+        continue;
+      }
+      if (c === '/' && src[i + 1] === '/' ) { prevSig = c; i += 1; continue; }
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+        // Regex literal: scan to the unescaped closing `/`, honoring
+        // character classes ([/] does not close).
+        let j = i + 1; let inClass = false; let closed = -1;
+        for (; j < src.length && src[j] !== '\n'; j += 1) {
+          const d = src[j];
+          if (d === '\\') { j += 1; continue; }
+          if (inClass) { if (d === ']') inClass = false; continue; }
+          if (d === '[') { inClass = true; continue; }
+          if (d === '/') { closed = j; break; }
+        }
+        if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
+      }
+      if (!/\s/.test(c)) prevSig = c;
     }
   }
   return out.join('');
@@ -909,6 +983,13 @@ function* markdownLinkDests(src: string): Generator<string> {
       else if (src[j] === ']') depth -= 1;
     }
     if (depth !== 0 || src[j] !== '(') { i += 1; continue; }
+    // CommonMark: links may not NEST — a completed link inside the label
+    // ([outer [inner](/blog/)](/quote/)) wins and the outer bracket text
+    // renders literally. Step INTO the label so the inner link is the one
+    // yielded; the outer's `](…)` tail is then plain text. (Images inside
+    // labels are legal — callers mask them before this walker runs, so a
+    // masked image never trips this.)
+    if (hasCompletedMarkdownLink(src.slice(i + 1, j - 1))) { i += 1; continue; }
     let pd = 1; let k = j + 1;
     for (; k < src.length && pd > 0; k += 1) {
       if (src[k] === '\\') { k += 1; continue; }
@@ -923,6 +1004,11 @@ function* markdownLinkDests(src: string): Generator<string> {
     if (dm) yield (dm[1] ?? dm[2] ?? '').trim();
     i = k;
   }
+}
+
+function hasCompletedMarkdownLink(s: string): boolean {
+  for (const dest of markdownLinkDests(s)) { void dest; return true; }
+  return false;
 }
 
 // True when the (masked) prefix carries a Waves service CTA: a markdown
@@ -947,19 +1033,39 @@ function hasServiceCtaBefore(prefix: string): boolean {
   return hasInlineCtaService(p2);
 }
 
-// A JSX SPREAD ({...expr}) delivers props no literal-attribute scan can
-// see — a spread can override ctaHref/product/placement at render time, so
-// any tag carrying one can never be validated (fail closed).
-const JSX_SPREAD_RE = /\{\s*\.\.\./;
-
 // Quoted attribute VALUES may contain anything ("Use {...props} notation",
 // "hidden") without it being markup — blank their contents (quotes kept,
 // length-preserving) before any structural test of raw attribute text.
 function stripQuotedAttrValues(attrs: string): string {
   return attrs.replace(/(["'`])(?:(?!\1)[\s\S])*\1/g, (m) => m[0] + ' '.repeat(m.length - 2) + m[m.length - 1]);
 }
+// A JSX SPREAD ({...expr}) delivers props no literal-attribute scan can
+// see — a spread can override ctaHref/product/placement (or inject
+// hidden/style on a wrapper) at render time, so any tag carrying one can
+// never be validated (fail closed). ONLY a spread at ATTRIBUTE position
+// counts: a `{...}` nested inside an attr VALUE expression
+// (data-options={JSON.stringify({...{foo:1}})}) is an object spread the
+// element never receives as props — walk attrs quote/brace-aware and test
+// braces that open where an attribute would start.
 function hasJsxSpread(attrs: string): boolean {
-  return JSX_SPREAD_RE.test(stripQuotedAttrValues(attrs));
+  const s = String(attrs || '');
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
+    if (c !== '{') continue;
+    const attrPos = i === 0 || /\s/.test(s[i - 1]);
+    if (attrPos && /^\{\s*\.\.\./.test(s.slice(i))) return true;
+    // Consume the balanced brace span (quote-aware) so nothing inside it
+    // is mistaken for attribute position.
+    let depth = 0;
+    for (; i < s.length; i += 1) {
+      const d = s[i];
+      if (d === '"' || d === "'" || d === '`') { i += 1; while (i < s.length && s[i] !== d) { if (s[i] === '\\') i += 1; i += 1; } continue; }
+      if (d === '{') depth += 1;
+      else if (d === '}') { depth -= 1; if (depth === 0) break; }
+    }
+  }
+  return false;
 }
 
 // Sequential quote/brace-aware attribute walk (one nesting level of braces
@@ -1091,10 +1197,11 @@ export function validateAffiliateUsage(
     // (aria-label={"display:none"}) is not a style.
     if (styleHidesElement(attrs)) return true;
     // A wrapper spread ({...props}) can inject hidden/style at render time
-    // — visibility cannot be determined, so fail closed (blank it). Quote-
-    // stripped, so a string prop mentioning {...} is not a spread.
+    // — visibility cannot be determined, so fail closed (blank it). Only
+    // an ATTRIBUTE-position spread counts (hasJsxSpread): a {...} nested
+    // in an attr value expression never reaches the element's props.
+    if (hasJsxSpread(attrs)) return true;
     const bare = stripQuotedAttrValues(attrs);
-    if (JSX_SPREAD_RE.test(bare)) return true;
     // hidden={false} disables only the hidden-attribute test.
     if (/(?:^|\s)hidden\s*=\s*\{\s*false\s*\}/i.test(bare)) return false;
     return /(?:^|\s)hidden(?=[\s>/=]|$)/i.test(bare);

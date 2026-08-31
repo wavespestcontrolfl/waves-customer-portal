@@ -3164,8 +3164,11 @@ class AutonomousRunner {
     // never shows a phantom PR-pending item the poller will never reconcile: a
     // PR-open → astro_pr_pending_merge; a no-PR/no-live result (e.g. a refresh
     // 'no_changes') → publisher_no_live_url (actionable in review, not pollable).
+    // The published reason carries the run's own parked KIND — an approved
+    // affiliate_review publish must not land in the durable opportunity
+    // history as competitor content (Codex #3646 r12 P2).
     const oppFinal = published
-      ? { status: 'done', skip_reason: 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
+      ? { status: 'done', skip_reason: parkedKind === 'affiliate_review' ? 'affiliate_published' : 'named_competitor_published', completed_at: new Date(), updated_at: new Date() }
       : noChanges
         ? { status: 'done', skip_reason: 'no_changes', completed_at: new Date(), updated_at: new Date() }
         : patch.astro_pr_url
