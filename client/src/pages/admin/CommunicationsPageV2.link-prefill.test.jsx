@@ -5,8 +5,12 @@
 // an em dash or curly quote flips the SMS to UCS-2 (70-char segments).
 import { describe, expect, it } from "vitest";
 import {
+  appendStaticLinkClause,
+  buildCustomerLinkPrefill,
   buildReschedulePrefill,
   buildReservicePrefill,
+  CUSTOMER_COMPOSER_LINKS,
+  libraryLinkClause,
 } from "./CommunicationsPageV2";
 
 const URL = "https://portal.wavespestcontrol.com/l/abc123";
@@ -97,5 +101,83 @@ describe("buildReservicePrefill", () => {
     expect(
       buildReservicePrefill({ firstName: null, laneLabel: "pest", url: URL }),
     ).toBeNull();
+  });
+});
+
+// The Insert Link sheet's static entries share one append helper: clause
+// alone into an empty composer, clause appended below a typed draft, and
+// never a stacked duplicate.
+describe("appendStaticLinkClause", () => {
+  const link = {
+    url: "https://www.wavespestcontrol.com/quote/",
+    clause: "Get your free quote here: https://www.wavespestcontrol.com/quote/",
+  };
+
+  it("an empty composer gets the clause alone", () => {
+    expect(appendStaticLinkClause("", link)).toBe(link.clause);
+    expect(appendStaticLinkClause("   ", link)).toBe(link.clause);
+    expect(appendStaticLinkClause(null, link)).toBe(link.clause);
+  });
+
+  it("a typed draft keeps its text and gets the clause appended", () => {
+    expect(appendStaticLinkClause("Hi PersonA, quick question.  ", link)).toBe(
+      `Hi PersonA, quick question.\n\n${link.clause}`,
+    );
+  });
+
+  it("does not stack a second copy of a link already in the body", () => {
+    const once = appendStaticLinkClause("Hi PersonA.", link);
+    expect(appendStaticLinkClause(once, link)).toBe(once);
+  });
+});
+
+describe("libraryLinkClause", () => {
+  it("renders '{clause}: {url}' and falls back to the row name", () => {
+    expect(
+      libraryLinkClause({ name: "Free quote", clause: "Get your free quote here", url: "https://www.wavespestcontrol.com/quote/" }),
+    ).toBe("Get your free quote here: https://www.wavespestcontrol.com/quote/");
+    expect(
+      libraryLinkClause({ name: "Pest Library", clause: null, url: "https://www.wavespestcontrol.com/pest-library/" }),
+    ).toBe("Pest Library: https://www.wavespestcontrol.com/pest-library/");
+  });
+});
+
+describe("buildCustomerLinkPrefill", () => {
+  it("greets the recipient ahead of the server clause", () => {
+    expect(
+      buildCustomerLinkPrefill({ firstName: "PersonA", clause: `You can view your estimate here: ${URL}` }),
+    ).toBe(`Hi PersonA, it's Waves Pest Control. You can view your estimate here: ${URL}`);
+  });
+
+  it("returns null without a first name or clause — caller falls back to the bare clause", () => {
+    expect(buildCustomerLinkPrefill({ firstName: "", clause: `x: ${URL}` })).toBeNull();
+    expect(buildCustomerLinkPrefill({ firstName: "PersonA", clause: "  " })).toBeNull();
+  });
+
+  it("keeps the TEMPLATE copy pure ASCII (UCS-2 guard)", () => {
+    const msg = buildCustomerLinkPrefill({ firstName: "PersonA", clause: `Pay here: ${URL}` });
+    expect(msg).toMatch(/^[\x00-\x7F]+$/);
+  });
+});
+
+describe("CUSTOMER_COMPOSER_LINKS", () => {
+  it("carries all seven customer rows in the customer category", () => {
+    expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
+      "reschedule",
+      "reservice",
+      "review_request",
+      "pay_balance",
+      "estimate",
+      "referral",
+      "portal_login",
+    ]);
+    for (const link of CUSTOMER_COMPOSER_LINKS) {
+      expect(link.category).toBe("customer");
+    }
+    // The one static row inserts a scheme-less portal link (SMS link policy
+    // for owned hosts) and carries its clause with it.
+    const login = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === "portal_login");
+    expect(login.dynamic).toBeUndefined();
+    expect(login.url).toBe("portal.wavespestcontrol.com/login");
   });
 });

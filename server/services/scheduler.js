@@ -760,6 +760,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:50AM — Link Library sitemap sync: keep the SMS composer's
+  // website links in step with www.wavespestcontrol.com (new pages appear,
+  // removed pages drop). Manual rows are untouched; Settings ▸ Link Library
+  // "Sync now" runs the same sync on demand.
+  // =========================================================================
+  cron.schedule('50 2 * * *', async () => {
+    if (!isEnabled('linkLibrarySync')) return;
+    try {
+      await runExclusive('link-library-sitemap-sync', () =>
+        require('./link-library').syncSitemapLinks());
+    } catch (err) {
+      logger.error(`[link-library] nightly sitemap sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {

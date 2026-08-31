@@ -597,6 +597,13 @@ const gates = {
   // the owner-activation-gated phone agent), ≤1 DEEP call/day.
   voiceProfileDistiller: process.env.GATE_VOICE_PROFILE_DISTILLER !== 'false',
 
+  // Link Library sitemap sync — DAILY pull of www.wavespestcontrol.com's
+  // sitemap into the composer's link_library rows (services/link-library.js).
+  // Read-only against the public site, no sends, no customer data. DEFAULT
+  // ON; kill switch GATE_LINK_LIBRARY_SYNC=false. The Settings "Sync now"
+  // button calls the same sync directly and is not gated here.
+  linkLibrarySync: process.env.GATE_LINK_LIBRARY_SYNC !== 'false',
+
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
   // sent, per intent class (shadow_draft_judgments). LLM is called only
