@@ -60,12 +60,16 @@ export default function AdminCommandHeader({
         // padding-top already clears the shell's fixed top bar (52px +
         // safe-area + 16px gutter) — so a top offset that repeats the bar
         // height double-counts it and pins the header ~68px down with
-        // cards scrolling through the gap (the floating-header bug). -top-4
-        // cancels only the 16px gutter, pinning flush under the bar; at md+
-        // there is no fixed bar and top-0 pins below the 24px page padding.
-        // z-20 stays under the shell chrome (top bar 90 / tab bar 95 /
-        // backdrop 99 / sidebar 100) and Dialog overlays.
-        sticky && "sticky -top-4 md:top-0",
+        // cards scrolling through the gap (the floating-header bug). The
+        // mobile inset cancels only the 16px gutter, pinning flush under
+        // the bar; --vv-offset-top (useAdminViewport, :root default 0px)
+        // keeps it flush when iOS pans the visual viewport for a focused
+        // field — the fixed bar tracks that var, so the sticky inset must
+        // too. At md+ there is no fixed bar and top-0 pins below the 24px
+        // page padding. z-20 stays under the shell chrome (top bar 90 /
+        // tab bar 95 / backdrop 99 / sidebar 100) and Dialog overlays.
+        sticky &&
+          "sticky top-[calc(var(--vv-offset-top)_-_16px)] md:top-0",
         "z-20 mb-5 bg-surface-page/95 pb-3",
         className,
       )}

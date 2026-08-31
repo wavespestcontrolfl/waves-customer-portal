@@ -16,8 +16,14 @@ describe("AdminCommandHeader heading hierarchy", () => {
     ).toHaveClass("text-22");
     // Sticky on all breakpoints; below md the shell bar clearance lives in
     // .admin-main's padding-top, so the offset only cancels the 16px gutter
-    // (repeating the bar height here double-counts it — floating-header bug).
-    expect(container.firstChild).toHaveClass("sticky", "-top-4", "md:top-0");
+    // (repeating the bar height here double-counts it — floating-header bug)
+    // while tracking --vv-offset-top with the fixed bar during iOS keyboard
+    // visual-viewport pans.
+    expect(container.firstChild).toHaveClass(
+      "sticky",
+      "top-[calc(var(--vv-offset-top)_-_16px)]",
+      "md:top-0",
+    );
     expect(container.querySelector(".border-b")).not.toBeInTheDocument();
   });
 
