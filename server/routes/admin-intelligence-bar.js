@@ -1292,8 +1292,10 @@ function getToolsForContext(context, isAdmin = false) {
   // /execute both refuse them for technician tokens, so non-admin lists must
   // not offer them either. Appended LAST so each context's own tools stay a
   // stable prompt-cache prefix.
-  // Recall rides with infra: context-independent, admin-only, appended last.
-  const infra = isAdmin ? [...INFRA_TOOLS, ...HISTORY_TOOLS] : [];
+  // Recall rides with infra: context-independent, admin-only, appended last
+  // — and only while GATE_IB_THREADS is on (the tool refuses at execution
+  // time too, so a forced call fails closed with the rest of threads).
+  const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
   if (context === 'schedule' || context === 'dispatch') {
     return [...base, ...SCHEDULE_TOOLS, ...infra];
   }

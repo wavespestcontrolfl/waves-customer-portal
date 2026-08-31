@@ -19,6 +19,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { threadsEnabled } = require('./threads');
 
 const DEFAULT_DAYS = 90;
 const MAX_DAYS = 400; // retention is 365 — nothing older exists
@@ -74,6 +75,11 @@ function clampInt(v, dflt, min, max) {
 }
 
 async function searchIbHistory(input, actionContext) {
+  // Same kill switch as the thread endpoints: unset GATE_IB_THREADS and
+  // previously persisted conversations become unreachable here too.
+  if (!threadsEnabled()) {
+    return { error: 'Conversation history is not enabled', results: [] };
+  }
   const actorId = actionContext?.actorId ? String(actionContext.actorId) : null;
   if (!actorId) {
     return { error: 'Operator identity required — history is searchable only by its owner', results: [] };

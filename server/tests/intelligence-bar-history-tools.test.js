@@ -44,7 +44,19 @@ const { attachThread } = require('../services/intelligence-bar/pending-actions')
 
 const T1 = '11111111-1111-4111-8111-111111111111';
 
-beforeEach(() => { queue.length = 0; calls.length = 0; jest.clearAllMocks(); });
+beforeEach(() => {
+  queue.length = 0; calls.length = 0; jest.clearAllMocks();
+  process.env.GATE_IB_THREADS = 'true';
+});
+afterAll(() => { delete process.env.GATE_IB_THREADS; });
+
+test('gate off: refuses before any query (same kill switch as threads)', async () => {
+  delete process.env.GATE_IB_THREADS;
+  const r = await executeHistoryTool('search_ib_history', { query: 'acct-1042' }, { actorId: 'admin-1' });
+  expect(r.error).toMatch(/not enabled/i);
+  expect(r.results).toEqual([]);
+  expect(mockDb).not.toHaveBeenCalled();
+});
 
 test('tool is declared with a required query and an inline contract', () => {
   const t = HISTORY_TOOLS.find((x) => x.name === 'search_ib_history');

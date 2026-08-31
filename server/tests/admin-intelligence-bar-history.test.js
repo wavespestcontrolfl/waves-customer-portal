@@ -54,7 +54,8 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   cancelPendingAction: jest.fn(), recordResult: jest.fn(), attachThread: jest.fn(),
 }));
 jest.mock('../services/intelligence-bar/threads', () => ({
-  threadsEnabled: () => false, appendExchange: jest.fn(), latestThread: jest.fn(),
+  threadsEnabled: () => process.env.GATE_IB_THREADS === 'true',
+  appendExchange: jest.fn(), latestThread: jest.fn(),
   getThread: jest.fn(), listThreads: jest.fn(), purgeExpiredThreads: jest.fn(),
 }));
 jest.mock('../services/intelligence-bar/history-tools', () => {
@@ -105,7 +106,18 @@ function offeredToolNames() {
   return (mockMessagesCreate.mock.calls[0][0].tools || []).map((t) => t.name);
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => { jest.clearAllMocks(); process.env.GATE_IB_THREADS = 'true'; });
+afterAll(() => { delete process.env.GATE_IB_THREADS; });
+
+test('gate off: not offered to admins (execution refusal lives in the tool)', async () => {
+  delete process.env.GATE_IB_THREADS;
+  mockMessagesCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'hi' }] });
+  await withServer(async (baseUrl) => {
+    const { status } = await postQuery(baseUrl, { prompt: 'hello', context: 'customers' });
+    expect(status).toBe(200);
+    expect(offeredToolNames()).not.toContain('search_ib_history');
+  });
+});
 
 test('admin: search_ib_history is offered in a regular admin context', async () => {
   mockMessagesCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'hi' }] });
