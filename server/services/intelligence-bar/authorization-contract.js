@@ -302,6 +302,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName),
     notifies_customer: notifiesCustomer,
     summary: summary || null,
+    // The card caps/truncates preview lines for presentation only — the
+    // contract (and so its hash) still covers the COMPLETE resolved preview
+    // through this fingerprint, so two plans that share a visible prefix
+    // can never hash to the same contract.
+    ...(WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object'
+      ? { preview_fingerprint: previewFingerprint(preview) }
+      : {}),
   };
 }
 

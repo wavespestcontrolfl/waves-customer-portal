@@ -175,6 +175,12 @@ test('two-step previews surface their resolved facts as effects (capped) and fin
   const c2 = buildContract({ toolName: 'optimize_all_routes', params: {}, displayParams: {}, preview: big });
   expect(c2.effects.filter((e) => e.label.startsWith('stop ')).length).toBe(12);
   expect(c2.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^\(\+8 more preview fields/));
+  // The cap is presentation only: a plan differing ONLY beyond the visible
+  // lines still yields a different contract hash.
+  const c3 = buildContract({ toolName: 'optimize_all_routes', params: {}, displayParams: {}, preview: { ...big, stop_19: 'addr 99' } });
+  expect(c3.effects.map((e) => e.label)).toEqual(c2.effects.map((e) => e.label));
+  expect(contractHash(c3)).not.toBe(contractHash(c2));
+  expect(c2.preview_fingerprint).toBe(previewFingerprint(big));
 });
 
 test('hash is order-independent and sensitive to any effect change', () => {
