@@ -584,6 +584,24 @@ describe('cron-lock runExclusive', () => {
     expect(conn.__knex__disposed).toBeUndefined();
   });
 
+  test('a cancelled/timed-out start-record query (57014) is recoverable — the body runs', async () => {
+    const conn = {
+      query: jest.fn(async ({ text }) => {
+        if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+        if (text.includes('INSERT INTO job_health')) {
+          const err = new Error('canceling statement due to statement timeout');
+          err.code = '57014';
+          throw err;
+        }
+        return { rows: [] };
+      }),
+    };
+    db.client.acquireConnection.mockResolvedValue(conn);
+    const body = jest.fn(async () => 'billed');
+    await expect(runExclusive('billing-monthly', body)).resolves.toBe('billed');
+    expect(conn.__knex__disposed).toBeUndefined();
+  });
+
   test('coalesced ticks behind a run that lost the lease to ANOTHER instance skip as lease_held', async () => {
     const conn = mockConnection(false); // other pod holds the advisory lock
     db.client.acquireConnection.mockResolvedValue(conn);

@@ -60,16 +60,18 @@ function sanitizeJobError(message) {
 // lock connection is pinned recreates the herd self-deadlock described in
 // the header. Standalone callers (scheduler.js skip records) pass nothing
 // and use the pool as before.
-// pg surfaces a dead session with no SQLSTATE at all (socket-level errors)
-// or class 08 (connection exception) / 57 (operator intervention: admin
-// shutdown, crash recovery) / 53 (insufficient resources). Ledger problems
-// carry their own classes (42 undefined table/column, 22/23 data) and stay
-// best-effort. On the HELD lock connection the distinction is load-bearing:
-// a dead session has already dropped its advisory lock, so the body must
-// not run — another instance can take the lease and run the same sweep.
+// pg surfaces a dead session with no SQLSTATE at all (socket-level errors),
+// class 08 (connection exception), or the shutdown codes 57P01–57P03
+// (admin/crash shutdown, cannot connect now). Everything else — 57014
+// query cancelled/statement timeout, class 53 resource errors, 42 schema,
+// 22/23 data — leaves the session and its advisory lock usable, so the
+// recorder stays best-effort and the body runs. On the HELD lock
+// connection the distinction is load-bearing: a dead session has already
+// dropped its advisory lock, so the body must not run — another instance
+// can take the lease and run the same sweep.
 function isSessionFatal(err) {
   const code = String((err && err.code) || '');
-  return !code || /^(08|57|53)/.test(code);
+  return !code || /^08/.test(code) || /^57P0[123]$/.test(code);
 }
 
 async function recordJobStart(jobName, conn) {
