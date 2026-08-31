@@ -272,8 +272,15 @@ describe('closeout-status: report + report delivery', () => {
       .toMatchObject({ state: 'pending', reason: 'delivery_queued', attempts: 2 });
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'failed', attempts: 5, last_error: 'smtp 550' } })).facts.reportDelivery)
       .toMatchObject({ state: 'failed', reason: 'delivery_exhausted', lastError: 'smtp 550' });
+    // 'skipped' is classified by its reason: suppression = policy; no recipient = gap; ineligible/blank = unknown.
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'Suppressed: bounce (service_operational)' } })).facts.reportDelivery)
+      .toMatchObject({ state: 'not_required', reason: 'delivery_skipped_suppressed', ruleSource: 'email_suppression' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'No service report recipient email' } })).facts.reportDelivery)
+      .toMatchObject({ state: 'failed', reason: 'delivery_skipped_no_recipient' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped', last_error: 'Not a completed service report v1 record' } })).facts.reportDelivery)
+      .toMatchObject({ state: 'unknown', reason: 'delivery_skipped_ineligible' });
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: { ...queued, status: 'skipped' } })).facts.reportDelivery)
-      .toMatchObject({ state: 'not_required', reason: 'delivery_skipped' });
+      .toMatchObject({ state: 'unknown', reason: 'delivery_skipped_unclassified' });
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: null })).facts.reportDelivery)
       .toMatchObject({ state: 'pending', reason: 'not_enqueued' });
   });
@@ -600,6 +607,10 @@ describe('closeout-status: Agent D findings', () => {
       .toMatchObject({ state: 'done', sentAt: '2026-08-30T18:06:00.000Z' });
     expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: rec('failed', { serviceReportV1EmailError: 'bounce for jane@example.com' }) })).facts.reportDelivery)
       .toMatchObject({ state: 'failed', lastError: 'bounce for [email]' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: rec('skipped', { serviceReportV1EmailError: 'No service report recipient email' }) })).facts.reportDelivery)
+      .toMatchObject({ state: 'failed', reason: 'delivery_skipped_no_recipient' });
+    expect(deriveCloseoutFacts(closedOutInputs({ delivery: null, record: rec('skipped', { serviceReportV1EmailError: 'Email suppressed' }) })).facts.reportDelivery)
+      .toMatchObject({ state: 'not_required', reason: 'delivery_skipped_suppressed' });
   });
 
   test('non-V1 template with no delivery row → unknown (not a gap); recap-lane SMS counts as report delivery', () => {

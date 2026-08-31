@@ -119,6 +119,19 @@ function scrubErrorText(value) {
     .slice(0, 200) || null;
 }
 
+// service_report_deliveries.status 'skipped' is overloaded (delivery-queue.js
+// markDeliverySkipped ← email-delivery.js): a suppression match is policy, a
+// missing recipient is a real gap, an ineligible record is undecidable. The
+// skip reason text is the only discriminator persisted.
+function classifyDeliverySkip(reasonText) {
+  const t = String(reasonText || '').toLowerCase();
+  if (!t) return { state: 'unknown', reason: 'delivery_skipped_unclassified' };
+  if (t.startsWith('suppressed') || t.includes('email suppressed')) return { state: 'not_required', reason: 'delivery_skipped_suppressed', ruleSource: 'email_suppression' };
+  if (t.includes('no service report recipient email') || t.includes('no email on file') || t.includes('recipient')) return { state: 'failed', reason: 'delivery_skipped_no_recipient' };
+  if (t.includes('not a completed service report') || t.includes('unsupported service report') || t.includes('table unavailable')) return { state: 'unknown', reason: 'delivery_skipped_ineligible' };
+  return { state: 'unknown', reason: 'delivery_skipped_unclassified' };
+}
+
 function fact(state, reason, extra = {}) {
   if (!FACT_STATES.includes(state)) throw new Error(`closeout-status: bad fact state ${state}`);
   return { state, reason, ...extra };
@@ -562,14 +575,20 @@ function deriveCloseoutFacts(inputs) {
     };
     if (DELIVERY_TERMINAL_OK.has(status)) reportDelivery = fact('done', 'delivery_sent', evidence);
     else if (status === 'failed') reportDelivery = fact('failed', 'delivery_exhausted', evidence);
-    else if (DELIVERY_TERMINAL_SKIPPED.has(status)) reportDelivery = fact('not_required', `delivery_${status}`, { ruleSource: 'delivery_queue', ...evidence });
+    else if (status === 'skipped') {
+      const skip = classifyDeliverySkip(delivery.last_error);
+      reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), ...evidence });
+    } else if (DELIVERY_TERMINAL_SKIPPED.has(status)) reportDelivery = fact('not_required', `delivery_${status}`, { ruleSource: 'delivery_queue', ...evidence });
     else if (DELIVERY_IN_FLIGHT.has(status)) reportDelivery = fact('pending', `delivery_${status}`, evidence);
     else reportDelivery = fact('unknown', 'delivery_status_unrecognized', evidence);
   } else if (inputs.deliveryLookupFailed) reportDelivery = fact('unknown', 'service_report_deliveries_lookup_failed', { posture });
   else if (notesEmailStatus === 'disabled') reportDelivery = fact('not_required', 'report_email_kill_switch', { ruleSource: 'kill_switch', posture, notesStatus: notesEmailStatus });
   else if (notesEmailStatus === 'sent') reportDelivery = fact('done', 'delivery_sent_per_record_notes', { posture, sentAt: isoOrNull(notes.serviceReportV1EmailSentAt) });
   else if (notesEmailStatus === 'failed') reportDelivery = fact('failed', 'delivery_exhausted_per_record_notes', { posture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
-  else if (notesEmailStatus === 'skipped') reportDelivery = fact('not_required', 'delivery_skipped', { ruleSource: 'delivery_queue', posture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
+  else if (notesEmailStatus === 'skipped') {
+    const skip = classifyDeliverySkip(notes.serviceReportV1EmailError);
+    reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), posture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
+  }
   else if (notesEmailStatus === 'queued' || notesEmailStatus === 'sending') reportDelivery = fact('pending', `delivery_${notesEmailStatus}`, { posture });
   else if (isBackfill) reportDelivery = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', posture });
   else if (recapSentAt) reportDelivery = fact('done', 'recap_sms_delivered', { channel: 'sms', recapSentAt });
