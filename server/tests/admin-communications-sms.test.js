@@ -67,7 +67,6 @@ jest.mock('../services/review-request', () => ({
   claimInlineForSend: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),
   markInlineDelivered: jest.fn(async () => {}),
-  cancelInlineIfPending: jest.fn(async () => true),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),

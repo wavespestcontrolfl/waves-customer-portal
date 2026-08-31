@@ -1889,15 +1889,6 @@ const ReviewService = {
    * so there is no scheduled send to race — this guards the operator's own
    * /sms delivery marking. Returns whether a pending row was suppressed.
    */
-  async cancelInlineIfPending(requestId) {
-    if (!requestId) return false;
-    const updated = await db("review_requests")
-      .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
-      .whereNull("sms_sent_at")
-      .update({ status: "suppressed", scheduled_for: null });
-    return updated > 0;
-  },
-
   async markInlineDeliveryFailed(requestId) {
     if (!requestId) return;
     await db("review_requests").where({ id: requestId }).update({

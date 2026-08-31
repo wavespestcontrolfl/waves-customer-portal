@@ -1558,8 +1558,10 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 // review_request mints a real review_requests row via createInline with
 // armSafetyNet:false — the row is UNSCHEDULED, so the operator's own POST
 // /sms send (carrying the returned requestId) is the ONLY thing that can
-// deliver it; an abandoned draft never auto-texts. /customer-link/cancel
-// retires a withdrawn row so it doesn't linger pending.
+// deliver it; an abandoned draft never auto-texts, and a withdrawn draft
+// just forgets the row client-side (the pending row is SHARED across
+// composers via createInline reuse, so canceling it would break a sibling
+// operator's valid send — the next insert reuses it instead).
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const kind = String(req.body?.kind || '');
@@ -1647,29 +1649,6 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/communications/customer-link/cancel  { requestId }
-// The operator withdrew a composer-inserted review link (recipient changed,
-// line deleted) — retire the inline review_requests row. Composer mints are
-// unscheduled (nothing auto-sends either way); suppressing keeps a withdrawn
-// ask from lingering pending in the customer's review history. Idempotent:
-// a row already sent/suppressed/missing is left alone and still answers ok.
-router.post('/customer-link/cancel', requireAdmin, async (req, res) => {
-  try {
-    const requestId = String(req.body?.requestId || '');
-    if (!requestId || requestId.length > 64) {
-      return res.status(400).json({ error: 'requestId required' });
-    }
-    // One conditional UPDATE (no read-then-act): a send that marks the row
-    // delivered in between must keep its delivered state.
-    const ReviewService = require('../services/review-request');
-    await ReviewService.cancelInlineIfPending(requestId);
-    res.json({ ok: true });
-  } catch (err) {
-    logger.error(`customer-link cancel failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // GET /api/admin/communications/link-library
 // The Insert Link sheet's full searchable list (office review links computed
 // live + stored manual/sitemap rows) — filtering happens client-side. Read
@@ -1721,17 +1700,20 @@ router.delete('/link-library/:id', requireAdmin, async (req, res) => {
 
 // POST /api/admin/communications/link-library/sync — Settings "Sync now":
 // re-pull the marketing site's sitemap on demand (the daily job in
-// services/scheduler.js does the same on schedule).
+// services/scheduler.js does the same on schedule). { force: true } accepts
+// an over-cap shrinkage for THIS run — the admin-confirmed recovery path
+// after a genuine site restructure; the nightly job never forces.
 router.post('/link-library/sync', requireAdmin, async (req, res) => {
   try {
     const linkLibrary = require('../services/link-library');
+    const force = req.body?.force === true;
     // Same advisory lock as the 2:50 AM job — an unlocked second execution
     // path (two "Sync now" clicks, or a manual run overlapping the cron)
     // reads the same snapshot and races inserts into the unique url index.
     const { runExclusive } = require('../utils/cron-lock');
     const result = await runExclusive(
       'link-library-sitemap-sync',
-      () => linkLibrary.syncSitemapLinks(),
+      () => linkLibrary.syncSitemapLinks({ force }),
       { recordHealth: false },
     );
     if (result?.skipped) {
@@ -1740,6 +1722,10 @@ router.post('/link-library/sync', requireAdmin, async (req, res) => {
     res.json(result);
   } catch (err) {
     logger.error(`link-library sync failed: ${err.message}`);
+    if (err.shrinkage) {
+      // Recoverable: the client offers a confirmed force re-run.
+      return res.status(409).json({ error: `Sitemap sync refused — ${err.message}`, shrinkage: true });
+    }
     res.status(502).json({ error: `Sitemap sync failed — ${err.message}` });
   }
 });

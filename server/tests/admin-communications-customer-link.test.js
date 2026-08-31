@@ -4,7 +4,7 @@
  * Pins the same fail-closed recipient contract as /reschedule-link
  * (admin-only, full 10-digit phone, kind allowlist), which builder each kind
  * dispatches to (account ids vs the phone-owning primary id), the response
- * shape, and the /customer-link/cancel suppression rules. Builder internals
+ * shape. Builder internals
  * are covered by their own services — mocked here.
  */
 
@@ -79,7 +79,6 @@ jest.mock('../services/composer-customer-links', () => ({
   buildReferralLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
-  cancelInlineIfPending: jest.fn(async () => true),
 }));
 
 const express = require('express');
@@ -265,40 +264,4 @@ describe('POST /admin/communications/customer-link', () => {
   });
 });
 
-describe('POST /admin/communications/customer-link/cancel', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    db.mockReset();
-  });
 
-  test('delegates to the conditional suppress and stays ok either way', async () => {
-    // The pending/sent/other-flow guards live INSIDE cancelInlineIfPending's
-    // single conditional UPDATE (no read-then-act race at the route) — the
-    // route just delegates and answers ok whether or not a row matched.
-    wireDb({ customers: soloCustomer() });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link/cancel', { requestId: 'rr-1' });
-      expect(res.status).toBe(200);
-      expect(ReviewService.cancelInlineIfPending).toHaveBeenCalledWith('rr-1');
-    });
-
-    // Nothing matched (already sent, or a row from a different flow) → still ok:true.
-    ReviewService.cancelInlineIfPending.mockResolvedValueOnce(false);
-    wireDb({ customers: soloCustomer() });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link/cancel', { requestId: 'rr-2' });
-      expect(res.status).toBe(200);
-      expect((await res.json()).ok).toBe(true);
-    });
-  });
-
-  test('403 for technicians, 400 without a requestId', async () => {
-    await withServer(async (baseUrl) => {
-      const forbidden = await post(baseUrl, 'customer-link/cancel', { requestId: 'rr-1' }, 'tech');
-      expect(forbidden.status).toBe(403);
-      const missing = await post(baseUrl, 'customer-link/cancel', {});
-      expect(missing.status).toBe(400);
-      expect(db).not.toHaveBeenCalled();
-    });
-  });
-});

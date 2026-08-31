@@ -234,6 +234,30 @@ describe('syncSitemapLinks', () => {
     expect(builder.inserted).toHaveLength(0);
     expect(builder.updated).toHaveLength(0);
     expect(builder.deletedIds).toEqual([]);
+    // The refusal is marked recoverable so Settings can offer the confirmed
+    // force path.
+    await expect(syncSitemapLinks()).rejects.toMatchObject({ shrinkage: true });
+  });
+
+  it('force accepts an over-cap shrinkage — the admin-confirmed recovery path', async () => {
+    const existing = [
+      { id: 100, url: PAGES[0], name: 'Home', category: 'website', source: 'sitemap' },
+      ...Array.from({ length: 29 }, (_, i) => ({
+        id: 200 + i,
+        url: `${SITE}/page-${i}/`,
+        name: `Page ${i}`,
+        category: 'website',
+        source: 'sitemap',
+      })),
+    ];
+    const builder = makeLinkLibraryBuilder(existing);
+    mockBuilders = { link_library: builder, system_config: makeSystemConfigBuilder() };
+    sitemapManager.listUrls.mockResolvedValue(PAGES);
+
+    const result = await syncSitemapLinks({ force: true });
+
+    expect(result.removed).toBe(29);
+    expect(builder.deletedIds).toHaveLength(29);
   });
 
   it('refuses to overwrite the library from a suspiciously tiny fetch', async () => {

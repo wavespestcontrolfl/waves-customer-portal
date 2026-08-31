@@ -257,6 +257,31 @@ function smsThreadKey(phone) {
   return String(phone || "").replace(/\D/g, "").slice(-10) || "unknown";
 }
 
+// Canonical presence check for tracked customer bearer links: operators edit
+// bodies, and a case-changed hostname or a dropped https:// still carries
+// the SAME live token — an exact `includes` would treat that edit as a
+// deletion, forget the tracking entry, and let a later recipient change
+// send the previous customer's link unguarded. Compare scheme-stripped and
+// lowercased on both sides (a case-mangled token path is a dead link, but
+// the entry then simply lingers tracked until the line is stripped).
+function linkFragment(url) {
+  return String(url || "").replace(/^https?:\/\//i, "").toLowerCase();
+}
+function bodyHasLink(body, url) {
+  const frag = linkFragment(url);
+  return !!frag && String(body || "").toLowerCase().includes(frag);
+}
+function stripLinkLines(body, url) {
+  const frag = linkFragment(url);
+  if (!frag) return body;
+  return body
+    .split("\n")
+    .filter((l) => !l.toLowerCase().includes(frag))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function smsMessageMatchesLine(message, lineNumber) {
   const lineKey = phoneKey(lineNumber);
   if (!lineKey || !message) return false;
@@ -1139,7 +1164,7 @@ function SmsTab() {
       const recipientKey = trimmedTo ? smsThreadKey(trimmedTo) : "";
       const staleLink = Object.values(insertedCustomerLinks).some(
         (entry) =>
-          msgBody.includes(entry.url) &&
+          bodyHasLink(msgBody, entry.url) &&
           (entry.recipientKey !== recipientKey ||
             (selectedCustomerId || null) !== entry.customerId),
       );
@@ -1696,36 +1721,12 @@ function SmsTab() {
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
   };
 
-  // Retire a withdrawn review row (minted unscheduled — nothing auto-sends
-  // either way, but a silently dropped failure would leave an abandoned ask
-  // lingering pending in the customer's review history). Retry transient
-  // failures and surface the final one. Never rejects (callers
-  // fire-and-forget it behind state updates).
-  const cancelReviewRequestRow = useCallback(async (requestId) => {
-    if (!requestId) return;
-    // Never cancel while a send is in flight — the server marks the row
-    // delivered AFTER the provider send, so a cancel landing in between
-    // would suppress an ask the customer received. Wait for the send to
-    // settle first; a delivered row then no-ops the conditional cancel.
-    for (let waited = 0; sendInFlightRef.current && waited < 20000; waited += 250) {
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        await adminFetch("/admin/communications/customer-link/cancel", {
-          method: "POST",
-          body: JSON.stringify({ requestId }),
-        });
-        return;
-      } catch {
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 1500 * attempt));
-      }
-    }
-    setSendResult({
-      ok: false,
-      text: "Couldn't retire the withdrawn review link — it may linger as pending on the customer's review requests.",
-    });
-  }, []);
+  // Withdrawal is NON-destructive: the pending review row is SHARED — every
+  // composer inserting for the same customer holds the same row (createInline
+  // reuse), so canceling it here would 409 another operator's valid in-flight
+  // send. Forgetting the local entry is enough: the row is unscheduled (never
+  // auto-sends), the customer's next insert reuses it, and only a claimed
+  // /sms send delivers it.
 
   const handleInsertCustomerLink = async (kind) => {
     const requestRecipient = toNumber.trim();
@@ -1759,36 +1760,19 @@ function SmsTab() {
         }),
       });
       if (contextChanged()) {
-        // The mint landed after the operator moved on — retire the row
-        // minted for the abandoned recipient.
-        if (kind === "review_request" && d.requestId) {
-          void cancelReviewRequestRow(d.requestId);
-        }
+        // The mint landed after the operator moved on — just drop it. The
+        // shared pending row stays reusable (see the withdrawal note above).
         return;
       }
       const clause = String(d.line || "").trim() || `${d.url}`;
       const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
       // Replace-don't-stack per kind (same rule as the reschedule insert).
+      // A replaced review link's row is NOT canceled: reuse means the fresh
+      // insert hands back the same shared row anyway.
       const prevEntry = insertedCustomerLinks[kind] || null;
       const prevUrl = prevEntry?.url || null;
-      // A replaced review link's OLD row would otherwise stay pending —
-      // retire it before the tracked entry is overwritten.
-      if (
-        kind === "review_request" &&
-        prevEntry?.requestId &&
-        prevEntry.requestId !== (d.requestId || null)
-      ) {
-        void cancelReviewRequestRow(prevEntry.requestId);
-      }
       setMsgBody((b) => {
-        const base = prevUrl
-          ? b
-              .split("\n")
-              .filter((l) => !l.includes(prevUrl))
-              .join("\n")
-              .replace(/\n{3,}/g, "\n\n")
-              .trim()
-          : b;
+        const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
         return base.trim()
           ? `${base.replace(/\s+$/, "")}\n\n${clause}`
           : prefill || clause;
@@ -1814,43 +1798,31 @@ function SmsTab() {
 
   // Same bearer-credential rule as the reschedule/re-service links: a minted
   // customer link must not survive a recipient change, and the tracked entry
-  // is forgotten once the operator deletes it from the body. A withdrawn
-  // review-request link additionally retires its pending row.
+  // is forgotten once the operator deletes it from the body (presence is
+  // checked canonically — bodyHasLink — so a case/scheme edit of a still-
+  // live URL never sheds tracking). Withdrawal never cancels the shared
+  // review row (see the note above handleInsertCustomerLink).
   useEffect(() => {
     const entries = Object.entries(insertedCustomerLinks);
     if (!entries.length) return;
-    // Defer while a send is in flight: mid-send body edits must not cancel
-    // the review row racing its own delivered-marking. The effect re-runs
-    // when `sending` settles — a successful send has already forgotten the
-    // links (cleared with the body), a failed one re-evaluates then.
+    // Defer while a send is in flight — the effect re-runs when `sending`
+    // settles: a successful send has already forgotten the links (cleared
+    // with the body), a failed one re-evaluates then.
     if (sending) return;
-    const cancelReviewRow = (entry) => {
-      if (entry.requestId) void cancelReviewRequestRow(entry.requestId);
-    };
     const currentRecipient = toNumber.trim();
     const currentRecipientKey = currentRecipient ? smsThreadKey(currentRecipient) : "";
     let removedForRecipient = false;
     const kept = {};
     for (const [kind, entry] of entries) {
-      if (!msgBody.includes(entry.url)) {
-        // Operator deleted the line (or the body cleared) — forget it, and
-        // withdraw a pending review ask.
-        if (kind === "review_request") cancelReviewRow(entry);
+      if (!bodyHasLink(msgBody, entry.url)) {
+        // Operator deleted the line (or the body cleared) — forget it.
         continue;
       }
       if (
         currentRecipientKey !== entry.recipientKey ||
         (selectedCustomerId || null) !== entry.customerId
       ) {
-        setMsgBody((b) =>
-          b
-            .split("\n")
-            .filter((l) => !l.includes(entry.url))
-            .join("\n")
-            .replace(/\n{3,}/g, "\n\n")
-            .trim(),
-        );
-        if (kind === "review_request") cancelReviewRow(entry);
+        setMsgBody((b) => stripLinkLines(b, entry.url));
         removedForRecipient = true;
         continue;
       }
@@ -1862,7 +1834,7 @@ function SmsTab() {
         setSendResult({ ok: true, text: "Customer link removed — the recipient changed." });
       }
     }
-  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, cancelReviewRequestRow, sending]);
+  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, sending]);
 
   // The sheet's full list: the customer group first, then the library rows.
   // Every dynamic row dispatches to a requireAdmin endpoint (reschedule-link,

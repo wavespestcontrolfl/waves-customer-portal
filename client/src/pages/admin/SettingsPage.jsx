@@ -1438,15 +1438,30 @@ function LinkLibraryTab() {
   };
   useEffect(load, []);
 
-  const handleSync = async () => {
+  const handleSync = async (force = false) => {
+    // A sync that would delete more than the shrinkage cap is refused (a
+    // truncated sitemap must not erase the library). After a REAL site
+    // restructure the owner confirms once and re-runs with force.
+    if (
+      force &&
+      !window.confirm(
+        "The sitemap now has far fewer pages than the library. Force-sync and delete every stored page no longer in it?",
+      )
+    ) {
+      return;
+    }
     setSyncing(true);
     setNotice(null);
     try {
-      const r = await adminFetch("/admin/communications/link-library/sync", { method: "POST" });
+      const r = await adminFetch("/admin/communications/link-library/sync", {
+        method: "POST",
+        body: JSON.stringify(force ? { force: true } : {}),
+      });
       setNotice({ ok: true, text: `Synced ${r.fetched} website pages — ${r.added} added, ${r.updated} renamed, ${r.removed} removed.` });
       load();
     } catch (e) {
-      setNotice({ ok: false, text: e.message });
+      const shrinkage = /implausible shrinkage/i.test(String(e.message || ""));
+      setNotice({ ok: false, text: e.message, ...(shrinkage ? { shrinkage: true } : {}) });
     } finally {
       setSyncing(false);
     }
@@ -1526,7 +1541,7 @@ function LinkLibraryTab() {
           <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>Link Library</div>
           <button
             type="button"
-            onClick={handleSync}
+            onClick={() => handleSync()}
             disabled={syncing}
             style={{
               padding: "8px 14px",
@@ -1565,7 +1580,29 @@ function LinkLibraryTab() {
           </div>
         )}
         {notice && (
-          <div style={{ fontSize: 13, color: notice.ok ? D.green : D.red, marginTop: 8 }}>{notice.text}</div>
+          <div style={{ fontSize: 13, color: notice.ok ? D.green : D.red, marginTop: 8 }}>
+            {notice.text}
+            {notice.shrinkage && (
+              <button
+                type="button"
+                onClick={() => handleSync(true)}
+                disabled={syncing}
+                style={{
+                  marginLeft: 10,
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  border: `1px solid ${D.inputBorder}`,
+                  background: D.white,
+                  color: D.red,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  cursor: syncing ? "default" : "pointer",
+                }}
+              >
+                Force full reconcile…
+              </button>
+            )}
+          </div>
         )}
       </Card>
 

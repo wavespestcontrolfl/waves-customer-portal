@@ -98,7 +98,7 @@ function isSiteUrl(url) {
  * pages are deleted. Manual rows are never touched.
  * Returns { fetched, added, updated, removed }.
  */
-async function syncSitemapLinks({ fetchFn } = {}) {
+async function syncSitemapLinks({ fetchFn, force = false } = {}) {
   // The manager caches per-host for 5 minutes; a sync is an explicit ask for
   // the live sitemap (the Settings button especially), so bust it first.
   sitemapManager.invalidate();
@@ -136,13 +136,17 @@ async function syncSitemapLinks({ fetchFn } = {}) {
   // would then erase the library. Bound the shrink BEFORE any write:
   // organic pruning removes a handful of pages, never a fifth of the
   // stored rows at once (slack floor 5 keeps small libraries workable). A
-  // genuine mass restructure is an explicit owner action, not a nightly
-  // reconcile.
+  // genuine mass restructure recovers through `force` — the Settings "Sync
+  // now" confirm path (never the nightly job), which accepts the shrinkage
+  // for this one run; the error carries `shrinkage` so the route can offer
+  // that path instead of a dead end.
   const currentUrls = new Set(pages);
   const staleIds = [...sitemapByUrl.values()].filter((r) => !currentUrls.has(r.url)).map((r) => r.id);
   const maxRemovals = Math.max(5, Math.ceil(sitemapByUrl.size * 0.2));
-  if (staleIds.length > maxRemovals) {
-    throw new Error(`sitemap sync aborted — snapshot would remove ${staleIds.length} of ${sitemapByUrl.size} sitemap rows (cap ${maxRemovals}); refusing implausible shrinkage`);
+  if (!force && staleIds.length > maxRemovals) {
+    const err = new Error(`sitemap sync aborted — snapshot would remove ${staleIds.length} of ${sitemapByUrl.size} sitemap rows (cap ${maxRemovals}); refusing implausible shrinkage`);
+    err.shrinkage = true;
+    throw err;
   }
 
   let added = 0;
