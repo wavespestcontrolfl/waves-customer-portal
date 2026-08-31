@@ -745,6 +745,24 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       .toEqual(["server/index.js @ / :: GET /debug [conditional: process.env.NODE_ENV !== 'production']"]);
   });
 
+  test("a CONDITIONAL router MOUNT makes every descendant route conditional with the mount's predicate", () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "if (process.env.ENABLE_X === 'true') {",
+        "  app.use('/api/x', require('./routes/x'));",
+        '}',
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map(routeKey)).toEqual([
+      "server/routes/x.js @ /api/x :: GET /api/x/thing [conditional: process.env.ENABLE_X === 'true']",
+    ]);
+  });
+
   test('an optional-call registration (app?.get) on a known router is a reported problem', () => {
     const res = scanOf({
       'server/index.js': app("app?.get('/leak', (req, res) => res.json({}));"),

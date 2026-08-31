@@ -986,7 +986,10 @@ class Scanner {
 
   scan() {
     const app = this.module(this.appFile);
-    this.walkRouter(app, 'app', { prefix: '/', mountGuards: [], inEffect: [], mountLabel: '/', mountRouter: this.appFile });
+    this.walkRouter(app, 'app', {
+      prefix: '/', mountGuards: [], inEffect: [], mountLabel: '/', mountRouter: this.appFile,
+      mountConditional: false, mountCond: null,
+    });
     return this.result();
   }
 
@@ -1076,7 +1079,7 @@ class Scanner {
             this.routes.push(this.makeRoute({
               method: 'USE', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...ownGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
-              resolved: pathResolved, conditional: !reg.topLevel, cond: reg.cond, extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
+              resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
             }));
           }
           if (routerRefs.length === 0 && statics.length === 0) {
@@ -1098,7 +1101,7 @@ class Scanner {
             this.routes.push(this.makeRoute({
               method: 'STATIC', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...s.precedingGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
-              resolved: pathResolved, conditional: !reg.topLevel, cond: reg.cond, extra: s.desc, loc: m.loc(reg.node),
+              resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, extra: s.desc, loc: m.loc(reg.node),
             }));
           }
           for (const ref of routerRefs) {
@@ -1109,6 +1112,11 @@ class Scanner {
               // time relative to the module's top-level use() guards — give
               // it NO source-order guard credit (fail closed).
               inEffect: reg.topLevel ? [...inEffect] : [],
+              // A conditional MOUNT makes every descendant route conditional;
+              // the predicate chain rides into their identities so moving or
+              // re-predicating the mount forces re-review.
+              mountConditional: ctx.mountConditional || !reg.topLevel,
+              mountCond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null,
               mountLabel: scope,
               mountRouter: ref.type === 'router' ? ref.module : m.file,
             };
@@ -1140,7 +1148,7 @@ class Scanner {
             ...ownGuards.map((g) => ({ ...g, baseScope: ctx.prefix })),
             ...(reg.topLevel ? inEffectGuards(inEffect, fullPath) : []),
           ],
-          resolved: pathResolved, conditional: !reg.topLevel, cond: reg.cond, loc: m.loc(reg.node),
+          resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, loc: m.loc(reg.node),
         }));
       }
     }
