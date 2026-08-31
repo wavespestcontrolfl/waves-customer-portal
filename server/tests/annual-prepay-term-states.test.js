@@ -360,12 +360,20 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // A mutation through a DYNAMIC table expression (db(fn()), trx(cfg.x))
       // could write this table's status invisibly — fail closed unless the
       // file is on the audited allowlist above.
-      if (!AUDITED_DYNAMIC_WRITERS.includes(rel)) {
-        for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
-          const chain = chainAfter(src, m.index + m[0].length);
-          if (/\.(?:update|insert|merge)\s*\(/.test(chain)) {
-            unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} — audit it and extend AUDITED_DYNAMIC_WRITERS`);
-          }
+      for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+        const chain = chainAfter(src, m.index + m[0].length);
+        const mut = chain.match(/\.(?:update|insert|merge)\s*\(/);
+        if (!mut) continue;
+        if (!AUDITED_DYNAMIC_WRITERS.includes(rel)) {
+          unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} — audit it and extend AUDITED_DYNAMIC_WRITERS`);
+          continue;
+        }
+        // Even audited dynamic writers must never name a status key in a
+        // dynamically-tabled payload — that is how a future status write
+        // would sneak past the literal-table scan.
+        const args = chain.slice(mut.index);
+        if (/(?:\b|['"])status['"]?\s*:/.test(args) || /\[\s*['"]status['"]\s*\]/.test(args)) {
+          unscannable.push(`${rel}: dynamic-table mutation via ${m[1]} carries a status key`);
         }
       }
     }
@@ -479,6 +487,19 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     for (const invStatus of ['void', 'cancelled', 'canceled', 'refunded']) {
       expect(f({ status: invStatus })).toBe('cancelled');
     }
+  });
+
+  test('statusForPrepayInvoice (the birth wrapper createTerm actually calls) keeps its three documented branches', () => {
+    // Not exported — pinned at source: no linked invoice → born 'active'
+    // (manual term, treated as already-covered); invoice found → the
+    // invoiceTermStatus mapping above; lookup error → payment_pending
+    // (degrade, never guess active).
+    const src = read('server/services/annual-prepay-renewals.js');
+    const fn = src.match(/async function statusForPrepayInvoice\(invoiceId[\s\S]*?\n\}/);
+    expect(fn).not.toBeNull();
+    expect(fn[0]).toContain("if (!invoiceId) return 'active';");
+    expect(fn[0]).toContain('return invoiceTermStatus(invoice);');
+    expect(fn[0]).toContain('return PAYMENT_PENDING_STATUS;');
   });
 
   describe('recordDecision — the operator moves out of active / renewal_pending', () => {
