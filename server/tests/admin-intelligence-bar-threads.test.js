@@ -162,6 +162,7 @@ describe('threads gate OFF (default)', () => {
       expect(status).toBe(200);
       expect(mockAppendExchange).not.toHaveBeenCalled();
       expect(body.threadId).toBeUndefined();
+      expect(body.threadsEnabled).toBe(false);
     });
   });
 
@@ -191,6 +192,7 @@ describe('threads gate ON', () => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'remember this', context: 'customers' });
       expect(status).toBe(200);
       expect(body.threadId).toBe(THREAD_ID);
+      expect(body.threadsEnabled).toBe(true);
 
       expect(mockAppendExchange).toHaveBeenCalledTimes(1);
       const arg = mockAppendExchange.mock.calls[0][0];
@@ -219,6 +221,7 @@ describe('threads gate ON', () => {
       expect(status).toBe(200);
       expect(mockAppendExchange).not.toHaveBeenCalled();
       expect(body.threadId).toBeUndefined();
+      expect(body.threadsEnabled).toBe(false);
     });
   });
 

@@ -460,12 +460,17 @@ function GlobalCommandPalette(_props, ref) {
           setResponse(data.response);
           setPendingActions(data.pendingActions || []);
           setConversationHistory(data.conversationHistory || []);
-          if (data.threadId) {
-            setThreadId(data.threadId);
-            // A returned thread id proves the server gate is on even if the
-            // availability probe failed earlier — switch to thread mode so
-            // route changes stop clearing the conversation.
+          if (data.threadId) setThreadId(data.threadId);
+          // The server states thread availability on every query, so a
+          // RUNTIME gate change is reflected: off → detach and return to
+          // ephemeral mode (the kill switch's promise); on → thread mode
+          // even if the availability probe failed earlier or this
+          // exchange's best-effort append didn't return an id.
+          if (data.threadsEnabled === true) {
             threadsAvailableRef.current = true;
+          } else if (data.threadsEnabled === false) {
+            threadsAvailableRef.current = false;
+            setThreadId(null);
           }
         }
       } catch (err) {

@@ -1800,8 +1800,9 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // thread_id the actor doesn't own appends nothing and returns no id, so
     // the client quietly falls back to its ephemeral history.
     let persistedThreadId = null;
-    if (IbThreads.threadsEnabled() && req.techRole === 'admin'
-      && context !== 'tech' && context !== 'agent_estimate') {
+    const threadPersistenceActive = IbThreads.threadsEnabled() && req.techRole === 'admin'
+      && context !== 'tech' && context !== 'agent_estimate';
+    if (threadPersistenceActive) {
       try {
         // Pending-action cards (and their confirmation ids) are deliberately
         // client-only and are NOT restored on resume — annotate the stored
@@ -1843,6 +1844,11 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         { role: 'assistant', content: persistedAssistantTurn },
       ],
       ...(persistedThreadId ? { threadId: persistedThreadId } : {}),
+      // Explicit availability so the client tracks a RUNTIME gate change:
+      // false detaches its thread state (the kill switch's exact-ephemeral
+      // promise), true keeps thread mode even when this exchange's append
+      // failed best-effort.
+      threadsEnabled: threadPersistenceActive,
     });
 
   } catch (err) {
