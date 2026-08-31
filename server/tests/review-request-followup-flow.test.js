@@ -17,6 +17,7 @@ jest.mock('../services/customer-contact', () => ({
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
+  existingShortUrlFor: jest.fn().mockResolvedValue(null),
 }));
 // Manual create() runs under the per-customer advisory lock; with the db mock
 // there is no pool so the real runExclusive would fail closed (skipped:
@@ -601,21 +602,22 @@ describe('review request follow-up flow', () => {
     expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
   });
 
-  test('a stale claim with no trace of a send is reclaimed', async () => {
+  test('a stale claim with no log evidence stays blocked — absence is not proof of no send', async () => {
     const rrQuery = chain();
     const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
-    rrQuery.update
-      .mockResolvedValueOnce(0) // pending claim misses
-      .mockResolvedValueOnce(1); // stale reclaim wins
+    rrQuery.update.mockResolvedValueOnce(0); // pending claim misses
     rrQuery.first.mockResolvedValueOnce({ id: 'rr-inline', token: 'tok-64chars' });
-    smsLogQuery.first.mockResolvedValue(undefined); // nothing ever left
+    smsLogQuery.first.mockResolvedValue(undefined); // no log row — but twilio.js
+    // swallows post-accept sms_log insert failures, so this proves nothing
     db.mockImplementation((table) => {
       if (table === 'review_requests') return rrQuery;
       if (table === 'sms_log') return smsLogQuery;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
-    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(true);
+    expect(await ReviewService.claimInlineForSend('rr-inline')).toBe(false);
+    // ONE update (the missed pending claim) — never a reclaim, never a repair.
+    expect(rrQuery.update).toHaveBeenCalledTimes(1);
   });
 
   test('releaseInlineClaim hands a claimed row back to pending', async () => {
@@ -701,6 +703,50 @@ describe('review request follow-up flow', () => {
 
     expect(result).toMatchObject({ requestId: 'rr-open-tab', token: 'token-open-tab' });
     expect(insert.query.insert).not.toHaveBeenCalled();
+  });
+
+  test('composer reuse also matches a row mid-claim and reuses its short URL', async () => {
+    const { existingShortUrlFor } = require('../services/short-url');
+    // Another tab's /sms is between claim and delivery-mark: status 'sending'.
+    // Minting a fresh token here would ride past the claim gate — the reuse
+    // query must see the claimed row too.
+    const rrChain = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'rr-claimed',
+        token: 'token-claimed',
+        status: 'sending',
+        sms_sent_at: null,
+        scheduled_for: null,
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue(null) });
+      }
+      if (table === 'review_requests') return rrChain;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    // The row already has a minted code — the second insert must carry the
+    // SAME short URL, or its body slips past the /sms linkInBody claim gate.
+    existingShortUrlFor.mockResolvedValueOnce('https://portal.wavespestcontrol.com/s/abc123');
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      armSafetyNet: false,
+    });
+
+    expect(rrChain.whereIn).toHaveBeenCalledWith('status', ['pending', 'sending']);
+    expect(result).toMatchObject({
+      requestId: 'rr-claimed',
+      token: 'token-claimed',
+      url: 'https://portal.wavespestcontrol.com/s/abc123',
+    });
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
   });
 
   test('manual-ask detection recognizes the seeded Yelp and Facebook write-a-review links', async () => {

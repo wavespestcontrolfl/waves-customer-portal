@@ -7,7 +7,7 @@ const {
   addETDays,
   etDateString,
 } = require("../utils/datetime-et");
-const { shortenOrPassthrough } = require("./short-url");
+const { shortenOrPassthrough, existingShortUrlFor } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
@@ -268,6 +268,22 @@ function unshortenedReviewUrl(token) {
 }
 
 async function buildReviewUrl(request, customerId) {
+  // One deterministic URL per request row — reuse the earliest minted code
+  // so every insert of the SAME reused row carries the SAME short link. The
+  // /sms claim gate matches the body against existingShortUrlFor (the
+  // earliest code); a second insert minting a fresh code would slip past
+  // that linkInBody check and send unclaimed and unmarked. Lookup failure
+  // falls through to a fresh mint (never block building the link).
+  try {
+    const existing = await existingShortUrlFor({
+      kind: "review",
+      entityType: "review_requests",
+      entityId: request.id,
+    });
+    if (existing) return existing;
+  } catch {
+    /* fall through to mint */
+  }
   const longUrl = unshortenedReviewUrl(request.token);
   return shortenOrPassthrough(longUrl, {
     kind: "review",
@@ -1664,9 +1680,14 @@ const ReviewService = {
     // send automatically" — an unscheduled row won't), so without reuse a
     // second tab or session could mint a second live token for the same
     // customer. Reuse returns the SAME token, so there is only ever one.
+    // 'sending' rows count too: that's a live pre-provider claim (or a
+    // stranded one) — minting a fresh token during that window would let a
+    // second ask ride past the claim gate; reusing it hands back the same
+    // token, whose send the claim gate then serializes.
     if (!serviceRecordId && !armSafetyNet) {
       const existing = await db("review_requests")
-        .where({ customer_id: customerId, triggered_by: "auto_inline", status: "pending" })
+        .where({ customer_id: customerId, triggered_by: "auto_inline" })
+        .whereIn("status", ["pending", "sending"])
         .whereNull("sms_sent_at")
         .whereNull("scheduled_for")
         .whereNull("service_record_id")
@@ -1790,12 +1811,15 @@ const ReviewService = {
    * UPDATE lets exactly one through and the loser's send is rejected before
    * the provider call, so at most one ask ever texts the customer. A claim
    * orphaned by a crash between the claim and the post-send mark is
-   * RECONCILED against the outbound log after 10 minutes rather than
-   * blindly reclaimed: a delivered-but-unmarked ask (provider send
-   * succeeded, the delivered stamp failed) must become "sent", never a
-   * second text — only a stale claim with no trace of the link ever
-   * leaving is handed back (the row is unscheduled, so a stuck claim can
-   * never auto-send in the meantime).
+   * RECONCILED against the outbound log after 10 minutes: a
+   * delivered-but-unmarked ask (provider send succeeded, the delivered
+   * stamp failed) is repaired to "sent". A stale claim with NO log
+   * evidence is NEVER handed back — twilio.js deliberately swallows a
+   * post-accept sms_log insert failure, so a missing row cannot prove the
+   * send didn't happen, and re-texting a solicitation is the one
+   * unacceptable outcome. The row stays 'sending' (it is unscheduled, so
+   * it can never auto-send) and createInline keeps reusing it, so no
+   * second token is ever minted around the block.
    */
   async claimInlineForSend(requestId) {
     if (!requestId) return false;
@@ -1821,7 +1845,6 @@ const ReviewService = {
     // evidence of delivery.
     let frags = [row.token];
     try {
-      const { existingShortUrlFor } = require("./short-url");
       const short = await existingShortUrlFor({
         kind: "review",
         entityType: "review_requests",
@@ -1839,18 +1862,15 @@ const ReviewService = {
         .where("message_body", "like", `%${frag}%`)
         .first("id");
       if (evidence) {
-        // The ask went out — repair the missing stamp instead of reclaiming.
+        // The ask went out — repair the missing stamp.
         await this.markInlineDelivered(requestId);
         return false;
       }
     }
 
-    const reclaimed = await db("review_requests")
-      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
-      .whereNull("sms_sent_at")
-      .where("updated_at", "<", staleBefore)
-      .update({ status: "sending", updated_at: new Date() });
-    return reclaimed > 0;
+    // No evidence is NOT proof of no send (twilio.js swallows a post-accept
+    // sms_log insert failure) — fail closed: the claim is never handed back.
+    return false;
   },
 
   async releaseInlineClaim(requestId) {
