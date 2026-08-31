@@ -12670,10 +12670,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // primary) still owes the appointment confirmation — the SMS legs
     // below no-op without a number and deliverConfirmationByChannel then
     // reaches the email. A customer-less accept has no prefs/email row to
-    // resolve, so it still needs a phone to enter. Annual-prepay accepts
-    // enter for their acceptance text (owner ruling 2026-08-31: revived —
-    // it had been unreachable since #1520 narrowed this guard to one-time).
-    if (!billByInvoice && (treatAsOneTime || annualPrepaySelected) && (acceptSmsPhone || customerId)) {
+    // resolve, so it still needs a phone to enter. (The annual-prepay
+    // acceptance text lives AFTER the invoice delivery below.)
+    if (!billByInvoice && treatAsOneTime && (acceptSmsPhone || customerId)) {
       try {
         if (treatAsOneTime) {
           const primarySvc = oneTimeBookingService || bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
@@ -12855,96 +12854,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (
-          annualPrepaySelected && acceptSmsPhone
-          && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)
-          // Payer-billed accepts (pre-push Codex P1): the invoice routes to
-          // the payer's AP and sendViaSMSAndEmail suppresses the homeowner
-          // text — promising THEM an invoice would be false.
-          && !(prepayAutoCharge?.status === 'skipped' && prepayAutoCharge?.reason === 'payer_billed')
-          // The template names a WaveGuard tier ("Your {tier} WaveGuard
-          // plan"); lawn/commercial-only prepay has none (pre-push Codex
-          // P1) — never invent "Bronze". Those accepts keep the onboarding
-          // email + the invoice's own SMS + email.
-          && !!String(estimate.waveguard_tier || '').trim()
-        ) {
-          // Revived 2026-08-31 (owner ruling) — this branch was unreachable
-          // from #1520 (2026-06-03) until now. Sends alongside the prepay
-          // invoice's own SMS + email below; no phone ⇒ nothing to send.
-          // Auto-charged (or ACH-initiated) accepts skip this SMS (pre-push
-          // Codex P1): the template promises an invoice to pay, which
-          // contradicts a year already collected/collecting — the charge
-          // path's receipt is the customer's confirmation. Declined/skipped
-          // charges keep the invoice-coming copy, which is then accurate.
-          // Quote the invoice's live amount DUE (Codex r27 P2):
-          // annualPrepayQuotedAmount is invoice.total, but account credit
-          // applied in the accept trx sits in credit_applied — the pay
-          // link this SMS promises collects total - credit_applied, so the
-          // gross figure would contradict the lower amount the customer
-          // just acknowledged. (Live read also picks up a payer-reroute
-          // reversal, where gross is once again the true due.)
-          let prepayFallbackAmount = annualPrepayQuotedAmount;
-          // Payer-billed invoice (pre-push Codex P1 r2): payer-billed prepay
-          // accepts are exempt from the card lane, so prepayAutoCharge can be
-          // null while the minted invoice carries payer_id — the invoice
-          // routes to the payer's AP and the homeowner must not be promised
-          // it. Read the live row; an unreadable row fails CLOSED (skip).
-          let payerBilledInvoice = false;
-          try {
-            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id') : null;
-            if (dueRow) {
-              prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
-              payerBilledInvoice = !!dueRow.payer_id;
-            }
-          } catch {
-            payerBilledInvoice = !!invoiceId; // routing unknown — do not text
-          }
-          if (payerBilledInvoice) {
-            logger.info(`[estimate-accept] prepay invoice for estimate ${estimate.id} is payer-billed; skipping homeowner acceptance SMS`);
-          } else {
-            const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
-            const customerBody = await renderEditableSmsTemplate(
-              'estimate_accepted_annual_prepay',
-              {
-                first_name: firstName,
-                waveguard_tier: String(estimate.waveguard_tier).trim(),
-                amount_text: amountText,
-              },
-              { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
-            );
-            if (!customerBody) {
-              logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
-            } else {
-              const sendResult = await sendCustomerMessage({
-                to: acceptSmsPhone,
-                body: customerBody,
-                channel: 'sms',
-                audience: customerId ? 'customer' : 'lead',
-                purpose: 'estimate_followup',
-                customerId: customerId || undefined,
-                estimateId: estimate.id,
-                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-                consentBasis: customerId ? undefined : {
-                  status: 'transactional_allowed',
-                  source: 'estimate_token_acceptance',
-                  capturedAt: new Date().toISOString(),
-                },
-                entryPoint: 'estimate_accept_annual_prepay',
-                metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
-              });
-              // No quiet-hours requeue: estimate_accept_annual_prepay is a
-              // customer-action entry point (owner ruling 2026-08-29) — the
-              // acceptance text answers the customer's own web acceptance
-              // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
-              // here.
-              if (sendResult.blocked || sendResult.sent === false) {
-                throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-              } else {
-                logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
-              }
-            }
-          }
         }
+        // Annual prepay: the acceptance text is sent AFTER the invoice
+        // delivery below (post-credit amount, delivery-confirmed).
         // Standard recurring accepts no longer send a separate acceptance SMS;
         // the onboarding handoff text was retired with the onboarding flow.
         // Customers continue through the invoice/pay-link path below.
@@ -13010,6 +12922,71 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
       logger.info(`[estimate-accept] Accept invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+    }
+
+    // Annual-prepay acceptance text (owner ruling 2026-08-31: revived — it
+    // had been unreachable since #1520, 2026-06-03). Runs AFTER the invoice
+    // delivery, keyed on it (pre-push Codex P1 r3): sendViaSMSAndEmail
+    // auto-applies account credit, so the amount is the FINAL due re-read
+    // from the row; a fully-covered invoice (nothing delivered, or due 0)
+    // or a payer-billed one (payer_id — payer-billed prepay skips the card
+    // lane, so prepayAutoCharge can be null) sends nothing: the homeowner
+    // must never be promised an invoice that is not coming to them. The
+    // auto-charged statuses never reach delivery, so they never reach here.
+    // No phone or no WaveGuard tier (the template names one; lawn/commercial
+    // prepay has none — never invent "Bronze") ⇒ no text. Kill switch:
+    // disable the estimate_accepted_annual_prepay admin SMS template.
+    if (annualPrepaySelected && invoiceId && invoiceLinkDelivered && acceptSmsPhone && String(estimate.waveguard_tier || '').trim()) {
+      try {
+        const finalRow = await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied', 'payer_id');
+        const finalDue = finalRow ? require('../services/invoice-helpers').invoiceAmountDue(finalRow) : null;
+        if (!finalRow || finalRow.payer_id || !(Number(finalDue) > 0)) {
+          logger.info(`[estimate-accept] prepay acceptance SMS skipped for estimate ${estimate.id}: ${!finalRow ? 'invoice unreadable' : (finalRow.payer_id ? 'payer-billed' : 'nothing due after credit')}`);
+        } else {
+          const customerBody = await renderEditableSmsTemplate(
+            'estimate_accepted_annual_prepay',
+            {
+              first_name: firstName,
+              waveguard_tier: String(estimate.waveguard_tier).trim(),
+              amount_text: ` for ${fmtMoney(finalDue)}`,
+            },
+            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
+          );
+          if (!customerBody) {
+            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+          } else {
+            const sendResult = await sendCustomerMessage({
+              to: acceptSmsPhone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_annual_prepay',
+              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
+            });
+            // No quiet-hours requeue: estimate_accept_annual_prepay is a
+            // customer-action entry point (owner ruling 2026-08-29) — the
+            // acceptance text answers the customer's own web acceptance
+            // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
+            // here.
+            if (sendResult.blocked || sendResult.sent === false) {
+              logger.error(`[estimate-accept] Annual prepay acceptance SMS blocked for estimate ${estimate.id}: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            } else {
+              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            }
+          }
+        }
+      } catch (prepaySmsErr) {
+        logger.error(`[estimate-accept] Annual prepay acceptance SMS failed for estimate ${estimate.id}: ${prepaySmsErr.message}`);
+      }
     }
 
     // Late stamp resolution for UNCOLLECTED prepay outcomes (pre-push Codex
