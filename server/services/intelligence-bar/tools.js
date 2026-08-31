@@ -2326,7 +2326,9 @@ async function rescheduleAppointment(input) {
 
   // Audit row, matching the rebooker's reschedule_log conventions.
   // Best-effort: the move above is already committed — a log failure must
-  // not report the move itself as failed.
+  // not report the move itself as failed, but the card disclosed the audit
+  // append (GH r16 P2), so it surfaces as a warning, never a bare Done.
+  let auditWarning = null;
   try {
     await db('reschedule_log').insert({
       scheduled_service_id: appointment_id,
@@ -2343,6 +2345,7 @@ async function rescheduleAppointment(input) {
     });
   } catch (err) {
     logger.error(`[intelligence-bar] reschedule_log insert failed for ${appointment_id}: ${err.message}`);
+    auditWarning = "The move committed, but the reschedule audit entry could not be written — this move is missing from the visit's reschedule history.";
   }
 
   logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${dateStr}`);
@@ -2371,10 +2374,10 @@ async function rescheduleAppointment(input) {
     new_date: dateStr,
     service_type: appt.service_type,
     // ONE warning key (card renders result.warning only): advisory overlap
-    // note + lifecycle-cleanup + group-repair failures COMBINE, never
-    // overwrite.
-    ...(overlapAdvisory || lifecycleWarning || groupWarning
-      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning].filter(Boolean).join(' ') }
+    // note + lifecycle-cleanup + group-repair + audit-append failures
+    // COMBINE, never overwrite.
+    ...(overlapAdvisory || lifecycleWarning || groupWarning || auditWarning
+      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning, auditWarning].filter(Boolean).join(' ') }
       : {}),
   };
 }

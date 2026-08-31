@@ -289,6 +289,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('operational', `Move ${a.service_type || 'visit'}${a.customer_name ? ` for ${a.customer_name}` : ''} (${a.status || 'scheduled'}) from ${from} → ${to}`, {
       before: from, after: to,
     });
+    // The move also appends a reschedule_log audit row (GH r16 P2) — a
+    // derived write of every confirmed reschedule, so the exact-effects
+    // card must carry it, and the executor surfaces a failed append as a
+    // warning instead of a bare Done.
+    push('operational', "A reschedule audit entry is appended to the visit's history after the move (a failed append surfaces as a warning)");
     // A LIVE visit (tech en route / on site) is more than a date move: the
     // executor resets it to confirmed, releases tech/tracker state, and
     // appends lifecycle history — the active field workflow ends.
@@ -374,6 +379,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (grouped.length) {
       const who = grouped.map((st) => String(st.customer || st.id)).join(', ');
       push('operational', `${grouped.length} stop(s) belong to grouped visits — ${who}: the reassignment also updates grouped-visit membership (the visit adopts the new technician, or the stop detaches from its visit, per the group's rules; a failed repair surfaces as a warning)`);
+    }
+  }
+  // Same seam disclosure for whole-day swaps (GH r16 P1): the swap preview's
+  // stops are an object keyed by technician name; grouped members carry
+  // grouped_visit_id, which also binds the fingerprint and the executor's
+  // under-lock membership compare.
+  if (toolName === 'swap_tech_assignments' && preview?.stops && typeof preview.stops === 'object' && !Array.isArray(preview.stops)) {
+    const grouped = Object.values(preview.stops).flat().filter((st) => st && st.grouped_visit_id);
+    if (grouped.length) {
+      push('operational', `${grouped.length} swapped stop(s) belong to grouped visits: the swap also updates grouped-visit membership (each visit adopts the new technician, or the divergent stop detaches, per the group's rules; a failed repair surfaces as a warning)`);
     }
   }
   // Receiving a restock also re-runs the WaveGuard lawn-readiness recheck,
@@ -498,7 +513,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (CUSTOMER_UPDATE_TOOL_NAMES.has(toolName)) {
     const upd = params?.updates && typeof params.updates === 'object' ? params.updates : {};
     if (ADDRESS_UPDATE_KEYS.some((k) => upd[k] !== undefined)) {
-      push('customer', 'Address change also clears saved coordinates (re-geocoded afterwards), updates the primary property record, and rewrites the address on open leads/estimates that still match the OLD address (that set is resolved at commit)');
+      push('customer', 'Address change also clears saved coordinates (re-geocoding is ATTEMPTED after commit, best-effort — a failure leaves coordinates empty until the next geocode pass), updates the primary property record, and rewrites the address on open leads/estimates that still match the OLD address (that set is resolved at commit)');
     }
     if (upd.pipeline_stage) {
       push('customer', `Stage → ${upd.pipeline_stage} also stamps lifecycle fields (active, member_since, churned_at/churn_reason, pipeline_stage_changed_at) derived from the customer's stage at commit`);
@@ -511,7 +526,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // executor's own documented contract.
   if (isCustomerUpdate
     && (params?.updates?.waveguard_tier !== undefined || Number(params?.updates?.monthly_rate) > 0)) {
-    push('billing', "Any affected customer left with a membership tier + positive monthly rate and no billing lane gets billing_mode stamped 'monthly_membership' in the same write, and the owner is notified to verify the lane");
+    push('billing', "Any affected customer left with a membership tier + positive monthly rate and no billing lane gets billing_mode stamped 'monthly_membership' in the same write, and an owner notification to verify the lane is attempted (best-effort — a notification failure is logged, the stamp itself stands)");
   }
 
   // Name/phone fan-out runs on the single-customer path only (the bulk

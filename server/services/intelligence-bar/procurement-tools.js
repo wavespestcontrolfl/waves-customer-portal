@@ -1425,6 +1425,10 @@ async function updateRestockRequest(input) {
     } catch (recheckErr) {
       logger.warn(`[intelligence-bar:procurement] restock readiness recheck failed: ${recheckErr.message}`);
       result.readiness_recheck = { error: recheckErr.message };
+      // The card renders only result.warning, and the contract promises a
+      // recheck failure is reported (GH r16 P2) — promote it there, never
+      // leave it buried in a field the operator never sees.
+      result.warning = [result.warning, 'Stock received, but the WaveGuard lawn-readiness recheck failed — open readiness alerts in the Command Center may be stale until the next recheck.'].filter(Boolean).join(' ');
     }
   }
   return result;

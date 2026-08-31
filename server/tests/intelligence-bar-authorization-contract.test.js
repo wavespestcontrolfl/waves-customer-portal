@@ -214,7 +214,9 @@ test('tier/rate customer updates disclose the billing-lane stamp + owner notific
     params: { customer_id: 'c9', updates: { waveguard_tier: 'gold', monthly_rate: 129 } },
     displayParams: { customer_id: 'c9', updates: { waveguard_tier: 'gold', monthly_rate: 129 } },
   });
-  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/billing_mode stamped 'monthly_membership'.*owner is notified/));
+  // The owner notification is best-effort fire-and-forget — the card says
+  // "attempted", never promised (GH r16 P2).
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/billing_mode stamped 'monthly_membership'.*owner notification to verify the lane is attempted/));
   const plain = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
   expect(plain.effects.some((e) => /billing_mode stamped/.test(e.label))).toBe(false);
 });

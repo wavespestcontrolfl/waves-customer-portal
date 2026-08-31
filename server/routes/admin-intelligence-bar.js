@@ -2611,9 +2611,14 @@ router.post('/confirm-action', async (req, res, next) => {
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments, assign_technician).
-        // `_`-prefixed: never shown. Arrays only (GH r14): the tech-route
-        // optimizer's `stops` is a bare count, not a set.
-        if (Array.isArray(livePreview?.stops)) execParams._verified_stops = livePreview.stops;
+        // `_`-prefixed: never shown. Arrays (assign) or the swap's
+        // per-tech-name object of stop sets — but never the tech-route
+        // optimizer's bare `stops` COUNT (GH r14/r16): a number riding as
+        // the verified set is junk to every consumer.
+        if (Array.isArray(livePreview?.stops)
+          || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
+          execParams._verified_stops = livePreview.stops;
+        }
         // Route optimizers (GH r14 P1): the verified preview's ordered
         // sequence IS the approved plan — hand the ordered ids to the
         // executor so it applies THAT order under the tech-day locks

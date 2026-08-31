@@ -1237,8 +1237,11 @@ async function swapTechAssignments(input) {
       // counts equal). Ids + service/window let the confirm card and its
       // fingerprint bind the actual targets (W0B).
       stops: {
-        [techA.name]: aServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null })),
-        [techB.name]: bServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null })),
+        // grouped_visit_id rides too (GH r16 P1): the post-commit seam can
+        // adopt the new tech for a grouped visit or detach the child —
+        // membership must bind the fingerprint and the card's disclosure.
+        [techA.name]: aServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null, ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}) })),
+        [techB.name]: bServices.map((s) => ({ id: s.id, service_type: s.service_type, time_window: s.time_window || null, ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}) })),
       },
       note: `Would swap ${aServices.length} stop(s) from ${techA.name} with ${bServices.length} stop(s) from ${techB.name}. Re-call with confirmed:true to apply.`,
     };
@@ -1253,15 +1256,20 @@ async function swapTechAssignments(input) {
   // own pre-lock read. Reloaded and compared UNDER the tech-day locks so a
   // concurrent move between read and lock can't swap an unseen set.
   const sameSet = (a, b) => a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i]);
-  const expectedA = (input._verified_stops?.[techA.name] || aServices).map((s) => s.id);
-  const expectedB = (input._verified_stops?.[techB.name] || bServices).map((s) => s.id);
-  let aIds = expectedA;
-  let bIds = expectedB;
+  // Membership key = id + grouped-visit id (GH r16 P1): a stop that joined,
+  // left, or switched grouped visits during the pending window must refuse —
+  // the seam's adopt/detach on it was never disclosed. Handles both shapes:
+  // verified preview stops carry grouped_visit_id, fresh rows carry visit_id.
+  const memberKey = (s) => `${s.id}:${s.grouped_visit_id ? String(s.grouped_visit_id) : (s.visit_id ? String(s.visit_id) : '')}`;
+  const expectedA = (input._verified_stops?.[techA.name] || aServices).map(memberKey);
+  const expectedB = (input._verified_stops?.[techB.name] || bServices).map(memberKey);
+  let aIds = [];
+  let bIds = [];
   const liveStops = async (trx, techId) => trx('scheduled_services')
     .where({ scheduled_date: date, technician_id: techId })
     .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
     .forUpdate()
-    .pluck('id');
+    .select('id', 'visit_id');
   try {
     await db.transaction(async trx => {
       // Tech-day fence before any membership write — both real tech-days plus
@@ -1274,13 +1282,13 @@ async function swapTechAssignments(input) {
         { techId: null, date },
       ]);
       const [liveA, liveB] = [await liveStops(trx, techA.id), await liveStops(trx, techB.id)];
-      if (!sameSet(liveA, expectedA) || !sameSet(liveB, expectedB)) {
+      if (!sameSet(liveA.map(memberKey), expectedA) || !sameSet(liveB.map(memberKey), expectedB)) {
         const err = new Error('swap_set_changed');
         err.previewChanged = true;
         throw err;
       }
-      aIds = liveA;
-      bIds = liveB;
+      aIds = liveA.map((r) => r.id);
+      bIds = liveB.map((r) => r.id);
     // route_order: null on both real reassignments — each stop's sequence
     // number belonged to its OLD tech's run; carrying it into the new tech's
     // day would interleave stale numbers (consumers append NULLs last).
@@ -1299,11 +1307,17 @@ async function swapTechAssignments(input) {
   // but not service_visits.technician_id — run the repair per row so each
   // grouped visit either adopts the new tech (all members moved together)
   // or detaches the divergent child. Post-commit, best-effort.
+  let swapGroupWarning = null;
   try {
     const { handleChildStopChanged } = require('../visit-groups');
     for (const sid of [...aIds, ...bIds]) await handleChildStopChanged(sid);
   } catch (vgErr) {
     logger.warn(`[intelligence-bar:schedule] visit-group seam failed after swap: ${vgErr.message}`);
+    // The card disclosed the grouped-visit adoption/detach for grouped
+    // stops — a failed repair must surface, never a bare Done (GH r16 P1).
+    if ([...aServices, ...bServices].some((s) => s.visit_id)) {
+      swapGroupWarning = 'Swapped, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit assignment; re-check the affected visits on the schedule.';
+    }
   }
 
   return {
@@ -1313,6 +1327,7 @@ async function swapTechAssignments(input) {
       [techA.name]: { was: aServices.length, now: bServices.length },
       [techB.name]: { was: bServices.length, now: aServices.length },
     },
+    ...(swapGroupWarning ? { warning: swapGroupWarning } : {}),
   };
 }
 
