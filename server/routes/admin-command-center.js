@@ -212,10 +212,15 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
     // way the previous inline `.catch(() => [])` queries did. Alert types,
     // ids, labels, and severities stay byte-identical so the admin_alerts
     // lifecycle rows carry over.
-    const statuses = await Promise.all(completedJobIds.map(
-      (id) => getCloseoutStatus(id).catch(() => null),
-    ));
-    const statusByJobId = new Map(completedJobIds.map((id, i) => [id, statuses[i]]));
+    // Each load is ~20 indexed probes — bound the fan-out so a busy day
+    // stays a handful of concurrent reads, never hundreds (codex r1).
+    const CLOSEOUT_CONCURRENCY = 4;
+    const statusByJobId = new Map();
+    for (let i = 0; i < completedJobIds.length; i += CLOSEOUT_CONCURRENCY) {
+      const slice = completedJobIds.slice(i, i + CLOSEOUT_CONCURRENCY);
+      const loaded = await Promise.all(slice.map((id) => getCloseoutStatus(id).catch(() => null)));
+      slice.forEach((id, j) => statusByJobId.set(id, loaded[j]));
+    }
     // Open = required and unmet. `awaiting_completion` (no completion yet)
     // and in-flight sends are transient, not gaps; unknown is an outage.
     const openFact = (f) => Boolean(f)
@@ -228,18 +233,27 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
       const closeoutRequirements = status.requirements || {};
       const facts = status.facts || {};
 
-      // A completed visit with no committed completion record (or a
-      // terminal failed completion attempt) is ONE card, not three — the
-      // downstream facts are all unknowable until the record exists.
-      if (facts.completion?.reason === 'completed_visit_without_record' || facts.completion?.state === 'failed') {
+      // A completed visit whose completion never committed (no record, a
+      // terminal failed attempt) or is STUCK RESUMABLE (a stale claim past
+      // the 10-minute window that needs an operator re-POST) is ONE card,
+      // not three — the downstream facts are all unknowable until the
+      // completion lands. Running states are transient and stay silent.
+      const completionReason = facts.completion?.reason || '';
+      const completionStuck = facts.completion?.state === 'failed'
+        || completionReason === 'completed_visit_without_record'
+        || completionReason === 'completion_resumable'
+        || completionReason === 'completion_side_effects_resumable';
+      if (completionStuck) {
         attention.push(issue({
           ...row,
           id: `${row.sourceRecordId}_missing_required_service_report`,
           type: 'missing_required_service_report',
           severity: 'medium',
           label: 'Missing required service report',
-          summary: 'Completed job has no completion record — closeout never committed.',
-          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'completion', closeoutReason: facts.completion.reason },
+          summary: completionReason.includes('resumable')
+            ? 'Completion is stuck mid-commit — re-open the completion to resume its side effects.'
+            : 'Completed job has no completion record — closeout never committed.',
+          metadata: { ...row.metadata, closeoutRequirements, closeoutFact: 'completion', closeoutReason: completionReason },
         }));
         continue;
       }

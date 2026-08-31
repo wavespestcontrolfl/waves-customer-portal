@@ -155,6 +155,39 @@ test('completed visit with no completion record is ONE accurate card, not three'
   expect(alerts[0]).toMatchObject({ type: 'missing_required_service_report', summary: expect.stringMatching(/no completion record/) });
 });
 
+test('stuck resumable completion is the single closeout card (codex r1)', async () => {
+  installJobs([jobRow('svc-1')]);
+  getCloseoutStatus.mockResolvedValue(closeout({
+    facts: {
+      completion: fact('pending', 'completion_side_effects_resumable'),
+      report: fact('pending', 'awaiting_completion'),
+      application: fact('pending', 'awaiting_completion'),
+    },
+  }));
+  const alerts = (await run()).filter((a) => String(a.type).startsWith('missing_required'));
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0].summary).toMatch(/stuck mid-commit/);
+  // A RUNNING completion stays silent — transient, not a gap.
+  getCloseoutStatus.mockResolvedValue(closeout({
+    facts: { completion: fact('pending', 'completion_running'), report: fact('pending', 'awaiting_completion') },
+  }));
+  expect((await run()).filter((a) => String(a.type).startsWith('missing_required'))).toEqual([]);
+});
+
+test('closeout loads are bounded to 4 concurrent (codex r1)', async () => {
+  installJobs(Array.from({ length: 12 }, (_, i) => jobRow(`svc-${i}`)));
+  let inFlight = 0; let peak = 0;
+  getCloseoutStatus.mockImplementation(async () => {
+    inFlight += 1; peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight -= 1;
+    return closeout();
+  });
+  await run();
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(12);
+  expect(peak).toBeLessThanOrEqual(4);
+});
+
 test('getCloseoutStatus throwing or found:false fires nothing (never fabricate a gap)', async () => {
   installJobs([jobRow('svc-1'), jobRow('svc-2')]);
   getCloseoutStatus
