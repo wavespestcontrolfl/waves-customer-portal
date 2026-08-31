@@ -30,40 +30,69 @@ const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 // `\s*` spans the newline).
 const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\([^()]*\))*`;
 const Q = '[\'"`]'; // quote class incl. backtick
-const INSERT_PATTERNS = [
-  new RegExp(String.raw`\b[A-Za-z_$][\w$]*\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  // `.table('leads')` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
-  new RegExp(String.raw`\.\s*table\s*\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  /\.into\(\s*['"`]leads['"`]\s*\)/g,
-  /\binsert\s*\(\s*['"`]leads['"`]\s*\)/g,
-  /\bbatchInsert\s*\(\s*['"`]leads['"`]/g,
-  new RegExp(String.raw`\bfrom\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  // Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting, with
-  // an optional schema qualifier (`public.leads`, `"public"."leads"`). Word
-  // characters after `leads` (lead_activities etc.) break the \b and don't
-  // match. Also fires on a comment SAYING "insert into leads" — that's fine,
-  // registering (or rewording) it is cheaper than an unscanned writer form.
-  new RegExp(String.raw`\binsert\s+into\s+(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`, 'gi'),
-];
+const LITERAL_LEADS = String.raw`${Q}leads${Q}`;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// The knex builder shapes, built for a given "table token": the quoted
+// literal, or an identifier a constant-resolution pass found bound to the
+// string 'leads' in the same file (the repo's `const TABLE = 'leads';
+// await db(TABLE).insert(` pattern — cf. services/local-news-store.js).
+function knexInsertPatterns(token) {
+  return [
+    new RegExp(String.raw`\b[A-Za-z_$][\w$]*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+    // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
+    new RegExp(String.raw`\.\s*table\s*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+    new RegExp(String.raw`\.into\(\s*${token}\s*\)`, 'g'),
+    new RegExp(String.raw`\binsert\s*\(\s*${token}\s*\)`, 'g'),
+    new RegExp(String.raw`\bbatchInsert\s*\(\s*${token}`, 'g'),
+    new RegExp(String.raw`\bfrom\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  ];
+}
+
+// Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting, with
+// an optional schema qualifier (`public.leads`, `"public"."leads"`). Word
+// characters after `leads` (lead_activities etc.) break the \b and don't
+// match. Also fires on a comment SAYING "insert into leads" — that's fine,
+// registering (or rewording) it is cheaper than an unscanned writer form.
+const RAW_SQL_INSERT_RE = new RegExp(
+  String.raw`\binsert\s+into\s+(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
+  'gi'
+);
+
+// Constant-resolution pass: identifiers bound to the string 'leads'
+// (`const TABLE = 'leads';`). Each becomes an extra table token, so every
+// builder shape above — and the stored-builder alias below — is also scanned
+// with the identifier in place of the literal. The terminator lookahead
+// keeps `const x = 'leads' + suffix` (a computed name, not this table) out.
+const CONST_DECL_RE = new RegExp(
+  String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*${LITERAL_LEADS}\s*(?=[;,)\]\n])`,
+  'g'
+);
+
+function leadsTableTokens(src) {
+  const tokens = [LITERAL_LEADS];
+  CONST_DECL_RE.lastIndex = 0;
+  let m;
+  while ((m = CONST_DECL_RE.exec(src))) tokens.push(String.raw`\b${escapeRe(m[1])}\b`);
+  return tokens;
+}
 
 // Aliased-builder form: a `leads` query builder stored in a variable first
 // (`const leads = trx('leads'); ... leads.insert(...)`). The declaration must
 // NOT be awaited — `const rows = await db('leads')...` is an executed query,
-// not a stored builder. Covers `qb('leads')` and `qb.table('leads')` heads,
-// including a schema-qualified head (`db.withSchema('public').table('leads')`)
-// via the same CHAIN of intermediate calls the direct patterns allow.
-const ALIAS_DECL_RE = new RegExp(
-  String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${Q}leads${Q}\s*\)`,
-  'g'
-);
-
-function aliasInsertPatterns(src) {
+// not a stored builder. Covers `qb(X)` and `qb.table(X)` heads, including a
+// schema-qualified head (`db.withSchema('public').table(X)`) via the same
+// CHAIN of intermediate calls the direct patterns allow, for X = the literal
+// or a resolved constant.
+function aliasInsertPatterns(src, token) {
+  const declRe = new RegExp(
+    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${token}\s*\)`,
+    'g'
+  );
   const patterns = [];
-  ALIAS_DECL_RE.lastIndex = 0;
   let decl;
-  while ((decl = ALIAS_DECL_RE.exec(src))) {
-    const name = decl[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    patterns.push(new RegExp(String.raw`\b${name}${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
+  while ((decl = declRe.exec(src))) {
+    patterns.push(new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
   }
   return patterns;
 }
@@ -86,7 +115,11 @@ function scanSourceForLeadInserts(src) {
   const lines = src.split('\n');
   const seen = new Set();
   const sites = [];
-  for (const pattern of [...INSERT_PATTERNS, ...aliasInsertPatterns(src)]) {
+  const patterns = [RAW_SQL_INSERT_RE];
+  for (const token of leadsTableTokens(src)) {
+    patterns.push(...knexInsertPatterns(token), ...aliasInsertPatterns(src, token));
+  }
+  for (const pattern of patterns) {
     pattern.lastIndex = 0;
     let m;
     while ((m = pattern.exec(src))) {
@@ -131,6 +164,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['raw SQL insert, template + quoted table', 'await db.raw(`insert into "leads" (name) values (?)`, [name]);'],
     ['raw SQL insert, schema-qualified', "await db.raw('INSERT INTO public.leads (name) VALUES (?)', [name]);"],
     ['raw SQL insert, quoted schema-qualified', 'await db.raw(`insert into "public"."leads" (name) values (?)`, [name]);'],
+    ['constant table name', "const TABLE = 'leads';\nawait db(TABLE).insert({ a: 1 });"],
+    ['constant table name via batchInsert', "const TABLE = 'leads';\nawait db.batchInsert(TABLE, rows);"],
+    ['constant table name through stored builder', "const TABLE = 'leads';\nconst b = trx(TABLE);\nawait b.insert({ a: 1 });"],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
   });
@@ -140,6 +176,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['read-only query', "const open = await db('leads').where({ status: 'new' }).select('id');"],
     ['insert into another table', "await db('lead_activities').insert({ a: 1 });"],
     ['raw SQL insert into another table', "await db.raw('INSERT INTO lead_activities (a) VALUES (?)', [1]);"],
+    ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
+    ['computed table name is not the constant form', "const t = 'leads' + suffix;\nawait audit(t);"],
   ])('ignores: %s', (_name, src) => {
     expect(found(src)).toEqual([]);
   });
