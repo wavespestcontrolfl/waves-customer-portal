@@ -418,6 +418,18 @@ describe('units are part of a property\'s identity', () => {
     if (mixed) expect(mixed.address_line1).toBe('100 First St Apt 4');
   });
 
+  it('a suffix spelling does not turn a restatement into an extra job', () => {
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First Street', zip: '34202', notes: 'gate code at the rear' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St.', zip: '34202', property_type: 'condo' }],
+    }, RK);
+    expect(afterCall2.additional_properties).toHaveLength(1);
+    expect(afterCall2.additional_properties[0].notes).toBe('gate code at the rear');
+    expect(afterCall2.additional_properties[0].property_type).toBe('condo');
+  });
+
   it('an address-only property does not accumulate copies of itself', () => {
     // The under-lock pass re-applies this pass's own payload over the locked
     // row, so an entry that never matched even itself appended a duplicate

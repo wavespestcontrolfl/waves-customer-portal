@@ -97,9 +97,15 @@ function propertyStreetKey(entry) {
   // Peel any unit written INTO the street line so "100 Main St Apt 4" and
   // "100 Main St" + address_line2 "Apt 4" key the same street; the unit then
   // decides identity separately, in propertyUnitKey below.
-  const { splitStreetLineUnit } = require('./address-normalizer');
+  const { splitStreetLineUnit, normalizeStreetLine } = require('./address-normalizer');
   const street = splitStreetLineUnit(raw).street || raw;
-  const line = street.trim().toLowerCase().replace(/\s+/g, ' ');
+  // Through the shared normalizer, per the existing-mechanism rule: it
+  // canonicalizes suffix aliases, so "100 First Street" and "100 First St."
+  // are ONE property rather than a restatement turning into an extra job on
+  // the estimate. It canonicalizes spellings of the same street; it does not
+  // loosen what counts as the same address.
+  const canonical = normalizeStreetLine(street) || street;
+  const line = canonical.trim().toLowerCase().replace(/\s+/g, ' ');
   return line || null;
 }
 
