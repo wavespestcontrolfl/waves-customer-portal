@@ -771,6 +771,28 @@ describe('booking + redemption wiring — source contracts (routes too large to 
     expect(source).toContain("await require('./inspection-credit').markBookingForInspectionCredit(client, {");
   });
 
+  it('card-approved credit-free bookings stamp the dedicated event source and every adoption path excludes it (W0B #3648 r7 pre-push P0)', () => {
+    const { CREDIT_FREE_CARD_EVENT_SOURCE } = require('../services/inspection-credit');
+    expect(CREDIT_FREE_CARD_EVENT_SOURCE).toBe('ib_card_credit_free');
+    // The IB executor stamps the dedicated source ONLY on the pinned
+    // (card-approved credit-free) path — an unpinned direct call keeps the
+    // plain adoptable source.
+    const tools = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    expect(tools).toContain("source: input._inspection_credit_amount !== undefined");
+    expect(tools).toContain(".CREDIT_FREE_CARD_EVENT_SOURCE");
+    // All three adoption/mint paths carry the exclusion: the shared
+    // evidence probe (provenBookingInWindow), the hourly sweep's provable
+    // join, and the rebind-to-children anchor scan. A timestamp cannot
+    // encode serialized order (recovery backdates created_at to the
+    // promise moment), so the source predicate is the only thing standing
+    // between a late offer and a booking whose card said no credit.
+    const credit = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    const joined = credit.split("COALESCE(e.source, '') <> ?").length - 1;
+    const plain = credit.split("COALESCE(source, '') <> ?").length - 1;
+    expect(joined).toBe(2);
+    expect(plain).toBe(1);
+  });
+
   it('phone bookings earn evidence at the AI insert, in the booking transaction', () => {
     // The outbound office-review hold was removed (owner directive
     // 2026-08-11): every auto-booked phone sale writes durable evidence in

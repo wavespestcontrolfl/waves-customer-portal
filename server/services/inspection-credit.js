@@ -718,6 +718,22 @@ async function markBookingForInspectionCredit(trx, {
   }
 }
 
+// Booking events stamped with this source were CARD-APPROVED as
+// credit-free (W0B, pre-push P0 on #3648 r7): the operator confirmed an
+// exact-effects card that said no inspection credit is redeemed by this
+// booking. Such an event is NEVER adoptable evidence for minting — any
+// offer open at booking time aborts the booking inside its transaction
+// (shared customer credit lock), so an offer that could pair with this
+// event was necessarily serialized AFTER it, and the ratified contract is
+// that a late offer redeems on the customer's NEXT booking, not on one
+// the card promised was credit-free. Timestamps can't encode that order
+// (recovery deliberately backdates created_at to the promise moment), so
+// the exclusion rides the event's source. The event itself still exists —
+// "this customer booked" stays provable for provenance checks — and an
+// estimate-accept adoption of the same visit RESTAMPS the source, making
+// that new purchase adoptable again.
+const CREDIT_FREE_CARD_EVENT_SOURCE = 'ib_card_credit_free';
+
 /**
  * The earliest PROVEN customer booking inside a window — the shared
  * evidence test for redemption, rebinding and late-offer adoption.
@@ -732,6 +748,9 @@ async function provenBookingInWindow({ customerId, from, to, excludeIds = [] }) 
     // COALESCE: the column defaults false, but a null must not exclude a
     // real booking under SQL three-valued logic.
     .whereRaw('COALESCE(s.is_callback, false) = false')
+    // Card-approved credit-free bookings are never adoptable evidence —
+    // see CREDIT_FREE_CARD_EVENT_SOURCE.
+    .whereRaw("COALESCE(e.source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
     .where('e.created_at', '>=', from)
     .where('e.created_at', '<=', to)
     .orderBy('e.created_at', 'asc');
@@ -1306,6 +1325,9 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // enough free re-service events inside open windows would spend
         // the limit on unmintable rows every run and starve real recovery.
         .whereRaw('COALESCE(s.is_callback, false) = false')
+        // Card-approved credit-free bookings never mint — see
+        // CREDIT_FREE_CARD_EVENT_SOURCE.
+        .whereRaw("COALESCE(e.source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
         .orderBy('e.created_at', 'asc')
         .limit(limit);
       if (!creditingOn) {
@@ -1629,6 +1651,9 @@ async function reverseInspectionCreditForBooking({
           if (!seriesChild) {
             const provenAnchors = await db('inspection_credit_booking_events')
               .where({ customer_id: offer.customer_id })
+              // A card-approved credit-free anchor's children are not
+              // rebind targets — see CREDIT_FREE_CARD_EVENT_SOURCE.
+              .whereRaw("COALESCE(source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
               .where('created_at', '>=', offer.created_at)
               .where('created_at', '<=', offer.expires_at)
               .whereNotIn('scheduled_service_id',
@@ -2010,6 +2035,7 @@ module.exports = {
   projectRedeemableOfferAmount,
   lockInspectionCreditCustomer,
   markBookingForInspectionCredit,
+  CREDIT_FREE_CARD_EVENT_SOURCE,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,
   sweepInspectionCreditRedemptions,

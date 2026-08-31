@@ -1856,7 +1856,17 @@ async function createAppointment(input) {
     await require('../inspection-credit').markBookingForInspectionCredit(trx, {
       customerId: customer_id,
       scheduledServiceId: created.id,
-      source: 'intelligence_bar',
+      // A card-approved credit-free booking stamps the dedicated source:
+      // its event proves "this customer booked" but is NEVER adoptable by
+      // an offer serialized after it (pre-push P0 on #3648 r7 — the
+      // recovery path backdates offer created_at to the promise moment, so
+      // a late offer's timestamp can sort BEFORE this booking and the
+      // sweep would mint against a booking whose card said no credit; the
+      // late offer now redeems on the NEXT booking instead, the ratified
+      // r6b contract).
+      source: input._inspection_credit_amount !== undefined
+        ? require('../inspection-credit').CREDIT_FREE_CARD_EVENT_SOURCE
+        : 'intelligence_bar',
     });
   });
   } catch (err) {
