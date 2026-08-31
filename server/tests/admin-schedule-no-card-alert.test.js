@@ -87,7 +87,6 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     isRecurring: true,
     recurringFloorPrice: 0,
     customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
-    effectiveBillingTerm: 'standard',
     prepaid: null,
     isCallback: false,
     serviceType: 'Monthly Pest Control Service',
@@ -140,15 +139,23 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
   });
 
-  test("an existing annual-prepay customer's lane cannot excuse a STANDARD booking (Codex P0)", () => {
+  test('the annual-prepay LANE is no exemption either — priced or refused (Codex P0)', () => {
+    // The prepay invoice + term are created post-commit and may never exist,
+    // so neither a requested prepay term nor an inherited prepay lane can
+    // stand in for an amount. A genuine prepay booking carries its quote.
     const annualCustomer = withCustomer({ billing_mode: 'annual_prepay' });
-    // Downgraded / never-prepay booking: the customer's lane would otherwise
-    // predict annual_renewal_owned and slip through unpriced.
-    expect(recurringWithoutBillableAmount({ ...annualCustomer, effectiveBillingTerm: 'standard' })).toBeTruthy();
-    // A booking that IS annual prepay still defers to the renewal flow.
-    expect(recurringWithoutBillableAmount({ ...annualCustomer, effectiveBillingTerm: 'prepay_annual' })).toBeNull();
-    // And a priced standard booking for that customer is fine either way.
-    expect(recurringWithoutBillableAmount({ ...annualCustomer, effectiveBillingTerm: 'standard', recurringFloorPrice: 46.33 })).toBeNull();
+    expect(recurringWithoutBillableAmount(annualCustomer)).toBeTruthy();
+    expect(recurringWithoutBillableAmount({ ...annualCustomer, recurringFloorPrice: 46.33 })).toBeNull();
+  });
+
+  test('an explicit member with a ZERO rate has no collectible dues (Codex P0)', () => {
+    // memberSeriesCovered strips the primary price from covered rows, so the
+    // caller passes the addon-only floor; with rate 0 there are no dues to
+    // cover them either and the series would run entirely free.
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'monthly_membership' }))).toBeTruthy();
+    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'monthly_membership', monthly_rate: 46.33 }))).toBeNull();
+    // The inferred-membership shape (real tier + rate) is covered as before.
+    expect(recurringWithoutBillableAmount(withCustomer({ monthly_rate: 46.33 }))).toBeNull();
   });
 
   test('free-by-design work passes — the only exemptions left', () => {

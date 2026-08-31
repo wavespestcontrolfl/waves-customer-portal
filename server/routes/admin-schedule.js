@@ -3268,7 +3268,6 @@ function recurringWithoutBillableAmount({
   isRecurring,
   recurringFloorPrice,
   customer,
-  effectiveBillingTerm,
   isCallback,
   serviceType,
 }) {
@@ -3293,19 +3292,20 @@ function recurringWithoutBillableAmount({
   // — the exact lost-AR case this gate exists to stop (Codex P0). A payer
   // still needs a price or a rate behind it.
 
-  // The customer's EXISTING annual-prepay lane is not an exemption for a
-  // booking that is not itself annual prepay. An unpriced recurring booking
-  // for such a customer predicts 'annual_renewal_owned' — deliberately not a
-  // gap, because coverage belongs to the renewal flow — so it sailed through
-  // even when bookingBillingTermEffective had been downgraded to standard,
-  // leaving unstamped visits with no term coverage and no invoice (Codex P0).
+  // The annual-prepay lane is neutralized UNCONDITIONALLY for this gate. An
+  // unpriced recurring booking on that lane predicts 'annual_renewal_owned',
+  // which unbilledCompletionGap deliberately does not treat as a gap because
+  // coverage belongs to the renewal flow — but the thing that would provide
+  // that coverage (the prepay invoice + term) is created by
+  // markEstimateManuallyAccepted AFTER this transaction commits, inside a
+  // catch that leaves the booking standing on failure. Whether the booking
+  // requests prepay or merely inherits the lane, an unpriced series can
+  // therefore commit and complete at $0 (Codex P0, twice: once for the
+  // downgraded-term path, once for the requested-term path).
   //
-  // Note the ASYMMETRY, which is the whole point: the effective term can only
-  // REMOVE an exemption here, never grant one. Round 6 deleted the opposite
-  // use (trusting a requested prepay term to excuse a missing amount) because
-  // the term invoice is created post-commit and may never exist.
-  const bookingIsAnnualPrepay = effectiveBillingTerm === 'prepay_annual';
-  const customerForLane = !bookingIsAnnualPrepay && customer?.billing_mode === 'annual_prepay'
+  // A genuine prepay booking carries its quoted price, so this refuses
+  // nothing legitimate — only a prepay booking with no amount at all.
+  const customerForLane = customer?.billing_mode === 'annual_prepay'
     ? { ...customer, billing_mode: null }
     : customer;
   const lane = resolveBillingLane(customerForLane);
@@ -5151,10 +5151,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // insert loop then writes.
     {
       const gateDates = [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates].filter(Boolean);
-      const floorForDate = (targetDate) => calculateVisitFinancialsForAddons(
-        pricing,
-        filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective),
-      ).price || 0;
+      // The amount the row will ACTUALLY carry. memberSeriesCovered strips the
+      // primary price from the parent and every child (dues are meant to cover
+      // them) and disables create_invoice_on_complete, so gating on the
+      // calculated price let an explicit monthly_membership customer with
+      // monthly_rate 0 pass on a catalog price and then receive rows with
+      // neither a price nor collectible dues (Codex P0). For covered rows the
+      // stamp is addon-only — mirror that exactly.
+      const floorForDate = (targetDate) => {
+        const lines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective);
+        return memberSeriesCovered
+          ? addonOnlyTotal(lines)
+          : (calculateVisitFinancialsForAddons(pricing, lines).price || 0);
+      };
       const recurringFloorPrice = zeroCallbackPrice
         ? 0
         : gateDates.reduce((min, d) => Math.min(min, floorForDate(d)), Infinity);
@@ -5162,7 +5171,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
         isRecurring,
         recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
         customer,
-        effectiveBillingTerm: bookingBillingTermEffective,
         isCallback: resolvedIsCallback,
         serviceType,
       });
