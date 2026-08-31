@@ -229,7 +229,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // Reminder registered so the 72h/24h cron sees the new visit.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       901, 5, expect.stringContaining('T08:00'), 'Quarterly Pest Control',
-      'recurring_auto_extend', { sendConfirmation: false },
+      'recurring_auto_extend', { sendConfirmation: false, closeReminderWindows: false, fromCommittedRow: true },
     );
     // Visit still live after registration → the re-check leaves the fresh
     // reminder armed.
@@ -790,7 +790,7 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledTimes(1);
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       900, 5, expect.stringContaining('T08:00'), 'Quarterly Pest Control',
-      'recurring_alert_action', { sendConfirmation: false },
+      'recurring_alert_action', { sendConfirmation: false, closeReminderWindows: false, fromCommittedRow: true },
     );
   });
 

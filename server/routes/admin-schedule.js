@@ -1255,20 +1255,17 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
   if (!scheduledServiceId) return;
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
-    // Time comes from the committed row, not the caller's copy — see
-    // resolveCommittedVisitTime for why (UPDATE-only sync trigger).
-    const resolved = await AppointmentReminders.resolveCommittedVisitTime(
-      scheduledServiceId,
-      { date: scheduledDate, windowStart: normalizeHHMM(windowStart) || null },
-    );
-    if (!resolved) return;
+    // fromCommittedRow: the time is read from the committed visit inside
+    // the registration transaction (under a share lock), not from this
+    // in-memory copy — see registerAppointment. The values here are only
+    // the fallback for a row that is not visible yet; windowless then
+    // registers as a non-delivering placeholder, never an armed 08:00.
+    const start = normalizeHHMM(windowStart) || null;
     await AppointmentReminders.registerAppointment(
       scheduledServiceId, customerId,
-      resolved.appointmentTime,
+      `${scheduledDate}T${start || '08:00'}`,
       serviceType, source,
-      // A windowless visit registers as a non-delivering placeholder, never
-      // an armed 08:00 — the UPDATE trigger re-arms it once a window is set.
-      { sendConfirmation: false, closeReminderWindows: resolved.windowless },
+      { sendConfirmation: false, closeReminderWindows: !start, fromCommittedRow: true },
     );
   } catch (e) {
     logger.error(`[schedule] Reminder registration failed for spawned visit ${scheduledServiceId}: ${e.message}`);
@@ -5547,18 +5544,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const AppointmentReminders = require('../services/appointment-reminders');
       for (const appt of createdAppointments) {
         try {
-          // Committed row is the truth for the time (UPDATE-only sync
-          // trigger — a reminder born at the wrong time never heals).
-          const resolved = await AppointmentReminders.resolveCommittedVisitTime(
-            appt.id, { date: appt.date, windowStart: windowStart || null },
-          ) || { appointmentTime: `${appt.date}T${windowStart || '08:00'}`, windowless: !windowStart };
+          // fromCommittedRow: the time is read from the committed row inside
+          // the registration transaction (UPDATE-only sync trigger — a
+          // reminder born at the wrong time never heals). Windowless →
+          // non-delivering placeholder, never an armed 08:00 nobody chose.
           await AppointmentReminders.registerAppointment(
             appt.id, customerId,
-            resolved.appointmentTime,
+            `${appt.date}T${windowStart || '08:00'}`,
             serviceType, 'admin_manual',
-            // Windowless → non-delivering placeholder (no confirmation, no
-            // 72h/24h texts "at 8:00 AM" for a time nobody chose).
-            { sendConfirmation: !!appt.confirmation, deferConfirmation: true, closeReminderWindows: resolved.windowless }
+            { sendConfirmation: !!appt.confirmation, deferConfirmation: true, closeReminderWindows: !windowStart, fromCommittedRow: true }
           );
         } catch (e) {
           logger.error(`Appointment reminder registration failed for ${appt.id}: ${e.message}`);
