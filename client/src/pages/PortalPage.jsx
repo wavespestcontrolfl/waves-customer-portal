@@ -4796,7 +4796,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     // Email/Both can only be offered once an email is on file —
                     // otherwise the backend silently falls back to SMS and the
                     // customer would think email was configured when it wasn't.
-                    const hasEmail = !!customer.email;
+                    // Channels are account-level: on a secondary property the
+                    // account primary's email counts (the senders fall back to
+                    // it), so key on the server's account-level flag when the
+                    // payload carries it (#1995 E) and on this row otherwise.
+                    const hasEmail = prefs && prefs.channelEmailAvailable != null
+                      ? !!prefs.channelEmailAvailable
+                      : !!customer.email;
                     const opts = hasEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
                     const selectable = isOn && hasEmail;
                     return (
