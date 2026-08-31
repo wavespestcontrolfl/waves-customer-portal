@@ -664,7 +664,11 @@ const ReviewService = {
    * post-service enrollment.
    */
   async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
-    const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
+    // yelp.com/writeareview and facebook.com/<page>/reviews are the Insert
+    // Link sheet's seeded write-a-review destinations (link-library.js) —
+    // an operator texting one is a personal ask exactly like a pasted
+    // g.page link, and must stand the cadence down the same way.
+    const MANUAL_ASK_RE = /g\.page\/|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
     // A forwarded copy of one of our own (now shorter) templates says just
     // "review" with a branded /l/ short link (codex #3235 r4 P1) — /l/ alone
     // is any portal short link (reports, appointments), so require BOTH the
@@ -1652,6 +1656,26 @@ const ReviewService = {
         `[review] Inline request skipped; prefs lookup failed (customerId=${customerId} errType=${err?.name || "Error"})`,
       );
       return null;
+    }
+
+    // Composer mints (unscheduled, no service record) reuse an existing
+    // pending unscheduled row for the customer: checkUnscheduledAskGates's
+    // already_queued arm only sees rows with a scheduled_for (they "will
+    // send automatically" — an unscheduled row won't), so without reuse a
+    // second tab or session could mint a second live token for the same
+    // customer. Reuse returns the SAME token, so there is only ever one.
+    if (!serviceRecordId && !armSafetyNet) {
+      const existing = await db("review_requests")
+        .where({ customer_id: customerId, triggered_by: "auto_inline", status: "pending" })
+        .whereNull("sms_sent_at")
+        .whereNull("scheduled_for")
+        .whereNull("service_record_id")
+        .orderBy("created_at", "desc")
+        .first();
+      if (existing) {
+        const url = await buildReviewUrl(existing, customerId);
+        return { url, requestId: existing.id, token: existing.token };
+      }
     }
 
     // Reuse an existing request for this service so we don't stack tokens.

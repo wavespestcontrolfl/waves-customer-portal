@@ -58,7 +58,7 @@ beforeEach(() => {
 });
 
 describe('buildPayBalanceLink', () => {
-  test('anchors on the oldest open invoice across siblings and sums the balance', async () => {
+  test('anchors on the oldest open invoice across siblings, amount scoped to the anchor customer', async () => {
     openBalanceSummary
       .mockResolvedValueOnce({
         total: 100,
@@ -77,7 +77,10 @@ describe('buildPayBalanceLink', () => {
     const r = await buildPayBalanceLink(['c1', 'c2']);
     expect(r.url).toContain('/pay/tok-old');
     expect(r.line).toContain(r.url);
-    expect(r.balance).toEqual({ total: 184, count: 2 });
+    // NOT 184/2: the pay page's combined selection is scoped to the anchor
+    // invoice's customer row, so the reported figure must be what the link
+    // can actually settle.
+    expect(r.balance).toEqual({ total: 84, count: 1 });
   });
 
   test('an incomplete read keeps the link but suppresses the amount', async () => {

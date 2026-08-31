@@ -100,25 +100,34 @@ async function buildPayBalanceLink(customerIds) {
   // page itself (GATE_PAY_INCLUDE_BALANCE) offers the rest of the balance.
   // openBalanceInvoices deliberately never selects tokens, so the anchor's
   // token comes from its own scoped query.
+  //
+  // The reported amount is scoped to the ANCHOR's customer row: the pay
+  // page's combined selection (pay-combined.js) reads
+  // openBalanceInvoices(anchorInvoice.customer_id), so on a multi-property
+  // account the link can display and settle only that one row's invoices —
+  // an account-wide sum would tell the operator the link covers balances
+  // the customer cannot pay through it.
   let anchor = null;
-  let total = 0;
-  let count = 0;
-  let incomplete = false;
+  let anchorSummary = null;
+  let anchorIncomplete = false;
   for (const id of customerIds) {
+    let incomplete = false;
     const summary = await openBalanceSummary(id, {
       onResolveFailure: () => { incomplete = true; },
       onTruncation: () => { incomplete = true; },
     });
-    total += summary.total;
-    count += summary.count;
     const first = summary.invoices[0];
     if (first) {
       const firstDue = new Date(first.due_date || first.created_at || 0).getTime();
       const anchorDue = anchor ? new Date(anchor.due_date || anchor.created_at || 0).getTime() : Infinity;
-      if (firstDue < anchorDue) anchor = first;
+      if (firstDue < anchorDue) {
+        anchor = first;
+        anchorSummary = summary;
+        anchorIncomplete = incomplete;
+      }
     }
   }
-  if (!anchor || !(total > 0)) {
+  if (!anchor || !(anchorSummary.total > 0)) {
     return { url: null, line: '', reason: 'No open balance on this account' };
   }
 
@@ -141,7 +150,9 @@ async function buildPayBalanceLink(customerIds) {
     // An incomplete read (payer resolve failure / truncation) may understate
     // the total — say nothing about the amount rather than assert a wrong
     // figure (the open-balance SMS-line rule).
-    balance: incomplete ? null : { total: Math.round(total * 100) / 100, count },
+    balance: anchorIncomplete
+      ? null
+      : { total: Math.round(anchorSummary.total * 100) / 100, count: anchorSummary.count },
   };
 }
 

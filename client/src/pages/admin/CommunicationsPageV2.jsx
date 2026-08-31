@@ -737,6 +737,10 @@ function SmsTab() {
   const [fromNumber, setFromNumber] = useState("+19413187612");
   const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
+  // Mirrors `sending` for async code that must not act mid-send: canceling
+  // a review row while its /sms is in flight can land before the server's
+  // delivered-marking and suppress an ask the customer actually received.
+  const sendInFlightRef = useRef(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
   const [insertingResched, setInsertingResched] = useState(false);
@@ -1124,6 +1128,7 @@ function SmsTab() {
       return;
     }
     setSending(true);
+    sendInFlightRef.current = true;
     setSendResult(null);
     try {
       if (loadedMessageDraft?.id) {
@@ -1207,6 +1212,7 @@ function SmsTab() {
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   };
@@ -1673,6 +1679,13 @@ function SmsTab() {
   // fire-and-forget it behind state updates).
   const cancelReviewRequestRow = useCallback(async (requestId) => {
     if (!requestId) return;
+    // Never cancel while a send is in flight — the server marks the row
+    // delivered AFTER the provider send, so a cancel landing in between
+    // would suppress an ask the customer received. Wait for the send to
+    // settle first; a delivered row then no-ops the conditional cancel.
+    for (let waited = 0; sendInFlightRef.current && waited < 20000; waited += 250) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         await adminFetch("/admin/communications/customer-link/cancel", {
@@ -1782,6 +1795,11 @@ function SmsTab() {
   useEffect(() => {
     const entries = Object.entries(insertedCustomerLinks);
     if (!entries.length) return;
+    // Defer while a send is in flight: mid-send body edits must not cancel
+    // the review row racing its own delivered-marking. The effect re-runs
+    // when `sending` settles — a successful send has already forgotten the
+    // links (cleared with the body), a failed one re-evaluates then.
+    if (sending) return;
     const cancelReviewRow = (entry) => {
       if (entry.requestId) void cancelReviewRequestRow(entry.requestId);
     };
@@ -1820,7 +1838,7 @@ function SmsTab() {
         setSendResult({ ok: true, text: "Customer link removed — the recipient changed." });
       }
     }
-  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, cancelReviewRequestRow]);
+  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, cancelReviewRequestRow, sending]);
 
   // The sheet's full list: the customer group first, then the library rows.
   // Every dynamic row dispatches to a requireAdmin endpoint (reschedule-link,

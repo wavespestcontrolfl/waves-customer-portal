@@ -562,4 +562,100 @@ describe('review request follow-up flow', () => {
       status: 'sent',
     }));
   });
+
+  test('composer mint (armSafetyNet:false) inserts an UNSCHEDULED row', async () => {
+    const insert = insertReturning({ id: 'rr-composer', token: null });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue(null) });
+      }
+      if (table === 'review_requests') {
+        return {
+          ...chain({ first: jest.fn().mockResolvedValue(null) }),
+          insert: insert.query.insert,
+        };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      armSafetyNet: false,
+    });
+
+    expect(insert.holder.payload).toEqual(expect.objectContaining({
+      customer_id: 'cust-1',
+      triggered_by: 'auto_inline',
+      scheduled_for: null,
+      status: 'pending',
+    }));
+    expect(result.requestId).toBe('rr-composer');
+  });
+
+  test('composer mint reuses an existing pending unscheduled row instead of stacking tokens', async () => {
+    const insert = insertReturning({ id: 'rr-new', token: null });
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: jest.fn().mockResolvedValue({ id: 'cust-1', has_left_google_review: false }),
+        });
+      }
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue(null) });
+      }
+      if (table === 'review_requests') {
+        return {
+          ...chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'rr-open-tab',
+              token: 'token-open-tab',
+              status: 'pending',
+              sms_sent_at: null,
+              scheduled_for: null,
+            }),
+          }),
+          insert: insert.query.insert,
+        };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.createInline({
+      customerId: 'cust-1',
+      armSafetyNet: false,
+    });
+
+    expect(result).toMatchObject({ requestId: 'rr-open-tab', token: 'token-open-tab' });
+    expect(insert.query.insert).not.toHaveBeenCalled();
+  });
+
+  test('manual-ask detection recognizes the seeded Yelp and Facebook write-a-review links', async () => {
+    for (const body of [
+      'Review us on Yelp here: yelp.com/writeareview/biz/waves-pest-control-bradenton-6',
+      'Review us on Facebook here: facebook.com/wavespestcontrol/reviews',
+    ]) {
+      db.mockImplementation((table) => {
+        if (table === 'sms_log') {
+          return chain({
+            whereNotIn: jest.fn(function () { return this; }),
+            select: jest.fn().mockResolvedValue([
+              { message_body: body, created_at: new Date('2026-06-01T12:00:00.000Z') },
+            ]),
+          });
+        }
+        if (table === 'review_requests') {
+          return chain({ select: jest.fn().mockResolvedValue([]) });
+        }
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      const detected = await ReviewService.manualReviewAskSentRecently('cust-1');
+      expect(detected).toBe(true);
+    }
+  });
 });
