@@ -201,6 +201,23 @@ describe('threads gate ON', () => {
       expect(arg.threadId).toBeNull();
       expect(arg.userText).toContain('remember this');
       expect(arg.assistantText).toContain('the answer');
+      expect(arg.seedTurns).toEqual([]);
+    });
+  });
+
+  test('a new thread is seeded with the round-tripped history', async () => {
+    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 4 });
+    scriptModelTurns([[{ type: 'text', text: 'continuing' }]]);
+    const priorHistory = [
+      { role: 'user', content: 'earlier question' },
+      { role: 'assistant', content: 'earlier answer' },
+    ];
+
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'and now?', context: 'customers', conversationHistory: priorHistory });
+      const arg = mockAppendExchange.mock.calls[0][0];
+      expect(arg.threadId).toBeNull();
+      expect(arg.seedTurns).toEqual(priorHistory);
     });
   });
 

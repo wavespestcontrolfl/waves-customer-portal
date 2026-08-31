@@ -1823,6 +1823,12 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           context,
           userText: persistedUserTurn,
           assistantText: threadAssistantTurn,
+          // A NEW thread is seeded with the same trimmed, marker-tainted
+          // history the model sees, so a conversation that started ephemeral
+          // (gate flipped mid-chat, or a detach after a rejected append)
+          // survives refresh instead of persisting an amnesiac thread. The
+          // service validates roles/content and caps the seed.
+          seedTurns: req.body.thread_id ? null : conversationHistory.slice(-8),
         });
         persistedThreadId = appended?.threadId || null;
         persistedThreadSeq = appended?.lastSeq ?? null;

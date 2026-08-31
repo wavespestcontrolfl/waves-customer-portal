@@ -25,6 +25,12 @@ const DEFAULT_RETENTION_DAYS = 365;
 // re-displays.
 const RESUME_TURN_LIMIT = 40;
 
+// Cap on client-supplied seed turns persisted into a NEWLY created thread
+// (matches the route's model-window trim). Seeding keeps a thread coherent
+// when a conversation that started ephemeral — gate flipped mid-chat, or the
+// client detached after a rejected append — lands in a fresh thread.
+const SEED_TURN_LIMIT = 8;
+
 // Call-time read (a flip needs no redeploy); registered in
 // config/feature-gates.js (`ibThreads`) for the centralized status listing.
 function threadsEnabled() {
@@ -44,12 +50,15 @@ function deriveTitle(userText) {
 /**
  * Append one exchange to a thread, creating the thread when threadId is null.
  * Returns { threadId, lastSeq } on success, null when the thread is missing,
- * owned by a different actor, or when expectedSeq no longer matches the
- * thread's tail — a concurrent append from another tab landed first, so this
- * exchange was generated without seeing it (the caller then responds without
- * a thread id and the client detaches rather than interleaving).
+ * owned by a different actor, or when expectedSeq is absent or no longer
+ * matches the thread's tail — a concurrent append from another tab landed
+ * first, so this exchange was generated without seeing it (the caller then
+ * responds without a thread id and the client detaches rather than
+ * interleaving). A newly created thread is seeded with the caller's
+ * round-tripped history (validated, capped) so it stays coherent when the
+ * conversation started ephemeral.
  */
-async function appendExchange({ actorId, threadId, expectedSeq, context, userText, assistantText }) {
+async function appendExchange({ actorId, threadId, expectedSeq, context, userText, assistantText, seedTurns }) {
   if (!actorId || !userText || assistantText === undefined) return null;
   return db.transaction(async (trx) => {
     let thread;
@@ -65,11 +74,21 @@ async function appendExchange({ actorId, threadId, expectedSeq, context, userTex
         title: deriveTitle(userText),
         context: context || null,
       }).returning('*');
+      const seeds = (Array.isArray(seedTurns) ? seedTurns : [])
+        .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content)
+        .slice(-SEED_TURN_LIMIT);
+      if (seeds.length) {
+        await trx('ib_thread_turns').insert(
+          seeds.map((t, i) => ({ thread_id: thread.id, seq: i + 1, role: t.role, content: t.content })),
+        );
+      }
     }
 
     const [{ max }] = await trx('ib_thread_turns').where('thread_id', thread.id).max('seq');
     const tail = max || 0;
-    if (threadId && Number.isInteger(expectedSeq) && expectedSeq !== tail) return null;
+    // Existing threads REQUIRE a matching tail seq — a missing/corrupt
+    // thread_seq must not bypass the cross-tab interleaving guard.
+    if (threadId && (!Number.isInteger(expectedSeq) || expectedSeq !== tail)) return null;
     const nextSeq = tail + 1;
     await trx('ib_thread_turns').insert([
       { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText) },
