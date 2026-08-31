@@ -470,3 +470,45 @@ describe('W0B estimate toggle pin', () => {
     });
   });
 });
+
+describe('W0B id-shaped proposals pin like name-shaped ones (codex r3)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'x', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+
+  test('send_sms with customer_id only: recipient resolved, pinned, and phone-match required', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { customer_id: 'c1', message: 'On my way' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text them', context: 'customers' });
+      expect(mockResolveCommsCustomer).toHaveBeenCalledWith({ customer_id: 'c1' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.phone).toBe('+19415550000');
+      expect(stored.params._require_phone_match).toBe(true);
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual('Text acct 1042 (…0000)');
+      expect(body.pendingActions[0].params.recipient).toBe('acct 1042 (…0000)');
+    });
+  });
+
+  test('update_lead_status with lead_id: lead loaded, current status pinned and shown', async () => {
+    mockResolveLeadForUpdate.mockResolvedValue({ id: 'l1', first_name: 'acct', last_name: '2077', status: 'contacted' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_lead_status', input: { lead_id: 'l1', new_status: 'won' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'mark it won', context: 'leads' });
+      expect(mockResolveLeadForUpdate).toHaveBeenCalled();
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._expected_status).toBe('contacted');
+      expect(stored.contract.effects).toContainEqual(expect.objectContaining({ label: 'Lead acct 2077: status contacted → won', before: 'contacted', after: 'won' }));
+      expect(body.pendingActions[0].params.lead).toBe('acct 2077 — contacted → won');
+    });
+  });
+});

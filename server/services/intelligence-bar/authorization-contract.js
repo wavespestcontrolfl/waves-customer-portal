@@ -357,6 +357,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
     push('customer', `${n > 1 ? `For each of ${n} customers: ` : ''}${require('../customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`);
   }
+  // Billing-lane stamp (#3140): the executors stamp billing_mode
+  // 'monthly_membership' on any affected row the update leaves with a
+  // membership tier + positive monthly rate and no billing lane, and notify
+  // the owner. Disclose whenever the update touches those fields — the
+  // executor's own documented contract.
+  if (isCustomerUpdate
+    && (params?.updates?.waveguard_tier !== undefined || Number(params?.updates?.monthly_rate) > 0)) {
+    push('billing', "Any affected customer left with a membership tier + positive monthly rate and no billing lane gets billing_mode stamped 'monthly_membership' in the same write, and the owner is notified to verify the lane");
+  }
+
   // Name/phone fan-out runs on the single-customer path only (the bulk
   // executor propagates email alone) — disclose exactly what runs.
   if (toolName === 'update_customer'

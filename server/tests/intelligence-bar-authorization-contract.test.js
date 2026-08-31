@@ -208,6 +208,17 @@ test('bulk_update_leads: full name list under more_effects and a fingerprint of 
   expect(contractHash(other)).not.toBe(contractHash(c));
 });
 
+test('tier/rate customer updates disclose the billing-lane stamp + owner notification', () => {
+  const c = buildContract({
+    toolName: 'update_customer',
+    params: { customer_id: 'c9', updates: { waveguard_tier: 'gold', monthly_rate: 129 } },
+    displayParams: { customer_id: 'c9', updates: { waveguard_tier: 'gold', monthly_rate: 129 } },
+  });
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/billing_mode stamped 'monthly_membership'.*owner is notified/));
+  const plain = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
+  expect(plain.effects.some((e) => /billing_mode stamped/.test(e.label))).toBe(false);
+});
+
 test('irreversibility is derived from outbound effects, not only the allowlist', () => {
   expect(buildContract({ toolName: 'move_stops_to_day', params: { notify_customers: true }, displayParams: { notify_customers: true } }).irreversible).toBe(true);
   expect(buildContract({ toolName: 'move_stops_to_day', params: {}, displayParams: { notify_customers: false } }).irreversible).toBe(false);

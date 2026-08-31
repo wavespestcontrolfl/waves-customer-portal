@@ -600,6 +600,9 @@ async function loadPriceApprovalPin(approvalId) {
     id: a.id,
     status: a.status,
     product_id: a.product_id,
+    // vendor_id rides in the pin so a reassigned approval is drift — the
+    // fingerprint must hash the vendor the card displayed (codex r3 P1).
+    vendor_id: a.vendor_id,
     product_name: a.product_name || null,
     vendor_name: a.vendor_name || null,
     new_price: a.new_price == null ? null : Number(a.new_price),
@@ -758,8 +761,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // name→row resolution happens NOW, so the operator approves a specific
     // pinned id and /confirm-action can never re-resolve "Smith" to a
     // different row than the card showed.
-    if (toolUse.name === 'send_sms' && !params.customer_id && !params.phone && params.customer_name) {
-      const customer = await resolveCommsCustomer({ customer_name: params.customer_name });
+    if (toolUse.name === 'send_sms' && !params.phone && (params.customer_id || params.customer_name)) {
+      // customer_id-only proposals get the SAME pin as name proposals
+      // (codex r3 P1): the card must show WHO gets this irreversible text,
+      // and the executor's fresh phone read must match the approved one.
+      const customer = await resolveCommsCustomer(
+        params.customer_id ? { customer_id: params.customer_id } : { customer_name: params.customer_name },
+      );
       // Generic error strings: a failed proposal's error is persisted in
       // tool-health telemetry, so it must not carry the typed name.
       if (!customer) return { failed: true, modelResult: { error: 'No customer matches that name.' } };
@@ -910,9 +918,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
-    if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
+    if (toolUse.name === 'update_lead_status' && (params.lead_id || params.lead_name)) {
+      // lead_id proposals pin exactly like name proposals (codex r3 P1):
+      // the card names the lead and its CURRENT status, and the stored
+      // _expected_status refuses a transition from a state the card never
+      // showed. resolveLeadForUpdate handles both shapes.
       const lead = await resolveLeadForUpdate(params);
-      if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
+      if (!lead) return { failed: true, modelResult: { error: params.lead_id ? 'Lead not found.' : 'No active lead matches that name.' } };
       if (lead.error) return { failed: true, modelResult: lead };
       params.lead_id = lead.id;
       params.lead_name = `${lead.first_name} ${lead.last_name || ''}`.trim();
