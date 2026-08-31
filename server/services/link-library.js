@@ -130,6 +130,21 @@ async function syncSitemapLinks({ fetchFn } = {}) {
   }
   const now = new Date();
 
+  // The absolute floor above catches an empty/near-empty response, but a
+  // partial-yet-valid snapshot (truncated fetch, one sub-sitemap of many)
+  // can clear it while missing most of the site — and the delete below
+  // would then erase the library. Bound the shrink BEFORE any write:
+  // organic pruning removes a handful of pages, never a fifth of the
+  // stored rows at once (slack floor 5 keeps small libraries workable). A
+  // genuine mass restructure is an explicit owner action, not a nightly
+  // reconcile.
+  const currentUrls = new Set(pages);
+  const staleIds = [...sitemapByUrl.values()].filter((r) => !currentUrls.has(r.url)).map((r) => r.id);
+  const maxRemovals = Math.max(5, Math.ceil(sitemapByUrl.size * 0.2));
+  if (staleIds.length > maxRemovals) {
+    throw new Error(`sitemap sync aborted — snapshot would remove ${staleIds.length} of ${sitemapByUrl.size} sitemap rows (cap ${maxRemovals}); refusing implausible shrinkage`);
+  }
+
   let added = 0;
   let updated = 0;
   for (const url of pages) {
@@ -154,8 +169,6 @@ async function syncSitemapLinks({ fetchFn } = {}) {
     }
   }
 
-  const currentUrls = new Set(pages);
-  const staleIds = [...sitemapByUrl.values()].filter((r) => !currentUrls.has(r.url)).map((r) => r.id);
   if (staleIds.length) await db('link_library').whereIn('id', staleIds).del();
 
   const result = { fetched: pages.length, added, updated, removed: staleIds.length };

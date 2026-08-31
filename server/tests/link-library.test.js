@@ -210,6 +210,32 @@ describe('syncSitemapLinks', () => {
     expect(builder.deletedIds).toEqual([]);
   });
 
+  it('refuses implausible shrinkage — a partial snapshot above the floor must not mass-delete', async () => {
+    // 30 stored sitemap rows; the fetch returns 11 valid pages (clears the
+    // absolute floor) of which only 2 overlap — a truncated snapshot, not
+    // organic pruning. The delete would remove 28 rows (cap: 20% = 6).
+    const existing = [
+      { id: 100, url: PAGES[0], name: 'Home', category: 'website', source: 'sitemap' },
+      { id: 101, url: PAGES[1], name: 'Quote', category: 'booking', source: 'sitemap' },
+      ...Array.from({ length: 28 }, (_, i) => ({
+        id: 200 + i,
+        url: `${SITE}/page-${i}/`,
+        name: `Page ${i}`,
+        category: 'website',
+        source: 'sitemap',
+      })),
+    ];
+    const builder = makeLinkLibraryBuilder(existing);
+    mockBuilders = { link_library: builder, system_config: makeSystemConfigBuilder() };
+    sitemapManager.listUrls.mockResolvedValue(PAGES);
+
+    await expect(syncSitemapLinks()).rejects.toThrow(/implausible shrinkage/);
+    // Guard runs BEFORE any write — nothing added, renamed, or deleted.
+    expect(builder.inserted).toHaveLength(0);
+    expect(builder.updated).toHaveLength(0);
+    expect(builder.deletedIds).toEqual([]);
+  });
+
   it('refuses to overwrite the library from a suspiciously tiny fetch', async () => {
     mockBuilders = { link_library: makeLinkLibraryBuilder([]) };
     sitemapManager.listUrls.mockResolvedValue([`${SITE}/quote/`]);
