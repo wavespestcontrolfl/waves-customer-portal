@@ -132,6 +132,11 @@ function normalizePropertyScope(raw) {
 // them into the one-time totals, so every renderer (React document, on-page
 // card, SSR card, pdfkit fallback) must print these rows beside the totals.
 function normalizeCorrectiveWorkItem(raw = {}) {
+  // Structured provenance for the send-time pricing audit (GH codex P1
+  // ×2 on #3628): the canonical engine service id (cost family) and the
+  // package's visit count — without them a derived 3-visit roach package
+  // costs one treatment's COGS, and operator text decides the family.
+  const visits = num(raw.visits ?? raw.visitsPerYear, 0);
   return {
     label: cleanString(raw.label ?? raw.description, 160),
     // Same clamp rationale as normalizeLineItem: commercial quote amounts are
@@ -139,6 +144,8 @@ function normalizeCorrectiveWorkItem(raw = {}) {
     amount: Math.max(0, roundMoney(num(raw.amount ?? raw.price, 0))),
     taxable: raw.taxable === true,
     includes: cleanStringList(raw.includes, { maxItems: 12, maxLen: 200 }),
+    service: cleanString(raw.service, 80) || null,
+    visits: visits > 0 ? Math.min(Math.round(visits), 52) : null,
   };
 }
 

@@ -186,6 +186,7 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.propertyScope).toEqual({ items: [{ label: 'Units', value: '4 residential units' }] });
     expect(p.correctiveWork).toEqual([{
       label: 'Cleanout', amount: 450.01, taxable: true, includes: ['Kitchens', 'Follow-up at 2 weeks'],
+      service: null, visits: null,
     }]);
     expect(p.customerResponsibilities).toEqual(['Provide unit access with 24-hour tenant notice']);
     // validDays in the input is IGNORED — no validity field exists until the
@@ -254,7 +255,7 @@ describe('structured proposal sections (slice 1A-i)', () => {
       customerResponsibilities: [],
       commercialTerms: { validDays: 4000, initialTermMonths: -3, paymentTerms: '   ' },
     }));
-    expect(p.correctiveWork).toEqual([{ label: 'Hostile', amount: 0, taxable: false, includes: [] }]);
+    expect(p.correctiveWork).toEqual([{ label: 'Hostile', amount: 0, taxable: false, includes: [], service: null, visits: null }]);
     expect(p.propertyScope).toBeNull();          // label without value drops the row
     expect(p.customerResponsibilities).toBeNull();
     expect(p.commercialTerms).toBeNull();        // every field invalid → whole block null

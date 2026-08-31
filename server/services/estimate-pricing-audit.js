@@ -219,12 +219,19 @@ function cadenceOccurrences(value) {
   return CADENCE_OCCURRENCES[String(value || '').toLowerCase().trim()];
 }
 
+// Honest unmapped key: a plain slug with NO pattern matching, for
+// operator-authored text that must never pick a COGS family (GH codex P1:
+// "Termite Foam Renewal" is not bait).
+function slugKey(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'unknown';
+}
+
 function keyFromName(name) {
   const value = String(name || '');
   for (const [pattern, key] of NAME_TO_KEY) {
     if (pattern.test(value)) return key;
   }
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'unknown';
+  return slugKey(value);
 }
 
 function mosquitoCogs(program, addOns = {}) {
@@ -835,7 +842,12 @@ function normalizeProposalLines(estimate) {
   const push = (name, cadence, amount, extra = {}) => {
     const amt = numOrNaN(amount);
     if (!Number.isFinite(amt)) return;
-    const serviceKey = extra.serviceKey || keyFromName(name);
+    // Operator-authored building/corrective text carries NO verified
+    // service family — an honest unmapped slug (missing-COGS warning)
+    // beats keyFromName's label patterns costing "Termite Foam Renewal"
+    // as bait (GH codex P1). Canonical families come only from explicit
+    // extra.serviceKey (programs, persisted corrective service ids).
+    const serviceKey = extra.serviceKey || slugKey(name);
     lines.push({
       serviceKey,
       label: name || serviceKey,
@@ -899,7 +911,13 @@ function normalizeProposalLines(estimate) {
     });
   }
   for (const work of proposal.correctiveWork || []) {
-    push(work.label || 'Corrective work', 'one_time', work.amount);
+    // The persisted canonical service id is the only sanctioned cost
+    // family; the package's visit count scales one-time COGS units
+    // (3-visit roach cleanout ≠ one treatment) (GH codex P1 ×2).
+    push(work.label || 'Corrective work', 'one_time', work.amount, {
+      ...(work.service && SERVICE_MAP[work.service] ? { serviceKey: work.service } : {}),
+      ...(Number(work.visits) > 0 ? { visitsPerYear: Number(work.visits) } : {}),
+    });
   }
   return lines;
 }

@@ -233,6 +233,7 @@ describe('deriveProposalDraft', () => {
     });
     expect(withOneTime.correctiveWork).toEqual([{
       label: 'German Cockroach Treatment', amount: 275, taxable: true, includes: ['Includes 1 treatment visit.'],
+      service: 'pest_initial_roach', visits: null,
     }]);
     expect(withOneTime.programs).toHaveLength(1);
 
@@ -299,7 +300,7 @@ describe('deriveProposalDraft', () => {
         },
       },
     });
-    expect(draft.correctiveWork).toEqual([{ label: 'Cleanout', amount: 250, taxable: true, includes: [] }]);
+    expect(draft.correctiveWork).toEqual([{ label: 'Cleanout', amount: 250, taxable: true, includes: [], service: null, visits: null }]);
   });
 
   test('explicit zeros are authoritative: zeroed totals reject generated prices, comped rows fail the draft (codex r2c)', async () => {
@@ -437,7 +438,7 @@ describe('deriveProposalDraft', () => {
         engineResult: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 }] },
       },
     });
-    expect(rawOneTime.correctiveWork).toEqual([{ label: 'Bed Bug Treatment', amount: 500, taxable: true, includes: [] }]);
+    expect(rawOneTime.correctiveWork).toEqual([{ label: 'Bed Bug Treatment', amount: 500, taxable: true, includes: [], service: 'bed_bug', visits: null }]);
   });
 
   test('legit repeated one-time charges are preserved; mirrored container copies collapse (codex r3c)', async () => {
@@ -857,6 +858,10 @@ describe('deriveProposalDraft', () => {
     // service key (codex r20).
     expect(roach.correctiveWork[0].includes).toEqual(['3 visits · kitchens and baths']);
     expect(roach.correctiveWork[0].label).toBe('German Roach Cleanout — 3 Visit Program');
+    // The canonical id + package visit count survive for the pricing
+    // audit — without them the package costs one treatment's COGS.
+    expect(roach.correctiveWork[0].service).toBe('german_roach');
+    expect(roach.correctiveWork[0].visits).toBe(3);
 
     // Explicit one-time cadence wins even beside recurring-looking fields.
     const flea = await deriveProposalDraft({ category: 'COMMERCIAL',

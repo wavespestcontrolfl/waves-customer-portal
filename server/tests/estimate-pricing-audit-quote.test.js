@@ -515,6 +515,28 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       .toMatchObject({ homeSqFt: 2600 });
   });
 
+  test('operator-authored proposal text never picks a COGS family; persisted service + visits do', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-authored', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '1050.00',
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          buildings: [{ name: 'Main', lineItems: [] }],
+          correctiveWork: [
+            // Operator text — must stay honestly unmapped, not bait.
+            { label: 'Termite Foam Renewal', amount: 600 },
+            // Derived row with persisted canonical id + package count.
+            { label: 'German Roach Cleanout — 3 Visit Program', amount: 450, service: 'german_roach', visits: 3 },
+          ],
+        },
+      },
+    });
+    expect(audit.lines.find((l) => /foam renewal/i.test(l.label)).serviceKey).toBe('termite_foam_renewal');
+    const roach = audit.lines.find((l) => /roach cleanout/i.test(l.label));
+    expect(roach.serviceKey).toBe('german_roach');
+    expect(roach.cogs.visitsPerYear).toBe(3);
+  });
+
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-xfer', status: 'sent', monthly_total: '400.00', annual_total: '4800.00', onetime_total: null,
