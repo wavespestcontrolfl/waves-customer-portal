@@ -81,6 +81,9 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   cancelPendingAction: (...args) => mockCancelPendingAction(...args),
   recordResult: (...args) => mockRecordResult(...args),
 }));
+// create_appointment proposals project the customer's inspection credit
+// (W0B disclosure) — keep it off the db stub here.
+jest.mock('../services/inspection-credit', () => ({ projectRedeemableOfferAmount: jest.fn(async () => ({ amount: 0 })) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');

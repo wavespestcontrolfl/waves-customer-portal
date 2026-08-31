@@ -522,13 +522,20 @@ async function loadAppointmentPin(appointmentId) {
   const a = await db('scheduled_services as ss')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.id', appointmentId)
-    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.technician_id', 'ss.service_type', 'c.first_name', 'c.last_name');
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'c.first_name', 'c.last_name');
   if (!a) return null;
+  const iso = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
   return {
     id: a.id,
     status: a.status,
     scheduled_date: a.scheduled_date instanceof Date ? a.scheduled_date.toISOString().slice(0, 10) : String(a.scheduled_date || ''),
+    // Both the legacy label and the canonical window instants — the
+    // reschedule executor writes window_start/window_end, so a window-only
+    // move must register as drift.
     time_window: a.time_window || null,
+    window_start: iso(a.window_start),
+    window_end: iso(a.window_end),
+    estimated_duration_minutes: a.estimated_duration_minutes == null ? null : Number(a.estimated_duration_minutes),
     technician_id: a.technician_id || null,
     service_type: a.service_type || null,
     customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim() || null,
@@ -537,7 +544,17 @@ async function loadAppointmentPin(appointmentId) {
 
 function appointmentPinFingerprint(pin) {
   return crypto.createHash('sha256').update(JSON.stringify([
-    String(pin.id), pin.status, pin.scheduled_date, pin.time_window, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
+    String(pin.id), pin.status, pin.scheduled_date, pin.time_window, pin.window_start || null, pin.window_end || null,
+    pin.estimated_duration_minutes ?? null, pin.technician_id ? String(pin.technician_id) : null, pin.service_type,
+  ])).digest('hex');
+}
+
+// Email reply pin covers WHO the reply goes to AND what it is a reply to —
+// a re-threaded or re-attributed email during the pending window is drift.
+function emailPinFingerprint(email) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    String(email.id), email.from_address || null, email.subject || null, email.gmail_thread_id || null,
+    email.customer_id ? String(email.customer_id) : null,
   ])).digest('hex');
 }
 
@@ -684,19 +701,6 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (isToolFailure(preview)) {
       return { failed: true, modelResult: preview };
     }
-    if (toolUse.name === 'create_appointment' && params.customer_id) {
-      // Booking redeems the customer's open inspection credit post-commit
-      // (tools.js redeemInspectionCreditForBooking) — a money effect the
-      // card must show and the preview fingerprint must pin. Read-only
-      // projection of what the redemption would apply.
-      try {
-        const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id));
-        const amount = Number(projected?.amount ?? projected) || 0;
-        preview = { ...preview, inspection_credit: { amount } };
-      } catch (err) {
-        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
-      }
-    }
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
@@ -745,6 +749,20 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params.technician_name = tech.name;
       preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
     }
+    if (toolUse.name === 'create_appointment' && params.customer_id) {
+      // Booking redeems the customer's open inspection credit post-commit
+      // (tools.js redeemInspectionCreditForBooking) — a money effect the
+      // card must show and the contract must pin. Read-only projection of
+      // what the redemption would apply; fail closed if it can't be read.
+      try {
+        const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id));
+        const amount = Number(projected?.amount ?? projected) || 0;
+        params._inspection_credit_amount = amount;
+        preview = { ...preview, inspection_credit: { amount } };
+      } catch (err) {
+        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
+      }
+    }
     if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
       // Pin the visit being moved (W0B): the card must name the customer,
       // service, and current date/window it is approving a move FROM, and
@@ -782,10 +800,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
     if (toolUse.name === 'send_email_reply' && params.email_id) {
-      const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject');
+      const email = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
       if (!email) return { failed: true, modelResult: { error: 'Email not found — nothing was proposed.' } };
       if (!email.from_address) return { failed: true, modelResult: { error: 'Email has no sender address to reply to.' } };
-      params._pinned_email = email.from_address;
+      params._pinned_email = emailPinFingerprint(email);
       preview = {
         ...preview,
         pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null },
@@ -2253,8 +2271,17 @@ router.post('/confirm-action', async (req, res, next) => {
         drifted = !r || r.error || String(r.phone || '') !== String(pinnedPhone);
       }
       if (!drifted && pinnedEmail) {
-        const email = await db('emails').where('id', String(execParams.email_id || '')).first('from_address');
-        drifted = !email || String(email.from_address || '') !== String(pinnedEmail);
+        const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        drifted = !email || emailPinFingerprint(email) !== String(pinnedEmail);
+      }
+      const pinnedCredit = execParams._inspection_credit_amount;
+      delete execParams._inspection_credit_amount;
+      if (!drifted && pinnedCredit !== undefined && execParams.customer_id) {
+        // The booking's redemption amount the card disclosed must still hold.
+        try {
+          const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(execParams.customer_id));
+          drifted = (Number(projected?.amount ?? projected) || 0) !== Number(pinnedCredit);
+        } catch { drifted = true; }
       }
       if (!drifted && pinnedAppointment) {
         const pin = await loadAppointmentPin(String(execParams.appointment_id || ''));

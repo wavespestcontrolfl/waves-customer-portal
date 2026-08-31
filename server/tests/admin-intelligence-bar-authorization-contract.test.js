@@ -73,6 +73,8 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   cancelPendingAction: (...args) => mockCancelPendingAction(...args),
   recordResult: (...args) => mockRecordResult(...args),
 }));
+const mockProjectCredit = jest.fn();
+jest.mock('../services/inspection-credit', () => ({ projectRedeemableOfferAmount: (...a) => mockProjectCredit(...a) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -349,6 +351,65 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
       });
       expect(res.status).toBe(200);
       expect(mockExecuteTool).toHaveBeenCalledWith('trigger_review_request', { customer_name: 'acct 1042' });
+    });
+  });
+});
+
+describe('W0B booking discloses and pins inspection-credit redemption', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'create_appointment', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+
+  test('proposal projects the credit, shows it as a billing effect, and pins the amount', async () => {
+    mockProjectCredit.mockResolvedValue({ amount: 49 });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', date: '2026-09-02', service_type: 'Quarterly Pest' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(mockProjectCredit).toHaveBeenCalledWith('c1');
+      expect(stored.params._inspection_credit_amount).toBe(49);
+      const labels = stored.contract.effects.map((e) => e.label);
+      expect(labels).toContainEqual("Redeems $49.00 of the customer's inspection credit toward this booking");
+      expect(labels).toContainEqual(expect.stringMatching(/no confirmation text is sent now/));
+      expect(stored.contract.notifies_customer).toBe(false);
+      expect(body.pendingActions[0].params._inspection_credit_amount).toBeUndefined();
+    });
+  });
+
+  test('confirm refuses when the redeemable credit changed since the card', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'create_appointment', params: { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 49 } },
+    });
+    mockProjectCredit.mockResolvedValue({ amount: 0 });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(409);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('confirm executes with the credit pin stripped when unchanged', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'create_appointment', params: { customer_id: 'c1', date: '2026-09-02', _inspection_credit_amount: 49 } },
+    });
+    mockProjectCredit.mockResolvedValue({ amount: 49 });
+    mockExecuteTool.mockResolvedValue({ success: true });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledWith('create_appointment', { customer_id: 'c1', date: '2026-09-02' });
     });
   });
 });
