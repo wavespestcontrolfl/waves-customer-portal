@@ -82,6 +82,11 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   stranded `cancelled` with its decision intact. Whether the DELETE should
   refuse decided terms (or clear the decision) is an owner ruling; documented,
   not changed.
+- Move 5's release is not ownership-checked: it clears `notice_N_claimed_at`
+  without comparing the claim timestamp, so a worker that stalls past the
+  15-minute TTL can clear a successor's fresh claim and overwrite its status
+  (a duplicate-notice window). Pre-existing behavior; the fix is a claim-token
+  compare in `releaseClaim` — a code change to the module, separate PR.
 - `cancelled` carries two meanings. A dedicated `lapsed` status would remove
   the `renewal_decision` disambiguation everywhere, but that is a CHECK change
   plus ~10 read sites — not a one-PR move.

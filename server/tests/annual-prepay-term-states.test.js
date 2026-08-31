@@ -230,9 +230,24 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     ]));
 
     const writes = [];
+    const unscannable = [];
     for (const rel of files) {
-      for (const expr of statusWriteExpressions(read(rel))) writes.push({ file: rel, expr });
+      const src = read(rel);
+      for (const expr of statusWriteExpressions(src)) writes.push({ file: rel, expr });
+      // Fail closed on mutation forms the scanner cannot read: raw SQL that
+      // updates/inserts this table's status, or indirect builder forms. Any
+      // hit means the scanner (and the doc) must be extended first.
+      if (new RegExp(`(?:UPDATE|INSERT\\s+INTO)\\s+${TABLE}[\\s\\S]{0,400}?\\bstatus\\b`, 'i').test(src)) {
+        unscannable.push(`${rel}: raw SQL UPDATE/INSERT touching ${TABLE} status`);
+      }
+      if (new RegExp(`\\.table\\(\\s*['"]${TABLE}`).test(src)) {
+        unscannable.push(`${rel}: .table('${TABLE}') builder form`);
+      }
+      if (/\bTABLE\s*=|ANNUAL_PREPAY_TERMS_TABLE/.test(src) && new RegExp(`=\\s*['"]${TABLE}['"]`).test(src)) {
+        unscannable.push(`${rel}: table name behind a constant`);
+      }
     }
+    expect(unscannable).toEqual([]);
     // Sanity: the scanner found the known write shapes (a regex that silently
     // matched nothing would make this test vacuous).
     const exprs = writes.map((w) => w.expr);
