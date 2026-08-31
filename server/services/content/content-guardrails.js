@@ -1800,6 +1800,25 @@ const AFFILIATE_NETWORK_HOST_SUFFIXES = Object.freeze([
   'tkqlhce.com', 'dpbolvw.net', 'prf.hn', 'pxf.io', 'sjv.io',
   'linksynergy.com', 'refersion.com', 'goaffpro.com',
 ]);
+// Direct-merchant tracking parameters (in-house programs and network click
+// refs carried on the merchant's own domain — Solutions' `?aff=`, Awin's
+// `awc`, CJ's `cjevent`, Impact's `irclickid`, Rakuten's `ranMID`, ShareASale's
+// `sscid`, Refersion's `rfsn`). Any URL carrying one is affiliate material
+// on ANY host, so an unregistered product path on a citation-allowlisted
+// merchant still hits the veto (Codex r5 P1). Names compared lowercased.
+const AFFILIATE_QUERY_PARAMS = Object.freeze(new Set([
+  'aff', 'affid', 'aff_id', 'affiliate', 'affiliate_id', 'affiliateid', 'afid',
+  'awc', 'cjevent', 'cjdata', 'clickid', 'clickref', 'irclickid', 'irgwc',
+  'ranmid', 'raneaid', 'ransiteid', 'sscid', 'rfsn', 'subid', 'sub_id',
+]));
+function hasAffiliateQueryParam(u) {
+  for (const [k, v] of u.searchParams) {
+    const key = k.toLowerCase();
+    if (AFFILIATE_QUERY_PARAMS.has(key)) return true;
+    if (key === 'utm_medium' && /affiliate/i.test(v)) return true;
+  }
+  return false;
+}
 
 // host + path (www-stripped, lowercased, trailing-slash-normalized) — the
 // part of a retailer URL that identifies the PRODUCT; query/fragment are
@@ -1839,6 +1858,7 @@ function containsAffiliateMaterial(text) {
         const host = u.hostname.toLowerCase().replace(/^www\./, '');
         if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
         if ((host === 'amazon.com' || host.endsWith('.amazon.com')) && (u.searchParams.has('tag') || u.searchParams.has('ascsubtag'))) return true;
+        if (hasAffiliateQueryParam(u)) return true;
       } catch { /* malformed URL — not a match */ }
     }
   }

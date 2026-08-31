@@ -65,12 +65,28 @@ describe('validateProduct', () => {
     expect(registry.parseReviewDate('2099-02-31')).toBeNull();
     expect(registry.parseReviewDate('2026-02-30')).toBeNull();
     expect(registry.parseReviewDate('2026-08-30T25:00:00Z')).toBeNull();
-    expect(registry.parseReviewDate('2026-08-30')).toBeInstanceOf(Date);
+    expect(registry.parseReviewDate('2026-08-30')).toEqual({ dateOnly: '2026-08-30' });
+    expect(registry.parseReviewDate('2026-08-30T12:00:00Z').instant).toBeInstanceOf(Date);
     expect(registry.validateProduct(green({ owner_approved_at: iso(-30) }), now).join(' ')).toMatch(/owner_approved_at/);
     expect(registry.validateProduct(yellow({ label_reviewed_at: '2099-02-31' }), now).join(' ')).toMatch(/label_reviewed_at/);
-    expect(registry.validateProduct(yellow({ florida_registration_verified_at: iso(-1) }), now).join(' ')).toMatch(/florida_registration_verified_at/);
+    expect(registry.validateProduct(yellow({ florida_registration_verified_at: iso(-2) }), now).join(' ')).toMatch(/florida_registration_verified_at/);
     expect(registry.classifyProduct(yellow({ label_reviewed_at: '2099-02-31' }), now)).toBe('stale_label_review');
     expect(registry.classifyProduct(green({ owner_approved_at: iso(-30) }), now)).toBe('inactive');
+  });
+  test('date-only values are America/New_York calendar days, not UTC midnight (Codex r5 P1)', () => {
+    // 2026-08-31T02:00Z is 2026-08-30 22:00 ET — "tomorrow" in UTC terms is
+    // still today in ET, and 2026-08-31 is a FUTURE ET date.
+    const now = new Date('2026-08-31T02:00:00Z');
+    expect(registry.etCalendarDate(now)).toBe('2026-08-30');
+    expect(registry.validateProduct(green({ owner_approved_at: '2026-08-31' }), { now }).join(' ')).toMatch(/owner_approved_at/);
+    expect(registry.validateProduct(green({ owner_approved_at: '2026-08-30' }), { now })).toEqual([]);
+    // 180-day window counts ET calendar days: reviewed 2026-03-03 is exactly 180 days before 2026-08-30 → still current;
+    // 2026-03-02 is 181 → stale. (UTC midnight math would have flipped these hours early.)
+    expect(registry.classifyProduct(yellow({ label_reviewed_at: '2026-03-03', florida_registration_verified_at: '2026-03-03', owner_approved_at: '2026-03-03' }), { now })).toBe('active');
+    expect(registry.classifyProduct(yellow({ label_reviewed_at: '2026-03-02', florida_registration_verified_at: '2026-03-02', owner_approved_at: '2026-03-02' }), { now })).toBe('stale_label_review');
+    // Timestamped values compare as instants.
+    expect(registry.validateProduct(green({ owner_approved_at: '2026-08-31T01:00:00Z' }), { now })).toEqual([]);
+    expect(registry.validateProduct(green({ owner_approved_at: '2026-08-31T03:00:00Z' }), { now }).join(' ')).toMatch(/owner_approved_at/);
   });
   test('non-https URLs are invalid', () => {
     expect(registry.validateProduct(green({ approved_affiliate_url: 'http://www.amazon.com/dp/B1?tag=t' })).length).toBeGreaterThan(0);
@@ -89,11 +105,13 @@ describe('classifyProduct', () => {
     expect(registry.classifyProduct(green({ owner_approved_at: undefined }), now)).toBe('inactive');
     expect(registry.classifyProduct(green({ approved_affiliate_url: 'https://amzn.to/x' }), now)).toBe('inactive');
   });
+  // Fixtures are UTC-relative while the classifier counts ET calendar days —
+  // margins of ±2 keep this stable across the 8pm–midnight ET skew window.
   test('yellow review staleness: missing fields or >180 days old is stale_label_review', () => {
     expect(registry.classifyProduct(yellow({ label_reviewed_at: undefined }), now)).toBe('stale_label_review');
-    expect(registry.classifyProduct(yellow({ label_reviewed_at: iso(181) }), now)).toBe('stale_label_review');
+    expect(registry.classifyProduct(yellow({ label_reviewed_at: iso(182) }), now)).toBe('stale_label_review');
     expect(registry.classifyProduct(yellow({ florida_registration_verified_at: iso(200) }), now)).toBe('stale_label_review');
-    expect(registry.classifyProduct(yellow({ label_reviewed_at: iso(179), florida_registration_verified_at: iso(179) }), now)).toBe('active');
+    expect(registry.classifyProduct(yellow({ label_reviewed_at: iso(178), florida_registration_verified_at: iso(178) }), now)).toBe('active');
   });
 });
 

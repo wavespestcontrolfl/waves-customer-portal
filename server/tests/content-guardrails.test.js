@@ -601,6 +601,11 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/test-bait?ref=1&aff=waves')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://amzn.to/abc')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://shareasale.com/r.cfm?b=1')).toBe(true);
+      // Direct-merchant tracking params on an UNREGISTERED path, any host (Codex r5 P1).
+      expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?aff=waves')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.thermacell.com/x?irclickid=abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://example.com/x?utm_medium=affiliate')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?utm_source=newsletter')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('')).toBe(false);
     }, { gate: '' }); // gate OFF — stripping still detects

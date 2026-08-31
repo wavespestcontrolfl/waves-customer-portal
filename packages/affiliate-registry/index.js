@@ -88,8 +88,27 @@ function loadRegistry() {
 // validated — "2099-02-31" is ISO-shaped but JS would normalise it to
 // March 3 and a yellow review would read as current forever) and must not
 // be in the future (a forward-dated approval or review is not a review that
-// happened). Bare dates are read as UTC calendar days; a date-only value
-// equal to today's UTC date is "today", not future.
+// happened).
+//
+// Business dates are AMERICA/NEW_YORK calendar days (AGENTS.md ET
+// discipline): a date-only value is compared against today's ET calendar
+// date, never UTC midnight — otherwise after ~8pm ET "tomorrow" would
+// already validate, and 180-day review windows would expire hours early.
+// Timestamped values (with an explicit offset) compare as instants.
+// Dependency-free by design (this package sits outside server/), so the ET
+// calendar date comes from Intl rather than server/utils/datetime-et.js.
+const ET_DAY_FORMAT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+});
+function etCalendarDate(instant) {
+  return ET_DAY_FORMAT.format(instant); // en-CA → YYYY-MM-DD
+}
+function calendarDayNumber(ymd) {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  return Date.UTC(y, mo - 1, d) / 86400000;
+}
+
+// → { dateOnly: 'YYYY-MM-DD' } | { instant: Date } | null
 function parseReviewDate(v) {
   if (typeof v !== 'string') return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2}))?$/.exec(v.trim());
@@ -97,18 +116,24 @@ function parseReviewDate(v) {
   const [y, mo, d] = [m[1], m[2], m[3]].map(Number);
   const calendar = new Date(Date.UTC(y, mo - 1, d));
   if (calendar.getUTCFullYear() !== y || calendar.getUTCMonth() !== mo - 1 || calendar.getUTCDate() !== d) return null;
-  if (m[4] !== undefined && (Number(m[4]) > 23 || Number(m[5]) > 59 || Number(m[6] || 0) > 59)) return null;
-  const parsed = m[4] === undefined ? calendar : new Date(v.trim());
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  if (m[4] === undefined) return { dateOnly: `${m[1]}-${m[2]}-${m[3]}` };
+  if (Number(m[4]) > 23 || Number(m[5]) > 59 || Number(m[6] || 0) > 59) return null;
+  const instant = new Date(v.trim());
+  return Number.isNaN(instant.getTime()) ? null : { instant };
 }
 
 function isPastOrPresentDate(v, now) {
-  const d = parseReviewDate(v);
-  return !!d && d.getTime() <= now.getTime();
+  const p = parseReviewDate(v);
+  if (!p) return false;
+  if (p.instant) return p.instant.getTime() <= now.getTime();
+  return p.dateOnly <= etCalendarDate(now); // ISO strings order lexically
 }
 
-function daysOld(isoDate, now) {
-  return (now.getTime() - parseReviewDate(isoDate).getTime()) / 86400000;
+// Age in ET calendar days (date-only) or exact days (timestamps).
+function daysOld(v, now) {
+  const p = parseReviewDate(v);
+  if (p.instant) return (now.getTime() - p.instant.getTime()) / 86400000;
+  return calendarDayNumber(etCalendarDate(now)) - calendarDayNumber(p.dateOnly);
 }
 
 /** sha256("\0registry.json\0" + bytes) — the vendor-drift recipe shared with the astro repo's checksum.txt. */
@@ -315,5 +340,6 @@ module.exports = {
   registryUrls,
   registryChecksum,
   parseReviewDate,
+  etCalendarDate,
   _resetCache,
 };

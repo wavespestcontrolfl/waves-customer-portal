@@ -2068,18 +2068,27 @@ const SocialMediaService = {
     for (const field of ['title', 'description']) {
       if (out[field] && containsAffiliateMaterial(out[field])) { drop(field); out[field] = ''; }
     }
-    // customContent is a per-platform caption map ({ facebook, gbp, … }) or
-    // a single string — scan every string leaf, never the coerced object.
-    if (customContent && typeof customContent === 'object') {
-      const cleaned = {};
-      for (const [platform, caption] of Object.entries(customContent)) {
-        if (typeof caption === 'string' && containsAffiliateMaterial(caption)) { drop(`customContent.${platform}`); continue; }
-        cleaned[platform] = caption;
+    // customContent is a per-platform caption map ({ facebook, gbp, … };
+    // gbp itself may be a nested { locationId: caption } map) or a single
+    // string — scan every string LEAF recursively, never a coerced object.
+    const scrub = (value, path) => {
+      if (typeof value === 'string') {
+        if (containsAffiliateMaterial(value)) { drop(path); return undefined; }
+        return value;
       }
-      out.customContent = Object.keys(cleaned).length ? cleaned : null;
-    } else if (customContent && containsAffiliateMaterial(customContent)) {
-      drop('customContent');
-      out.customContent = null;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const cleaned = {};
+        for (const [k, v] of Object.entries(value)) {
+          const kept = scrub(v, `${path}.${k}`);
+          if (kept !== undefined) cleaned[k] = kept;
+        }
+        return Object.keys(cleaned).length ? cleaned : undefined;
+      }
+      return value;
+    };
+    if (customContent) {
+      const kept = scrub(customContent, 'customContent');
+      out.customContent = kept === undefined ? null : kept;
     }
     return out;
   },

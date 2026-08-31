@@ -69,6 +69,16 @@ describe('social sanitizeShareContent (publishToAll strip point)', () => {
     expect(allBad.customContent).toBeNull();
   });
 
+  test('nested GBP { locationId: caption } maps are scanned leaf by leaf (Codex r5 P1)', () => {
+    const out = social.sanitizeShareContent({
+      customContent: { facebook: 'Clean', gbp: { loc1: 'Clean too', loc2: 'Buy https://amzn.to/abc' } },
+      link: BLOG_URL,
+    });
+    expect(out.customContent).toEqual({ facebook: 'Clean', gbp: { loc1: 'Clean too' } });
+    const allBad = social.sanitizeShareContent({ customContent: { gbp: { loc1: 'https://amzn.to/abc' } }, link: BLOG_URL });
+    expect(allBad.customContent).toBeNull();
+  });
+
   test('postToSingle (admin publish-single + tech-social path) applies the same guard', async () => {
     process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
     try {
