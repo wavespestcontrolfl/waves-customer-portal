@@ -147,6 +147,22 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining.map((l) => recurringServiceKey(l)).sort()).toEqual(['pest_control', 'termite_bond_5yr']);
   });
 
+  test('identity-aware reserved matching reads label AND durable catalog identity', () => {
+    const converter = require('../services/estimate-converter');
+    const { identityAwareComboMatches } = converter._test || converter;
+    const combo = { route: { primaryKey: 'termite_bait', companionKey: 'termite_bond_5yr' } };
+    const idMap = new Map([['svc-bait', 'termite_bait']]);
+    // Adopted reservation: stale pest label, authoritative bait identity.
+    const staleLabelBait = { service_type: 'Pest Control Plan', service_id: 'svc-bait', service_key_snapshot: null };
+    expect(identityAwareComboMatches([staleLabelBait], combo, idMap)).toHaveLength(1);
+    // Snapshot fallback when the id is unresolved.
+    const snapshotBait = { service_type: 'Pest Control Plan', service_id: null, service_key_snapshot: 'termite_bait' };
+    expect(identityAwareComboMatches([snapshotBait], combo, idMap)).toHaveLength(1);
+    // A genuinely unrelated reservation stays zero-match.
+    const pestRow = { service_type: 'Quarterly Pest Control Service', service_id: null, service_key_snapshot: 'pest_general_quarterly' };
+    expect(identityAwareComboMatches([pestRow], combo, idMap)).toHaveLength(0);
+  });
+
   test('the reserved branch promotes the pest program when the BAIT owns the reservation (source guard)', () => {
     const fs = require('fs');
     const path = require('path');
@@ -157,7 +173,12 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     // combo) promote alongside the reserved visit, gate-scoped.
     expect(src).toContain('promotedComboUnits');
     expect(src).toContain('...promotedComboUnits,');
-    expect(src.slice(src.indexOf('const promotedComboUnits'), src.indexOf('const promotedComboUnits') + 900)).toContain('.length === 0)');
+    expect(src.slice(src.indexOf('const promotedComboUnits'), src.indexOf('const promotedComboUnits') + 900)).toContain('identityAwareComboMatches');
+    // The rewrite and the promotion share ONE classification under the gate…
+    expect(src).toContain('const comboRewritePairs =');
+    // …and the retired-pair detection counts a bait+bond COMBO as bait
+    // coverage in BOTH the promotion and the lock pre-pass.
+    expect(src.match(/combo\.route\.primaryKey === 'termite_bait'/g)).toHaveLength(2);
     expect(src.match(/PEST_CADENCE_CATALOG_KEYS\[/g)).toHaveLength(2); // promotion + lock pre-pass
     expect(src).toContain('prePassRetiredPestPair');
   });

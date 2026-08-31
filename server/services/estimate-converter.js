@@ -801,6 +801,45 @@ function reservedRowComboRewrites(reservedRows = [], combos = []) {
   return rewrites;
 }
 
+// Route-family keys a reserved row answers to under
+// GATE_SEPARATE_COMBO_VISITS: its LABEL key plus the family of its durable
+// catalog identity (id-resolved key, else snapshot). Adopted reservations
+// deliberately keep a stale label while identity is authoritative (codex
+// r20 P1), so a label-only match would misclassify a bait reservation as
+// zero-match and double-schedule the bait+bond program — or, symmetric,
+// skip the rewrite it needs. Only the families combo routes name.
+function comboRouteFamiliesFromCatalogKey(serviceKey) {
+  const key = String(serviceKey || '');
+  if (!key) return [];
+  if (key === 'pest_termite_bait_quarterly') return ['pest_control', 'termite_bait'];
+  if (key.startsWith('pest_general')) return ['pest_control'];
+  if (key === 'termite_bait' || key.startsWith('termite_active')) return ['termite_bait'];
+  if (/^termite_bond_\d+yr$/.test(key)) return [key];
+  if (key === 'lawn_tree_shrub_combo') return ['lawn_care', 'tree_shrub'];
+  if (key.startsWith('lawn_')) return ['lawn_care'];
+  if (key.startsWith('tree_shrub')) return ['tree_shrub'];
+  return [];
+}
+
+function reservedRowComboKeys(row, idMap) {
+  const keys = new Set([recurringServiceKey({ name: row.service_type })]);
+  const identity = (idMap && idMap.get(row.service_id)) || String(row.service_key_snapshot || '') || null;
+  for (const fam of comboRouteFamiliesFromCatalogKey(identity)) keys.add(fam);
+  return keys;
+}
+
+// Identity-aware match set for one combo — used ONLY under
+// GATE_SEPARATE_COMBO_VISITS (both for the exactly-one-match rewrite and
+// the zero-match promotion, so the two classifications can never disagree
+// and a combo is always either rewritten, promoted, or two-halves-covered).
+// The pre-gate path keeps label-only reservedRowComboRewrites byte-for-byte.
+function identityAwareComboMatches(reservedRows, combo, idMap) {
+  return (reservedRows || []).filter((row) => {
+    const keys = reservedRowComboKeys(row, idMap);
+    return keys.has(combo.route.primaryKey) || keys.has(combo.route.companionKey);
+  });
+}
+
 // The UPDATE a combo rewrite applies to the reserved row. The reserve path
 // stamps the STANDALONE cadence id + snapshot; the promotion must move the
 // durable identity with the label — and when the combined catalog row is
@@ -4452,7 +4491,8 @@ const EstimateConverter = {
             // termite and promotes mosquito while the other does the
             // reverse). Mirrors the loop's own name/key derivations.
             const prePassRetiredPestPair = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
-              && standalone.some((unit) => unit.catalogServiceKey === 'termite_bait');
+              && (standalone.some((unit) => unit.catalogServiceKey === 'termite_bait')
+                || combos.some((combo) => combo.route.primaryKey === 'termite_bait'));
             for (const svc of remaining) {
               const key = String(recurringServiceKey(svc) || '');
               // Mirrors promotedRetiredPestUnits below (audit P0): the
@@ -4654,6 +4694,47 @@ const EstimateConverter = {
         // billed program must schedule. The pattern gate reuses the
         // allowlist end-to-end, so a legacy line that would not seed does
         // not promote either (office scheduling keeps its semantics).
+        // Catalog identities of the reserved rows (codex r20 P1): an
+        // adopted appointment can carry a STALE label with the CORRECT
+        // catalog id — estimate-public classifies adoption catalog-first —
+        // so a label-only alreadyReserved check would promote a duplicate
+        // parent + series beside it. Fail-soft: a failed lookup leaves the
+        // map empty and the label check still applies.
+        const reservedServiceKeyById = new Map();
+        try {
+          const reservedIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
+          if (reservedIds.length) {
+            const idRows = await database('services').whereIn('id', reservedIds).select('id', 'service_key');
+            for (const idRow of idRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
+          }
+        } catch (idErr) {
+          // One retry, then PROPAGATE (codex r27 P1): palm units match by
+          // identity ONLY and catalog-first adoptions are invisible to
+          // labels — an empty map after a transient failure would promote
+          // a duplicate parent beside the reserved program row. Unknown
+          // identity state fails the conversion instead.
+          try {
+            const retryIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
+            if (retryIds.length) {
+              const retryRows = await database('services').whereIn('id', retryIds).select('id', 'service_key');
+              for (const idRow of retryRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
+            }
+          } catch (retryErr) {
+            logger.error(`[estimate-converter] reserved catalog-key prefetch failed twice: ${retryErr.message}`);
+            // A bare database error would be swallowed by the fail-soft
+            // comboErr catch below (it rethrows recognized codes only), so
+            // the abort must carry one — same operational contract as the
+            // palm refusals: 422, convert manually.
+            const abort = new Error(
+              'Catalog identities for the reserved rows could not be resolved (database lookup failed twice), so this acceptance cannot verify what is already scheduled — retry, or convert manually.'
+            );
+            abort.code = 'RESERVED_CATALOG_IDENTITY_UNKNOWN';
+            abort.isOperational = true;
+            abort.status = 422;
+            abort.statusCode = 422;
+            throw abort;
+          }
+        }
         // Unmatched COMBOS promote alongside the reserved visit under
         // GATE_SEPARATE_COMBO_VISITS (audit P0): with the pest+bait route
         // retired, a PEST-owned reservation leaves the (kept) bait+bond
@@ -4664,10 +4745,7 @@ const EstimateConverter = {
         // rows (reservedRowComboRewrites' exactly-one-match contract), and
         // a one-match combo rewrites the reserved row below as always.
         const promotedComboUnits = process.env.GATE_SEPARATE_COMBO_VISITS !== 'true' ? [] : (combos || [])
-          .filter((combo) => reservedRows.filter((row) => {
-            const rowKey = recurringServiceKey({ name: row.service_type });
-            return rowKey === combo.route.primaryKey || rowKey === combo.route.companionKey;
-          }).length === 0)
+          .filter((combo) => identityAwareComboMatches(reservedRows, combo, reservedServiceKeyById).length === 0)
           .map((combo) => ({
             service: combo.service,
             catalogServiceKey: combo.route.catalogServiceKey,
@@ -4680,7 +4758,8 @@ const EstimateConverter = {
         // billed pest program (audit P0). A pest-owned reservation dedups
         // via alreadyReserved exactly like every other promotion.
         const retiredPestPairPresent = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
-          && (reservedStandalone || []).some((unit) => unit.catalogServiceKey === 'termite_bait');
+          && ((reservedStandalone || []).some((unit) => unit.catalogServiceKey === 'termite_bait')
+            || (combos || []).some((combo) => combo.route.primaryKey === 'termite_bait'));
         const promotedRetiredPestUnits = !retiredPestPairPresent ? [] : (remaining || [])
           .filter((line) => {
             if (String(recurringServiceKey(line) || '') !== 'pest_control') return false;
@@ -4734,47 +4813,6 @@ const EstimateConverter = {
                 : fam === 'tree_shrub' ? 'tree & shrub program' : 'lawn program',
             };
           });
-        // Catalog identities of the reserved rows (codex r20 P1): an
-        // adopted appointment can carry a STALE label with the CORRECT
-        // catalog id — estimate-public classifies adoption catalog-first —
-        // so a label-only alreadyReserved check would promote a duplicate
-        // parent + series beside it. Fail-soft: a failed lookup leaves the
-        // map empty and the label check still applies.
-        const reservedServiceKeyById = new Map();
-        try {
-          const reservedIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
-          if (reservedIds.length) {
-            const idRows = await database('services').whereIn('id', reservedIds).select('id', 'service_key');
-            for (const idRow of idRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
-          }
-        } catch (idErr) {
-          // One retry, then PROPAGATE (codex r27 P1): palm units match by
-          // identity ONLY and catalog-first adoptions are invisible to
-          // labels — an empty map after a transient failure would promote
-          // a duplicate parent beside the reserved program row. Unknown
-          // identity state fails the conversion instead.
-          try {
-            const retryIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
-            if (retryIds.length) {
-              const retryRows = await database('services').whereIn('id', retryIds).select('id', 'service_key');
-              for (const idRow of retryRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
-            }
-          } catch (retryErr) {
-            logger.error(`[estimate-converter] reserved catalog-key prefetch failed twice: ${retryErr.message}`);
-            // A bare database error would be swallowed by the fail-soft
-            // comboErr catch below (it rethrows recognized codes only), so
-            // the abort must carry one — same operational contract as the
-            // palm refusals: 422, convert manually.
-            const abort = new Error(
-              'Catalog identities for the reserved rows could not be resolved (database lookup failed twice), so this acceptance cannot verify what is already scheduled — retry, or convert manually.'
-            );
-            abort.code = 'RESERVED_CATALOG_IDENTITY_UNKNOWN';
-            abort.isOperational = true;
-            abort.status = 422;
-            abort.statusCode = 422;
-            throw abort;
-          }
-        }
         for (const unit of [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to
@@ -4994,7 +5032,15 @@ const EstimateConverter = {
             logger.error(`[estimate-converter] standalone bait scheduling failed for estimate ${estimateId}: ${standaloneErr.message}`);
           }
         }
-        for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
+        // Under the gate the rewrite uses the SAME identity-aware match as
+        // the zero-match promotion above — one classification, no gaps.
+        const comboRewritePairs = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+          ? (combos || []).flatMap((combo) => {
+            const matching = identityAwareComboMatches(reservedRows, combo, reservedServiceKeyById);
+            return matching.length === 1 ? [{ row: matching[0], combo }] : [];
+          })
+          : reservedRowComboRewrites(reservedRows, combos);
+        for (const { row, combo } of comboRewritePairs) {
           // Identity contract lives in combinedRewriteUpdate (pre-push P1:
           // a missing row / failed lookup CLEARS the standalone identity).
           let catalogRow = null;
@@ -6559,6 +6605,7 @@ module.exports.combinedRewriteUpdate = combinedRewriteUpdate;
 module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
+module.exports.identityAwareComboMatches = identityAwareComboMatches;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
