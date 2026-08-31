@@ -15,7 +15,12 @@
  *   SQL `monthly_rate > 0`, `c.monthly_rate > 0`, `monthly_rate::numeric > 0`)
  *   in the server source tree must sit in the SAME query chain as
  *   MONTHLY_LANE_SQL — the rate predicate narrows the lane population, it
- *   never defines it. billing-lane.js itself is exempt (it is the
+ *   never defines it. AND: any single expression that tests monthly_rate
+ *   positivity AND compares billing_mode is a hand-rolled row-level lane
+ *   resolver (`Number(c.monthly_rate) > 0 && c.billing_mode !== '…'`) —
+ *   rows in hand go through resolveBillingLane() (Codex #3669 r3 P2; a bare
+ *   numeric monthly_rate test without billing_mode on the line stays
+ *   legitimate). billing-lane.js itself is exempt (it is the
  *   definition). Comments are ignored. Anything else must be in ALLOWLIST
  *   with a one-line reason — and each entry is keyed to its exact site
  *   (file + predicate + a distinctive `context` string from the query
@@ -129,6 +134,13 @@ const KNEX_PREDICATE = /\.(?:where|andWhere|orWhere|having|andHaving|orHaving)\(
 // bare JS comparisons). `Number(x.monthly_rate || 0) > 0` does not match:
 // the `|| 0)` sits between the column and the operator.
 const RAW_PREDICATE = /\b(?:\w+\.)?monthly_rate(?:::numeric)?\s*>=?\s*'?0(?:\.0+)?'?\b/g;
+// row-level JS lane classifier: monthly_rate positivity (any of the
+// `Number(x.monthly_rate) > 0` / `(x.monthly_rate || 0) > 0` wrappings) on
+// the SAME line as a billing_mode comparison — a hand-rolled resolver
+// (Codex #3669 r3 P2). Positivity alone is a legitimate numeric test; the
+// billing_mode co-occurrence is what makes it lane classification.
+const JS_POSITIVITY = /\bmonthly_rate\s*(?:\|\|\s*0\s*)?\)*\s*>\s*0/;
+const isJsLaneClassifier = (line) => JS_POSITIVITY.test(line) && line.includes('billing_mode');
 
 const LANE_MARKER = 'MONTHLY_LANE_SQL';
 
@@ -173,11 +185,14 @@ function findOffenders() {
     lines.forEach((line, idx) => {
       KNEX_PREDICATE.lastIndex = 0;
       RAW_PREDICATE.lastIndex = 0;
-      if (!KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line)) return;
+      const jsClassifier = isJsLaneClassifier(line);
+      if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line)) return;
       if (seen.has(idx)) return;
       seen.add(idx);
       const chain = chainAround(lines, idx);
-      if (chain.includes(LANE_MARKER)) return;
+      // A JS row classifier is never excused by a nearby MONTHLY_LANE_SQL —
+      // rows in hand go through resolveBillingLane().
+      if (!jsClassifier && chain.includes(LANE_MARKER)) return;
       offenders.push({ file: rel, line: idx + 1, snippet: line.trim(), chain });
     });
   }
@@ -264,5 +279,18 @@ describe('monthly-lane source guard (#3140)', () => {
       const stripped = stripComments(s);
       expect(KNEX_PREDICATE.test(stripped) || RAW_PREDICATE.test(stripped)).toBe(false);
     }
+    // JS row-level classifier: rate positivity + billing_mode on one line.
+    const classifierShapes = [
+      "const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';",
+      "const monthlyLane = Number(customer?.monthly_rate) > 0 && String(customer?.billing_mode || '') !== 'per_application';",
+      "const m = (row.monthly_rate || 0) > 0 && row.billing_mode !== 'annual_prepay';",
+    ];
+    for (const s of classifierShapes) expect(isJsLaneClassifier(s)).toBe(true);
+    const classifierNonShapes = [
+      'const positive = Number(customer.monthly_rate) > 0;', // numeric only, no lane
+      "const lane = resolveBillingLane(customer).mode === 'monthly_membership';",
+      "update.billing_mode = 'monthly_membership'; update.monthly_rate = rate;",
+    ];
+    for (const s of classifierNonShapes) expect(isJsLaneClassifier(stripComments(s))).toBe(false);
   });
 });

@@ -8,6 +8,8 @@
 
 const db = require('../../models/db');
 const { MONTHLY_LANE_SQL } = require('../billing-lane');
+const { computeMrrBreakdown } = require('../mrr-breakdown');
+const { pendingPrepayIds } = require('../mrr-snapshot');
 const logger = require('../logger');
 const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -258,7 +260,11 @@ async function getKpiSnapshot() {
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
     ).first(),
-    db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL).sum('monthly_rate as total').first(),
+    // Headline MRR = the shared breakdown (monthly lane ∪ payment-pending
+    // prepay, internal excluded) — one definition with the dashboard tile and
+    // the snapshot, so the IB answer can't sit below them while an annual
+    // invoice awaits payment (Codex #3669 r3).
+    computeMrrBreakdown(db),
     // Source-of-truth filter for "outstanding" — paid_at IS NULL and not
     // a draft/void. Mirrors the cleaner pattern used by /core-kpis AR
     // Days; the prior status whitelist would silently drop any new
@@ -487,13 +493,23 @@ async function getMrrTrend(months) {
     return [];
   }
 
+  // Payment-pending annual-prepay ids: those customers sit on billing_mode
+  // 'per_application' until the prepay invoice is PAID, so the lane predicate
+  // alone would drop them from the current-month recompute while the
+  // completed-month snapshots and the live headline (computeMrrBreakdown)
+  // both union them — the chart's current point would sit below both sources
+  // whenever an annual invoice awaits payment (Codex #3669 r3 P1). Fail-soft
+  // set, shared with the snapshot writer.
+  const pendingIds = await pendingPrepayIds(db);
+
   function customersActiveAsOf(endIso) {
     return excludeInternalCustomers(
       db({ c: 'customers' })
         .where('c.created_at', '<=', endIso)
         .where('c.monthly_rate', '>', 0)
-        // Monthly LANE, not merely rate-bearing (#3140) — see fallback note above.
-        .whereRaw(MONTHLY_LANE_SQL)
+        // Monthly LANE, not merely rate-bearing (#3140) — see fallback note
+        // above. Pending-prepay union per the note on pendingIds.
+        .where(function laneOrPendingPrepay() { this.whereRaw(MONTHLY_LANE_SQL); if (pendingIds.length) this.orWhereIn('c.id', pendingIds); })
         .where(function () {
           this.where('c.active', true).orWhereNotNull('c.churned_at');
         })

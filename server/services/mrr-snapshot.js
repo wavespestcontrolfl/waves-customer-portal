@@ -156,4 +156,4 @@ async function recordMrrSnapshot(periodMonth = etMonthStart(), conn) {
   return { period_month: periodMonth, ...breakdown, by_tier, customerSnapshot };
 }
 
-module.exports = { recordMrrSnapshot, recordCustomerMrrSnapshots, customerRateRows, tierBreakdown };
+module.exports = { recordMrrSnapshot, recordCustomerMrrSnapshots, customerRateRows, tierBreakdown, pendingPrepayIds };
