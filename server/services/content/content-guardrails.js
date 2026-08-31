@@ -1687,18 +1687,123 @@ function blankExpressionStringLiterals(text) {
   const s = String(text || '');
   const out = s.split('');
   let depth = 0;
+  let prevSig = ''; // last significant char — decides regex vs division
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
-    if (c === '{') { depth += 1; continue; }
-    if (c === '}') { if (depth > 0) depth -= 1; continue; }
-    if (depth > 0 && (c === '"' || c === "'" || c === '`')) {
-      let j = i + 1;
-      for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
-      if (j < s.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; }
+    if (c === '{') { depth += 1; prevSig = '{'; continue; }
+    if (c === '}') { if (depth > 0) depth -= 1; prevSig = '}'; continue; }
+    if (depth > 0) {
+      if (c === '"' || c === "'" || c === '`') {
+        let j = i + 1;
+        for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
+        if (j < s.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; }
+        continue;
+      }
+      // Comments render nothing and may spell tag-shaped text — blank whole.
+      if (c === '/' && s[i + 1] === '/') {
+        let j = i;
+        while (j < s.length && s[j] !== '\n') j += 1;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      if (c === '/' && s[i + 1] === '*') {
+        const e = s.indexOf('*/', i + 2);
+        const j = e === -1 ? s.length : e + 2;
+        for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+        i = j - 1; continue;
+      }
+      // Regex literal (operator-position /, char-class aware) — its content
+      // is text, and its quote/tag characters must not leak into pairing.
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+        let j = i + 1; let inClass = false; let closed = -1;
+        for (; j < s.length && s[j] !== '\n'; j += 1) {
+          const d = s[j];
+          if (d === '\\') { j += 1; continue; }
+          if (inClass) { if (d === ']') inClass = false; continue; }
+          if (d === '[') { inClass = true; continue; }
+          if (d === '/') { closed = j; break; }
+        }
+        if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
+      }
+      // ++/-- end an operand: the / after n++ is DIVISION, not a regex.
+      if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
     }
   }
   return out.join('');
+}
+
+// Index of the `}` closing the expression whose `{` is at `i` (-1 if
+// unbalanced) — string/regex/comment-aware (astro closeOfExpressionAt).
+function closeOfExpressionAt(s, i) {
+  let depth = 0; let q = null; let prevSig = '';
+  for (let j = i; j < s.length; j += 1) {
+    const c = s[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
+    if (depth > 0 && c === '/' && s[j + 1] === '/') { while (j < s.length && s[j] !== '\n') j += 1; continue; }
+    if (depth > 0 && c === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+      let k = j + 1; let inClass = false; let closed = -1;
+      for (; k < s.length && s[k] !== '\n'; k += 1) {
+        const d = s[k];
+        if (d === '\\') { k += 1; continue; }
+        if (inClass) { if (d === ']') inClass = false; continue; }
+        if (d === '[') { inClass = true; continue; }
+        if (d === '/') { closed = k; break; }
+      }
+      if (closed > 0) { j = closed; prevSig = '/'; continue; }
+    }
+    if (c === '{') { depth += 1; prevSig = '{'; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; continue; }
+    if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
+  }
+  return -1;
+}
+
+// Length-preserving mask of every quoted span and expression value inside
+// JSX opening tags (astro maskJsxAttrQuotes parity): title="[q](/quote/)"
+// or title="<InlineCTA />" renders no anchor and no component, so
+// attribute text must never satisfy a Markdown-link or tag scan.
+function maskJsxAttrQuotes(src) {
+  const s = String(src || '');
+  const out = s.split('');
+  const re = /<[A-Za-z][\w.]*/g;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    let j = m.index + m[0].length; let q = null; let qStart = -1;
+    for (; j < s.length; j += 1) {
+      const c = s[j];
+      if (q) {
+        if (c === '\\') { j += 1; continue; }
+        if (c === q) {
+          for (let t = qStart + 1; t < j; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          q = null;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { q = c; qStart = j; continue; }
+      if (c === '{') {
+        const e = closeOfExpressionAt(s, j);
+        if (e > 0) {
+          for (let t = j; t <= e; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          j = e; continue;
+        }
+      }
+      if (c === '>') break;
+    }
+    re.lastIndex = j;
+  }
+  return out.join('');
+}
+
+// eachTag lowercases names; the astro contract is CASE-SENSITIVE
+// (tagsNamed) — MDX mounts <InlineCTA>, never <inlinecta>. True when the
+// tag at `start` spells the component name exactly.
+function isExactTagAt(text, start, name) {
+  if (!text.startsWith(`<${name}`, start)) return false;
+  const after = text[start + name.length + 1];
+  return after === undefined || /[\s/>]/.test(after);
 }
 
 function collectAffiliateLinkTags(text) {
@@ -1717,7 +1822,8 @@ function collectAffiliateLinkTags(text) {
   const masked = blankNonRenderedMarkdown(blankComments(String(text || '')));
   const strView = blankExpressionStringLiterals(masked);
   for (const tag of eachTag(masked)) {
-    if (tag.isClose || tag.name !== 'affiliatelink') continue;
+    // CASE-SENSITIVE (astro tagsNamed parity): <affiliatelink> never mounts.
+    if (tag.isClose || tag.name !== 'affiliatelink' || !isExactTagAt(masked, tag.start, 'AffiliateLink')) continue;
     if (strView[tag.start] === ' ') continue; // quoted JSX text
     const productId = literalAttribute(tag.attrs, 'product');
     const placement = literalAttribute(tag.attrs, 'placement');
@@ -1779,8 +1885,16 @@ function hasServiceCtaLink(body) {
   // component, never a Markdown CTA, and must not satisfy the rule.
   const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(prefix))))))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
+  // Attr-masked view: link- or tag-shaped text inside a JSX attribute
+  // (title="[q](/quote/)", title="<InlineCTA />") renders nothing — the
+  // Markdown scan runs on it, and the component scan position-checks
+  // against it (astro p3 parity; attrs still read from `rendered`).
+  const attrMasked = maskJsxAttrQuotes(rendered);
   for (const tag of eachTag(rendered)) {
-    if (tag.isClose || tag.name !== 'inlinecta') continue;
+    // CASE-SENSITIVE (astro tagsNamed parity): MDX mounts <InlineCTA>,
+    // never <inlinecta> — a lowercase spelling renders an inert element.
+    if (tag.isClose || tag.name !== 'inlinecta' || !isExactTagAt(rendered, tag.start, 'InlineCTA')) continue;
+    if (attrMasked[tag.start] === ' ') continue; // attr-quoted tag text
     // An InlineCTA counts only when it leads to a Waves service route: no
     // ctaHref (the component defaults to the quote page) or a quoted
     // literal service route. A dynamic or non-service destination is not
@@ -1798,10 +1912,10 @@ function hasServiceCtaLink(body) {
   // renders literal text — eachMarkdownLink deliberately still scans those
   // for the citation rules, so the escape check lives here), and the
   // CommonMark destination (bare or <>-wrapped) split from any title.
-  for (const span of eachMarkdownLink(rendered)) {
+  for (const span of eachMarkdownLink(attrMasked)) {
     if (span.kind !== 'inline' || span.isImage) continue;
-    if (backslashRunBefore(rendered, span.labelStart) % 2 === 1) continue;
-    const inner = rendered.slice(span.destStart, span.destEnd + 1).trim();
+    if (backslashRunBefore(attrMasked, span.labelStart) % 2 === 1) continue;
+    const inner = attrMasked.slice(span.destStart, span.destEnd + 1).trim();
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
     const dest = dm ? (dm[1] !== undefined ? dm[1] : dm[2]).trim() : '';
     if (dest && isServiceCtaHref(dest)) return true;
@@ -1831,9 +1945,12 @@ function inlineCtaContractFinding(body) {
   // opener sits inside an expression string never validates (astro
   // contract-loop parity; Codex #3646 r11 P1).
   const strView = blankExpressionStringLiterals(text);
+  const attrView = maskJsxAttrQuotes(text);
   for (const tag of eachTag(text)) {
-    if (tag.isClose || tag.name !== 'inlinecta') continue;
-    if (strView[tag.start] === ' ') continue;
+    // Case-sensitive + never from expression strings or attr-quoted text
+    // (astro contract-loop parity — none of those mount the component).
+    if (tag.isClose || tag.name !== 'inlinecta' || !isExactTagAt(text, tag.start, 'InlineCTA')) continue;
+    if (strView[tag.start] === ' ' || attrView[tag.start] === ' ') continue;
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
     }

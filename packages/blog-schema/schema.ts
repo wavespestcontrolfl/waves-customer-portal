@@ -746,7 +746,7 @@ function closeOfExpressionAt(src: string, i: number): number {
     }
     if (c === '{') { depth += 1; prevSig = '{'; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; continue; }
-    if (!/\s/.test(c)) prevSig = c;
+    if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
   }
   return -1;
 }
@@ -853,7 +853,7 @@ function blankExpressionStrings(src: string): string {
         }
         if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
       }
-      if (!/\s/.test(c)) prevSig = c;
+      if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
     }
   }
   return out.join('');
@@ -1067,15 +1067,12 @@ function hasServiceCtaBefore(prefix: string): boolean {
   // (isServiceCtaHref) — a walker over real links, never a `](`-anchored
   // regex that escaped or residual bracket text can satisfy.
   for (const dest of markdownLinkDests(p3)) if (isServiceCtaHref(dest)) return true;
-  return hasInlineCtaService(p2);
+  // p3 doubles as the POSITION view for the component scan: a tag spelled
+  // inside an attribute value (<div title="<InlineCTA />">) is blanked
+  // there and never counts; attrs still read from p2.
+  return hasInlineCtaService(p2, p3);
 }
 
-// Quoted attribute VALUES may contain anything ("Use {...props} notation",
-// "hidden") without it being markup — blank their contents (quotes kept,
-// length-preserving) before any structural test of raw attribute text.
-function stripQuotedAttrValues(attrs: string): string {
-  return attrs.replace(/(["'`])(?:(?!\1)[\s\S])*\1/g, (m) => m[0] + ' '.repeat(m.length - 2) + m[m.length - 1]);
-}
 // A JSX SPREAD ({...expr}) delivers props no literal-attribute scan can
 // see — a spread can override ctaHref/product/placement (or inject
 // hidden/style on a wrapper) at render time, so any tag carrying one can
@@ -1132,6 +1129,25 @@ function styleHidesElement(attrs: string): boolean {
 // a falsey boolean attribute), {false}/{null}/{0}/{''} and every dynamic
 // expression render closed or cannot be determined (fail closed — a CTA a
 // reader must expand for is no CTA). Last occurrence wins (JSX).
+// True when the element's `hidden` attribute renders it hidden. Same
+// sequential last-wins walk as detailsRendersOpen, opposite fail
+// direction: bare hidden, a non-empty string, an unquoted value, {true},
+// or any DYNAMIC expression hides (over-blanking only discounts a CTA);
+// absent, ""/'', and the falsey literals ({false}/{null}/{0}/{''}) don't.
+function hiddenAttrRendersHidden(attrs: string): boolean {
+  const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
+  let hidden = false;
+  let m: RegExpExecArray | null;
+  while (re.lastIndex < attrs.length && (m = re.exec(attrs)) !== null) {
+    if (m[0].length === 0) return true; // unparseable residue — fail closed
+    if (m[1].toLowerCase() !== 'hidden') continue;
+    if (m[4] !== undefined) hidden = !/^\{\s*(?:false|null|undefined|0|(['"`])\1?)\s*\}$/.test(m[4]);
+    else if (m[2] !== undefined || m[3] !== undefined) hidden = (m[2] ?? m[3] ?? '') !== '';
+    else hidden = true; // bare `hidden` or an unquoted value
+  }
+  return hidden;
+}
+
 function detailsRendersOpen(attrs: string): boolean {
   const re = new RegExp(JSX_ATTR_WALK_RE.source, 'y');
   let open = false;
@@ -1186,8 +1202,9 @@ function maskJsxAttrQuotes(src: string): string {
   return out.join('');
 }
 
-function hasInlineCtaService(prefix: string): boolean {
-  for (const { attrs } of tagsNamed(prefix, 'InlineCTA')) {
+function hasInlineCtaService(prefix: string, positionView: string = prefix): boolean {
+  for (const { start, attrs } of tagsNamed(prefix, 'InlineCTA')) {
+    if (positionView[start] === ' ') continue; // attr-quoted tag text, renders nothing
     if (attrs === null) continue; // unterminated — never counts
     if (hasJsxSpread(attrs)) continue; // spread can override the destination
     if (!/\bctaHref\s*=/.test(attrs)) return true;
@@ -1248,10 +1265,10 @@ export function validateAffiliateUsage(
     // an ATTRIBUTE-position spread counts (hasJsxSpread): a {...} nested
     // in an attr value expression never reaches the element's props.
     if (hasJsxSpread(attrs)) return true;
-    const bare = stripQuotedAttrValues(attrs);
-    // hidden={false} disables only the hidden-attribute test.
-    if (/(?:^|\s)hidden\s*=\s*\{\s*false\s*\}/i.test(bare)) return false;
-    return /(?:^|\s)hidden(?=[\s>/=]|$)/i.test(bare);
+    // Duplicate hidden attributes apply LAST-WINS (JSX) — evaluated
+    // sequentially like the details `open` parser; a dynamic value fails
+    // closed (hidden).
+    return hiddenAttrRendersHidden(attrs);
   }, unmasked);
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.

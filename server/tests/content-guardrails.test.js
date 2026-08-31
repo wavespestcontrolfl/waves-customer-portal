@@ -785,6 +785,26 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('component names are case-sensitive; attr text and regex/comment expression text never count (Codex #3646 r14)', () => {
+    withAffiliateEnv(() => {
+      // <inlinecta /> never mounts — it cannot satisfy the CTA rule...
+      const lower = `Intro.\n\n## Sec\n\n<inlinecta />\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: lower, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // ...and <affiliatelink> never counts as an affiliate link.
+      expect(guardrails.affiliateProductIdsIn('<affiliatelink product="x">y</affiliatelink>')).toEqual([]);
+      // Tag- or link-shaped text inside a JSX attribute renders nothing.
+      const attrCta = `Intro.\n\n## Sec\n\n<div title="<InlineCTA />">x</div>\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: attrCta, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      const attrLink = `Intro.\n\n## Sec\n\n<div title="[Request a quote](/quote/)">x</div>\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: attrLink, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // Regex and comment text inside expressions is not a component.
+      expect(guardrails.affiliateProductIdsIn('{/ <AffiliateLink product="x" placement="primary-rec">/}')).toEqual([]);
+      expect(guardrails.affiliateProductIdsIn('{true /* <AffiliateLink product="x" placement="primary-rec"> */}')).toEqual([]);
+      // A real component after a postfix division stays counted.
+      expect(guardrails.affiliateProductIdsIn('{n++ / total && <AffiliateLink product="rain-gauge" placement="primary-rec">y</AffiliateLink>}')).toEqual(['rain-gauge']);
+    });
+  });
+
   test('whitespace-padded product/placement props fail closed against the exact astro contract (Codex #3646 r11)', () => {
     withAffiliateEnv(() => {
       const padded = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product=" rain-gauge " placement="primary-rec">x</AffiliateLink>`;
