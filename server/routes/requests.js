@@ -669,7 +669,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }).catch((emailErr) => {
         logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
       });
-    } else if (!confirmationSmsSent) {
+    } else {
+      // A customer-initiated cancel gets BOTH the text and the email (owner
+      // ruling 2026-08-31 — the rule the non-cancellation branch already
+      // follows); the email is the durable artifact, not an SMS fallback.
       // Awaited (not fire-and-forget) so the response can say which channel
       // actually accepted the confirmation — a skipped/failed email must not
       // become "an email is on its way" on the customer's screen.
