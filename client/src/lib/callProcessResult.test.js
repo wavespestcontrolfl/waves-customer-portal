@@ -32,7 +32,7 @@ describe("describeProcessResult", () => {
   });
 
   it("skips that reached a real outcome read as done", () => {
-    for (const reason of ["already_processed", "spam", "voicemail", "pan_quarantined"]) {
+    for (const reason of ["already_processed", "spam", "voicemail"]) {
       const v = describeProcessResult({ success: true, skipped: true, reason });
       expect(v.didWork).toBe(true);
       expect(v.severity).toBe("ok");
@@ -55,6 +55,28 @@ describe("describeProcessResult", () => {
     const v = describeProcessResult({ success: true, skipped: true, reason: "transcription_rejected_implausible" });
     expect(v.didWork).toBe(true);
     expect(v.severity).toBe("ok");
+  });
+
+  it("a settled skip without confirmed success is not accepted either", () => {
+    // Every settled reason processRecording returns carries success: true,
+    // so this shape is a malformed response, not a classified call.
+    for (const body of [
+      { skipped: true, reason: "spam" },
+      { success: false, skipped: true, reason: "spam" },
+    ]) {
+      const v = describeProcessResult(body);
+      expect(v.didWork).toBe(false);
+      expect(v.severity).not.toBe("ok");
+    }
+  });
+
+  it("an ownership loss does not claim nothing was saved", () => {
+    // The transcript is persisted before the terminal fence, so a pass that
+    // loses its claim may already have written real work.
+    const v = describeProcessResult({ success: true, skipped: true, reason: "terminal_write_ownership_lost" });
+    expect(v.severity).toBe("blocked");
+    expect(v.text).not.toMatch(/[Nn]othing was saved/);
+    expect(v.text).toMatch(/took this call over/);
   });
 
   it("a hard failure is failed, not blocked", () => {

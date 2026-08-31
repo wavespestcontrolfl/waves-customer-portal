@@ -13,13 +13,16 @@
 
 // Skips where the pipeline DID reach a real outcome. Nothing is wrong and
 // nothing is owed; the row is in the state the operator wanted.
+//
+// Scoped to what POST /admin/call-recordings/process/:callSid can actually
+// return — that route runs processRecording. The recovery sweep
+// (recoverRecordingForCall) has its own reasons; speculating about them
+// here would be policy no client path exercises, free to drift from the
+// endpoint it claims to describe.
 const SETTLED_SKIP_COPY = {
   already_processed: 'Already processed — use Reprocess to re-run extraction.',
   spam: 'Processed — classified as spam.',
   voicemail: 'Processed — classified as voicemail.',
-  pan_quarantined: 'Quarantined — a card number was read aloud, so the recording is not stored.',
-  already_has_recording: 'Already has its recording — nothing to recover.',
-  already_recovered_by_peer: 'Another pass already recovered this recording.',
   // NOT a failure and NOT a no-op: the run completed and persisted the
   // extraction, summary, sentiment, lead quality and a terminal status, then
   // deliberately withheld the customer/lead/appointment writes and opened a
@@ -33,8 +36,8 @@ const SETTLED_SKIP_COPY = {
     "Rejected — the transcript didn't plausibly belong to this call, so it was discarded.",
 };
 
-// Skips where NOTHING ran. Each one leaves the call exactly as it was, so
-// the operator has to know the button did not do what it looks like it did.
+// Skips where the pipeline never got to finish its work, so the operator has
+// to know the button did not do what it looks like it did.
 const BLOCKED_SKIP_COPY = {
   // Names PROCESS, not Reprocess: the row is still 'processing', and both
   // lists label the control by status — Reprocess appears only once a row
@@ -42,9 +45,13 @@ const BLOCKED_SKIP_COPY = {
   // own small lie.
   already_processing: 'Nothing ran — another pass still holds this call. Give it about ten minutes, then hit Process again.',
   recording_not_ready: "Nothing ran — the recording hasn't landed from Twilio yet.",
-  terminal_write_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
-  transcription_rejected_ownership_lost: 'Nothing was saved — another pass took this call over mid-run.',
-  no_completed_recording: 'Nothing ran — Twilio has no completed recording for this call.',
+  // NOT "nothing was saved": the transcript is persisted before the terminal
+  // fence, so a pass that loses its claim here may already have written real
+  // work. What it could not do is finish and stamp the outcome.
+  terminal_write_ownership_lost:
+    "Didn't finish — another pass took this call over mid-run. Reload before deciding whether to re-run it.",
+  transcription_rejected_ownership_lost:
+    "Didn't finish — another pass took this call over mid-run. Reload before deciding whether to re-run it.",
 };
 
 /**
@@ -62,7 +69,14 @@ export function describeProcessResult(res) {
   }
   if (res?.skipped) {
     const reason = res.reason || 'unknown';
-    if (SETTLED_SKIP_COPY[reason]) {
+    // A settled skip needs the SAME explicit confirmation a completed run
+    // does. Every settled reason processRecording returns carries
+    // success: true, so `{skipped: true, reason: 'spam'}` without it is a
+    // malformed response, not a classified call — and letting it through
+    // would put the fail-closed guarantee back where it started. Blocked
+    // reasons deliberately don't check: recording_not_ready is a genuine
+    // success: false.
+    if (res.success === true && SETTLED_SKIP_COPY[reason]) {
       return { didWork: true, severity: 'ok', text: SETTLED_SKIP_COPY[reason] };
     }
     // Unknown reasons fail CLOSED — an unrecognised skip is reported as
