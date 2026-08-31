@@ -952,6 +952,15 @@ function customerPhoneMatches(phone, customer = {}) {
   return samePhone(phone, customer.phone);
 }
 
+// ONE merge policy for leads.extracted_data, shared with the voice-agent
+// writer (lead-from-extraction.js) so the two paths can never drift again.
+const {
+  mergeLeadExtractedData, parseLeadExtractedData, shouldRefreshLeadSummary,
+} = require('../utils/lead-extracted-data-merge');
+// Members of leads.extracted_data this file re-derives on EVERY pass, so they
+// must not fill forward from the prior row: a stale reason would outlive the
+// condition that produced it.
+const EXTRACTED_DATA_RECOMPUTED_KEYS = ['needs_confirmation', 'missing_for_qualification'];
 // Extracted VERBATIM to the shared util (codex P1 PR #3303 r19) — the
 // attribution retire path mirrors this exact gate on phone-matched
 // successors; never re-inline or duplicate it.
@@ -2819,7 +2828,7 @@ function canonicalizeInlineUnits(streetKey) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -2870,11 +2879,54 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
       delete payload.missing_for_qualification;
       if (remergedNeedsConfirmation.length) payload.needs_confirmation = remergedNeedsConfirmation;
       if (contact.missing.length) payload.missing_for_qualification = contact.missing;
-      out.extracted_data = JSON.stringify(payload);
+      // Re-merge over the LOCKED row for the same reason every other
+      // conditional column is re-decided here: the pre-lock `current` read is
+      // stale by now, and a staff edit or concurrent call in that gap must
+      // survive. Merge only THIS pass's delta — merging `payload` (already
+      // merged over the pre-lock row) would re-apply prior-derived keys and
+      // revert the concurrent writer we are trying to protect (pre-push P1).
+      // Without a delta, fall back to the pre-lock result rather than guess.
+      // The delta still carries this pass's PRE-lock needs_confirmation /
+      // missing_for_qualification. Drop them before merging: when the
+      // lock-time re-derivation comes back EMPTY, a conditional spread adds no
+      // override, and the stale pre-lock values would merge straight back in
+      // and undo a concurrent staff correction (pre-push P1). Strip first, then
+      // add only what the lock derived — the empty case included.
+      const lockDerivedDelta = { ...extractedDataDelta };
+      for (const key of EXTRACTED_DATA_RECOMPUTED_KEYS) delete lockDerivedDelta[key];
+      if (remergedNeedsConfirmation.length) lockDerivedDelta.needs_confirmation = remergedNeedsConfirmation;
+      if (contact.missing.length) lockDerivedDelta.missing_for_qualification = contact.missing;
+      out.extracted_data = JSON.stringify(extractedDataDelta
+        ? mergeLeadExtractedData(
+          lockedLead.extracted_data,
+          lockDerivedDelta,
+          { recomputedKeys: EXTRACTED_DATA_RECOMPUTED_KEYS },
+        )
+        : payload);
       if (Object.prototype.hasOwnProperty.call(out, 'is_qualified')) {
-        out.is_qualified = ['hot', 'warm'].includes(leadQuality) && contact.complete;
+        // Same monotonic rule as the Step 4b write, re-judged against the
+        // LOCKED row: earned by this call OR retained from the row.
+        out.is_qualified = contact.complete
+          && (['hot', 'warm'].includes(leadQuality) || lockedLead.is_qualified === true);
       }
     }
+  }
+  // transcript_summary's refresh test (did this pass ADVANCE the lead?) was
+  // decided from the pre-lock `current` row. If a concurrent call or a staff
+  // edit filled that contact field or took on the quote obligation first, the
+  // fill is dropped above but the summary would still overwrite the newer,
+  // substantive one — the exact clobber this guard exists to stop. Re-judge
+  // against the locked row: dropFilledLeadColumns has already removed any
+  // FILL_ONLY key the locked row now carries, so a surviving one genuinely
+  // fills an empty column.
+  if (Object.prototype.hasOwnProperty.call(out, 'transcript_summary')) {
+    // Re-judged against the LOCKED row: the pre-lock `current` read is stale
+    // by now, so a summary a concurrent call or a staff edit wrote in that gap
+    // must be compared against, not blown past.
+    if (!shouldRefreshLeadSummary({
+      currentSummary: lockedLead.transcript_summary,
+      newSummary: out.transcript_summary,
+    })) delete out.transcript_summary;
   }
   return { updates: out, contact, serviceInterestDropped };
 }
@@ -9581,9 +9633,11 @@ const CallRecordingProcessor = {
             } else if (extracted.lead_quality && isEmpty(current?.urgency)) {
               leadUpdates.urgency = 'normal';
             }
-            // Always refresh the rolling AI-derived fields — they're a snapshot
-            // of the latest call, not user-curated content.
-            if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+            // The lead's prior extracted_data, parsed ONCE: the basis for the
+            // needs_confirmation union, the extracted_data merge, and the
+            // "did this pass actually add anything" test below.
+            const priorExtractedData = parseLeadExtractedData(current?.extracted_data);
+            let extractedDataDelta = null;
             // Qualification now requires BOTH buying intent (hot/warm) AND the
             // contact info the office needs to work the lead: first + last name,
             // a service street address, and an email. Evaluate against the MERGED
@@ -9603,16 +9657,22 @@ const CallRecordingProcessor = {
             // warnings (a quick "slab or footer?" callback was wiping
             // address_unverified/email_unverified off the lead). Union prior +
             // this call; a recovered address supersedes its stale unverified.
-            const priorNeedsConfirmation = (() => {
-              try {
-                const data = typeof current?.extracted_data === 'string'
-                  ? JSON.parse(current.extracted_data)
-                  : (current?.extracted_data || {});
-                return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
-              } catch { return []; }
-            })();
+            const priorNeedsConfirmation = Array.isArray(priorExtractedData.needs_confirmation)
+              ? priorExtractedData.needs_confirmation
+              : [];
             const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
-            leadUpdates.extracted_data = JSON.stringify({
+            // MERGED over the lead's prior payload, never rebuilt wholesale
+            // (server/utils/lead-extracted-data-merge.js): a follow-up call
+            // that doesn't restate the pest problem or the promised quote must
+            // not erase them. needs_confirmation / missing_for_qualification
+            // are re-derived every pass, so they are declared recomputed and
+            // do not fill forward.
+            // THIS pass's own delta, kept separately from the merged result:
+            // the under-lock reconcile must re-apply only the keys this call
+            // actually supplied, never the merged object (whose prior-derived
+            // keys came from the PRE-lock read and would revert a concurrent
+            // writer — pre-push P1).
+            extractedDataDelta = {
               pain_points: extracted.pain_points,
               preferred_date_time: extracted.preferred_date_time,
               sentiment: extracted.sentiment,
@@ -9625,11 +9685,42 @@ const CallRecordingProcessor = {
               ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
               ...(callSecondaryContact ? { secondary_contact: callSecondaryContact } : {}),
               // Recovery-pass rows keep the audit stamp the mint used to
-              // carry — this write REPLACES extracted_data wholesale.
+              // carry (this write MERGES now, so the stamp persists across
+              // later passes rather than being rebuilt away).
               ...(raceRecovered ? { claim_race_recovery: true } : {}),
-            });
+            };
+            const mergedExtractedData = mergeLeadExtractedData(
+              priorExtractedData,
+              extractedDataDelta,
+              { recomputedKeys: EXTRACTED_DATA_RECOMPUTED_KEYS },
+            );
+            leadUpdates.extracted_data = JSON.stringify(mergedExtractedData);
+            // transcript_summary is the lead card's "Notes" — what the office
+            // reads to know what the job IS. It used to refresh unconditionally
+            // ("a snapshot of the latest call"), so the LAST call always won
+            // regardless of content: on 2026-08-31 a 14-second callback chasing
+            // an estimate replaced the 157-second summary describing the actual
+            // work. shouldRefreshLeadSummary is the shared policy (all three
+            // writers of this column use it) — refresh when the lead has no
+            // summary, when this pass filled a contact field it was missing, or
+            // when it added a material job detail.
+            if (extracted.call_summary && shouldRefreshLeadSummary({
+              currentSummary: current?.transcript_summary,
+              newSummary: extracted.call_summary,
+            })) {
+              leadUpdates.transcript_summary = extracted.call_summary;
+            }
             // hot/warm AND complete contact. Spam was already early-returned.
-            leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
+            // Qualification is MONOTONIC under evidence: this call may EARN it,
+            // or the lead may RETAIN it, and it is lost only when the contact
+            // evidence stops supporting it. The old expression read lead_quality
+            // from this call alone, so one 'cold' callback demoted a lead an
+            // earlier call had qualified — which also drops it from the Google
+            // Ads qualified-lead conversion upload (ads/data-manager.js). A real
+            // demotion is a human act and has its own column
+            // (leads.disqualification_reason), never a side effect of a callback.
+            leadUpdates.is_qualified = contact.complete
+              && (['hot', 'warm'].includes(extracted.lead_quality) || current?.is_qualified === true);
             // Only ever SET the customer link, never clear it. The unnamed-lead
             // path runs with customerId null and can reuse an existing lead
             // found by phone — writing customer_id = null there would detach a
@@ -9956,6 +10047,17 @@ const CallRecordingProcessor = {
                       leadUpdates.status = 'new';
                     }
                     resupply('next_follow_up_at', quotePromisedDue);
+                    // transcript_summary joins the resupply list now that it is
+                    // written CONDITIONALLY. It used to be unconditional, so it
+                    // was always in the payload and never needed re-supplying;
+                    // with the refresh guard, a chronological restamp whose
+                    // pre-settle row already held THIS call's own summary would
+                    // omit the key, the settle would roll the column back to
+                    // baseline, and the accepted reprocessing would commit with
+                    // the lead's Notes erased. Re-supplied here and then gated
+                    // by the conditional reconcile against the POST-SETTLE row,
+                    // exactly like every other key in this block.
+                    resupply('transcript_summary', extracted.call_summary);
                   }
                 }
                 // Fill-only columns are re-decided against the LOCKED row
@@ -9971,7 +10073,7 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality },
+                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;
@@ -13911,10 +14013,19 @@ const CallRecordingProcessor = {
       try {
         synopsis = await generateLeadSynopsis(transcription);
         if (synopsis) {
+          // generateLeadSynopsis's Step 0 gate answers with the literal
+          // "Not a new lead — no analysis needed." for, among others, "a
+          // callback or follow-up on an already-quoted job". That sentinel is
+          // a truthful per-CALL classification, so it still belongs on
+          // call_log — but it is NOT a lead-level fact, and writing it to the
+          // lead destroyed the strategist analysis the substantive call
+          // produced (2026-08-31). The column sits outside
+          // STAMPED_LEAD_RESTORE_FIELDS, so that loss is not even rollback-able.
+          const synopsisIsGateRefusal = /^\s*\**\s*not a new lead/i.test(synopsis);
           await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
           await updateUnifiedVoiceMessage(call, { ai_summary: synopsis });
-          // Also write to lead if one was created
-          if (leadId) {
+          // Also write to lead if one was created — never the gate refusal.
+          if (leadId && !synopsisIsGateRefusal) {
             await db('leads').where({ id: leadId }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
           }
           logger.info(`[call-proc] Lead synopsis generated: ${synopsis.length} chars`);

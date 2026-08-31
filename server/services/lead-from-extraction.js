@@ -45,6 +45,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { mergeLeadExtractedData, shouldRefreshLeadSummary } = require('../utils/lead-extracted-data-merge');
 const { properCase } = require('../utils/name-case');
 const { composeServiceInterest } = require('../utils/lead-service-interest');
 
@@ -740,7 +741,8 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     if (extracted.lead_quality === 'hot' || extracted.quote_promised_expectation === 'about_15_minutes') leadUpdates.urgency = 'urgent';
     else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
 
-    if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+    // transcript_summary is decided AFTER the merge below — it depends on
+    // whether this capture added anything material to the lead.
     // ⭐ extracted_data is MERGED, never replaced.
     //
     // contactPreferenceFields returning null was supposed to mean "a
@@ -752,23 +754,25 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     // that payload. A caller who said "stop texting me" and then answered one
     // more question lost the instruction.
     const priorExtracted = parseJsonObject(current?.extracted_data);
-    const merged = { ...priorExtracted };
-    // Fill-forward: a payload that simply didn't mention a field keeps the
-    // value already on the lead rather than nulling it.
-    merged.pain_points = extracted.pain_points || priorExtracted.pain_points || null;
-    merged.preferred_date_time = extracted.preferred_date_time || priorExtracted.preferred_date_time || null;
-    merged.source = 'voice_agent';
-    merged.language = language || priorExtracted.language || null;
-    // A written-estimate request/promise is STICKY-ON on the lead artifact
-    // (codex #3569), in the shape the Leads UI already renders
-    // (quote_requested → "Quote requested on call", quote_promised → "Quote
-    // promised to caller"): staff working the lead must see the obligation,
-    // and a later capture that does not mention it must not erase it.
-    if (extracted.quote_requested === true) merged.quote_requested = true;
-    if (extracted.quote_promised === true) merged.quote_promised = true;
-    // What the caller was TOLD about turnaround travels with the lead
-    // (hook P1); a 15-minute expectation makes the lead urgent for staff.
-    if (extracted.quote_promised_expectation) merged.quote_promised_expectation = extracted.quote_promised_expectation;
+    // The fill-forward / sticky-on policy this path pioneered now lives in one
+    // shared util so the recorded-call writer cannot drift from it again
+    // (server/utils/lead-extracted-data-merge.js). quote_requested and
+    // quote_promised are STICKY-ON there (codex #3569, in the shape the Leads
+    // UI renders); pain_points ACCUMULATES so a later call describing a
+    // different concern adds to the problem statement instead of replacing it.
+    const merged = mergeLeadExtractedData(priorExtracted, {
+      pain_points: extracted.pain_points,
+      preferred_date_time: extracted.preferred_date_time,
+      source: 'voice_agent',
+      language: language || priorExtracted.language || null,
+      ...(extracted.quote_requested === true ? { quote_requested: true } : {}),
+      ...(extracted.quote_promised === true ? { quote_promised: true } : {}),
+      // What the caller was TOLD about turnaround travels with the lead
+      // (hook P1); a 15-minute expectation makes the lead urgent for staff.
+      ...(extracted.quote_promised_expectation
+        ? { quote_promised_expectation: extracted.quote_promised_expectation }
+        : {}),
+    });
     const contactPreference = contactPreferenceFields(extracted);
     if (contactPreference) {
       if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;
@@ -781,9 +785,29 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       else if (merged.do_not_contact_request !== true) merged.do_not_contact_request = false;
     }
     leadUpdates.extracted_data = JSON.stringify(merged);
+    // Same shared policy the recorded-call writer uses: this path ALSO reuses
+    // leads by phone across calls, so without it a thin follow-up capture
+    // clobbers the substantive Notes before the recording processor even runs
+    // (pre-push P1). Refresh when the lead has no summary, when this capture
+    // filled a contact field it was missing, or when it added a material job
+    // detail.
+    if (extracted.call_summary && shouldRefreshLeadSummary({
+      currentSummary: current?.transcript_summary,
+      newSummary: extracted.call_summary,
+    })) {
+      leadUpdates.transcript_summary = extracted.call_summary;
+    }
     // Only touch is_qualified when the agent sent a recognized quality, so a
-    // later quality-less payload can't demote a previously qualified lead.
-    if (extracted.lead_quality) leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
+    // later quality-less payload can't demote a previously qualified lead —
+    // and when it IS recognized, qualification is MONOTONIC: this capture may
+    // earn it or the lead may retain it. A recognized 'cold' on a follow-up
+    // must not undo what an earlier call qualified (the recorded-call writer
+    // carried the same defect; both now share the rule). Demotion stays a
+    // human act via leads.disqualification_reason.
+    if (extracted.lead_quality) {
+      leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality)
+        || current?.is_qualified === true;
+    }
     if (language) leadUpdates.preferred_language = language;
     // Only (re)link a customer when one was unambiguously resolved — never
     // null out an existing lead's customer_id on a no-match/ambiguous lookup.
