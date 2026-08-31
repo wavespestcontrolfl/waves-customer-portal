@@ -27,11 +27,29 @@ const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 // `.insert` covers the multi-line `db('leads')\n  .insert({` form.
 const INSERT_PATTERNS = [
   /\b[A-Za-z_$][\w$]*\(\s*['"`]leads['"`]\s*\)\s*\.\s*insert\s*\(/g,
+  /\b[A-Za-z_$][\w$]*\s*\.\s*table\s*\(\s*['"`]leads['"`]\s*\)\s*\.\s*insert\s*\(/g,
   /\.into\(\s*['"`]leads['"`]\s*\)/g,
   /\binsert\s*\(\s*['"`]leads['"`]\s*\)/g,
   /\bbatchInsert\s*\(\s*['"`]leads['"`]/g,
   /\bfrom\(\s*['"`]leads['"`]\s*\)\s*\.\s*insert\s*\(/g,
 ];
+
+// Aliased-builder form: a `leads` query builder stored in a variable first
+// (`const leads = trx('leads'); ... leads.insert(...)`). The declaration must
+// NOT be awaited — `const rows = await db('leads')...` is an executed query,
+// not a stored builder. Covers `qb('leads')` and `qb.table('leads')` heads.
+const ALIAS_DECL_RE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\.\s*table)?\s*\(\s*['"`]leads['"`]\s*\)/g;
+
+function aliasInsertPatterns(src) {
+  const patterns = [];
+  ALIAS_DECL_RE.lastIndex = 0;
+  let decl;
+  while ((decl = ALIAS_DECL_RE.exec(src))) {
+    const name = decl[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    patterns.push(new RegExp(`\\b${name}\\s*\\.\\s*insert\\s*\\(`, 'g'));
+  }
+  return patterns;
+}
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -55,7 +73,7 @@ function scanLeadInsertSites() {
     const src = fs.readFileSync(abs, 'utf8');
     const lines = src.split('\n');
     const seen = new Set();
-    for (const pattern of INSERT_PATTERNS) {
+    for (const pattern of [...INSERT_PATTERNS, ...aliasInsertPatterns(src)]) {
       pattern.lastIndex = 0;
       let m;
       while ((m = pattern.exec(src))) {

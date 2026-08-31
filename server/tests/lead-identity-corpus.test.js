@@ -110,13 +110,24 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     }
   });
 
-  test('every contact value is synthetic: 555-01xx phones (or non-phone sentinels), example.com emails', () => {
+  // Digit-free sentinels the corpus may use in the phone field (exercise the
+  // garbage-key rejection path). Anything containing a digit must be a FULLY
+  // reserved NANP fictional number — see the guard below.
+  const NON_PHONE_SENTINELS = new Set(['anonymous', 'call me', 'unknown']);
+
+  test('every contact value is synthetic: reserved NANP 555-01xx phones (or allowlisted non-phone sentinels), example.com emails', () => {
     for (const c of CASES) {
       for (const rec of [c.a, c.b]) {
         if (rec.phone != null) {
           const digits = String(rec.phone).replace(/\D/g, '');
-          const isSentinel = digits.length < 10;
-          expect({ id: c.id, phone: rec.phone, ok: isSentinel || /55501\d\d$/.test(digits) })
+          // Zero digits → must be an allowlisted sentinel string; any digits →
+          // the COMPLETE number must be a reserved NANP fixture (NXX-555-01xx,
+          // optional leading 1). A real 7-digit local number or a non-NANP
+          // number merely ending in 55501xx fails here by design.
+          const ok = digits.length === 0
+            ? NON_PHONE_SENTINELS.has(String(rec.phone).trim().toLowerCase())
+            : /^1?[2-9]\d\d55501\d\d$/.test(digits);
+          expect({ id: c.id, phone: rec.phone, ok })
             .toEqual({ id: c.id, phone: rec.phone, ok: true });
         }
         if (rec.email != null) {

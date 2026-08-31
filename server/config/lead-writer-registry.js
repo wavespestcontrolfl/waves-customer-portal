@@ -7,13 +7,18 @@
  * key + nickname-aware name corroboration, PR #3627). Web forms, the quote
  * wizard, lawn/pest claim flows, referrals, field leads etc. can mint a
  * duplicate lead for a person the system already knows. The dedup RULE those
- * writers should adopt is blocked on an owner ruling (AGENTS.md:375 / #3137),
- * so this file does not fix them — it makes the writer set VISIBLE and makes
- * every NEW writer declare its identity resolver.
+ * writers should adopt is blocked on an owner ruling, tracked in issue #3137
+ * ("Identity-dedupe protocol rollout": which shared identity lock/read
+ * protocol the non-call writers adopt), so this file does not fix them — it
+ * makes the writer set VISIBLE and makes every NEW writer declare its
+ * identity resolver.
  *
  * Enforcement (tests/lead-writer-registry.test.js, no DB): the test scans
- * server/ for `<qb>('leads').insert(` / `.into('leads')` / `batchInsert('leads'`
- * and requires a 1:1 match with the entries below. A new insert site that is
+ * server/ for every knex insert spelling — `<qb>('leads').insert(`,
+ * `<qb>.table('leads').insert(`, `.into('leads')`, `insert('leads')`,
+ * `batchInsert('leads'`, and the stored-builder alias form
+ * (`const leads = trx('leads'); ... leads.insert(`) — and requires a 1:1
+ * match with the entries below. A new insert site that is
  * not registered FAILS CI; a registered site that no longer exists (stale
  * registry) FAILS CI.
  *
@@ -50,7 +55,9 @@ const LEAD_WRITERS = [
   {
     file: 'routes/lead-webhook.js',
     anchor: "const [newLead] = await db('leads').insert({",
-    context: 'POST /api/lead-webhook — main-site web forms (astro BookingForm/QuoteForm/ChatWidget)',
+    // Mounted at POST /api/webhooks/lead AND the POST /api/leads alias
+    // (server/index.js) — both execute this insert.
+    context: 'POST /api/webhooks/lead + /api/leads alias — main-site web forms (astro BookingForm/QuoteForm/ChatWidget)',
     // Partial: attaches to an OPEN phone-call lead on the same number (and to
     // a voicemail text-back prefill lead by token). No email/name reuse for
     // web-only repeat submitters.
