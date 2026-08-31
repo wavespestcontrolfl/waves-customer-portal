@@ -119,6 +119,24 @@ test('open report / all-retracted application / short photos fire the three lega
   expect(byType.missing_required_photos.summary).toBe('Completed job has 1 of 2 required closeout photos.');
 });
 
+test('two contradiction codes on one visit get DISTINCT ids — one shared id would double-hit the sync dedupe_key (pre-push r17 P1)', async () => {
+  installJobs([jobRow('svc-1')]);
+  getCloseoutStatus.mockResolvedValue(closeout({
+    contradictions: [
+      { code: 'invoice_on_covered_visit', detail: 'x' },
+      { code: 'applications_on_non_performed_visit', detail: 'y' },
+    ],
+  }));
+  const attention = await run();
+  const contradictionCards = attention.filter((a) => a.type === 'closeout_contradiction');
+  expect(contradictionCards.map((a) => a.id).sort()).toEqual([
+    'svc-1_closeout_contradiction:applications_on_non_performed_visit',
+    'svc-1_closeout_contradiction:invoice_on_covered_visit',
+  ]);
+  expect(new Set(contradictionCards.map((a) => a.id)).size).toBe(2);
+  expect(contradictionCards[0].label).toBe('Closeout records contradict');
+});
+
 test('unknown facts (lookup outage) fire NOTHING — an outage is not a compliance gap', async () => {
   installJobs([jobRow('svc-1')]);
   getCloseoutStatus.mockResolvedValue(closeout({

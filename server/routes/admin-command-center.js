@@ -219,7 +219,11 @@ async function getJobsNeedingAttention({ date, technicianId, serviceLine }) {
       for (const found of closeoutIssuesForVisit(status)) {
         attention.push(issue({
           ...row,
-          id: `${row.sourceRecordId}_${found.type}`,
+          // identity (set on contradiction issues) carries the code — two
+          // contradiction codes on one visit must not share an id, or the
+          // sync's single INSERT ... ON CONFLICT hits the same dedupe_key
+          // twice and Postgres rejects the whole statement (pre-push P1).
+          id: `${row.sourceRecordId}_${found.identity || found.type}`,
           type: found.type,
           severity: 'medium',
           label: CLOSEOUT_ALERT_LABELS[found.type],
