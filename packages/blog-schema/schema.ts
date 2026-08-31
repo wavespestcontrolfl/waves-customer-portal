@@ -662,7 +662,7 @@ function blankNonRenderedCode(src: string): string {
   return lines.join('\n');
 }
 
-function blankMdxExpressions(src: string): string {
+function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolean } = {}): string {
   const out = src.split('');
   const blankRange = (a: number, b: number) => { for (let k = a; k <= b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
   // Strings INSIDE an expression are honored so a `}` in {'a}b'} doesn't end it early.
@@ -699,7 +699,12 @@ function blankMdxExpressions(src: string): string {
         // LITERALS are blanked either way — {'<InlineCTA/>'} renders as
         // text, and {'[quote](/quote/)'} must never satisfy a CTA rule.
         const expr = src.slice(i, j + 1);
-        if (!/<[A-Z]/.test(expr)) blankRange(i, j);
+        // keepJsx=false: an expression NEVER supplies a rendered CTA or
+        // heading, whatever it contains (regex literals, strings, JSX) —
+        // blank it whole. keepJsx=true (component counting): a JSX-bearing
+        // expression keeps its JSX so affiliate components are still
+        // counted (fail closed both ways).
+        if (!keepJsx || !/<[A-Z]/.test(expr)) blankRange(i, j);
         else {
           let q: string | null = null; let qs = -1;
           for (let k = i; k <= j; k += 1) {
@@ -812,6 +817,10 @@ export function validateAffiliateUsage(
   // ordinary text, never as markup — blank every balanced brace expression
   // OUTSIDE quoted JSX attribute values (length-preserving) so structural
   // scans (headings, CTA links, component positions) only see real source.
+  // Two views of the body: `cleaned` keeps JSX-bearing expressions so
+  // affiliate components inside them are COUNTED; `structural` blanks every
+  // expression so none can supply a CTA or heading (an expression can only
+  // ever render a component, never Markdown).
   cleaned = blankMdxExpressions(cleaned);
   // Definitely-hidden markup never satisfies a reader-facing rule (a CTA a
   // reader cannot see is no CTA): elements carrying `hidden`, an inline
@@ -826,6 +835,7 @@ export function validateAffiliateUsage(
   });
   cleaned = cleaned.replace(/<details\b(?![^>]*\bopen\b)[^>]*>[\s\S]*?<\/details\s*>/gi, (m) => ' '.repeat(m.length));
 
+  const structural = blankMdxExpressions(cleaned, { keepJsx: false });
   const positions: number[] = tagsNamed(cleaned, 'AffiliateLink').map((t) => t.start);
   const count = positions.length;
   const declared = frontmatter.disclosure?.type === 'affiliate';
@@ -837,9 +847,9 @@ export function validateAffiliateUsage(
   if (!declared) blockers.push('body contains <AffiliateLink> but frontmatter.disclosure.type is not "affiliate" (FTC material-connection disclosure is rendered from that type)');
   if (opts.fileExt && opts.fileExt.toLowerCase() !== '.mdx') blockers.push(`<AffiliateLink> requires an .mdx post — a ${opts.fileExt} file renders the tag as literal text`);
   if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
-  const firstHeading = cleaned.search(/^#{2,3}\s/m);
+  const firstHeading = structural.search(/^#{2,3}\s/m);
   if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
-  if (!hasServiceCtaBefore(cleaned.slice(0, positions[0]))) {
+  if (!hasServiceCtaBefore(structural.slice(0, positions[0]))) {
     blockers.push('no Waves service CTA (<InlineCTA> leading to a service route, or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
   }
   // Page-class eligibility (fail closed): the post's post_type must be one
@@ -869,7 +879,10 @@ export function validateAffiliateUsage(
     if (checked.has(key)) continue;
     checked.add(key);
     const row = getAffiliateProduct(id);
-    if (!row) continue; // unknown ids are the prop schema's blocker
+    if (!row) {
+      if (AFFILIATE_ROWS.filter((r) => r?.product_id === id).length > 1) blockers.push(`affiliate product "${id}" has duplicate registry rows — the registry must be fixed before this post can publish`);
+      continue; // unknown ids are the prop schema's blocker
+    }
     if (row.status === 'prohibited' || row.risk_class === 'red') { blockers.push(`affiliate product "${id}" is prohibited — remove the recommendation`); continue; }
     if (postType && !(row.allowed_post_types ?? []).includes(postType)) {
       blockers.push(`affiliate product "${id}" is not eligible on a "${postType}" post (allowed: ${(row.allowed_post_types ?? []).join(', ') || 'none'})`);
@@ -889,8 +902,7 @@ export function validateAffiliateUsage(
 }
 
 function extractMdxComponentNames(mdx: string): Set<string> {
-  let cleaned = mdx.replace(/```[\s\S]*?```/g, '');
-  cleaned = cleaned.replace(/`[^`\n]*`/g, '');
+  const cleaned = blankNonRenderedCode(mdx);
 
   const names = new Set<string>();
   const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
@@ -937,7 +949,10 @@ export interface ComponentPropValidationResult {
 export function validateMarkdownComponentProps(
   body_mdx: string,
 ): ComponentPropValidationResult {
-  const cleaned = body_mdx.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  // Same non-rendered-code semantics as validateAffiliateUsage (backtick AND
+  // tilde fences, inline spans, indented code) — a code example never
+  // needs valid props.
+  const cleaned = blankNonRenderedCode(body_mdx);
   const invocations = extractComponentInvocations(cleaned);
 
   const issues: ComponentPropIssue[] = [];
