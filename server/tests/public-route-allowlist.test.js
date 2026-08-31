@@ -327,8 +327,12 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('is not a router'))).toBe(true);
   });
 
-  test('a provably-non-router use() handler (inline fn, node_modules call) is NOT a problem', () => {
-    const res = scanOf({
+  test('package factories are OPAQUE unless registry-reviewed; inline/in-repo functions are middleware', () => {
+    // A package factory (cors, rateLimit) CAN return a router, so an
+    // UNREVIEWED one in use() is a problem; a reviewed package passthrough
+    // is silent, and an inline function is provably-not-a-router middleware
+    // (inventoried as USE surface, never a problem).
+    const files = {
       'server/index.js': app([
         "const cors = require('cors');",
         "const rateLimit = require('express-rate-limit');",
@@ -343,13 +347,23 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
         "router.get('/thing', (req, res) => res.json({}));",
         'module.exports = router;',
       ].join('\n'),
-    });
-    expect(res.problems).toEqual([]);
-    // Every unproven-middleware use() is inventoried as USE surface, the
-    // path-less ones (cors, the inline fn) at scope '/' — none of these are
-    // registered passthroughs in this fixture registry.
-    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
-      .toEqual(['GET /api/x/thing', 'USE /', 'USE /', 'USE /api']);
+    };
+    const unreviewed = scanOf(files);
+    expect(unreviewed.problems.filter((p) => p.includes('unreviewed package factory')).length).toBe(2);
+    const reviewed = new Scanner({
+      files, appFile: 'server/index.js',
+      registry: {
+        ...REGISTRY,
+        passthroughs: [
+          { name: '*', module: 'cors', package: true },
+          { name: '*', module: 'express-rate-limit', package: true },
+        ],
+      },
+    }).scan();
+    expect(reviewed.problems).toEqual([]);
+    // Only the inline fn remains inventoried (pathless, scope '/').
+    expect(reviewed.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/thing', 'USE /']);
   });
 
   test('PATHLESS terminal middleware is inventoried as USE / surface', () => {

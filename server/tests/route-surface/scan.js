@@ -34,10 +34,11 @@
  *     so it voids every later guard in the call. Arrays / spreads of
  *     top-level const arrays are flattened.
  *   - A use() handler must be provably NOT a router: a router/static mount, a
- *     registered guard/passthrough, an inline or in-repo function, or a
- *     node_modules factory call. Anything opaque (an unresolved identifier, an
- *     in-repo factory call) is rejected as a scanner problem — a factory
- *     could return a router whose routes would bypass the allowlist.
+ *     registered guard/passthrough (package factories like express-rate-limit
+ *     need a reviewed `package` passthrough entry — a package CAN export a
+ *     router factory), or an inline / in-repo function. Anything opaque (an
+ *     unresolved identifier, an unreviewed factory call) is rejected as a
+ *     scanner problem — its routes would bypass the allowlist.
  *   - Router aliases (`const api = router`) resolve to the canonical router.
  *   - Nested routers (`router.use('/sub', subRouter)` or a require()) recurse.
  *   - Paths: string literals, arrays of them, RegExp literals, template
@@ -726,11 +727,18 @@ class ModuleAnalysis {
           const g = registry.lookup(b.module, b.name);
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
           if (registry.lookupPassthrough(b.module, b.name)) return [{ type: 'passthrough', name: b.name }];
-          if (b.module === null) return [{ type: 'middleware', desc: `${node.name} (node_modules)` }];
+          if (b.module === null) {
+            // A package export can BE a router — trust only reviewed entries.
+            if (registry.lookupPackagePassthrough(b.spec, b.name)) return [{ type: 'passthrough', name: b.name }];
+            return [{ type: 'opaque', desc: `${node.name} (unreviewed package export from ${b.spec})` }];
+          }
           return this.scanner.classifyModuleName(b.module, b.name, depth + 1, `${node.name} (from ${b.module})`);
         }
         if (b.kind === 'require') {
-          if (b.module === null) return [{ type: 'middleware', desc: `${node.name} (node_modules)` }];
+          if (b.module === null) {
+            if (registry.lookupPackagePassthrough(b.spec, '*')) return [{ type: 'passthrough', name: node.name }];
+            return [{ type: 'opaque', desc: `${node.name} (unreviewed package export from ${b.spec})` }];
+          }
           return [this.scanner.moduleRef(b.module, node.name)];
         }
         if (b.kind === 'array') return b.elements.flatMap((el) => this.classify(el, depth + 1));
@@ -767,9 +775,10 @@ class ModuleAnalysis {
         }
         if (c.type === 'CallExpression' && this.isNodeModulesRef(c)) {
           // require('express-rate-limit')({...}) — node_modules factory call.
+          // A package factory CAN return a router — only reviewed entries pass.
           const spec = c.arguments[0].value;
           if (registry.lookupPackagePassthrough(spec, null)) return [{ type: 'passthrough', name: spec }];
-          return [{ type: 'middleware', desc: this.src.slice(c.start, c.end) + '(...)' }];
+          return [{ type: 'opaque', desc: `${this.src.slice(c.start, c.end)}(...) — unreviewed package factory` }];
         }
         if (c.type === 'Identifier') {
           const b = this.bindings.get(c.name);
@@ -784,12 +793,12 @@ class ModuleAnalysis {
             if (registry.lookupPassthrough(this.file, c.name, { local: true })) return [{ type: 'passthrough', name: c.name }];
           }
           if (this.isNodeModulesRef(c)) {
-            // A node_modules factory (rateLimit, cors, morgan, ...) cannot
-            // return one of OUR routers — middleware, but never auth.
+            // A package factory CAN return a router (some packages export
+            // router factories) — only registry-reviewed entries count.
             if (registry.lookupPackagePassthrough(b.spec, b.kind === 'requireMember' ? b.name : null)) {
               return [{ type: 'passthrough', name: c.name }];
             }
-            return [{ type: 'middleware', desc: `${c.name}(...)` }];
+            return [{ type: 'opaque', desc: `${c.name}(...) — unreviewed package factory (${b.spec})` }];
           }
           return [{ type: 'opaque', desc: `${c.name}(...)` }];
         }
@@ -801,7 +810,7 @@ class ModuleAnalysis {
           if (spec && registry.lookupPackagePassthrough(spec, c.property.name)) {
             return [{ type: 'passthrough', name: `${spec}.${c.property.name}` }];
           }
-          return [{ type: 'middleware', desc: this.src.slice(c.start, c.end) + '(...)' }];
+          return [{ type: 'opaque', desc: `${this.src.slice(c.start, c.end)}(...) — unreviewed package factory` }];
         }
         return [{ type: 'opaque', desc: this.src.slice(c.start, c.end) + '(...)' }];
       }
@@ -809,12 +818,19 @@ class ModuleAnalysis {
         if (node.computed || node.property.type !== 'Identifier') return [{ type: 'opaque', desc: 'computed member' }];
         let mod = null;
         let modKnown = false;
-        if (isRequireCall(node.object)) { mod = resolveModulePath(this.file, node.object.arguments[0].value); modKnown = true; }
+        let spec = null;
+        if (isRequireCall(node.object)) { spec = node.object.arguments[0].value; mod = resolveModulePath(this.file, spec); modKnown = true; }
         else if (node.object.type === 'Identifier') {
           const b = this.bindings.get(node.object.name);
-          if (b && b.kind === 'require') { mod = b.module; modKnown = true; }
+          if (b && b.kind === 'require') { mod = b.module; spec = b.spec; modKnown = true; }
         }
-        if (modKnown && mod === null) return [{ type: 'middleware', desc: this.src.slice(node.start, node.end) }];
+        if (modKnown && mod === null) {
+          // A package member can BE a router — trust only reviewed entries.
+          if (registry.lookupPackagePassthrough(spec, node.property.name)) {
+            return [{ type: 'passthrough', name: `${spec}.${node.property.name}` }];
+          }
+          return [{ type: 'opaque', desc: `${this.src.slice(node.start, node.end)} — unreviewed package export` }];
+        }
         if (mod) {
           const g = registry.lookup(mod, node.property.name);
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
