@@ -131,6 +131,39 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   return { families: [], caseId: latest ? latest.id : null, source: 'none' };
 }
 
+// The families with residual LIVE recurring obligations on this account —
+// two kinds of evidence, matching cancellation-eligibility's own view of a
+// live obligation: (a) non-terminal recurring rows, and (b) a series anchor
+// re-armed with recurring_ongoing=true (staff can restore a family on a
+// completed anchor before its next occurrence exists, and that family is
+// owned, not restartable). The pricing-ai ownership loaders deliberately
+// answer [] for an inactive customer (loadActiveRecurringServiceRows), so
+// the churned lanes read the residual rows directly — same family detection
+// as the cancelled-family recovery. Throws when the rows cannot be read;
+// every caller FAILS CLOSED on that.
+async function ownedResidualFamilies(dbh, customerId) {
+  const {
+    detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
+  } = require('../self-booking-plan-sync');
+  const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
+  const residualBase = () => dbh('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
+    .limit(200)
+    .select('s.*', 'sv.service_key', 'sv.service_name');
+  const [nonTerminalRows, ongoingAnchorRows] = await Promise.all([
+    residualBase().whereNotIn('s.status', TERMINAL_STATUSES).where('s.is_recurring', true),
+    residualBase().where('s.recurring_ongoing', true),
+  ]);
+  const residualKeys = [];
+  for (const row of [...nonTerminalRows, ...ongoingAnchorRows]) {
+    if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+    for (const key of detectWaveGuardPlanKeys(row)) if (!residualKeys.includes(key)) residualKeys.push(key);
+  }
+  return uniqueServiceFamilies(residualKeys);
+}
+
 // A prior restart estimate the customer can still open (same liveness the
 // click-mint applies to its own lineage).
 function liveRestartEstimate(rows, now) {
@@ -171,48 +204,48 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     }
 
     // Ownership — FAIL CLOSED: a family with LIVE recurring rows on this
-    // account is never re-priced beside its live rate. The pricing-ai
-    // ownership loaders deliberately answer [] for an inactive customer
-    // (loadActiveRecurringServiceRows), so a churned restart reads the
-    // residual rows directly — same family detection as the recovery above.
-    const {
-      detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
-    } = require('../self-booking-plan-sync');
-    const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
-    let residualRows;
+    // account is never re-priced beside its live rate. Same residual read
+    // the accept-time revalidation runs (assertRestartAcceptEligible).
+    let ownedFamilies;
     try {
-      // Two kinds of evidence, matching cancellation-eligibility's own view
-      // of a live obligation: (a) non-terminal recurring rows, and (b) a
-      // series anchor re-armed with recurring_ongoing=true — staff can
-      // restore a family on a completed anchor before its next occurrence
-      // exists, and that family is owned, not restartable.
-      const residualBase = () => trx('scheduled_services as s')
-        .leftJoin('services as sv', 's.service_id', 'sv.id')
-        .where('s.customer_id', fresh.id)
-        .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
-        .limit(200)
-        .select('s.*', 'sv.service_key', 'sv.service_name');
-      const [nonTerminalRows, ongoingAnchorRows] = await Promise.all([
-        residualBase().whereNotIn('s.status', TERMINAL_STATUSES).where('s.is_recurring', true),
-        residualBase().where('s.recurring_ongoing', true),
-      ]);
-      residualRows = [...nonTerminalRows, ...ongoingAnchorRows];
+      ownedFamilies = await ownedResidualFamilies(trx, fresh.id);
     } catch (err) {
       logger.warn(`[plan-restart] residual ownership lookup failed for ${fresh.id} — refusing: ${err.message}`);
       throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
     }
-    const residualKeys = [];
-    for (const row of residualRows) {
-      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
-      for (const key of detectWaveGuardPlanKeys(row)) if (!residualKeys.includes(key)) residualKeys.push(key);
-    }
-    const ownedFamilies = uniqueServiceFamilies(residualKeys);
     const owned = new Set(ownedFamilies.map(pricingKeyFor));
     // The families this mint may actually quote: cancelled minus residual.
     const eligibleFamilies = families.filter((f) => !owned.has(pricingKeyFor(f)));
     const toPrice = eligibleFamilies.map(pricingKeyFor);
     if (!toPrice.length) {
       throw new RestartUnavailableError('nothing_to_restart', 'Those services are already active on this account.');
+    }
+
+    // Single-premises proof BEFORE any URL is handed out (codex GH r4 P1):
+    // the cancelled-family and residual queries above are scoped by
+    // customer_id alone, but the estimate is priced and addressed at the
+    // single primary street — a family cancelled at a SECONDARY premises
+    // would otherwise be quoted at the primary property's measurements.
+    // Same proof the portal offer runs (customerHasOnlyPrimaryPremises,
+    // cross-sell): a multi-premises profile — or a proof that cannot be
+    // evaluated, a missing primary street, or a street without provable
+    // locality — is the priced-by-hand 409, never an online price.
+    const crossSell = deps.crossSell || require('../service-report/cross-sell');
+    const linkage = require('../estimate-property-linkage');
+    const primaryStreet = linkage.normalizedStampedStreet(fresh.address_line1, fresh.address_line2, fresh.city, fresh.zip);
+    let singlePremises = false;
+    try {
+      const premisesProof = deps.customerHasOnlyPrimaryPremises
+        || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
+      singlePremises = Boolean(primaryStreet)
+        && !linkage.scopeKeyLacksLocality(primaryStreet)
+        && await premisesProof(trx, fresh.id, fresh, primaryStreet);
+    } catch (err) {
+      logger.warn(`[plan-restart] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
+      singlePremises = false;
+    }
+    if (!singlePremises) {
+      throw new RestartUnavailableError('pricing_unavailable', 'This restart needs to be set up by hand — please call or text us and we will take care of it.');
     }
 
     // Reuse a live restart estimate ONLY after the scope + ownership checks
@@ -246,27 +279,58 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     // under (cross-sell/one-tap). No LIVE lookup spend from a restart tap —
     // a cached lookup row or a prior accepted estimate for THIS street
     // supplies the footprint the stored profile lacks.
-    const crossSell = deps.crossSell || require('../service-report/cross-sell');
-    const { normalizedStampedStreet } = require('../estimate-property-linkage');
-    const primaryStreet = normalizedStampedStreet(fresh.address_line1, fresh.address_line2, fresh.city, fresh.zip);
     let propertySeed = null;
-    if (primaryStreet) {
-      try {
-        propertySeed = await crossSell.loadEstimateSeed(trx, fresh.id, primaryStreet);
-      } catch (err) {
-        logger.warn(`[plan-restart] estimate property seed skipped for ${fresh.id}: ${err.message}`);
-      }
+    try {
+      propertySeed = await crossSell.loadEstimateSeed(trx, fresh.id, primaryStreet);
+    } catch (err) {
+      logger.warn(`[plan-restart] estimate property seed skipped for ${fresh.id}: ${err.message}`);
     }
     const turfProfile = await pricingAi.loadTurfProfile(trx, fresh.id);
+    // Verified-correction probe discipline (codex GH r4 P1), mirrored from
+    // BOTH offer paths (cross-sell report + portal offer): only a USABLE
+    // lookup result carries staff's verified overrides folded in, so record
+    // whether one came back. When none does — a miss, a payload the resolver
+    // rejects (global verify flag), or no lookup at all — the price falls
+    // back to stored fields + the accepted-estimate seed, both OLDER than a
+    // technician's verified correction. Probed below, after the resolve.
+    const providedLookup = 'propertyLookup' in deps ? deps.propertyLookup : crossSell.cacheOnlyPropertyLookup;
+    const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+    let lookupProducedResult = false;
+    const trackedLookup = typeof providedLookup === 'function'
+      ? async (address) => {
+        const found = await providedLookup(address);
+        if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
+        return found;
+      }
+      : providedLookup;
     const propertyContext = await pricingAi.resolvePropertyContext({
       customer: fresh,
       turfProfile,
-      propertyLookup: 'propertyLookup' in deps ? deps.propertyLookup : crossSell.cacheOnlyPropertyLookup,
+      propertyLookup: trackedLookup,
       propertySeed,
     });
     const missing = pricingAi.missingPropertyFor(toPrice, propertyContext);
     if (missing) {
       throw new RestartUnavailableError('pricing_unavailable', 'We need a property measurement on file before we can price this online.');
+    }
+    // No lookup result means any verified correction on this address was NOT
+    // applied to the price. FAIL CLOSED, same as the offer paths' demote: an
+    // unreadable probe is not evidence that no corrections exist, and a
+    // correction on file makes this the priced-by-hand 409 instead of an
+    // exact price on a fact staff already fixed.
+    if (!lookupProducedResult) {
+      let correctionsUnapplied = false;
+      try {
+        const probe = deps.hasVerifiedOverrides
+          || require('../property-lookup/lookup-cache').hasVerifiedOverrides;
+        correctionsUnapplied = await probe(pricingAi.addressForCustomer(fresh));
+      } catch (err) {
+        correctionsUnapplied = true;
+        logger.warn(`[plan-restart] verified-override probe failed for ${fresh.id} — refusing: ${err.message}`);
+      }
+      if (correctionsUnapplied) {
+        throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
+      }
     }
 
     const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
@@ -405,11 +469,60 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
   });
 }
 
+// Accept-time revalidation (codex GH r4 P1) — called from the public
+// estimate accept transaction AFTER it takes the estimate row lock. The
+// residual-ownership exclusion in the mint runs at MINT time only, but the
+// published estimate stays acceptable until expiry: staff restoring a
+// family (or reactivating the whole account) between mint and accept would
+// let the old token accept a quote containing a now-live family — and the
+// AGENTS.md bound on this exception is that a live recurring rate is never
+// re-priced. Re-check the exact churn stamp and re-run the SAME residual
+// read against the QUOTED families, under the lock. FAIL CLOSED: drifted or
+// unreadable state refuses the accept with a 409 the portal can render.
+async function assertRestartAcceptEligible(trx, estimate) {
+  const refuse = (message) => {
+    const err = new Error(message);
+    err.status = 409;
+    err.code = 'RESTART_STATE_CHANGED';
+    return err;
+  };
+  const changed = () => refuse('This account changed since this restart quote was created — please reopen "Restart my plan" for a current quote.');
+  let quoted;
+  let fresh;
+  let ownedFamilies;
+  try {
+    // Fresh in-transaction read: the accept path locked this row FOR UPDATE
+    // just above, so this sees the committed truth, not the handler's
+    // pre-transaction snapshot.
+    const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
+    const planRestart = parseJson(row?.estimate_data, {})?.planRestart;
+    quoted = Array.isArray(planRestart?.families) ? planRestart.families : null;
+    fresh = row?.customer_id
+      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id', 'active', 'pipeline_stage')
+      : null;
+    ownedFamilies = fresh ? await ownedResidualFamilies(trx, fresh.id) : [];
+  } catch (err) {
+    logger.warn(`[plan-restart] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
+    throw refuse('We could not re-verify this restart just now — please try again in a moment.');
+  }
+  // A plan_restart estimate without its quoted families (or its customer)
+  // is malformed — never accept it.
+  if (!quoted || !quoted.length || !fresh) throw changed();
+  // Exactly the processor's churn stamp, same rule as the mint's locked
+  // re-check: anything else means staff reactivated the account.
+  if (fresh.active !== false || fresh.pipeline_stage !== 'churned') throw changed();
+  // A quoted family that went live again since the mint is a live rate this
+  // accept would re-price — refuse; the customer re-taps for a fresh quote.
+  const owned = new Set(ownedFamilies.map(pricingKeyFor));
+  if (quoted.some((f) => owned.has(pricingKeyFor(f)))) throw changed();
+}
+
 module.exports = {
   SOURCE,
   RESTARTABLE_FAMILIES,
   RestartUnavailableError,
   cancelledFamiliesFor,
   mintRestartEstimate,
-  _test: { liveRestartEstimate },
+  assertRestartAcceptEligible,
+  _test: { liveRestartEstimate, ownedResidualFamilies },
 };

@@ -190,6 +190,10 @@ function deps(overrides = {}) {
     // modules in this suite; the seed and cache-only lookup paths are inert.
     crossSell: { loadEstimateSeed: async () => null },
     propertyLookup: null,
+    // Single-premises proof + verified-override probe (codex GH r4): green
+    // by default here; the refusal tests override them.
+    customerHasOnlyPrimaryPremises: async () => true,
+    hasVerifiedOverrides: async () => false,
     bundleUtils: { pricingBundleMatchesEstimateTotals: () => true },
     buildEstimateSendSnapshot: async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: { frozen: true } } }),
     ...overrides,
@@ -409,6 +413,62 @@ describe('mintRestartEstimate', () => {
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });
   });
 
+  test('a multi-premises profile never gets an online restart price (proof false, proof unreadable, or no provable primary street)', async () => {
+    // Proof says a second premises exists → priced-by-hand 409, no row.
+    let d = deps({ customerHasOnlyPrimaryPremises: async () => false });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+    expect(recompute).not.toHaveBeenCalled();
+
+    // An unreadable proof is not evidence of a single premises — refuse.
+    d = deps({ customerHasOnlyPrimaryPremises: async () => { throw new Error('witness boom'); } });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+
+    // No primary street on the customer row → the proof cannot anchor.
+    tables.customers[0].address_line1 = null;
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('multi-premises also blocks REUSE of a live restart estimate (no URL of any kind)', async () => {
+    tables.estimates.push({
+      id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+    });
+    const d = deps({ customerHasOnlyPrimaryPremises: async () => false });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+  });
+
+  test('verified property overrides on a lookup miss refuse the online price (and an unreadable probe refuses too)', async () => {
+    // No usable lookup result (propertyLookup null) + a correction on file.
+    let d = deps({ hasVerifiedOverrides: async () => true });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+    expect(recompute).not.toHaveBeenCalled();
+
+    // Probe failure is not evidence that no corrections exist.
+    d = deps({ hasVerifiedOverrides: async () => { throw new Error('probe boom'); } });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('a USABLE lookup result skips the override probe (corrections are folded into the result)', async () => {
+    // The lookup returns a clean payload → the probe (which would refuse)
+    // must not run; the resolver receives the tracked wrapper.
+    const d = deps({
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      hasVerifiedOverrides: async () => { throw new Error('must not be called'); },
+    });
+    d.pricingAi.resolvePropertyContext = async (args) => {
+      await args.propertyLookup('1 Main St, Parrish, FL 34219');
+      return { propertyInput: { homeSqFt: 2200, lotSqFt: 9000, stories: 1 }, grassType: 'st_augustine', palmCount: null };
+    };
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(result.reused).toBe(false);
+    expect(tables.estimates).toHaveLength(1);
+  });
+
   test('the accepted-estimate property seed and cache-only lookup reach the property resolver', async () => {
     const seen = {};
     const d = deps({
@@ -432,5 +492,81 @@ describe('mintRestartEstimate', () => {
 
     const bad = deps({ buildEstimateSendSnapshot: async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundleError: 'boom' } }) });
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: bad })).rejects.toThrow(/did not freeze pricing/);
+  });
+});
+
+// ── accept-time revalidation (codex GH r4 P1): the checks the public accept
+// transaction re-runs on a plan_restart estimate under the estimate row lock.
+describe('assertRestartAcceptEligible', () => {
+  const trx = (table) => builder(table);
+  const RESTART_ESTIMATE = { id: 'est-r1' };
+  beforeEach(() => {
+    tables.estimates = [{
+      id: 'est-r1', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'tok-r1',
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+    }];
+  });
+
+  test('a still-churned account with no residual live families accepts', async () => {
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test('a quoted family that went LIVE after the mint refuses the accept (staff restored it)', async () => {
+    tables.scheduled_services = [
+      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+    ];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+  });
+
+  test('a re-armed completed series anchor counts as live at accept time too', async () => {
+    tables.scheduled_services = [
+      { id: 'anchor', customer_id: 'cust-1', status: 'completed', is_recurring: true, recurring_ongoing: true, service_type: 'Lawn Care Program' },
+    ];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+  });
+
+  test('a residual family OUTSIDE the quote does not block the accept', async () => {
+    tables.estimates[0].estimate_data = JSON.stringify({ planRestart: { families: ['lawn_care'] } });
+    tables.scheduled_services = [
+      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+    ];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test('a reactivated (or drifted) account refuses: only the exact churn stamp accepts', async () => {
+    tables.customers[0].active = true;
+    tables.customers[0].pipeline_stage = 'active_customer';
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+
+    tables.customers[0].active = null;
+    tables.customers[0].pipeline_stage = 'churned';
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+  });
+
+  test('malformed restart metadata or a missing customer refuses (never accept blind)', async () => {
+    tables.estimates[0].estimate_data = JSON.stringify({});
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+
+    tables.estimates[0].estimate_data = JSON.stringify({ planRestart: { families: ['pest_control'] } });
+    tables.customers = [];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+  });
+
+  test('an unreadable residual read fails closed with a retryable 409', async () => {
+    const failingTrx = (table) => {
+      const b = builder(table);
+      if (table.startsWith('scheduled_services')) {
+        b.whereNotIn = () => { throw new Error('rows read boom'); };
+      }
+      return b;
+    };
+    await expect(actualRestart.assertRestartAcceptEligible(failingTrx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
   });
 });

@@ -32,7 +32,7 @@ vi.mock('../components/brand/CustomerDialogHost', () => ({
 }));
 
 import api from '../utils/api';
-import { BillingTab } from './PortalPage';
+import { BillingTab, ScheduleTab } from './PortalPage';
 
 const baseCustomer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -72,5 +72,42 @@ describe('BillingTab — cancelled account is read-only (C4)', () => {
     await renderBilling({ ...baseCustomer, cancelled: false });
     expect(screen.getByText('Payment Methods')).toBeInTheDocument();
     expect(screen.getByText('Billing Preferences')).toBeInTheDocument();
+  });
+});
+
+// C4 codex GH r4 P1: the widened /api/schedule read returns surviving
+// pending/confirmed rows WITH rescheduleUrl — the read stays, but the
+// mutation controls (Confirm, the tokenized Reschedule link) must not
+// render for a cancelled session (the reschedule route refuses inactive
+// accounts server-side too; the client must not advertise the side door).
+describe('ScheduleTab — cancelled account renders no appointment mutations (C4)', () => {
+  const futureDate = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+  const upcomingVisit = {
+    id: 'svc-1', date: futureDate, serviceType: 'Quarterly Pest Control',
+    windowStart: '09:00', status: 'confirmed', customerConfirmed: false,
+    rescheduleUrl: '/reschedule/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  };
+
+  async function renderSchedule(customer) {
+    render(<ScheduleTab customer={customer} />);
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
+    await screen.findByText(/Quarterly Pest Control/);
+  }
+
+  it('cancelled: the visit row still renders (read), but Confirm and Reschedule do not', async () => {
+    api.getSchedule.mockResolvedValue({ upcoming: [upcomingVisit] });
+    await renderSchedule({ ...baseCustomer, cancelled: true, cancelledAt: '2026-08-22' });
+    expect(screen.queryByRole('button', { name: /confirm/i })).not.toBeInTheDocument();
+    expect(screen.queryByText('Reschedule')).not.toBeInTheDocument();
+    // The read survives: the appointment itself is listed.
+    expect(screen.getByText(/Quarterly Pest Control/)).toBeInTheDocument();
+  });
+
+  it('active: Confirm and the tokenized Reschedule link render unchanged', async () => {
+    api.getSchedule.mockResolvedValue({ upcoming: [upcomingVisit] });
+    await renderSchedule({ ...baseCustomer, cancelled: false });
+    expect(screen.getByRole('button', { name: /confirm/i })).toBeInTheDocument();
+    const link = screen.getByText('Reschedule');
+    expect(link).toHaveAttribute('href', upcomingVisit.rescheduleUrl);
   });
 });

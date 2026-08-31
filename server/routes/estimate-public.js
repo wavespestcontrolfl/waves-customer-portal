@@ -10169,6 +10169,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           throw err;
         }
       }
+      // Plan-restart accept revalidation (C4 codex GH r4 P1): the restart
+      // mint excludes families with residual live rows, but the published
+      // estimate stays acceptable until expiry — staff restoring a family
+      // or reactivating the account after the mint would let this token
+      // accept a quote containing a now-live recurring rate. Re-run the
+      // churn-stamp + residual-ownership checks under the estimate row lock
+      // taken just above; drifted or unreadable state refuses the accept
+      // (fail closed, 409 with a message the portal renders).
+      if (estimate.source === 'plan_restart') {
+        const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
+        await assertRestartAcceptEligible(trx, estimate);
+      }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
         .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])

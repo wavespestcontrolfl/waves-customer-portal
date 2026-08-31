@@ -4438,6 +4438,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </span>
       );
     }
+    // C4 (codex GH r4 P1): a cancelled session is read-only — confirming is
+    // a write (its route is not widened for cancelled reads), so no button.
+    // The Confirmed badge above still renders: it is pure status display.
+    if (cancelledAccount) return null;
     const busy = !!confirmingIds[s.id];
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
@@ -4543,13 +4547,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             ))}
           </div>
 
-          {/* Confirm + Reschedule */}
+          {/* Confirm + Reschedule — C4: both are appointment mutations, so a
+              cancelled (read-only) session renders neither control; the
+              tokenized reschedule route refuses inactive accounts
+              server-side too. The Confirmed badge (status display) stays. */}
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
-            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-              ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-              fontSize: 12, position: 'relative',
-            }}>Reschedule</a>
+            {!cancelledAccount && (
+              <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+                ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
+                fontSize: 12, position: 'relative',
+              }}>Reschedule</a>
+            )}
           </div>
         </div>
       </div>
@@ -4588,10 +4597,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           {renderConfirmBtn(s, true)}
-          <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-            ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
-            fontSize: 12, position: 'relative',
-          }}>Reschedule</a>
+          {/* C4: no Reschedule mutation control for a cancelled session. */}
+          {!cancelledAccount && (
+            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+              ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
+              fontSize: 12, position: 'relative',
+            }}>Reschedule</a>
+          )}
         </div>
       </div>
     </div>

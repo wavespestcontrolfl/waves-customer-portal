@@ -104,6 +104,11 @@ jest.mock('../models/db', () => {
     b.orderByRaw = () => b;
     b.modify = (fn) => { fn(b); return b; };
     b.select = () => b;
+    // Join/limit surface for the plan-restart residual read (C4): the fake
+    // has no second table to join, so both are inert pass-throughs (the
+    // `s.`-prefixed filters simply match nothing against unprefixed rows).
+    b.leftJoin = () => b;
+    b.limit = () => b;
     // Row-lock + overlap-predicate surface the slot-commit path chains
     // (commitReservation's FOR UPDATE read, applyWindowOverlapFilter,
     // findConflictingVisits' hold filter). Lock/OR semantics are inert here —
@@ -1351,5 +1356,71 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     conversionOk();
     const gateOffStale = await putAccept('tok-terms-6-x0123456789', { termsVersion: 'v2000-01' });
     expect(gateOffStale.status).toBe(200);
+  });
+});
+
+describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the accept txn', () => {
+  // A plan_restart estimate accepts through the SAME public path — the
+  // revalidation re-checks the churn stamp + residual ownership under the
+  // estimate row lock, so a mint-then-staff-restore window can no longer be
+  // accepted by the old token (AGENTS.md: live recurring rates are never
+  // re-priced). Residual-ownership refusals are pinned in plan-restart.test.js;
+  // this suite pins the WIRING and the fail-closed rollback.
+  const restartEstimate = (overrides = {}) => recurringPestEstimate({
+    id: 'est-restart-1',
+    token: 'tok-restart-1-x0123456789',
+    source: 'plan_restart',
+    customer_id: 'cust-9',
+    estimate_data: JSON.stringify({
+      planRestart: { families: ['pest_control'], mintedAt: '2026-08-30T00:00:00Z' },
+      result: {
+        recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] },
+        oneTime: { items: [], membershipFee: 99 },
+      },
+    }),
+    ...overrides,
+  });
+  const churnedCustomer = (overrides = {}) => ({
+    id: 'cust-9', active: false, pipeline_stage: 'churned', deleted_at: null,
+    first_name: 'Pat', last_name: 'Tester', phone: '(941) 555-0123', email: 'pat@example.com',
+    ...overrides,
+  });
+
+  test('a customer reactivated after the mint refuses the accept (409) and rolls back', async () => {
+    resetStore(restartEstimate());
+    db.__state.tables.customers = [churnedCustomer({ active: true, pipeline_stage: 'active_customer' })];
+    const res = await putAccept('tok-restart-1-x0123456789');
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/changed since this restart quote/);
+    // Fail closed: nothing accepted, price not locked, no invoice sent.
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('active drifted to NULL refuses too — only the exact churn stamp accepts', async () => {
+    resetStore(restartEstimate({ id: 'est-restart-2', token: 'tok-restart-2-x0123456789' }));
+    db.__state.tables.customers = [churnedCustomer({ active: null })];
+    const res = await putAccept('tok-restart-2-x0123456789');
+    expect(res.status).toBe(409);
+    expect(storedEstimate().status).toBe('sent');
+  });
+
+  test('a still-churned customer passes the revalidation and the accept commits', async () => {
+    resetStore(restartEstimate({ id: 'est-restart-3', token: 'tok-restart-3-x0123456789' }));
+    db.__state.tables.customers = [churnedCustomer()];
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-9',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+    const res = await putAccept('tok-restart-3-x0123456789');
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
   });
 });
