@@ -316,7 +316,9 @@ describe('detector adapters', () => {
       { id: 'v3', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
       { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
     ] });
-    mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }] });
+    // v4 is priced, so its invoice must exist or it is itself a finding under
+    // the owed-but-never-minted arm.
+    mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }, { scheduled_service_id: 'v4' }] });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
     // The db is mocked, so a nonexistent column cannot fail the query here —
     // it shipped once as `ss.billed_to_payer_id`, which is a schedule-query
@@ -329,6 +331,21 @@ describe('detector adapters', () => {
     expect(out.count).toBe(1);
     expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
     expect(out.detail).toMatchObject({ checked: 4, truncated: false });
+  });
+
+  test('unbilled_completed_visits: a rate added AFTER an unbilled completion does not hide it (Codex P1)', async () => {
+    // The repair path: staff sets monthly_rate to fix the account. Recomputing
+    // from current fields would re-predict the visit as billable/covered and
+    // silently drop it. Dues coverage now needs PAYMENT evidence for the
+    // visit's month (the payments mock returns none), so the owed-but-never-
+    // minted invoice is still reported.
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 46.33, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.count).toBe(1);
+    expect(out.ids).toEqual(['v1 [no_invoice_minted:invoice]']);
   });
 
   test('unbilled_completed_visits: a VOID invoice is not proof of billing (Codex P1)', async () => {
@@ -374,7 +391,8 @@ describe('detector adapters', () => {
       service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze',
     }));
     mockTables.scheduled_services = mockChain({ select: rows, first: { n: String(CLOSEOUT_VISIT_CAP + 4) } });
-    mockTables.invoices = mockChain({ select: [] });
+    // All priced and all invoiced — the ONLY finding must be the truncation.
+    mockTables.invoices = mockChain({ select: rows.map((r) => ({ scheduled_service_id: r.id })) });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
     expect(out.count).toBe(1);
     expect(out.ids).toEqual([`[truncated: 4 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);

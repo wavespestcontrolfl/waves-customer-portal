@@ -142,11 +142,20 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'annual_prepay' }))).toBeNull();
   });
 
-  test('the remaining legitimate arrangements pass', () => {
-    expect(recurringWithoutBillableAmount({ ...unbillable, prepaid: { totalAmount: 900 } })).toBeNull();
-
+  test('free-by-design work passes — the only exemptions left', () => {
+    // The gate now carries NO bespoke exemptions: every verdict comes from the
+    // canonical prediction. The payer, recorded-prepayment and
+    // requested-annual-prepay exemptions were each removed after Codex showed
+    // that none of them supplies an AMOUNT.
     expect(recurringWithoutBillableAmount({ ...unbillable, isCallback: true })).toBeNull();
     expect(recurringWithoutBillableAmount({ ...unbillable, serviceType: 'Pest Control Re-Service' })).toBeNull();
+  });
+
+  test('a recorded prepayment is not a price for the plan (Codex P0)', () => {
+    // stampSeriesPrepaid spreads the operator's total across the visits seeded
+    // NOW; an ongoing series keeps generating unstamped, unpriced visits after
+    // it, and those complete unbilled.
+    expect(recurringWithoutBillableAmount(unbillable)).toBeTruthy();
   });
 
   test('a payer does NOT substitute for a price (Codex P0)', () => {

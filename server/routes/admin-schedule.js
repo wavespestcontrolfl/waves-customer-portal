@@ -3268,7 +3268,6 @@ function recurringWithoutBillableAmount({
   isRecurring,
   recurringFloorPrice,
   customer,
-  prepaid,
   isCallback,
   serviceType,
 }) {
@@ -3281,7 +3280,11 @@ function recurringWithoutBillableAmount({
   // lost-AR condition (Codex P0). A real prepay booking carries its quoted
   // price on the series anyway, so this costs nothing legitimate: it only
   // refuses a prepay booking that has no amount on it at all.
-  if (prepaid && Number(prepaid.totalAmount) > 0) return null;
+  // NO prepayment exemption either. stampSeriesPrepaid distributes the
+  // operator's total across the visits seeded NOW; an ongoing series keeps
+  // generating later visits that carry no stamp and no price, and those
+  // complete unbilled (Codex P0). A recorded prepayment is a settlement for
+  // some visits, never a price for the plan.
   // NO payer exemption. An active payer identifies who owes the invoice; it
   // supplies no amount, and completion derives invoiceAmount from the visit
   // price / rate alone and categorically refuses to mint at <= 0. An
@@ -5031,7 +5034,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
         isRecurring,
         recurringFloorPrice,
         customer,
-        prepaid: req.body.prepaid || null,
         isCallback: resolvedIsCallback,
         serviceType,
       });

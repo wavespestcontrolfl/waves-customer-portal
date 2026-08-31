@@ -226,6 +226,7 @@ const DETECTORS = Object.freeze([
           : [],
       );
       const { resolveForInvoice } = require('./payer');
+      const { monthlyDuesCollected } = require('./billing-lane');
       for (const v of evaluated) {
         if (invoicedIds.has(v.id)) continue;
         // Canonical active-payer resolution for EVERY visit, with BOTH ids.
@@ -244,9 +245,17 @@ const DETECTORS = Object.freeze([
           waveguard_tier: v.waveguard_tier,
           monthly_rate: v.monthly_rate,
         });
+        // Dues coverage is asserted from PAYMENT EVIDENCE for the visit's own
+        // month, not from the customer's current rate/tier. Those fields are
+        // mutable: setting a rate to REPAIR an account after an unbilled
+        // completion would otherwise make yesterday's visit re-predict as
+        // covered and vanish from this sweep — hiding the very incident the
+        // repair was responding to (Codex P1).
+        const duesCollectedThisMonth = await monthlyDuesCollected(db, v.customer_id, new Date(`${yesterday}T12:00:00Z`));
         const prediction = predictCompletionBilling({
           lane: lane.mode,
           billingMode: v.billing_mode || null,
+          duesCollectedThisMonth,
           // Autopay/dues state is a SETTLEMENT detail; the gap this detector
           // hunts is "no number exists at all", which neither can create or
           // cure. Left at the conservative defaults so an unreadable wallet
@@ -264,11 +273,17 @@ const DETECTORS = Object.freeze([
         });
         // hasChargeableMethod omitted: the wallet only sharpens the tech's
         // on-site message, and this detector reports ids only (PII rule).
-        // Label from the GAP, not the prediction: a payer-billed prediction
-        // carries no `reason` of its own, and the gap is the thing being
-        // reported.
+        // Two ways a completed visit leaves money behind, and the second is
+        // the one mutable customer fields could hide: either nothing was
+        // billable at all (the gap), or an invoice WAS owed and none exists.
+        // Label from the GAP, not the prediction — a payer-billed prediction
+        // carries no `reason` of its own.
         const gap = unbilledCompletionGap({ prediction });
-        if (gap) ids.push(`${v.id} [${gap.reason}]`);
+        if (gap) {
+          ids.push(`${v.id} [${gap.reason}]`);
+        } else if (['invoice', 'auto_charge'].includes(prediction.kind)) {
+          ids.push(`${v.id} [no_invoice_minted:${prediction.kind}]`);
+        }
       }
       return { count: ids.length, ids, detail: { checked: evaluated.length, date: yesterday, truncated } };
     },
