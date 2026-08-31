@@ -151,6 +151,13 @@ function hasParamCi(url, name) {
   for (const [k] of url.searchParams) if (k.toLowerCase() === want) return true;
   return false;
 }
+// Non-empty value, case-insensitive on the name — "?tag=" is not an
+// associate tag (Codex PR3 r10).
+function paramValueCi(url, name) {
+  const want = String(name).toLowerCase();
+  for (const [k, v] of url.searchParams) if (k.toLowerCase() === want && String(v).trim()) return String(v).trim();
+  return '';
+}
 
 function isAmazonHost(hostname) {
   const host = String(hostname || '').toLowerCase();
@@ -214,8 +221,8 @@ function validateProduct(row, { now = new Date() } = {}) {
     const host = url.hostname.toLowerCase();
     if (host !== 'amazon.com' && host !== 'www.amazon.com') {
       errors.push('amazon products must link amazon.com directly — never amzn.to, redirects, or cloak domains (Associates policy)');
-    } else if (!hasParamCi(url, 'tag')) {
-      errors.push('amazon approved_affiliate_url is missing the tag= associate parameter');
+    } else if (!paramValueCi(url, 'tag')) {
+      errors.push('amazon approved_affiliate_url is missing a non-empty tag= associate parameter');
     }
   }
   if (!Array.isArray(row.allowed_post_types) || row.allowed_post_types.length === 0) {

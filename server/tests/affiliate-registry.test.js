@@ -61,6 +61,9 @@ describe('validateProduct', () => {
     // parameter NAME is case-insensitive (Codex PR3 r8)
     expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?Tag=wavespest-20' })).join(' ')).toMatch(/no tag=/);
     expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?TAG=wavespest-20' }))).toEqual([]);
+    for (const empty of ['?tag=', '?TAG=', '?tag=%20']) {
+      expect(registry.validateProduct(green({ approved_affiliate_url: `https://www.amazon.com/dp/B000TEST01${empty}` })).join(' ')).toMatch(/non-empty tag=/);
+    }
   });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {
