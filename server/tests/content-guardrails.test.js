@@ -428,6 +428,18 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('a code-fenced or commented <AffiliateLink> is not a rendered component (astro counting-view parity)', () => {
+    withAffiliateEnv(() => {
+      const fenced = 'Intro.\n\n## Sec\n\n```mdx\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n```\n\n{/* <AffiliateLink product="rain-gauge" placement="primary-rec">y</AffiliateLink> */}\n\nplain prose.';
+      const r = guardrails.evaluate({ body: fenced, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+      expect(affiliateCodes(r)).toEqual([]);
+      // An expression-wrapped one still counts (it renders) — dark gate ⇒ P0.
+      const expr = `Intro.\n\n## Sec\n\n[quote](/quote/)\n\n{true && ${link('rain-gauge')}}`;
+      expect(affiliateCodes(guardrails.evaluate({ body: expr, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:UNREGISTERED_AFFILIATE_LINK');
+      expect(guardrails._internals.collectAffiliateLinkTags(expr)).toHaveLength(1);
+    }, { gate: '' });
+  });
+
   test('raw tracking URLs stay DISALLOWED_EXTERNAL_LINK — the component is the ONLY path (no bypass)', () => {
     withAffiliateEnv(() => {
       const r = guardrails.evaluate({

@@ -320,6 +320,10 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
   test('a head without <AffiliateLink> passes; unreadable head fails closed', () => {
     expect(affiliateBeltVerdict({}, '---\ntitle: x\n---\nplain body').ok).toBe(true);
     expect(affiliateBeltVerdict({}, null).ok).toBe(false);
+    // A code-fenced example is not a rendered component — an otherwise
+    // affiliate-free head must not be withheld forever (pre-push audit P1).
+    const fenced = '---\ntitle: x\n---\n\n## Sec\n\n```mdx\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n```\n\nplain body';
+    expect(affiliateBeltVerdict({}, fenced).ok).toBe(true);
   });
   test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', () => {
     const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';

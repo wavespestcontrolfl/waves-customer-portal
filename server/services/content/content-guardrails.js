@@ -1665,8 +1665,15 @@ function literalAttribute(attrs, name) {
 }
 
 function collectAffiliateLinkTags(text) {
+  // Astro-parity COUNTING view: code and comments never render, so an
+  // <AffiliateLink> inside a fenced example is not a component (it would
+  // force affiliate_review and withhold auto-merge on an affiliate-free
+  // post); expressions stay ({cond && <AffiliateLink/>} renders). The
+  // masks are length-preserving, so tag.start offsets stay valid against
+  // the caller's original text. Channel stripping
+  // (containsAffiliateMaterial) deliberately keeps the raw scan.
   const tags = [];
-  for (const tag of eachTag(String(text || ''))) {
+  for (const tag of eachTag(blankNonRenderedMarkdown(blankComments(String(text || ''))))) {
     if (tag.isClose || tag.name !== 'affiliatelink') continue;
     const productId = (literalAttribute(tag.attrs, 'product') || '').trim();
     const placement = (literalAttribute(tag.attrs, 'placement') || '').trim();

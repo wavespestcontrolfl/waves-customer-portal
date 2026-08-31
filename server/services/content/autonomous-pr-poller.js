@@ -335,7 +335,14 @@ async function headRefreshFileContent(run, pr) {
 function affiliateBeltVerdict(run, head, prHeadSha = null) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
-  if (!/<AffiliateLink\b/.test(content)) return { ok: true };
+  // A RENDERED <AffiliateLink> only — the guardrails counting view masks
+  // code fences and comments, so a code-fenced example must not withhold an
+  // affiliate-free PR forever. Guardrails unavailable → the raw scan
+  // over-detects, which is the safe (withholding) direction.
+  let hasAffiliate;
+  try { hasAffiliate = require('./content-guardrails').affiliateProductIdsIn(content).length > 0; }
+  catch (_) { hasAffiliate = /<AffiliateLink\b/.test(content); }
+  if (!hasAffiliate) return { ok: true };
   // The kill switch is re-checked at MERGE time: an approval taken while the
   // lane was open must not publish affiliate material after
   // GATE_AFFILIATE_LINKS was unset (exact 'true', same call-time read as
