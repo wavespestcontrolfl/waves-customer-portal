@@ -173,6 +173,31 @@ describe('runPlanHoldLifecycle', () => {
   });
 });
 
+describe('runPlanHoldLifecycle — notice period (codex r2)', () => {
+  test('a reminder delivered late pushes the restart AND the parked visits out 7 days from delivery', async () => {
+    seed({
+      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly', tier_protected_until: daysOut(2) }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' }],
+      holds: [{ id: 'h2', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(2), held_monthly_rate: 90, reminder_sent_at: null, created_at: new Date(), moved_visits: JSON.stringify({ moved: [] }) }],
+      visits: [{ id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(2), service_type: 'Lawn Care Service', window_start: '08:00', window_end: '10:00' }],
+    });
+    // Day 0: reminder goes out (2 days before the old resume date).
+    const first = await runPlanHoldLifecycle({ today: TODAY });
+    expect(first.reminded).toBe(1);
+    // Day 2: resume date reached but only 2 days of notice → restart and
+    // the visit both move to day 7; billing stays suspended.
+    const onOldDate = await runPlanHoldLifecycle({ today: daysOut(2) });
+    expect(onOldDate.resumed).toBe(0);
+    expect(String(mockState.tables.plan_holds[0].resume_on)).toBe(daysOut(7));
+    expect(mockReschedule).toHaveBeenCalledWith('v1', daysOut(7), expect.objectContaining({ start: '08:00' }), 'plan_hold_notice', 'system', {});
+    expect(Number(mockState.tables.customer_plan_rates[0].monthly_rate)).toBe(0);
+    // Day 7: full notice elapsed → resumes.
+    const onNew = await runPlanHoldLifecycle({ today: daysOut(7) });
+    expect(onNew.resumed).toBe(1);
+    expect(Number(mockState.tables.customer_plan_rates[0].monthly_rate)).toBe(90);
+  });
+});
+
 describe('planScopedWindDown (ruling C-3)', () => {
   const visitRow = (family, extra = {}) => ({
     id: `v-${family}`, customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(10),
@@ -208,5 +233,40 @@ describe('planScopedWindDown (ruling C-3)', () => {
     expect(plan.scalarAfter).toBe(expected);
     // Demotion never lowers the remaining family's rate.
     expect(plan.remainingRates[0].after).toBeGreaterThanOrEqual(60);
+  });
+
+  test('a HELD remaining family reprices its saved hold rate, not its zeroed component', async () => {
+    seed({
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: 60, billing_mode: 'monthly', active: true }],
+      components: [
+        { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' },
+        { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
+      ],
+      holds: [{ id: 'h9', customer_id: 'c1', family_key: 'lawn_care', status: 'active', held_monthly_rate: 90, resume_on: daysOut(30), created_at: new Date() }],
+      visits: [visitRow('lawn_care'), visitRow('pest_control')],
+    });
+    const plan = await planScopedWindDown('c1', ['pest_control']);
+    expect(plan.ok).toBe(true);
+    const lawn = plan.remainingRates.find((r) => r.family === 'lawn_care');
+    expect(lawn.heldHoldId).toBe('h9');
+    expect(lawn.before).toBe(90);
+    expect(lawn.after).toBeGreaterThan(90); // Silver → Bronze from the HELD rate
+    expect(plan.scalarAfter).toBe(0);      // held family contributes 0 until resume
+  });
+
+  test('per-application lane: surviving uninvoiced rows are repriced at the demoted tier', async () => {
+    seed({
+      customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true }],
+      visits: [
+        visitRow('lawn_care'),
+        { ...visitRow('pest_control'), estimated_price: 90, primary_line_price: 90 },
+      ],
+    });
+    const plan = await planScopedWindDown('c1', ['lawn_care']);
+    expect(plan.ok).toBe(true);
+    expect(plan.perApplicationLane).toBe(true);
+    expect(plan.perAppRows).toHaveLength(1);
+    expect(plan.perAppRows[0]).toMatchObject({ family: 'pest_control', before: 90 });
+    expect(plan.perAppRows[0].after).toBeGreaterThan(90);
   });
 });

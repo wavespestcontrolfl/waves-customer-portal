@@ -270,7 +270,54 @@ async function consumeRetentionOffer({ offerId, expectedChargesApplied, amount, 
   return updated === 1;
 }
 
+/**
+ * Slot reservation used by EVERY charge rail (scheduled-visit invoice mint,
+ * monthly-membership autopay): a CAS UPDATE that advances charges_applied
+ * only from the value the caller computed against. Zero rows = a
+ * concurrent charge won the slot — the caller applies NO discount.
+ */
+async function reserveRetentionSlot({ offerId, expectedChargesApplied, amount, exhaustsOffer }, dbh = db) {
+  const updated = await dbh('retention_offers')
+    .where({ id: offerId, status: 'granted', charges_applied: expectedChargesApplied })
+    .where(function notExpired() {
+      this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
+    })
+    .update({
+      charges_applied: expectedChargesApplied + 1,
+      amount_applied: dbh.raw('amount_applied + ?', [amount]),
+      ...(exhaustsOffer ? { status: 'exhausted' } : {}),
+      updated_at: new Date(),
+    });
+  return updated > 0;
+}
+
+// Undo a reservation whose charge never happened (provider declined /
+// threw). Only for rails without a wrapping transaction (Stripe calls).
+async function releaseRetentionSlot({ offerId, expectedChargesApplied, amount }, dbh = db) {
+  return dbh('retention_offers')
+    .where({ id: offerId, charges_applied: expectedChargesApplied + 1 })
+    .update({
+      charges_applied: expectedChargesApplied,
+      amount_applied: dbh.raw('GREATEST(amount_applied - ?, 0)', [amount]),
+      status: 'granted',
+      updated_at: new Date(),
+    });
+}
+
+// Record which charge consumed the slot ("<invoiceId>" or "payment:<id>").
+async function stampRetentionApplied({ offerId, ref }, dbh = db) {
+  return dbh('retention_offers')
+    .where({ id: offerId })
+    .update({
+      applied_invoice_ids: dbh.raw('applied_invoice_ids || ?::jsonb', [JSON.stringify([String(ref)])]),
+      updated_at: new Date(),
+    });
+}
+
 module.exports = {
+  reserveRetentionSlot,
+  releaseRetentionSlot,
+  stampRetentionApplied,
   OFFER_REASONS,
   OFFER_FAMILIES,
   MIN_TENURE_DAYS,

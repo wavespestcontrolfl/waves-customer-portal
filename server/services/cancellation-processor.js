@@ -192,8 +192,15 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
 
   const components = await loadComponents(dbh, customerId);
   const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';
+  const perApplicationLane = String(customer.billing_mode || '') === 'per_application';
   const byFamily = new Map(components.map((c) => [c.family_key, Number(c.monthly_rate) || 0]));
-  const attributed = inScope.every((f) => byFamily.has(f)) && remaining.every((f) => byFamily.has(f));
+  // A family on HOLD carries its real price in plan_holds.held_monthly_rate
+  // (its component is 0) — reprice THAT and leave the component/source
+  // alone, or the resume would restore a stale rate / cancel the hold as
+  // obsolete (codex r2 P1).
+  const activeHolds = await dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).select('id', 'family_key', 'held_monthly_rate').catch(() => []);
+  const heldByFamily = new Map((activeHolds || []).map((h) => [h.family_key, h]));
+  const attributed = inScope.every((f) => byFamily.has(f) || heldByFamily.has(f)) && remaining.every((f) => byFamily.has(f) || heldByFamily.has(f));
   if (monthlyLane && !attributed) return { ok: false, error: 'scoped_unattributed' };
 
   const reprice = (rate) => {
@@ -201,13 +208,43 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
     const gross = discountBefore < 1 ? rate / (1 - discountBefore) : rate;
     return Math.round(gross * (1 - discountAfter) * 100) / 100;
   };
-  const remainingRates = remaining.map((f) => ({ family: f, before: byFamily.get(f) ?? null, after: monthlyLane ? reprice(byFamily.get(f) || 0) : null }));
+  const remainingRates = remaining.map((f) => {
+    const hold = heldByFamily.get(f);
+    if (hold && hold.held_monthly_rate != null) {
+      const before = Number(hold.held_monthly_rate) || 0;
+      return { family: f, before, after: monthlyLane ? reprice(before) : null, heldHoldId: hold.id };
+    }
+    return { family: f, before: byFamily.get(f) ?? null, after: monthlyLane ? reprice(byFamily.get(f) || 0) : null };
+  });
+  // Scalar = Σ live components after reprice; held families contribute 0
+  // until they resume (their repriced rate lives on the hold).
   const scalarAfter = monthlyLane
-    ? Math.round(remainingRates.reduce((sum, r) => sum + (r.after || 0), 0) * 100) / 100
+    ? Math.round(remainingRates.filter((r) => !r.heldHoldId).reduce((sum, r) => sum + (r.after || 0), 0) * 100) / 100
     : (customer.monthly_rate == null ? null : Number(customer.monthly_rate));
+
+  // Per-application lane (codex r2 P1): each surviving UNINVOICED upcoming
+  // visit carries its own tier-discounted price on the row — the demotion
+  // must reprice those rows or the old bundle discount lives on forever.
+  const perAppRows = [];
+  if (perApplicationLane) {
+    for (const row of rows) {
+      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+      const fam = uniqueServiceFamilies(detectWaveGuardPlanKeys(row))[0];
+      if (!fam || !remaining.includes(fam)) continue;
+      if (!CANCELLABLE_STATUSES.includes(String(row.status))) continue;
+      const price = Number(row.estimated_price);
+      if (!(price > 0)) continue;
+      perAppRows.push({
+        id: row.id, family: fam, before: price, after: reprice(price),
+        primarySet: row.primary_line_price !== null && row.primary_line_price !== undefined,
+        priorPrimary: row.primary_line_price,
+      });
+    }
+  }
   return {
     ok: true, owned, inScope, remaining, tierBefore, tierAfter, discountBefore, discountAfter,
-    monthlyLane, remainingRates, scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
+    monthlyLane, perApplicationLane, remainingRates, perAppRows,
+    scalarBefore: customer.monthly_rate == null ? null : Number(customer.monthly_rate), scalarAfter,
   };
 }
 
@@ -216,8 +253,27 @@ async function applyScopedWindDown(customerId, plan, { requestId } = {}) {
     if (plan.monthlyLane) {
       await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
       for (const r of plan.remainingRates) {
+        if (r.heldHoldId) {
+          // Held family: reprice the HOLD's saved rate; component stays 0 /
+          // source plan_hold so the resume restores the demoted price.
+          await trx('plan_holds').where({ id: r.heldHoldId, status: 'active' })
+            .update({ held_monthly_rate: r.after, updated_at: new Date() });
+          continue;
+        }
         await trx('customer_plan_rates').where({ customer_id: customerId, family_key: r.family })
           .update({ monthly_rate: r.after, source: 'cancellation_scoped', effective_at: new Date(), updated_at: new Date() });
+      }
+    }
+    if (plan.perApplicationLane) {
+      // CAS per row against the price we planned from; a row invoiced or
+      // repriced in the meantime is skipped, never double-adjusted.
+      for (const r of plan.perAppRows || []) {
+        const invoiced = await trx('invoices').where({ scheduled_service_id: r.id }).whereNot('status', 'void').first('id');
+        if (invoiced) continue;
+        const casWhere = { id: r.id, estimated_price: r.before };
+        if (r.primarySet) casWhere.primary_line_price = r.priorPrimary;
+        await trx('scheduled_services').where(casWhere)
+          .update({ estimated_price: r.after, ...(r.primarySet ? { primary_line_price: r.after } : {}), updated_at: new Date() });
       }
     }
     const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };

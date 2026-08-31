@@ -241,6 +241,44 @@ async function cancelHold(holdId, { compensateVisits = true } = {}) {
 }
 
 /**
+ * Push a hold's restart out to `newResume`: every upcoming visit in the
+ * family moves by the same delta (they were parked on the old resume
+ * date) and the hold row follows, so no visit can dispatch while the
+ * family is still held at $0 (codex r2 P1).
+ */
+async function shiftHoldResume(hold, newResume) {
+  const oldResume = String(hold.resume_on).slice(0, 10);
+  const delta = daysBetween(oldResume, newResume);
+  if (delta <= 0) return { shifted: 0 };
+  const visits = await familyUpcomingVisits(hold.customer_id, hold.family_key);
+  const SmartRebooker = require('../rebooker');
+  const moved = [];
+  for (const visit of visits) {
+    const from = String(visit.scheduled_date).slice(0, 10);
+    try {
+      await SmartRebooker.reschedule(visit.id, addDays(from, delta), {
+        start: visit.window_start || null, end: visit.window_end || null,
+      }, 'plan_hold_notice', 'system', {});
+      moved.push({ id: visit.id, from, to: addDays(from, delta), window: { start: visit.window_start || null, end: visit.window_end || null } });
+    } catch (err) {
+      logger.error(`[holds] notice shift failed for visit ${visit.id} (hold ${hold.id}): ${err.message}`);
+      const { notifyAdmin } = require('../notification-service');
+      await notifyAdmin('service', 'Plan hold: visit needs a manual move', `Visit ${visit.id} could not be pushed to ${addDays(from, delta)} for hold ${hold.id} — move it by hand; the family is still held.`, {
+        bell: true, dedupeKey: `plan_hold_notice_shift_failed:${visit.id}:${newResume}`, metadata: { kind: 'plan_hold_notice_shift_failed', holdId: hold.id, visitId: visit.id },
+      }).catch(() => {});
+    }
+  }
+  let prior = {};
+  try { prior = typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : (hold.moved_visits || {}); } catch { prior = {}; }
+  await db('plan_holds').where({ id: hold.id }).update({
+    resume_on: newResume,
+    moved_visits: JSON.stringify({ moved: [...(prior.moved || []), ...moved] }),
+    updated_at: new Date(),
+  });
+  return { shifted: moved.length };
+}
+
+/**
  * Daily lifecycle (scheduler): 7-day restart texts, then auto-resume.
  * Both idempotent — the reminder stamps reminder_sent_at, the resume flips
  * status under the live-unique index.
@@ -304,13 +342,23 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       // restart out a full week — the notice period is the consent.
       if (hold.reminder_sent_at) {
         const stampedEt = etDateString(new Date(hold.reminder_sent_at));
-        if (today < addDays(stampedEt, 7)) continue;
+        const effective = addDays(stampedEt, 7);
+        if (today < effective) {
+          // Late notice: the restart (and the parked visits) move out to
+          // seven days after delivery — once, idempotently.
+          if (String(hold.resume_on).slice(0, 10) < effective) await shiftHoldResume(hold, effective);
+          continue;
+        }
       }
       if (!hold.reminder_sent_at) {
-        if (String(hold.resume_on).slice(0, 10) < today) {
+        if (String(hold.resume_on).slice(0, 10) <= today) {
+          // Undeliverable notice: push the restart a week, park a bell —
+          // the visits must not sit on a past date while the family is $0.
+          const pushed = addDays(today, 7);
+          await shiftHoldResume(hold, pushed);
           const { notifyAdmin } = require('../notification-service');
-          await notifyAdmin('service', 'Plan hold cannot auto-resume: restart text undeliverable', `Hold ${hold.id} (${hold.family_key}) reached its resume date with no delivered reminder — contact the customer and resume by hand.`, {
-            bell: true, dedupeKey: `plan_hold_resume_blocked:${hold.id}`, metadata: { kind: 'plan_hold_resume_blocked', holdId: hold.id, customerId: hold.customer_id },
+          await notifyAdmin('service', 'Plan hold cannot auto-resume: restart text undeliverable', `Hold ${hold.id} (${hold.family_key}) reached its resume date with no delivered reminder — pushed to ${pushed}; contact the customer and resume by hand.`, {
+            bell: true, dedupeKey: `plan_hold_resume_blocked:${hold.id}:${pushed}`, metadata: { kind: 'plan_hold_resume_blocked', holdId: hold.id, customerId: hold.customer_id },
           }).catch(() => {});
         }
         continue;
@@ -357,4 +405,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, cancelHold, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, startHold, cancelHold, shiftHoldResume, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

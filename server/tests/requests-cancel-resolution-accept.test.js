@@ -120,7 +120,7 @@ test('happy path: re-resolves, mints accepted case, executes, confirms on both c
     reference: 'CASE-123',
     confirmationChannels: ['sms', 'email'],
   });
-  expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({ resolutionOutcome: 'accepted', reasonCode: 'away' }));
+  expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({ resolutionOutcome: 'accepted', reasonCode: 'away', processed: true }), expect.anything());
   expect(mockExecute).toHaveBeenCalledWith(expect.objectContaining({
     action: expect.objectContaining({ type: 'hold' }),
     params: expect.objectContaining({ resumeDate: '2026-12-01' }),

@@ -2046,17 +2046,8 @@ const InvoiceService = {
             database: conn,
           });
           if (retention) {
-            const reserved = await conn("retention_offers")
-              .where({ id: retention.offerId, status: "granted", charges_applied: retention.expectedChargesApplied })
-              .where(function notExpired() {
-                this.whereNull("expires_at").orWhere("expires_at", ">", new Date());
-              })
-              .update({
-                charges_applied: retention.expectedChargesApplied + 1,
-                amount_applied: conn.raw("amount_applied + ?", [retention.amount]),
-                ...(retention.exhaustsOffer ? { status: "exhausted" } : {}),
-                updated_at: new Date(),
-              });
+            const { reserveRetentionSlot } = require("./cancellation-resolution/retention-offer");
+            const reserved = await reserveRetentionSlot(retention, conn);
             if (reserved) {
               lineItems = [...lineItems, retention.lineItem];
               retentionOfferApplication = retention;
@@ -2125,13 +2116,8 @@ const InvoiceService = {
     // there is no path where a discount line commits unconsumed.
     const settleRetention = async (created, dbh) => {
       if (!retentionOfferApplication || !created || !created.id) return;
-      const conn = dbh || db;
-      const updated = await conn("retention_offers")
-        .where({ id: retentionOfferApplication.offerId })
-        .update({
-          applied_invoice_ids: conn.raw("applied_invoice_ids || ?::jsonb", [JSON.stringify([created.id])]),
-          updated_at: new Date(),
-        });
+      const { stampRetentionApplied } = require("./cancellation-resolution/retention-offer");
+      const updated = await stampRetentionApplied({ offerId: retentionOfferApplication.offerId, ref: created.id }, dbh || db);
       if (!updated) throw new Error(`retention offer ${retentionOfferApplication.offerId} vanished before invoice ${created.id} could be stamped`);
     };
 

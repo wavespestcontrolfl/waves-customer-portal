@@ -82,19 +82,35 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
     return row ? Number(row.monthly_rate) : null;
   };
 
+  // The ONE remainder-aware balance authority (codex r2 P1: summing
+  // invoice face values ignored credit_applied).
   let openBalance = null;
   try {
-    const { openBalanceInvoices } = require('../open-balance');
-    const open = await openBalanceInvoices(customerId);
-    if (Array.isArray(open)) openBalance = Math.round(open.reduce((s, inv) => s + (Number(inv.balance ?? inv.total) || 0), 0) * 100) / 100;
+    const { openBalanceSummary } = require('../open-balance');
+    const summary = await openBalanceSummary(customerId);
+    openBalance = summary && Number.isFinite(Number(summary.total)) ? Number(summary.total) : null;
   } catch (err) { openBalance = null; }
 
+  // Live annual-prepay term: real columns only (term_end, plan_label,
+  // monthly_rate); the remaining-visit count is not stored on the term, so
+  // it is honestly null rather than an invented number (codex r2 P1).
   let prepay = null;
   try {
     const { coveredTermsAsOf } = require('../annual-prepay-renewals');
-    const term = await coveredTermsAsOf(db, today).where('t.customer_id', customerId).first('t.id', 't.term_end', 't.covered_visits_remaining');
-    if (term) prepay = { covered: true, endsAt: term.term_end ? String(term.term_end).slice(0, 10) : null, visitsRemaining: term.covered_visits_remaining ?? null };
-  } catch (err) { prepay = null; }
+    const term = await coveredTermsAsOf(db, today).where('t.customer_id', customerId).first('t.id', 't.term_end', 't.plan_label', 't.prepay_amount');
+    if (term) {
+      prepay = {
+        covered: true,
+        endsAt: term.term_end ? String(term.term_end).slice(0, 10) : null,
+        planLabel: term.plan_label || null,
+        prepaidAmount: term.prepay_amount == null ? null : Number(term.prepay_amount),
+        visitsRemaining: null,
+      };
+    }
+  } catch (err) {
+    logger.warn(`[cancel-impact] prepay term lookup failed for ${customerId}: ${err.message}`);
+    prepay = null;
+  }
 
   const cancelledFamilies = wholeAccount ? owned : scope;
   const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.upcoming || 0), 0);
@@ -118,8 +134,9 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
     })),
     tierBefore,
     tierAfter: wholeAccount ? null : (plan ? plan.tierAfter : null),
-    tierDiscountBefore: plan ? plan.discountBefore : null,
-    tierDiscountAfter: wholeAccount ? null : (plan ? plan.discountAfter : null),
+    // Percentage POINTS — the client renders `${n}% off` (codex r2 P2).
+    tierDiscountBefore: plan ? Math.round(plan.discountBefore * 100) : null,
+    tierDiscountAfter: wholeAccount ? null : (plan ? Math.round(plan.discountAfter * 100) : null),
     accountMonthlyBefore: monthly,
     accountMonthlyAfter: wholeAccount ? (monthly == null ? null : 0) : (plan ? plan.scalarAfter : null),
     remaining: wholeAccount ? [] : (plan ? plan.remainingRates.map((r) => ({ key: r.family, label: labelOf(r.family), monthlyBefore: r.before, monthlyAfter: r.after })) : []),

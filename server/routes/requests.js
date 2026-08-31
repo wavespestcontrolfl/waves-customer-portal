@@ -572,10 +572,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           // The scope the processor actually RAN with is the durable record
           // (codex P0: a reason-less scoped cancel stored [] and a retry
           // then churned the whole account).
+          // Whole-account = [] — NEVER the resolver's "all owned" list (codex
+          // r2 P1: that made a retry look scoped and skip the repair).
           families: Array.isArray(cancellationResult?.scope) && cancellationResult.scope.length
             ? cancellationResult.scope
-            : (scopedFamilies.length ? scopedFamilies
-              : (serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [])),
+            : scopedFamilies,
           reasonText: cleanDescription || null,
           resolution: serverResolution,
           resolutionOutcome: outcome,
@@ -942,20 +943,21 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
     // concurrent taps both saw "no prior" and executed twice). The lock
     // covers only the durable claim; execution runs after it, protected by
     // per-case idempotency (executor dedupe keys + the grant's case guard).
-    const claim = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${req.customer.id}`]);
-      const candidates = await trx('cancellation_cases')
+    // The re-resolve is read-only and runs OUTSIDE the lock; the durable
+    // claim (prior lookup + case mint) runs INSIDE it (codex r2 P1: the
+    // lock must cover the insert, or two taps still mint two cases).
+    const findPrior = async (dbh) => {
+      const candidates = await dbh('cancellation_cases')
         .where({ customer_id: req.customer.id, resolution_template_id: value.templateId, resolution_outcome: 'accepted' })
         .where('created_at', '>=', new Date(Date.now() - 24 * 3600 * 1000))
         .orderBy('created_at', 'desc')
         .select('*');
-      const prior = (candidates || []).find((row) => {
+      return (candidates || []).find((row) => {
         const snap = typeof row.snapshot === 'string' ? JSON.parse(row.snapshot) : (row.snapshot || {});
         return snap.accept_key === acceptKey;
       }) || null;
-      return { prior };
-    });
-    const priorCase = claim.prior;
+    };
+    let priorCase = await findPrior(db);
     if (priorCase) {
       const receipt = priorCase.snapshot && priorCase.snapshot.accept_receipt;
       if (receipt) return res.json({ ok: true, deduped: true, receipt });
@@ -965,10 +967,13 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
     let cardAction = null;
     let cardHeadline = null;
     let caseScope = [];
-    if (caseRow) {
-      cardAction = typeof caseRow.resolution_action === 'string' ? JSON.parse(caseRow.resolution_action) : caseRow.resolution_action;
+    const loadFromCase = (row) => {
+      cardAction = typeof row.resolution_action === 'string' ? JSON.parse(row.resolution_action) : row.resolution_action;
       cardHeadline = null;
-      caseScope = (typeof caseRow.scope === 'string' ? JSON.parse(caseRow.scope) : caseRow.scope) || [];
+      caseScope = (typeof row.scope === 'string' ? JSON.parse(row.scope) : row.scope) || [];
+    };
+    if (caseRow) {
+      loadFromCase(caseRow);
     } else {
       // The transfer card only exists behind a VERIFIED in-area address —
       // re-run the verdict from the submitted address or the accept can
@@ -1001,22 +1006,35 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       if (!isAcceptableAction(resolution.card.action)) {
         return res.status(409).json({ error: 'That option is informational only.', code: 'action_not_acceptable' });
       }
-      caseRow = await CancellationResolution.openCancellationCase({
-        customerId: req.customer.id,
-        serviceRequestId: null,
-        families: resolution.scope,
-        reasonCode: value.reasonCode,
-        reasonText: null,
-        resolution,
-        resolutionOutcome: 'accepted',
-        snapshot: { accepted_at: new Date().toISOString(), accepted_params: value.params || {}, accept_key: acceptKey },
-        // An accepted resolution IS final — committed, or the ledger's
-        // grant guard rejects the very offer the card promised (codex r1 P1).
-        processed: true,
+      const minted = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${req.customer.id}`]);
+        const raced = await findPrior(trx);
+        if (raced) return { row: raced, reused: true };
+        const row = await CancellationResolution.openCancellationCase({
+          customerId: req.customer.id,
+          serviceRequestId: null,
+          families: resolution.scope,
+          reasonCode: value.reasonCode,
+          reasonText: null,
+          resolution,
+          resolutionOutcome: 'accepted',
+          snapshot: { accepted_at: new Date().toISOString(), accepted_params: value.params || {}, accept_key: acceptKey },
+          // An accepted resolution IS final — committed, or the ledger's
+          // grant guard rejects the very offer the card promised (codex r1 P1).
+          processed: true,
+        }, trx);
+        return { row, reused: false };
       });
-      cardAction = resolution.card.action;
-      cardHeadline = resolution.card.headline;
-      caseScope = resolution.scope;
+      caseRow = minted.row;
+      if (minted.reused) {
+        const receipt = caseRow.snapshot && (typeof caseRow.snapshot === 'string' ? JSON.parse(caseRow.snapshot) : caseRow.snapshot).accept_receipt;
+        if (receipt) return res.json({ ok: true, deduped: true, receipt });
+        loadFromCase(caseRow);
+      } else {
+        cardAction = resolution.card.action;
+        cardHeadline = resolution.card.headline;
+        caseScope = resolution.scope;
+      }
     }
     if (!isAcceptableAction(cardAction)) {
       return res.status(409).json({ error: 'That option is informational only.', code: 'action_not_acceptable' });

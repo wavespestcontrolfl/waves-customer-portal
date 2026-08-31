@@ -246,10 +246,10 @@ describe('Screen 2 — reason and resolution', () => {
     // Selects carry the scheduler's canonical values, never free text.
     const daySelect = await screen.findByLabelText('Preferred day');
     expect(daySelect.tagName).toBe('SELECT');
-    expect(Array.from(daySelect.options).map((o) => o.value)).toEqual(['', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']);
+    expect(Array.from(daySelect.options).map((o) => o.value)).toEqual(['', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday']);
     const timeSelect = screen.getByLabelText('Preferred time');
     expect(timeSelect.tagName).toBe('SELECT');
-    expect(Array.from(timeSelect.options).map((o) => o.value)).toEqual(['', 'early_morning', 'morning', 'late_morning', 'midday', 'afternoon']);
+    expect(Array.from(timeSelect.options).map((o) => o.value)).toEqual(['', 'early_morning', 'morning', 'midday', 'afternoon']);
     expect(screen.getByRole('option', { name: '1:00–5:00 PM' })).toBeInTheDocument();
     fireEvent.change(daySelect, { target: { value: 'friday' } });
     fireEvent.change(timeSelect, { target: { value: 'afternoon' } });

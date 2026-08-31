@@ -47,12 +47,11 @@ const REASONS = [
 const PRIMARY_REASON_COUNT = 10;
 // Scheduler-canonical values (Codex r1 P1): the accept endpoint 409s
 // `preferences_invalid` on anything outside these exact values.
-const DAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+const DAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']
   .map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) }));
 const TIME_OPTIONS = [
   { value: 'early_morning', label: '8:00\u201310:00 AM' },
   { value: 'morning', label: '9:00\u201311:00 AM' },
-  { value: 'late_morning', label: '10:00 AM\u201312:00 PM' },
   { value: 'midday', label: '11:00 AM\u20131:00 PM' },
   { value: 'afternoon', label: '1:00\u20135:00 PM' },
 ];

@@ -155,8 +155,10 @@ async function executeConfigureServices({ customerId, caseRow, action, params })
 /* ------------------------------------------------------------------ */
 /* set_preferences — writes the same allowlisted fields the portal does  */
 /* ------------------------------------------------------------------ */
-const PREFERRED_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-const PREFERRED_TIMES = ['early_morning', 'morning', 'late_morning', 'midday', 'afternoon'];
+// EXACTLY the property_preferences enums (migration 20260401000005): the
+// column rejects anything else, so the card must never offer it (codex r2 P1).
+const PREFERRED_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
+const PREFERRED_TIMES = ['early_morning', 'morning', 'midday', 'afternoon'];
 
 async function executeSetPreferences({ customerId, caseRow, params }) {
   // Canonical scheduler vocabulary ONLY (codex r1 P1): auto-dispatch's
@@ -177,7 +179,7 @@ async function executeSetPreferences({ customerId, caseRow, params }) {
   await timelineNote(customerId, 'Service preferences updated from the cancel flow',
     `Case ${caseRow.id}. Preferred day: ${preferredDay || '—'}; time: ${preferredTime || '—'}.`);
   const dayLabel = preferredDay ? preferredDay.charAt(0).toUpperCase() + preferredDay.slice(1) : '';
-  const timeLabels = { early_morning: '8-10 AM', morning: '9-11 AM', late_morning: '10 AM-12 PM', midday: '11 AM-1 PM', afternoon: '1-5 PM' };
+  const timeLabels = { early_morning: '8-10 AM', morning: '9-11 AM', midday: '11 AM-1 PM', afternoon: '1-5 PM' };
   return { effects: [`Your visits will be scheduled ${[dayLabel ? `on ${dayLabel}s` : '', preferredTime ? timeLabels[preferredTime] : ''].filter(Boolean).join(', ')} from now on. Reply to any reminder if a date does not work.`] };
 }
 
@@ -226,7 +228,20 @@ async function executeAwayPairing(ctx) {
   // Holds first (they can fail and fully compensate); Away Mode is a
   // single idempotent preference write, so nothing partial can linger.
   const hold = await executeHold(ctx);
-  const away = await executeAwayMode(ctx);
+  let away;
+  try {
+    away = await executeAwayMode(ctx);
+  } catch (err) {
+    // Nothing partial survives (codex r2 P1): undo every hold this accept
+    // created before reporting the failure.
+    const { cancelHold } = require('./holds');
+    for (const holdId of hold.holds || []) {
+      try { await cancelHold(holdId, { compensateVisits: true }); } catch (undoErr) {
+        logger.error(`[cancel-actions] hold compensation failed for ${holdId}: ${undoErr.message}`);
+      }
+    }
+    throw err;
+  }
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
 }
 
