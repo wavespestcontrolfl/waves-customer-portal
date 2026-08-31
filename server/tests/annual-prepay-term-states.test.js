@@ -11,6 +11,17 @@
  *
  * It deliberately does NOT restructure annual-prepay-renewals.js — the guard
  * reads the module as-is.
+ *
+ * SCOPE: the writer scan covers production files that NAME the table — every
+ * literal-table Knex shape is classified (or fails closed), raw SQL and
+ * table-name indirection defined in such a file fail closed, and dynamic-
+ * table mutations are allowlisted per audited file with a site-count
+ * ratchet. A hypothetical generic cross-file helper (`updateTable(name,
+ * payload)` living in a file that never names this table) is outside
+ * textual reach BY CONSTRUCTION; none exists in the codebase (verified
+ * 2026-08-31), and introducing one is exactly the "new mechanism" that
+ * CLAUDE.md rule 15 and PR review police. This suite is defense-in-depth
+ * for drift, not a parser-grade proof.
  */
 const fs = require('fs');
 const path = require('path');
