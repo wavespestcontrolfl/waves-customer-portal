@@ -131,6 +131,55 @@ function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
 }
 
+// Deterministic visit facts for the tech Visit Brief read path — served by
+// GET /admin/schedule/:id/visit-brief alongside a `{brief: null}` answer
+// (none stored, gate off, or stale) so the field tech still gets the
+// verified facts: the access block (gate/garage/lockbox codes, pets,
+// chemical sensitivities, parking/access notes) and the last same-line
+// visit's products. Zero LLM calls, zero storage. Dark behind its own
+// flag because serving raw access codes on a path that previously
+// answered `{brief: null}` is a new exposure surface, however
+// tech-ownership-scoped the route already is.
+function visitFactsGateEnabled() {
+  return process.env.GATE_VISIT_FACTS === 'true';
+}
+
+// Unlike brief GENERATION (strict-fail so an outage never overwrites a
+// valid cached brief), this is a read-path convenience with no cached
+// artifact to protect — every lookup is FAIL-SOFT and a partial answer
+// beats a 500. The route omits the key entirely if this still throws.
+async function deterministicVisitFacts(svc, dbh = db) {
+  let prefs = null;
+  try {
+    prefs = await dbh('property_preferences').where({ customer_id: svc.customer_id }).first();
+  } catch (err) {
+    logger.warn(`[previsit-brief] visit-facts property_preferences unreadable for customer ${svc.customer_id}: ${err.message}`);
+  }
+  const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
+  // First-visit is a POSITIVE claim (same rule as assembleGrounding):
+  // unreadable history (available:false) asserts nothing.
+  const genuinelyNew = history.available ? !history.last : false;
+  // rawServicePreferences stays null here: the pest opt-out alerts already
+  // ride the day payload's propertyAlerts — facts add codes/notes/pets.
+  const access = buildAccessBlock(prefs, svc, genuinelyNew, normalizeServiceType(svc.service_type), null);
+  let lastVisit = null;
+  const lastRecord = history.available ? history.lineRecords[0] || null : null;
+  if (lastRecord) {
+    let products = [];
+    try {
+      products = dedupeHistoryProducts(await loadProductHistory(dbh, [lastRecord.id]));
+    } catch (err) {
+      logger.warn(`[previsit-brief] visit-facts product history unreadable for record ${lastRecord.id}: ${err.message}`);
+    }
+    lastVisit = {
+      date: calendarDay(lastRecord.service_date),
+      type: cleanText(lastRecord.service_type, 120),
+      products,
+    };
+  }
+  return { access, last_visit: lastVisit };
+}
+
 // Order-independent stringify (visit-summary-narrative precedent) so the
 // grounding hash is stable across property insertion order.
 function stableStringify(value) {
@@ -2643,6 +2692,8 @@ function briefClearOnReclassification(newTag, storedBriefType) {
 
 module.exports = {
   briefGateEnabled,
+  visitFactsGateEnabled,
+  deterministicVisitFacts,
   generateVisitBrief,
   briefClearOnReclassification,
   briefStaleReason,
@@ -2651,6 +2702,7 @@ module.exports = {
   WDO_BRIEF_TYPE,
   _test: {
     assembleGrounding,
+    deterministicVisitFacts,
     findUngroundedClaim,
     extractOutputReferences,
     isGroundedReference,

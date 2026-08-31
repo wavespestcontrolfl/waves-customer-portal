@@ -12316,18 +12316,34 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
-    if (!svc.pre_service_brief) return res.json({ brief: null });
+    const PrevisitBrief = require('../services/previsit-brief');
+    // Every `{brief: null}` answer optionally carries a deterministic
+    // `facts` block (access codes + last same-line visit's products) for
+    // the tech Visit Brief panel — GATE_VISIT_FACTS-gated because raw
+    // access codes on a path that previously answered `{brief: null}` are
+    // a new exposure surface. Computed AFTER the single ownership-scoped
+    // fetch above, so the reassignment protection covers it; fail-soft —
+    // a facts outage omits the key, never 500s the brief read.
+    const withFacts = async (payload) => {
+      if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
+      try {
+        return { ...payload, facts: await PrevisitBrief.deterministicVisitFacts(svc) };
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
+        return payload;
+      }
+    };
+    if (!svc.pre_service_brief) return res.json(await withFacts({ brief: null }));
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
     // from the read path (regeneration is already gated, and a rollback
     // toggle that keeps serving stored guidance can't withdraw it).
     // Everything this lane did not write — the legacy WDO brief and any
     // other/untyped legacy brief — serves exactly as it always has.
-    const PrevisitBrief = require('../services/previsit-brief');
     const parsedBrief = typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief;
     if (String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE) {
       if (!PrevisitBrief.briefGateEnabled()) {
-        return res.json({ brief: null });
+        return res.json(await withFacts({ brief: null }));
       }
       // A reschedule or a direct service_type rewrite (edit modal,
       // estimate acceptance, call flows) leaves the stored brief behind —
@@ -12336,7 +12352,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // grounding-hash mismatch, both stamps being hashed facts).
       const staleReason = PrevisitBrief.briefStaleReason(parsedBrief, svc);
       if (staleReason) {
-        return res.json({ brief: null, stale: staleReason });
+        return res.json(await withFacts({ brief: null, stale: staleReason }));
       }
     }
     res.json({ brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });

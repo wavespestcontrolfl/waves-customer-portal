@@ -46,8 +46,15 @@ jest.mock('../services/appointment-tagger', () => ({
 }));
 const mockGateEnabled = jest.fn(() => false);
 const mockGenerateVisitBrief = jest.fn(async () => ({ generated: true }));
+const mockFactsGateEnabled = jest.fn(() => false);
+const mockDeterministicVisitFacts = jest.fn(async () => ({
+  access: { codes: { propertyGate: '4482' } },
+  last_visit: { date: '2026-08-01', type: 'Pest Control Service', products: [{ name: 'Talstar P' }] },
+}));
 jest.mock('../services/previsit-brief', () => ({
   briefGateEnabled: (...args) => mockGateEnabled(...args),
+  visitFactsGateEnabled: (...args) => mockFactsGateEnabled(...args),
+  deterministicVisitFacts: (...args) => mockDeterministicVisitFacts(...args),
   generateVisitBrief: (...args) => mockGenerateVisitBrief(...args),
   // Mirrors the production predicate's contract (missing stamps fail
   // closed; date checked before service); the real ET calendar-day
@@ -112,6 +119,11 @@ const VISIT_BRIEF_ROW = {
 beforeEach(() => {
   jest.clearAllMocks();
   mockGateEnabled.mockReturnValue(false);
+  mockFactsGateEnabled.mockReturnValue(false);
+  mockDeterministicVisitFacts.mockResolvedValue({
+    access: { codes: { propertyGate: '4482' } },
+    last_visit: { date: '2026-08-01', type: 'Pest Control Service', products: [{ name: 'Talstar P' }] },
+  });
   mockGenerateVisitBrief.mockResolvedValue({ generated: true });
 });
 
@@ -254,6 +266,87 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
       expect(res.status).toBe(200);
       expect((await res.json()).brief).toBeNull();
     });
+  });
+
+  test('GATE_VISIT_FACTS unset → no facts key on any { brief: null } answer (byte-identical to before)', async () => {
+    mockFactsGateEnabled.mockReturnValue(false);
+    // no stored brief
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null } });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body).toEqual({ brief: null });
+    });
+    // gate-off withdrawal of a cached visit brief
+    mockGateEnabled.mockReturnValue(false);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body).toEqual({ brief: null });
+    });
+    expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
+  });
+
+  test('facts gate ON attaches deterministic facts to all three { brief: null } paths', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    const expectFacts = (body) => {
+      expect(body.brief).toBeNull();
+      expect(body.facts.access.codes.propertyGate).toBe('4482');
+      expect(body.facts.last_visit.products).toEqual([{ name: 'Talstar P' }]);
+    };
+    // 1. no stored brief
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null } });
+    await withServer(async (base) => {
+      expectFacts(await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json());
+    });
+    // 2. brief gate off withdraws the cached visit brief — facts still ride
+    mockGateEnabled.mockReturnValue(false);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    await withServer(async (base) => {
+      expectFacts(await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json());
+    });
+    // 3. stale withdrawal keeps the stale reason alongside the facts
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, scheduled_date: '2026-08-15' } });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expectFacts(body);
+      expect(body.stale).toBe('date_moved');
+    });
+  });
+
+  test('a SERVED brief carries no facts key (the brief already contains access + last_visit)', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.brief.priorities).toEqual(['Check garage']);
+      expect(body.facts).toBeUndefined();
+    });
+    expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
+  });
+
+  test('a facts computation failure still answers { brief: null } — never a 500, key omitted', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockDeterministicVisitFacts.mockRejectedValue(new Error('property_preferences outage'));
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ brief: null });
+    });
+  });
+
+  test('facts gate ON: unowned visit still 404s and facts are never computed', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW }, { ownsVisit: false });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`, {
+        headers: { 'x-test-role': 'technician' },
+      });
+      expect(res.status).toBe(404);
+    });
+    expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
   });
 
   test('tech who does not own the visit gets 404 (both paths)', async () => {

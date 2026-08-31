@@ -58,6 +58,8 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+import VisitBriefPanel from './VisitBriefPanel';
+import { fmtMoney, shortAddress, stopAccessIndicator, visitMoneySummary } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
@@ -225,6 +227,11 @@ export default function TechHomePage() {
   const [rainOutResult, setRainOutResult] = useState(''); // post-commit banner
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
   const [rainChance, setRainChance] = useState(null);
+  // Visit Brief accordion: one stop expanded at a time (keyed by the
+  // stop's primary service id) + a per-stop session cache of the two
+  // detail fetches (estimate-source + visit-brief).
+  const [expandedStopId, setExpandedStopId] = useState(null);
+  const [stopDetail, setStopDetail] = useState({});
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
@@ -413,6 +420,36 @@ export default function TechHomePage() {
     if (target === 'on_site') handleOnSite(nextStop.id);
     else if (target === 'en_route') handleEnRoute(nextStop.id);
   };
+  // Visit Brief detail loader — one estimate-source + one visit-brief
+  // fetch per stop, cached for the session. Partial success is fine (each
+  // section fails soft); only both failing renders the Retry row. A 404
+  // (ownership filter / older stop) reads as "nothing linked", not an
+  // error — both endpoints answer it with "not found" bodies.
+  const loadStopDetail = useCallback(async (serviceId) => {
+    setStopDetail((d) => ({ ...d, [serviceId]: { status: 'loading', estimate: null, brief: null } }));
+    const soft = (path) => techRequest(path).catch((err) => {
+      if (/not found/i.test(err?.message || '')) return null;
+      throw err;
+    });
+    const [est, brief] = await Promise.allSettled([
+      soft(`/admin/schedule/${serviceId}/estimate-source`),
+      soft(`/admin/schedule/${serviceId}/visit-brief`),
+    ]);
+    const bothFailed = est.status === 'rejected' && brief.status === 'rejected';
+    setStopDetail((d) => ({
+      ...d,
+      [serviceId]: {
+        status: bothFailed ? 'error' : 'ready',
+        estimate: est.status === 'fulfilled' ? est.value : null,
+        brief: brief.status === 'fulfilled' ? brief.value : null,
+      },
+    }));
+  }, []);
+  const toggleStop = useCallback((stop) => {
+    const id = stop.primary.id;
+    setExpandedStopId((cur) => (cur === id ? null : id));
+    if (!stopDetail[id]) loadStopDetail(id);
+  }, [stopDetail, loadStopDetail]);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -751,21 +788,28 @@ export default function TechHomePage() {
             fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1,
           }}>Today's Services</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {myServices.map((s) => (
-              <ServiceRow
-                key={s.id}
-                service={s}
-                onProject={() => (
+            {/* One row per STOP (visit-group siblings collapse — same
+                grouping as the Next Stop card); tap expands the Visit
+                Brief with the per-service action buttons inside. */}
+            {stops.map((stop) => (
+              <StopRow
+                key={stop.key}
+                stop={stop}
+                expanded={expandedStopId === stop.primary.id}
+                detail={stopDetail[stop.primary.id]}
+                onToggle={() => toggleStop(stop)}
+                onRetryDetail={() => loadStopDetail(stop.primary.id)}
+                onProject={(s) => (
                   isTypedFindingsService(s)
                     ? openTypedCompletion(s)
                     : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
                 )}
-                onPhotos={() => setPhotoTarget({
+                onPhotos={(s) => setPhotoTarget({
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
                 })}
-                onZone={() => setZoneTarget(s)}
-                onLead={() => setLeadTarget(s)}
+                onZone={(s) => setZoneTarget(s)}
+                onLead={(s) => setLeadTarget(s)}
               />
             ))}
           </div>
@@ -1165,7 +1209,12 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
+// One route stop (visit-group siblings collapse into one row). Collapsed:
+// name, status·window, service label + short address, exception chips
+// (access alerts / collect-needed). Tap anywhere expands the Visit Brief
+// — the per-service action buttons (the old ServiceRow's) live inside it.
+function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead }) {
+  const service = stop.primary;
   const status = service.status || 'pending';
   const statusColor = {
     completed: '#22c55e',
@@ -1173,71 +1222,78 @@ function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
     en_route: '#f59e0b',
     skipped: '#94a3b8',
   }[status] || DARK.muted;
+  const windowLabel = stop.isVisit ? serviceWindowLabel(stopWindow(stop)) : serviceWindowLabel(service);
+  const indicator = stopAccessIndicator(stopPropertyAlerts(stop));
+  const money = visitMoneySummary(service);
+  const street = shortAddress(service.address);
+  const serviceLabel = stopSummaryLabel(stop)
+    || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
+  const chipStyle = (color) => ({
+    fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
+    border: `1px solid ${color}`, color, background: `${color}1a`,
+  });
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
       background: DARK.card, border: `1px solid ${DARK.border}`,
       borderRadius: 10, padding: '10px 12px',
     }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <p style={{
-          margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
-          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-        }}>
-          {service.customer_name || service.customerName || 'Customer'}
-        </p>
-        <p style={{ margin: '2px 0 0', fontSize: 11, color: statusColor, textTransform: 'capitalize' }}>
-          {status.replace(/_/g, ' ')}
-          {serviceWindowLabel(service) && <span style={{ color: DARK.muted }}> · {serviceWindowLabel(service)}</span>}
-          {service.visit && service.visit.serviceCount > 1 && (
-            <span style={{ color: DARK.muted, textTransform: 'none' }}> · visit of {service.visit.serviceCount}</span>
-          )}
-        </p>
-      </div>
-      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <button onClick={onProject} style={{
-          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: DARK.teal, cursor: 'pointer',
-        }}>
-          {/* A visit with an existing linked report continues it (in-place
-              editor) instead of creating a duplicate; a sent/closed report
-              or completed visit is terminal (openProjectOrContinue no-ops). */}
-          {service.linkedProject?.status === 'sent'
-            ? '🗂️ Sent'
-            : service.linkedProject?.status === 'closed' || service.status === 'completed'
-              ? '🗂️ Completed'
-              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
-        </button>
-        <button onClick={onPhotos} style={{
-          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: DARK.teal, cursor: 'pointer',
-        }}>
-          📷 Photos
-        </button>
-        {/* Hidden when the schedule feed marks the service trace-ineligible
-            (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
-            inspection stops, so the tracer has nothing true to capture.
-            Absent flag (older payloads, gate off) keeps the button — the
-            write route enforces the same registry either way. */}
-        {service.traceEligible !== false && (
-          <button onClick={onZone} aria-label="Trace treatment zone" style={{
-            padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-            border: `1px solid ${DARK.border}`, background: 'transparent',
-            color: DARK.teal, cursor: 'pointer',
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+        }}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 44 }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+            <p style={{
+              margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
+              {service.customer_name || service.customerName || 'Customer'}
+            </p>
+            <span style={{ fontSize: 12, fontWeight: 600, color: statusColor, textTransform: 'capitalize', flexShrink: 0 }}>
+              {status.replace(/_/g, ' ')}
+              {windowLabel && <span style={{ color: DARK.muted, textTransform: 'none' }}> · {windowLabel}</span>}
+            </span>
+          </div>
+          <p style={{
+            margin: '3px 0 0', fontSize: 14, color: DARK.muted,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>
-            🛰️ Zone
-          </button>
-        )}
-        <button onClick={onLead} aria-label="Flag opportunity" style={{
-          padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: '#f59e0b', cursor: 'pointer',
-        }}>
-          🚩
-        </button>
+            {serviceLabel}{street ? ` · ${street}` : ''}
+          </p>
+          {(indicator.hasAlerts || money.collectNeeded) && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+              {indicator.hasAlerts && (
+                <span style={chipStyle(indicator.hasChemical ? '#ef4444' : DARK.teal)}>
+                  🔑 {indicator.count} alert{indicator.count === 1 ? '' : 's'}
+                </span>
+              )}
+              {money.collectNeeded && (
+                <span style={chipStyle('#f59e0b')}>💵 Collect {fmtMoney(money.amount)}</span>
+              )}
+            </div>
+          )}
+        </div>
+        <span aria-hidden="true" style={{ color: DARK.muted, fontSize: 14, flexShrink: 0 }}>
+          {expanded ? '▾' : '▸'}
+        </span>
       </div>
+      {expanded && (
+        <VisitBriefPanel
+          stop={stop}
+          detail={detail}
+          onRetry={onRetryDetail}
+          onPhotos={onPhotos}
+          onProject={onProject}
+          onZone={onZone}
+          onLead={onLead}
+        />
+      )}
     </div>
   );
 }
