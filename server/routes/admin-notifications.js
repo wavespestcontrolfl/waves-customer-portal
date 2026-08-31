@@ -155,7 +155,13 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
       const stateRows = await db('dashboard_alert_state')
         .whereIn('alert_id', memberlessIds)
         .select('alert_id', 'first_seen_at');
-      const firstSeenByAlert = new Map(stateRows.map((s) => [s.alert_id, new Date(s.first_seen_at).getTime()]));
+      // first_seen_at survives an ET midnight while the alert stays active
+      // (the cron preserves it), but day-scoped memberships (closeout's
+      // visit ids) go stale at the rollover — bound the incarnation to
+      // whichever is later: first_seen_at or today's ET day start.
+      const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+      const etDayStart = parseETDateTime(`${etDateString()}T00:00`).getTime();
+      const firstSeenByAlert = new Map(stateRows.map((s) => [s.alert_id, Math.max(new Date(s.first_seen_at).getTime(), etDayStart)]));
       const prior = await db('dashboard_alert_dismissed')
         .where({ admin_user_id: adminUserId })
         .whereIn('alert_id', memberlessIds)
