@@ -36,6 +36,10 @@ const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
 } = require('../services/estimator-engine/unit-scope-model');
+// The estimator's own condo-record predicate (propertyType OR county
+// land-use text) — shared so the unit-lot verify flag and the unit-scope
+// model can never disagree on what counts as a condo record.
+const { _private: { isCondoRecord: shadowIsCondoRecord } } = require('../services/estimator-engine/property-facts-shadow');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -3199,6 +3203,91 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     });
   }
 
+  // The INVERSE hazard: a CONDO record that DOES carry a lotSize is usually
+  // carrying the development's whole parcel — county rolls file condo units
+  // as per-unit folios, so the lot on one is the association's grounds, and
+  // lot-priced services (mosquito's treatable area, rodent scoping) would
+  // quote the entire development for one door (estimator-engine audit
+  // 2026-08-30 #3). Lawn self-defends (lot-derived turf grades LOW and
+  // parks). Deliberately CONDO-ONLY: apartment/multifamily strings are
+  // whole-building records that route COMMERCIAL (detectCategory) where the
+  // parcel lot is the correct basis — flagging them stripped the lot from
+  // legitimate association/property-manager quotes (codex P1 r2).
+  // HOA common-area parcels and aggregated/association records are
+  // deliberately EXCLUDED: there the association or complex owner is the
+  // customer, the parcel-scale lot is the correct quoting basis, and the
+  // master-parcel guidance flag below covers that workflow (codex P1 ×2).
+  // The wording stays scope-aware, not prescriptive — a whole-property
+  // request keeps the parcel basis.
+  // Provenance rides the EXISTING trusted-record mechanism (codex P1): the
+  // type string is read off commercialSignalRecord — an unverified AI
+  // web-search "Multifamily" is stripped there and cannot fire this — and a
+  // technician-VERIFIED lot is the unit's own treatable area, not a parcel.
+  // ANY parcel attesting 2+ units is a WHOLE-property record, not a
+  // one-unit folio, and is EXEMPT: a duplex/triplex lot genuinely
+  // describes the small property (GH codex P1 r1), and a "Multifamily
+  // Condominium" master parcel attesting 8 units is the established
+  // whole-building/association shape whose parcel lot is the correct
+  // basis (GH codex P1 r7 — detectCategory routes it commercial). The
+  // floor is 2: a condo UNIT's own folio attests exactly 1, the shape
+  // this flag exists to catch (codex P1 r3). Counts come from county GIS
+  // (_parcel.residentialUnits) or the TRUSTED record's own unitCount
+  // (commercialSignalRecord already stripped untrusted web counts). On a
+  // lot the merge ALSO field-flagged, THIS scoped flag wins and the
+  // generic evidence loop below skips lotSize (GH codex P0: the wrong-
+  // scope verdict must survive — a generic flag reads as number-only and
+  // keeps forwarding shared-development turf; and two lotSize flags
+  // double-count in the win/loss slices).
+  const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
+  const unitLotParcelUnits = Number(rc?._parcel?.residentialUnits);
+  // trustedUnitCount, not the raw record count: commercialSignalRecord
+  // returns the whole record when the TYPE is authoritative, so a hybrid
+  // county-condo record with a web-sourced development unit count could
+  // otherwise exempt itself from the flag (codex P1 r6).
+  const unitLotTrustedUnitCount = unitLotSignalRc ? Number(trustedUnitCount(unitLotSignalRc)) : NaN;
+  const smallSharedParcel = (Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
+    || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2);
+  // Condo identity via the estimator's OWN predicate (isCondoRecord —
+  // propertyType OR county land-use text, aggregated excluded), so an
+  // "Office Condominium" land use behind a normalized 'Commercial' type is
+  // caught the same way the unit-scope model catches it (codex P1 r4).
+  // Land-use text is county metadata riding on the trusted-record read.
+  const unitLotLandUse = rc?._parcel?.landUseDescription || rc?._raw?.landUse || null;
+  const unitLotIsCondo = !!unitLotSignalRc
+    && shadowIsCondoRecord({
+      aggregated: rc?._parcel?.aggregated === true,
+      propertyType: unitLotSignalRc.propertyType,
+      landUseDescription: unitLotLandUse,
+    });
+  // The association/common-area exclusion scans the SAME two texts the
+  // condo predicate scans (codex P1 r5): a "Condominium Common Area" land
+  // use behind a normalized type is an association parcel, not a unit.
+  // Covers the county label family for association-owned property:
+  // "HOA Common Area", "Condominium Common Elements", "Common Property"
+  // (codex P1 — 'Condominium Common Elements' matched isCondoRecord via
+  // 'condominium' but escaped the exclusion).
+  const unitLotAssociationText = /hoa\s*common|common\s*(area|element|propert)|association/i;
+  if (rc && rc.lotSize
+    && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
+    && !rc._parcel?.aggregated && !rc._parcel?.association
+    && !smallSharedParcel
+    && !unitLotAssociationText.test(String(unitLotSignalRc?.propertyType || ''))
+    && !unitLotAssociationText.test(String(unitLotLandUse || ''))
+    && unitLotIsCondo) {
+    flags.push({
+      field: 'lotSize',
+      // Machine-readable scope marker: consumers that must distinguish
+      // "this lot describes the WRONG SCOPE (shared development)" from a
+      // generic lot-evidence disagreement key on it — a generic flag says
+      // verify the number, this one says the number measures the wrong
+      // thing, so scope-derived estimates (satellite turf, bed area) are
+      // wrong-scope too (GH codex P2 on #3626).
+      scope: 'unit_parcel',
+      reason: 'This lot size describes the development’s parcel, not one unit — confirm whether the quote covers a single unit (use the unit’s own treatable area) or the whole property before mosquito, rodent, or other lot-priced pricing',
+      priority: 'HIGH',
+    });
+  }
+
   // Satellite AI pool signal without record confirmation — fires both when
   // the county roll says no pool (new pool vs neighbor's) and when there is
   // no county signal at all (hasPool null). Suppressed when a tech already
@@ -3245,6 +3334,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
 
   for (const [field, evidence] of Object.entries(rc?._fieldEvidence || {})) {
     if (!evidence?.fieldVerify) continue;
+    // The SCOPED condo unit-lot flag above outranks the generic lot-evidence
+    // flag — the wrong-scope verdict must survive (public-quote treats a
+    // generic lot flag as number-only and keeps forwarding turf), and two
+    // lotSize flags double-count in the win/loss slices (GH codex P0+P2).
+    if (field === 'lotSize' && flags.some((f) => f.field === 'lotSize' && f.scope === 'unit_parcel')) continue;
     let reason;
     if (field === 'propertyType' && evidence.sourceType === 'satellite') {
       const attach = String(ai?.structureAttachment || '').toUpperCase();

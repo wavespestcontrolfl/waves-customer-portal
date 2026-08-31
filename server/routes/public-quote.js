@@ -22,6 +22,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress, splitStreetLineUnit, formatAddress } = require('../utils/address-normalizer');
+const { lookupDimensionIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
@@ -865,9 +866,104 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // stale/synthetic top-level value. When there's no trusted lot, fall back to
     // the synthetic sqft×4 default: lot-derived commercial lawn/tree still estimate
     // off it, but commercial mosquito reads lotSizeMeasured and stays manual.
-    const realLotSqFt = resolveRealLotSqFt({ enrichedLotSqFt: ep.lotSqFt, lotSqFt, lotSizeConfirmed });
+    // SERVER-SIDE lookup profile, hoisted above the lot resolution so both
+    // the lot-trust check here and the turf forwarding below read the same
+    // trusted record (GH codex P1 on #3626). The cache key is the SAME
+    // normalized street-only parcel address step 1 used
+    // (public-property-lookup's parcelLookupAddress), rebuilt from THIS
+    // request's normalizedAddress — never the raw `address` field alone,
+    // which a crafted request could point at a different cached property
+    // than the structured fields the quote stores (pre-push codex P0 r2).
+    const parcelLookupAddress = normalizedAddress.line2
+      ? formatAddress({
+        line1: normalizedAddress.line1,
+        city: normalizedAddress.city,
+        state: normalizedAddress.state,
+        zip: normalizedAddress.zip,
+      })
+      : (normalizedAddress.fullAddress || String(address || '').trim());
+    let trustedTurf = {};
+    let trustedProfileFound = false;
+    const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
+    if (parcelLookupAddress) {
+      try {
+        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
+        if (serverLookup?.enriched) {
+          trustedTurf = serverLookup.enriched;
+          trustedProfileFound = true;
+        }
+      } catch (turfErr) {
+        logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
+        trustedTurf = {};
+      }
+    }
+    // A lot the lookup itself flagged verify-first (the condo unit-lot flag:
+    // a per-unit folio carrying the association's parcel — GH codex P1 on
+    // #3626; or any weak lot evidence) is NOT a measured lot on this
+    // no-review-lane path. The measured VALUE comes from the SERVER profile,
+    // never ep.lotSqFt — the client payload pricing a lot it attests itself
+    // is the same manipulation vector as the turf P0 on #3622, and a cache
+    // miss must fail to "unmeasured", not to the client's number (pre-push
+    // codex P0). The customer-confirmed leg still wins — a hand-entered lot
+    // is an explicit override. Canonical read: lookupDimensionIsTrustworthy.
+    // Two DISTINCT verdicts (pre-push codex P0 r2/r3 + P1):
+    //   lotVerifyFlagged — a returned profile whose lot the lookup flagged
+    //     verify-first. Only this parks lot-priced services below; an
+    //     ordinary cache miss keeps today's synthetic-lot pricing.
+    //   The measured VALUE is server-or-confirmed ONLY — the posted
+    //     lotSqFt never reaches pricing without lotSizeConfirmed, so a
+    //     caller cannot select rodent-bait brackets by attesting a lot.
+    const lotVerifyFlagged = trustedProfileFound && !lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
+    // The condo-scope flag says the lot measures the WRONG THING (shared
+    // development), so scope-derived estimates (satellite turf, bed area)
+    // are wrong-scope too. A GENERIC lot flag (two sources disagree) only
+    // impugns the number — an independent vision turf measurement stays
+    // valid there (GH codex P2), so only the scoped flag suppresses it.
+    const condoScopeLotFlag = lotVerifyFlagged
+      && Array.isArray(trustedTurf.fieldVerifyFlags)
+      && trustedTurf.fieldVerifyFlags.some((f) => f && f.field === 'lotSize' && f.scope === 'unit_parcel');
+    // The channel distinction is the REQUEST CONTRACT, never cache state
+    // (pre-push P0 r5 + GH P0 r6: the cache is global with a 180-day TTL,
+    // so keying on trustedProfileFound made an unchanged direct-API request
+    // price differently depending on whether anyone else had looked the
+    // address up). Wizard requests carry the `enriched` payload; the
+    // documented direct-API shape (public-mcp how_to_request_quote) does
+    // not, and keeps its legacy posted-lotSqFt engine-fallback role:
+    // never "measured", never persisted, commercial mosquito still manual —
+    // while the lot-flag park below still applies uniformly (a flagged
+    // condo parks on every channel; that protection is this PR's point).
+    const wizardShaped = !!(enriched && typeof enriched === 'object');
+    const realLotSqFt = resolveRealLotSqFt({
+      enrichedLotSqFt: wizardShaped && trustedProfileFound && !lotVerifyFlagged
+        && Number(trustedTurf.lotSqFt) > 0
+        ? trustedTurf.lotSqFt
+        : null,
+      lotSqFt,
+      lotSizeConfirmed,
+    });
     const lotSizeMeasured = realLotSqFt != null;
-    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
+    // Wizard requests: server values govern absolutely — a flagged or
+    // profile-less lot falls to the sqft×4 synthetic (a request-controlled
+    // number must not select rodent-bait brackets past the server's own
+    // record — codex P0 r3).
+    const engineFallbackLot = !wizardShaped && Number(lotSqFt) > 0
+      ? Number(lotSqFt)
+      : sqft * 4;
+    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? engineFallbackLot));
+    // DB-safe measured value for the customers.lot_sqft writes below — a
+    // public confirmed value like 1e100 would overflow the integer column
+    // and fail the insert, dropping the quote's customer linkage (codex
+    // P1). Synthetic fallbacks still persist as null.
+    // Direct-API requests keep their legacy persistence too (GH codex P1
+    // r7): the documented contract sends lotSqFt without lotSizeConfirmed,
+    // and those callers' customer-provided lot always reached
+    // customers.lot_sqft. Wizard requests persist only server-measured or
+    // confirmed values — their posted field carries the synthetic seed.
+    const persistLotSource = realLotSqFt
+      ?? (!wizardShaped && Number(lotSqFt) > 0 ? Number(lotSqFt) : null);
+    const persistLotSqFt = persistLotSource != null
+      ? Math.round(Math.max(500, Math.min(LOT_CAP, persistLotSource)))
+      : null;
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water) flow into the
@@ -960,30 +1056,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // fields would re-grade as a plain vision measurement downstream and
     // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
     // number — the exact over-claim the source mapping exists to prevent.
-    // The cache key is the SAME normalized street-only parcel address step 1
-    // used (public-property-lookup's parcelLookupAddress), rebuilt from THIS
-    // request's normalizedAddress — never the raw `address` field alone,
-    // which a crafted request could point at a different cached property
-    // than the structured fields the quote stores (pre-push codex P0 r2).
-    const parcelLookupAddress = normalizedAddress.line2
-      ? formatAddress({
-        line1: normalizedAddress.line1,
-        city: normalizedAddress.city,
-        state: normalizedAddress.state,
-        zip: normalizedAddress.zip,
-      })
-      : (normalizedAddress.fullAddress || String(address || '').trim());
-    let trustedTurf = {};
-    const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
-    if (parcelLookupAddress) {
-      try {
-        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
-        trustedTurf = serverLookup?.enriched || {};
-      } catch (turfErr) {
-        logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
-        trustedTurf = {};
-      }
-    }
     engineInput.measuredTurfSf = num(trustedTurf.measuredTurfSf);
     // A parcel-capped vision estimate only describes the parcel it was
     // capped against. When the lot the ENGINE will price differs from the
@@ -995,7 +1067,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const parcelCapStale = trustedTurf.turfCappedToParcel === true
       && Number(trustedTurf.lotSqFt) > 0
       && Math.abs(Number(lot) - Number(trustedTurf.lotSqFt)) > 1;
-    if (!parcelCapStale) {
+    // A flagged condo profile's vision turf measures the SHARED
+    // development's grounds — condo records deliberately skip the parcel
+    // turf cap — so it must not forward even after the customer confirms a
+    // corrected lot (the confirmation fixes the LOT, not the turf scope;
+    // the engine would still prefer the shared-grounds turf — GH codex P1
+    // on 91b9c656a). Lawn then falls to the corrected lot's fallback → LOW
+    // → the #3622 review gate, until an explicit turf area is supplied.
+    // measuredTurfSf above is a real measurement of the serviced area and
+    // forwards regardless.
+    if (!parcelCapStale && !condoScopeLotFlag) {
       engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
       if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
       if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
@@ -1014,11 +1095,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // The commercial auto-pricers additionally price directly from bed /
       // tree / impervious dimensions. Pass those through so the profile
       // doesn't fall back to lot-derived estimates and mis-quote (then
-      // persist/book/invoice the wrong commercial price).
-      engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
-      engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
-      engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
-      if (ep.bedAreaSource) engineInput.bedAreaSource = ep.bedAreaSource;
+      // persist/book/invoice the wrong commercial price). EXCEPT on a
+      // lot-flagged profile (office-condo folio carrying the development's
+      // parcel): its bed/impervious estimates describe the SHARED grounds
+      // — the same wrong scope as the lot — and the engine prefers the
+      // absolute bed estimate over deriving from a corrected lot, so an
+      // office-condo unit could still price the development's beds after a
+      // lotSizeConfirmed correction (GH codex P1 r6).
+      if (!condoScopeLotFlag) {
+        engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
+        engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
+        engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
+        if (ep.bedAreaSource) engineInput.bedAreaSource = ep.bedAreaSource;
+      }
       engineInput.treeDensity = (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined;
       engineInput.shrubDensity = (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined;
       engineInput.landscapeComplexity = (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined;
@@ -1165,7 +1254,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.dethatching) {
-      engineInput.services.dethatching = {};
+      // Forward a positive explicit area — the lot-flag review exemption
+      // above assumes the engine actually prices from it, and dropping it
+      // here priced the (possibly development-wide) property turf instead
+      // (GH codex P1 on 91b9c656a).
+      const dethatchArea = Number(services.dethatching?.lawnSqFt);
+      engineInput.services.dethatching = {
+        ...(Number.isFinite(dethatchArea) && dethatchArea > 0 ? { lawnSqFt: dethatchArea } : {}),
+      };
     }
     if (services.plugging) {
       // Forward a positive patch area so the engine prices the patch; when
@@ -1178,8 +1274,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.topDressing) {
+      // Same explicit-area forwarding contract as dethatching above.
+      const topDressAreaSqFt = Number(services.topDressing?.lawnSqFt);
       engineInput.services.topDressing = {
         depth: services.topDressing.depth || 'eighth',
+        ...(Number.isFinite(topDressAreaSqFt) && topDressAreaSqFt > 0 ? { lawnSqFt: topDressAreaSqFt } : {}),
       };
     }
     if (services.lawnPestControl) {
@@ -1211,12 +1310,54 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // park signal this way, never remove the server's.
     const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep)
       || unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, trustedTurf);
+    // A lot-priced service (mosquito's treatable area and rodent bait's
+    // 12k/20k lot brackets are the lot consumers on this path) on a
+    // profile whose lot the lookup flagged verify-first, with no
+    // customer-confirmed lot to fall back on, parks instead of pricing the
+    // synthetic sqft×4 guess — the condo unit-lot flag exists precisely
+    // because the parcel-scale figure (and any silent substitute) is not a
+    // customer-ready basis (GH codex P1 on #3626). Profiles with NO lot
+    // flag keep today's synthetic-lot pricing.
+    // Area-priced consumers on this path: mosquito's treatable area, rodent
+    // bait's 12k/20k brackets, tree & shrub's lot-derived bed area
+    // (estimateTreeShrubBedAreaFromLot) — a rejected condo lot substituting
+    // sqft×4 must not hand any of them a customer-ready price (codex P0 r4)
+    // — and the TURF family: a vision turf estimate on a flagged condo lot
+    // measures the shared development's grounds (condo records deliberately
+    // skip the parcel turf cap) and grades MEDIUM, so a lawn-only request
+    // would otherwise price the association's turf for one door (P1 r7).
+    // Explicitly scoped add-on areas are independent of both the parcel lot
+    // and satellite turf — the engine prices them directly and exempts them
+    // from turf review (GH codex P2: a valid plugging patch measurement
+    // keeps its exact quote; same contract for top dressing / dethatching).
+    // Split by flag scope (GH codex P2 r7): a lot flag parks the LOT-priced
+    // services (the number itself is impugned); only the CONDO-SCOPE flag
+    // parks the turf family — on a generic flag the independent vision turf
+    // still forwards above and lawn prices instantly, and where no vision
+    // turf exists the engine's own LOW-turf gate (#3622) parks it anyway.
+    // Channel rules (GH codex P0 r8): the GENERIC-flag leg is wizard-only —
+    // a legacy direct-API request must price identically whether or not an
+    // unrelated prior lookup cached a lot-evidence flag (same contract rule
+    // as the fallback-lot fix above). The deliberate CONDO-SCOPE protection
+    // applies on every channel. Commercial rodent bait is exempt: it prices
+    // from the building footprint and never reads the lot (GH codex P2 r8).
+    const lotPricedRequested = !!(services.mosquito
+      || (services.rodentBait && !commercialDetected)
+      || services.treeShrub);
+    const lotFlagForcesSiteQuote = !lotSizeMeasured && (
+      ((condoScopeLotFlag || (wizardShaped && lotVerifyFlagged)) && lotPricedRequested)
+      || (condoScopeLotFlag && !!(services.lawn || services.oneTimeLawn || services.lawnPestControl
+        || (services.topDressing && !(Number(services.topDressing?.lawnSqFt) > 0))
+        || (services.dethatching && !(Number(services.dethatching?.lawnSqFt) > 0))
+        || (services.plugging && !(Number(services.plugging?.area) > 0))))
+    );
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
-    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel;
+    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel
+      || lotFlagForcesSiteQuote;
     const quoteRequiredReason = manualQuoteLine?.reason
       // The turf-review lines expose their reason via customQuoteReason /
       // manualReviewReasons, not `reason` — without these legs a parked
@@ -1226,7 +1367,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || manualQuoteLine?.customQuoteReason
       || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
-      || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
+      || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
+      || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -1426,7 +1568,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           entryChannel,
           quoteCity,
           sqft,
-          lot,
+          // Persist only a MEASURED/confirmed lot — the sqft×4 engine
+          // fallback must never be stored: customer-pricing-ai treats
+          // customers.lot_sqft as authoritative before the lookup, so a
+          // persisted fabrication would auto-price later quotes past the
+          // review this request was routed to (GH codex P1).
+          lot: persistLotSqFt,
           landingForCustomer,
           utm: attr?.utm,
         });
@@ -1460,7 +1607,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           latitude: ep.lat || null,
           longitude: ep.lng || null,
           property_sqft: sqft,
-          lot_sqft: lot,
+          // Measured/confirmed only — never the engine's synthetic fallback
+          // (GH codex P1, same rule as the existing-customer update above).
+          lot_sqft: persistLotSqFt,
           pipeline_stage: 'new_lead',
           pipeline_stage_changed_at: new Date(),
           lead_source: 'website_quote',
@@ -2236,6 +2385,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
           : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
+          : quoteRequiredReason === 'lot_size_requires_verification'
+          ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',
