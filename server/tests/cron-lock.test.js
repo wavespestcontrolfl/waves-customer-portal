@@ -421,9 +421,21 @@ describe('cron-lock runExclusive', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(tickBody).not.toHaveBeenCalled(); // waiting, not failed
 
+    // A scheduled sweep that opts out of job_health (link-registry-catchup)
+    // is still scheduled work: it waits too.
+    const unrecordedBody = jest.fn(async () => 'caught-up');
+    let fromUnrecorded;
+    scheduledCron.schedule('*/5 * * * *', async () => {
+      fromUnrecorded = runExclusive('link-registry-catchup', unrecordedBody, { recordHealth: false });
+    });
+    await nodeCron.schedule.mock.calls.at(-1)[1]();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unrecordedBody).not.toHaveBeenCalled(); // waiting, not failed
+
     release('swept');
     await Promise.all(herd);
     await expect(fromTick).resolves.toBe('billed');
+    await expect(fromUnrecorded).resolves.toBe('caught-up');
   });
 
   test('a lease won AFTER the tick deadline does not run — recorded as a failed run', async () => {
@@ -447,9 +459,11 @@ describe('cron-lock runExclusive', () => {
       expect(texts.some((x) => x.includes('pg_advisory_unlock'))).toBe(true); // lease released
       const fail = healthCalls(conn).find((c) => c.text.includes("last_status = 'failed'"));
       expect(fail.values.at(-1)).toContain('after tick deadline');
-      // Conditional: never overwrite a newer start/success by another replica.
-      expect(fail.text).toMatch(/last_started_at < EXCLUDED\.last_started_at/);
-      expect(fail.text).toMatch(/last_success_at < EXCLUDED\.last_started_at/);
+      // Conditional: never overwrite a start/success by another replica for
+      // the same occurrence — replicas fire within ms of each other, so
+      // the comparison tolerates a tick window before this pod's arrival.
+      expect(fail.text).toMatch(/last_started_at < EXCLUDED\.last_started_at - interval '60 seconds'/);
+      expect(fail.text).toMatch(/last_success_at < EXCLUDED\.last_started_at - interval '60 seconds'/);
       expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
     } finally {
       jest.useRealTimers();

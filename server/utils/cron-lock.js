@@ -98,9 +98,13 @@ async function recordJobStart(jobName, conn) {
 
 // A tick that never ran (no slot before its deadline, or a lease won too
 // late) must show as a FAILED run — but only if no other replica has
-// started or succeeded this job since the tick began: during a deploy
-// overlap the other pod may have completed the very sweep this pod lost,
-// and overwriting its success would tell the health surface a lie.
+// started or succeeded this job for the SAME scheduled occurrence: during
+// a deploy overlap the other pod may have completed the very sweep this
+// pod lost, and overwriting its success would tell the health surface a
+// lie. Replicas fire the same occurrence within milliseconds of each other
+// (never a full cron minute apart), so a start/success inside the window
+// before this pod's arrival is the same tick, not an older one.
+const TICK_WINDOW_SECONDS = 60;
 async function recordMissedTick(jobName, tickStartedAtMs, message, conn) {
   const startedAt = new Date(tickStartedAtMs);
   const finishedAt = new Date();
@@ -115,8 +119,10 @@ async function recordMissedTick(jobName, tickStartedAtMs, message, conn) {
                  last_error = EXCLUDED.last_error,
                  consecutive_failures = job_health.consecutive_failures + 1,
                  updated_at = EXCLUDED.updated_at
-               WHERE (job_health.last_started_at IS NULL OR job_health.last_started_at < EXCLUDED.last_started_at)
-                 AND (job_health.last_success_at IS NULL OR job_health.last_success_at < EXCLUDED.last_started_at)`;
+               WHERE (job_health.last_started_at IS NULL
+                      OR job_health.last_started_at < EXCLUDED.last_started_at - interval '${TICK_WINDOW_SECONDS} seconds')
+                 AND (job_health.last_success_at IS NULL
+                      OR job_health.last_success_at < EXCLUDED.last_started_at - interval '${TICK_WINDOW_SECONDS} seconds')`;
   try {
     if (conn) {
       let n = 0;
@@ -262,22 +268,24 @@ function releaseLockSlot() {
   else activeLockHolders -= 1;
 }
 
-// waitForSlot defaults to "this is a health-recorded job running inside
-// a scheduled cron tick" (see scheduled-cron.js). Only that shape waits —
-// a dropped once-a-day tick is unrecoverable. Everything else fails fast:
-// dynamic per-entity locks (recordHealth off: review-send:${customerId}),
-// and every HTTP path — including handlers that trigger a scheduled job
-// by name (manual auto-dispatch, price-scan, engagement sync) and shared
-// service entry points reached from admin routes. An HTTP request parked
-// behind the cron herd would mutate after the client gave up. The
-// context-based default means no request-vs-scheduled flag has to be
-// threaded through shared entry points.
+// waitForSlot defaults to "running inside a scheduled tick" (see
+// scheduled-cron.js) — independent of health recording, because scheduled
+// sweeps that opt out of job_health (link-registry-catchup) are still
+// scheduled work whose dropped tick nobody retries before the next
+// interval. Only scheduled ticks wait — a dropped once-a-day tick is
+// unrecoverable. Everything else fails fast: dynamic per-entity locks
+// (review-send:${customerId}) and every HTTP path — including handlers
+// that trigger a scheduled job by name (manual auto-dispatch, price-scan,
+// engagement sync) and shared service entry points reached from admin
+// routes. An HTTP request parked behind the cron herd would mutate after
+// the client gave up. The context-based default means no
+// request-vs-scheduled flag has to be threaded through shared code.
 //
 // Non-waiting callers still take a holder slot: bypassing the cap would
 // let a burst of request locks pin the half of the pool reserved for job
 // bodies and web routes. No slot → no_connection, the same skip every
 // caller already maps to "retry in a moment".
-async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = recordHealth && isScheduledTick() } = {}) {
+async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = isScheduledTick() } = {}) {
   const lockKey = `cron:${jobName}`;
   // Reentrant path: already inside a held slot (nested runExclusive) —
   // no second slot AND no second connection. The nested advisory lock is
