@@ -401,6 +401,63 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(frozenDiscounted.lines.find((l) => l.serviceKey === 'waveguard_membership')).toMatchObject({ price: 49 });
   });
 
+  test('one-time engine packages honor their explicit visit count in COGS', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-visits', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '750.00',
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'german_roach', name: 'German Roach Package', price: 750, total: 750, monthly: null, visits: 3 }],
+        },
+      },
+    });
+    const roach = audit.lines.find((l) => l.serviceKey === 'german_roach');
+    expect(roach).toMatchObject({ cadence: 'one_time', price: 750 });
+    // Three treatments' inventory goes out the door — not one unit's.
+    expect(roach.cogs.visitsPerYear).toBe(3);
+  });
+
+  test('authored one-time quantity scales COGS units (revenue already folds it in)', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-qty', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '2000.00',
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          buildings: [{ name: 'Grove', lineItems: [{ description: 'Palm injection', frequency: 'one_time', unitPrice: 50, quantity: 40, taxable: false }] }],
+        },
+      },
+    });
+    const palms = audit.lines.find((l) => /palm injection/i.test(l.label));
+    expect(palms).toMatchObject({ cadence: 'one_time', price: 2000 });
+    expect(palms.cogs.visitsPerYear).toBe(40);
+  });
+
+  test('a frozen setup discount reprices the MAPPED membership row too', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-mapped-fee', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: '49.00',
+      estimate_data: {
+        sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 49 }] } },
+        result: { recurring: { services: [{ name: 'Pest Control', mo: 55 }] }, oneTime: { membershipFee: 99 } },
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, initialFee: 99 }] },
+      },
+    });
+    // ONE membership row, at the customer-shown frozen amount — the raw
+    // $49 row price-matches and is consumed instead of dropped.
+    const fees = audit.lines.filter((l) => l.serviceKey === 'waveguard_membership');
+    expect(fees).toHaveLength(1);
+    expect(fees[0]).toMatchObject({ price: 49, priceBeforeDiscount: 99 });
+  });
+
+  test('a structured one-time container in engineResult merges (not just lineItems)', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-alt-onetime', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: '500.00',
+      estimate_data: {
+        result: { recurring: { services: [{ name: 'Pest Control', mo: 55 }] } },
+        engineResult: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 }] } },
+      },
+    });
+    expect(audit.lines.find((l) => l.serviceKey === 'bed_bug')).toMatchObject({ cadence: 'one_time', price: 500 });
+  });
+
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-xfer', status: 'sent', monthly_total: '400.00', annual_total: '4800.00', onetime_total: null,

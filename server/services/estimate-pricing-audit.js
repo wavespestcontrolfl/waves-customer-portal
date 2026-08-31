@@ -414,7 +414,7 @@ function normalizeRecurringLines(result) {
   return lines;
 }
 
-function normalizeOneTimeLines(result) {
+function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverride = null } = {}) {
   const lines = [];
   for (const item of result?.oneTime?.items || []) {
     const serviceKey = item.service || keyFromName(item.name);
@@ -458,15 +458,22 @@ function normalizeOneTimeLines(result) {
       priceSource: 'saved_estimate.result.oneTime.specItems',
     });
   }
-  if (Number(result?.oneTime?.membershipFee || 0) > 0) {
+  // The frozen setup-fee decision governs the MAPPED membership row too —
+  // a waiver suppresses it, and a frozen discounted amount replaces the
+  // stored fee, exactly as the raw normalizer's initialFee path (GH codex
+  // P1: mapped-plus-raw containers recorded $99 while the customer paid
+  // the frozen $49).
+  if (Number(result?.oneTime?.membershipFee || 0) > 0 && emitInitialFee) {
+    const gross = Number(result.oneTime.membershipFee);
+    const fee = Number.isFinite(numOrNaN(initialFeeOverride)) ? numOrNaN(initialFeeOverride) : gross;
     lines.push({
       serviceKey: 'waveguard_membership',
       label: 'WaveGuard Membership',
       cadence: 'one_time',
-      price: money(result.oneTime.membershipFee),
+      price: money(fee),
       monthly: null,
-      priceBeforeDiscount: money(result.oneTime.membershipFee),
-      discount: 0,
+      priceBeforeDiscount: money(gross),
+      discount: gross > 0 && gross > fee ? Math.round((1 - fee / gross) * 1000) / 1000 : 0,
       priceSource: 'saved_estimate.result.oneTime.membershipFee',
       skipCogs: true,
     });
@@ -549,7 +556,12 @@ async function inventoryCostFor(serviceKey, dimensions) {
 }
 
 function visitsFor(line, result) {
-  if (line.cadence === 'one_time') return 1;
+  // A one-time row can still cover N units of service (multi-treatment
+  // packages persisting visits:3, authored quantity>1 lines) — its COGS
+  // must scale by the explicit count, not one unit (GH codex P1 x2).
+  if (line.cadence === 'one_time') {
+    return Number(line.visitsPerYear) > 0 ? Number(line.visitsPerYear) : 1;
+  }
   if (line.visitsPerYear) return Number(line.visitsPerYear);
   const item = (result?.lineItems || []).find((i) => i.service === line.serviceKey);
   if (item?.visits || item?.visitsPerYear) return Number(item.visits || item.visitsPerYear);
@@ -798,7 +810,14 @@ function normalizeProposalLines(estimate) {
   };
   for (const building of proposal.buildings || []) {
     for (const item of building.lineItems || []) {
-      if (item.frequency === 'one_time') push(item.description || building.name, 'one_time', item.amount);
+      if (item.frequency === 'one_time') {
+        // amount already folds quantity in (the canonical normalizer
+        // multiplies unitPrice × quantity) — the units performed must
+        // scale COGS the same way as the recurring branch (GH codex P1).
+        const quantity = Math.max(1, Number(item.quantity) || 1);
+        push(item.description || building.name, 'one_time', item.amount,
+          quantity > 1 ? { visitsPerYear: quantity } : {});
+      }
       else {
         // COGS visits must match the annualized revenue occurrences —
         // visitsFor reads TOP-LEVEL visitsPerYear — and QUANTITY multiplies
@@ -854,21 +873,9 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // freezing an empty audit (codex pre-push P1).
   const proposalLines = data.proposal?.enabled === true ? normalizeProposalLines(estimate) : [];
   const proposalAuthoritative = proposalLines.length > 0;
-  let rawLines = proposalAuthoritative
-    ? proposalLines
-    : [
-      ...normalizeRecurringLines(result),
-      ...normalizeOneTimeLines(result),
-    ];
-  // Quote-wizard rows persist their priced services ONLY at
-  // engineResult.lineItems (no recurring/oneTime blocks) — without this
-  // fallback such snapshots had empty lines, zero cost, and a falsely
-  // perfect margin (GH codex P1). An ancillary data.result can shadow
-  // the priced engineResult in the alias — when the alternate object is
-  // the one with priced lines, it becomes THE result for the whole audit
-  // (dimensions, visit counts, provenance), not just the lines (codex
-  // pre-push P1).
-  // The FROZEN setup-fee decision gates the raw initialFee emission: a
+  // The FROZEN setup-fee decision gates EVERY membership emission — the
+  // raw initialFee path and the mapped oneTime.membershipFee row alike
+  // (GH codex P1: the mapped row escaped a frozen $49 discount): a
   // bundle waiver, an existing-member/queued setupFeeQuote waiver, or an
   // operator waiver means the customer was never charged it — the frozen
   // firstVisitFees rows are the authority when present (GH codex P1).
@@ -887,6 +894,21 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const initialFeeOverride = emitInitialFee && Number.isFinite(frozenSetupAmount) && frozenSetupAmount > 0
     ? frozenSetupAmount
     : null;
+  const setupOpts = { emitInitialFee, initialFeeOverride };
+  let rawLines = proposalAuthoritative
+    ? proposalLines
+    : [
+      ...normalizeRecurringLines(result),
+      ...normalizeOneTimeLines(result, setupOpts),
+    ];
+  // Quote-wizard rows persist their priced services ONLY at
+  // engineResult.lineItems (no recurring/oneTime blocks) — without this
+  // fallback such snapshots had empty lines, zero cost, and a falsely
+  // perfect margin (GH codex P1). An ancillary data.result can shadow
+  // the priced engineResult in the alias — when the alternate object is
+  // the one with priced lines, it becomes THE result for the whole audit
+  // (dimensions, visit counts, provenance), not just the lines (codex
+  // pre-push P1).
   if (!proposalAuthoritative) {
     // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
     // additional priced rows only in (engine)result.lineItems — merge and
@@ -956,14 +978,29 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     const hadMappedLines = rawLines.length > 0;
     const fromResult = normalizeEngineLineItems(result, { emitInitialFee, initialFeeOverride });
     if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
-      const alt = normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride });
-      if (alt.length) {
+      // The alternate container gets EVERY canonical collector, not just
+      // the lineItems scan — a structured engineResult.oneTime/recurring
+      // block is a supported shape there too (GH codex P1: a $500
+      // one-time charge in engineResult.oneTime.items was dropped).
+      // Structured first, then lineItems, so cross-shape duplicates
+      // (membership fee in both) dedupe exactly as they do on `result`.
+      const altMapped = [
+        ...normalizeRecurringLines(data.engineResult),
+        ...normalizeOneTimeLines(data.engineResult, setupOpts),
+      ];
+      const altRaw = normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride });
+      if (altMapped.length || altRaw.length) {
         result = data.engineResult;
-        merge(alt);
+        merge(altMapped);
+        merge(altRaw);
       }
     } else {
       merge(fromResult);
       if (data.engineResult && data.engineResult !== result) {
+        merge([
+          ...normalizeRecurringLines(data.engineResult),
+          ...normalizeOneTimeLines(data.engineResult, setupOpts),
+        ], { consumeOnlyMappedCadences: true });
         merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }), { consumeOnlyMappedCadences: true });
       }
     }
