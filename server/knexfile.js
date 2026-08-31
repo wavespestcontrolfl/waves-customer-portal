@@ -42,10 +42,17 @@ function poolSize(envName, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+// min > max makes tarn throw at startup ("opt.max is smaller than opt.min")
+// — a mis-set env var must degrade the pool, never prevent boot.
+function poolConfig(defaultMax) {
+  const max = poolSize('DB_POOL_MAX', defaultMax);
+  return { min: Math.min(poolSize('DB_POOL_MIN', 2), max), max };
+}
+
 const development = {
   client: 'pg',
   connection: process.env.DATABASE_URL,
-  pool: { min: poolSize('DB_POOL_MIN', 2), max: poolSize('DB_POOL_MAX', 10) },
+  pool: poolConfig(10),
   migrations: {
     directory: './models/migrations',
     tableName: 'knex_migrations',
@@ -69,7 +76,7 @@ module.exports = {
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
     },
-    pool: { min: poolSize('DB_POOL_MIN', 2), max: poolSize('DB_POOL_MAX', 20) },
+    pool: poolConfig(20),
     migrations: {
       directory: './models/migrations',
       tableName: 'knex_migrations',

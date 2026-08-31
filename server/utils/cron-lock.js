@@ -268,4 +268,15 @@ async function isLocked(jobName) {
   }
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd };
+// The complete set of skip results runExclusive itself can return — as
+// opposed to a `skipped: true` shape the job BODY returned, which flows
+// through untouched. Callers that must distinguish "the lock machinery
+// never ran my body" from their own body-level skips use this predicate
+// instead of enumerating reasons (an enumeration went stale when
+// lock_capacity was added and made a capacity skip look like success).
+const LOCK_SKIP_REASONS = new Set(['lease_held', 'no_connection', 'lock_capacity']);
+function wasLockSkipped(result) {
+  return !!(result && result.skipped === true && LOCK_SKIP_REASONS.has(result.reason));
+}
+
+module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped };
