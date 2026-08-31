@@ -73,14 +73,6 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   cancelPendingAction: (...args) => mockCancelPendingAction(...args),
   recordResult: (...args) => mockRecordResult(...args),
 }));
-const mockPreviewCancellation = jest.fn();
-jest.mock('../services/intelligence-bar/cancellation-preview', () => {
-  const actual = jest.requireActual('../services/intelligence-bar/cancellation-preview');
-  return {
-    ...actual,
-    previewCancellationEffects: (...args) => mockPreviewCancellation(...args),
-  };
-});
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -217,52 +209,11 @@ describe('W0B authorization contract', () => {
   });
 });
 
-describe('W0B cancellation money effects', () => {
-  // Money-free cancellation: the only kind the card commits.
-  const PREVIEW = {
-    appointment: { id: 'ap1', scheduled_date: '2026-09-02', service_type: 'Quarterly Pest', status: 'scheduled', customer_name: 'acct-3001' },
-    fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false },
-    invoices: [],
-  };
-  const MONEY_PREVIEW = {
-    ...PREVIEW,
-    fee: { rail: 'card_hold', applies: true, amount: 49, unresolved: false },
-    invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 0 }],
-  };
-  const { cancellationFingerprint } = jest.requireActual('../services/intelligence-bar/cancellation-preview');
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockCreatePendingAction.mockResolvedValue({
-      id: PENDING_ID, tool_name: 'cancel_appointment', summary: 'cancel', expires_at: new Date(Date.now() + 600000).toISOString(),
-    });
-  });
-
-  test('money-free proposal pins a fingerprint and the contract says no fee / no invoices', async () => {
-    mockPreviewCancellation.mockResolvedValue(PREVIEW);
+describe('W0B cancel_appointment is not card-confirmable', () => {
+  beforeEach(() => jest.clearAllMocks());
+  test('every cancel proposal is refused and routed to the Dispatch screen — no pending action, no execution', async () => {
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'ap1', reason: 'rain' } }],
-      [{ type: 'text', text: 'Proposed.' }],
-    ]);
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
-      expect(status).toBe(200);
-      expect(mockExecuteTool).not.toHaveBeenCalled(); // legacy-bare: never executed from the loop
-      const stored = mockCreatePendingAction.mock.calls[0][0];
-      expect(stored.params._cancellation_fingerprint).toBe(cancellationFingerprint(PREVIEW));
-      const labels = stored.contract.effects.map((e) => e.label);
-      expect(labels).toContainEqual(expect.stringMatching(/^No late-cancel fee/));
-      expect(labels.some((l) => /Void invoice|will be charged/.test(l))).toBe(false);
-      expect(body.pendingActions[0].contract.effects.map((e) => e.label)).toEqual(labels);
-      // Internal pins never ride to the card.
-      expect(body.pendingActions[0].params._cancellation_fingerprint).toBeUndefined();
-    });
-  });
-
-  test('a cancellation WITH money effects is refused at proposal and routed to the Dispatch screen', async () => {
-    mockPreviewCancellation.mockResolvedValue(MONEY_PREVIEW);
-    scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'ap1' } }],
       [{ type: 'text', text: 'Use Dispatch.' }],
     ]);
     await withServer(async (baseUrl) => {
@@ -275,66 +226,6 @@ describe('W0B cancellation money effects', () => {
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
       expect(toolResult.error).toMatch(/Dispatch screen/);
       expect(toolResult.error).toMatch(/Nothing was changed/);
-    });
-  });
-
-  test('/confirm-action refuses when the money posture drifted after the card was shown', async () => {
-    mockClaimForConfirm.mockResolvedValue({
-      action: {
-        id: PENDING_ID, tool_name: 'cancel_appointment',
-        params: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: cancellationFingerprint(PREVIEW) },
-      },
-    });
-    // A fee window was entered between proposal and confirm → money effect now.
-    mockPreviewCancellation.mockResolvedValue(MONEY_PREVIEW);
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
-        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pending_action_id: PENDING_ID }),
-      });
-      const body = await res.json();
-      expect(res.status).toBe(409);
-      expect(body.preview_changed).toBe(true);
-      expect(mockExecuteTool).not.toHaveBeenCalled();
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ preview_changed: true }));
-    });
-  });
-
-  test('/confirm-action executes when the effect set is unchanged, passing the pin for the in-transaction re-check', async () => {
-    mockClaimForConfirm.mockResolvedValue({
-      action: {
-        id: PENDING_ID, tool_name: 'cancel_appointment',
-        params: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: cancellationFingerprint(PREVIEW) },
-      },
-    });
-    mockPreviewCancellation.mockResolvedValue(PREVIEW);
-    mockExecuteTool.mockResolvedValue({ success: true, appointment_id: 'ap1' });
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
-        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pending_action_id: PENDING_ID }),
-      });
-      expect(res.status).toBe(200);
-      expect(mockExecuteTool).toHaveBeenCalledWith('cancel_appointment', {
-        appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: cancellationFingerprint(PREVIEW),
-      });
-    });
-  });
-
-  test('a proposal is REFUSED (fail closed) when the financial preview cannot be completed', async () => {
-    mockPreviewCancellation.mockResolvedValue({ error: 'Could not verify the late-cancel fee for this visit — cancel it from the Dispatch screen instead.' });
-    scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'ap1' } }],
-      [{ type: 'text', text: 'Could not propose.' }],
-    ]);
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
-      expect(status).toBe(200);
-      expect(mockCreatePendingAction).not.toHaveBeenCalled();
-      expect(body.pendingActions).toEqual([]);
-      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
-      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
-      expect(toolResult.error).toMatch(/Dispatch screen/);
     });
   });
 });
@@ -420,6 +311,7 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
       const { body } = await postQuery(baseUrl, { prompt: 'ask for a review', context: 'customers' });
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._pinned_phone).toBe('+19415550000');
+      expect(stored.params.customer_id).toBe('c1'); // canonicalized to the pinned row
       expect(stored.contract.effects.map((e) => e.label)).toContainEqual('Send review request to acct 1042 (…0000)');
       expect(stored.contract.pinned_recipient).toMatchObject({ name: 'acct 1042', phone_last4: '0000' });
       expect(body.pendingActions[0].params.recipient).toBe('acct 1042 (…0000)');
@@ -444,6 +336,8 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
 
   test('trigger_review_request: unchanged recipient executes with the pin stripped', async () => {
     mockClaimForConfirm.mockResolvedValue({
+      // Name-pinned row (this suite's db stub has no query chain; the
+      // customer_id path is exercised in the proposal test above).
       action: { id: PENDING_ID, tool_name: 'trigger_review_request', params: { customer_name: 'acct 1042', _pinned_phone: '+19415550000' } },
     });
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });

@@ -2203,18 +2203,6 @@ async function cancelAppointment(input) {
   // trigger the follow-up re-park hook for a treatment that already
   // happened. Idempotent on an already-cancelled row; every other terminal
   // state is an error, matching rescheduleAppointment above.
-  if (String(appt.status) === 'cancelled' && input._cancellation_fingerprint) {
-    // Authorization-bound confirm (W0B) meeting an already-cancelled visit:
-    // another surface cancelled it after the card was shown and ran its
-    // own follow-through. The approved effect set ("cancel a scheduled
-    // visit, charge X, void Y") no longer exists — never replay money
-    // rails under that approval. Refuse; the operator re-asks.
-    return {
-      error: 'This visit was already cancelled after the card was shown — nothing was charged or voided by this confirmation. Ask again if anything remains to do.',
-      preview_changed: true,
-      already_cancelled: true,
-    };
-  }
   if (String(appt.status) === 'cancelled') {
     // Retry of an already-committed cancellation: the post-commit re-park
     // hook may have failed transiently on the first attempt, and this early
@@ -2289,37 +2277,9 @@ async function cancelAppointment(input) {
   // caller-owned transaction as the transition (Codex r5): a crash between
   // separate writes would report failure for a committed cancellation, and
   // the retry's already_cancelled return would never persist the reason.
-  // W0B authorization contract: a confirmed card carries the fingerprint of
-  // the effect set the operator approved (visit identity/state, fee posture,
-  // voidable invoices). It is re-checked INSIDE the cancelling transaction
-  // under FOR UPDATE locks on the visit, its invoices, and its card-fee rows,
-  // so nothing can move between the check and the commit; the follow-through
-  // then runs on the same rows immediately after. Drift ⇒ no transition, no
-  // follow-through, preview_changed back to the card.
-  const approvedFingerprint = input._cancellation_fingerprint ? String(input._cancellation_fingerprint) : null;
-  // The approved effect set, verified under lock — bound into the post-
-  // commit rails below (fee posture → waiveFee, invoice set → approved ids)
-  // so the follow-through can only do what the card disclosed.
-  let approvedEffects = null;
   try {
     const { transitionJobStatus } = require('../job-status');
     await db.transaction(async (trx) => {
-      if (approvedFingerprint) {
-        const { previewCancellationEffects, cancellationFingerprint, cancellationHasMoneyEffects } = require('./cancellation-preview');
-        await trx('scheduled_services').where('id', appointment_id).forUpdate().first('id');
-        await trx('invoices').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
-        await trx('estimate_card_holds').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
-        await trx('appointment_card_requests').where({ scheduled_service_id: appointment_id }).forUpdate().select('id');
-        const live = await previewCancellationEffects(appointment_id, { trx });
-        // Same scope the proposal enforced: a money effect that appeared
-        // since the card (fee window entered, invoice minted) is drift.
-        if (live?.error || cancellationFingerprint(live) !== approvedFingerprint || cancellationHasMoneyEffects(live)) {
-          const err = new Error('cancellation_effects_changed');
-          err.previewChanged = true;
-          throw err;
-        }
-        approvedEffects = live;
-      }
       await transitionJobStatus({
         jobId: appointment_id,
         fromStatus: appt.status,
@@ -2336,12 +2296,6 @@ async function cancelAppointment(input) {
       }
     });
   } catch (err) {
-    if (err && err.previewChanged) {
-      return {
-        error: 'The fee or invoice effects of this cancellation changed after the card was shown. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
     }
@@ -2381,26 +2335,10 @@ async function cancelAppointment(input) {
     const staleCommit = cancelledAtCommit
       && (Date.now() - new Date(cancelledAtCommit).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
     if (cancelledAtCommit && !staleCommit) {
-      // Authorization-bound (W0B): the fee rail may only charge if the
-      // approved posture said a fee applies, and only the approved invoice
-      // set is voided — the follow-through cannot exceed the card.
-      await runVisitCancellationFollowThrough({
-        targetIds: [appointment_id],
-        source: 'intelligence-bar',
-        now: new Date(cancelledAtCommit),
-        ...(approvedEffects ? {
-          waiveFee: !approvedEffects.fee?.applies,
-          approvedInvoiceIds: (approvedEffects.invoices || []).map((i) => String(i.id)),
-        } : {}),
-      });
+      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtCommit) });
     } else {
       logger.warn(`[intelligence-bar] cancellation instant for ${appointment_id} is ${staleCommit ? 'stale' : 'missing'} — fee legs waived (fail free)`);
-      await runVisitCancellationFollowThrough({
-        targetIds: [appointment_id],
-        source: 'intelligence-bar',
-        waiveFee: true,
-        ...(approvedEffects ? { approvedInvoiceIds: (approvedEffects.invoices || []).map((i) => String(i.id)) } : {}),
-      });
+      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true });
     }
   } catch (e) {
     logger.error(`[intelligence-bar] cancel follow-through failed for ${appointment_id}: ${e.message}`);

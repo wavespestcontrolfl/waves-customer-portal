@@ -428,13 +428,22 @@ async function sendEmailReply({ email_id, body }) {
   }
 }
 
-async function replyViaSms({ email_id, customer_name, message }) {
+async function replyViaSms({ email_id, customer_name, message, customer_id }) {
   try {
     let phone = null;
     let custName = customer_name;
     let custId = null;
 
-    if (email_id) {
+    if (customer_id) {
+      // Pinned recipient (Intelligence Bar confirm card, W0B): the proposal
+      // resolved the customer and the operator approved THAT identity —
+      // send to exactly that row, never a fresh name/email match.
+      const customer = await db('customers').where('id', customer_id).first();
+      if (!customer) return { error: 'Pinned customer no longer exists' };
+      phone = customer.phone;
+      custName = `${customer.first_name} ${customer.last_name}`;
+      custId = customer.id;
+    } else if (email_id) {
       const email = await db('emails').where('id', email_id).first();
       if (email?.customer_id) {
         const customer = await db('customers').where('id', email.customer_id).first();

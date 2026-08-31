@@ -57,10 +57,11 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'run_seo_pipeline',
 ]);
 
-// Tools whose commit itself sends a customer a message. Schedule moves and
-// cancellations are deliberately NOT here: their executors only move/log
-// the row and run billing/tracker cleanup — no customer message is sent by
-// the confirm (reminder crons are separate, later, and their own effect).
+// Tools whose commit itself sends a customer a message. Bookings, schedule
+// moves and cancellations are deliberately NOT here: their executors
+// move/log rows and register reminders with sendConfirmation:false — no
+// customer message is sent by the confirm (reminder crons are separate,
+// later, and disclosed as their own effect).
 // move_stops_to_day is conditional on notify_customers and handled
 // explicitly.
 const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
@@ -68,7 +69,6 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'reply_via_sms',
   'send_email_reply',
   'trigger_review_request',
-  'create_appointment',
 ]);
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
@@ -228,6 +228,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
       before: params?.current_status, after: params?.new_status,
     });
+  }
+  for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
+  if (toolName === 'create_appointment') {
+    // Booking money + follow-on effects (codex P0/P1 on #3648): the open
+    // inspection credit is redeemed post-commit, and reminder rows are
+    // registered now but send LATER via the reminder schedule — no
+    // confirmation SMS goes out on Confirm.
+    const credit = Number(preview?.inspection_credit?.amount) || 0;
+    if (credit > 0) push('billing', `Redeems $${credit.toFixed(2)} of the customer's inspection credit toward this booking`);
+    push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule); no confirmation text is sent now');
   }
   for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
   if (toolName === 'cancel_appointment' && preview?.cancellation) {

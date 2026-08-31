@@ -105,40 +105,6 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
 });
 
-test('cancel_appointment discloses the late-cancel fee and invoice voids from the cancellation preview', () => {
-  const c = buildContract({
-    toolName: 'cancel_appointment',
-    params: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: 'x' },
-    displayParams: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: 'x' },
-    preview: {
-      cancellation: {
-        appointment: { id: 'ap1', scheduled_date: '2026-09-02', service_type: 'Quarterly Pest', status: 'scheduled', customer_name: 'acct-3001' },
-        fee: { rail: 'card_hold', applies: true, amount: 49, unresolved: false },
-        invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, credit_applied: 0 }],
-      },
-    },
-  });
-  const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^Late-cancel fee of \$49\.00 will be charged to the card on file/));
-  expect(labels).toContainEqual(expect.stringMatching(/^Void invoice INV-1001 \(sent, \$120\.00\) — applied credits\/deposits restored; skipped for office review/));
-  expect(labels).toContainEqual(expect.stringMatching(/^Only the invoices listed above are voided/));
-  expect(c.effects.find((e) => e.label.startsWith('Cancel Quarterly Pest'))).toMatchObject({ kind: 'operational', before: 'scheduled', after: 'cancelled' });
-  expect(labels.some((l) => l.includes('fingerprint'))).toBe(false);
-  expect(c.effects.filter((e) => e.kind === 'billing').length).toBe(3);
-
-  const unresolved = buildContract({
-    toolName: 'cancel_appointment', params: {}, displayParams: {},
-    preview: { cancellation: { appointment: {}, fee: { rail: 'appointment_card', applies: true, amount: null, unresolved: true }, invoices: [] } },
-  });
-  expect(unresolved.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/MAY be charged/));
-
-  const free = buildContract({
-    toolName: 'cancel_appointment', params: {}, displayParams: {},
-    preview: { cancellation: { appointment: {}, fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false }, invoices: [] } },
-  });
-  expect(free.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/No late-cancel fee/));
-});
-
 test('bulk_update_customers with an email change discloses the per-customer email fan-out (email only)', () => {
   const { EMAIL_FANOUT_DISCLOSURE } = require('../services/customer-email-fanout');
   const { CONTACT_FANOUT_DISCLOSURE } = require('../services/customer-contact-fanout');
@@ -189,7 +155,17 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
   expect(buildContract({ toolName: 'reschedule_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
   expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
   expect(buildContract({ toolName: 'trigger_review_request', params: {}, displayParams: {} }).notifies_customer).toBe(true);
-  expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(true);
+  expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+});
+
+test('create_appointment discloses inspection-credit redemption and later reminders (no confirmation text now)', () => {
+  const withCredit = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { preview: true, inspection_credit: { amount: 49 } } });
+  const labels = withCredit.effects.map((e) => e.label);
+  expect(labels).toContainEqual("Redeems $49.00 of the customer's inspection credit toward this booking");
+  expect(labels).toContainEqual(expect.stringMatching(/reminder rows .*no confirmation text is sent now/));
+  const noCredit = buildContract({ toolName: 'create_appointment', params: {}, displayParams: {}, preview: { preview: true, inspection_credit: { amount: 0 } } });
+  expect(noCredit.effects.some((e) => /Redeems/.test(e.label))).toBe(false);
+  expect(contractHash(withCredit)).not.toBe(contractHash(noCredit));
 });
 
 test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {
@@ -232,13 +208,6 @@ test('bulk_update_leads: full name list under more_effects and a fingerprint of 
   const other = buildContract({ toolName: 'bulk_update_leads', params: { lead_ids: ['l1', 'l2', 'l9'], current_status: 'new', new_status: 'lost' }, displayParams: {}, preview: { all_names: ['acct-1', 'acct-2', 'acct-3'] } });
   expect(other.targets_fingerprint).not.toBe(c.targets_fingerprint);
   expect(contractHash(other)).not.toBe(contractHash(c));
-});
-
-test('cancellation: frozen hold disposition is stated, never a disjunction', () => {
-  const mk = (disp) => buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {}, preview: { cancellation: { appointment: {}, fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false, hold_disposition: disp }, invoices: [] } } });
-  expect(mk('parked').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/PARKED for the rebooked visit$/));
-  expect(mk('released').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/is RELEASED$/));
-  expect(contractHash(mk('parked'))).not.toBe(contractHash(mk('released')));
 });
 
 test('hash is order-independent and sensitive to any effect change', () => {

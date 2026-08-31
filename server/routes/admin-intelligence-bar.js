@@ -430,10 +430,13 @@ function withCacheBreakpoint(messages) {
 // /confirm-action commits) while reads stay available; the fallback for a
 // broken confirm UI is the normal admin screen, never ungated AI execution.
 // (GATE_IB_UI_CONFIRM is retired and intentionally ignored.)
-// cancel_appointment via the confirm card is limited to money-free
-// cancellations (see proposePendingWrite) — shared with the executor's
-// in-transaction re-check so both boundaries agree.
-const { cancellationHasMoneyEffects, CANCELLATION_MONEY_EFFECTS_MESSAGE } = require('../services/intelligence-bar/cancellation-preview');
+// cancel_appointment is NOT card-confirmable (W0B): its post-commit rails
+// (late-cancel fee, invoice void via the shared status writer, inspection-
+// credit reversal) settle amounts by re-reading state after commit, so no
+// contract the card shows can be exact. Cancels happen on the Dispatch
+// screen, which owns the waiver and review controls, until a rails-binding
+// lane makes the effect set pinnable.
+const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
@@ -681,6 +684,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (isToolFailure(preview)) {
       return { failed: true, modelResult: preview };
     }
+    if (toolUse.name === 'create_appointment' && params.customer_id) {
+      // Booking redeems the customer's open inspection credit post-commit
+      // (tools.js redeemInspectionCreditForBooking) — a money effect the
+      // card must show and the preview fingerprint must pin. Read-only
+      // projection of what the redemption would apply.
+      try {
+        const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id));
+        const amount = Number(projected?.amount ?? projected) || 0;
+        preview = { ...preview, inspection_credit: { amount } };
+      } catch (err) {
+        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
+      }
+    }
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
@@ -753,6 +769,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (recipient.error) return { failed: true, modelResult: recipient };
       if (!recipient.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
       params._pinned_phone = recipient.phone;
+      // Canonicalize to the pinned row: the executor sends to THIS customer
+      // id, never a fresh name/email match (codex P1 on #3648).
+      params.customer_id = recipient.id;
       preview = {
         ...preview,
         pinned_recipient: {
@@ -772,26 +791,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         pinned_recipient: { email_masked: maskEmail(email.from_address), subject: email.subject || null },
       };
     }
-    if (toolUse.name === 'cancel_appointment' && params.appointment_id) {
-      // Cancelling runs the shared follow-through after commit: a late-
-      // cancel fee may CHARGE the customer's card and open invoices get
-      // voided/credited. The contract must disclose those effects (W0B P0),
-      // so preview them now (read-only, the rails' own previews) and pin a
-      // fingerprint that /confirm-action re-checks — money posture drift
-      // during the pending window refuses the commit.
-      const { previewCancellationEffects, cancellationFingerprint } = require('../services/intelligence-bar/cancellation-preview');
-      const cancellation = await previewCancellationEffects(String(params.appointment_id));
-      if (cancellation?.error) return { failed: true, modelResult: { error: cancellation.error } };
-      // Exact-effect scope (W0B): the card commits only cancellations with
-      // NO money effects. A fee (or an unverifiable fee lane) or open
-      // invoices are settled by rails that re-read amounts after commit,
-      // which cannot be pinned to the card yet — those cancels happen on
-      // the Dispatch screen, which owns the waiver and review controls.
-      if (cancellationHasMoneyEffects(cancellation)) {
-        return { failed: true, modelResult: { error: CANCELLATION_MONEY_EFFECTS_MESSAGE } };
-      }
-      params._cancellation_fingerprint = cancellationFingerprint(cancellation);
-      preview = { ...preview, cancellation };
+    if (toolUse.name === 'cancel_appointment') {
+      return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
     }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);
@@ -2269,27 +2270,6 @@ router.post('/confirm-action', async (req, res, next) => {
       }
     }
 
-    if (action.tool_name === 'cancel_appointment') {
-      // Re-validate the frozen effect set (W0B): visit identity/state, fee
-      // posture, and voidable-invoice set must still match what the card
-      // disclosed. This is the cheap fast-fail; the executor re-checks the
-      // SAME fingerprint inside its cancelling transaction under row locks
-      // (the pin stays in execParams for that), closing the check→execute
-      // window.
-      const approved = execParams._cancellation_fingerprint;
-      if (approved) {
-        const { previewCancellationEffects, cancellationFingerprint } = require('../services/intelligence-bar/cancellation-preview');
-        const live = await previewCancellationEffects(String(execParams.appointment_id));
-        if (live?.error || cancellationFingerprint(live) !== approved) {
-          const result = {
-            error: 'The fee or invoice effects of this cancellation changed after the card was shown. Ask again for a fresh confirmation card.',
-            preview_changed: true,
-          };
-          await PendingActions.recordResult(action.id, result);
-          return res.status(409).json(result);
-        }
-      }
-    }
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
       // W0B execution pin: re-run the (mutation-free) preview and refuse if
       // it no longer resolves to what the card showed.

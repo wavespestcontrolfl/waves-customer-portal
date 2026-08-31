@@ -5348,29 +5348,14 @@ const InvoiceService = {
    *
    * Best-effort: logs and continues, never throws. Returns voided invoice ids.
    */
-  async voidOpenInvoicesForCancelledService(scheduledServiceId, { onlyInvoiceIds = null } = {}) {
+  async voidOpenInvoicesForCancelledService(scheduledServiceId) {
     const voided = [];
     if (!scheduledServiceId) return voided;
     try {
       const candidates = await db("invoices")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
-        // Authorization-bound callers (IB confirm card) pass the exact invoice
-        // set the operator approved; anything minted after approval is left
-        // for the office rather than voided under an approval that never
-        // showed it.
-        .modify((qb) => { if (Array.isArray(onlyInvoiceIds)) qb.whereIn("id", onlyInvoiceIds.map(String)); })
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
-      if (Array.isArray(onlyInvoiceIds)) {
-        const unapproved = await db("invoices")
-          .where({ scheduled_service_id: scheduledServiceId })
-          .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
-          .whereNotIn("id", onlyInvoiceIds.map(String))
-          .select("id", "invoice_number");
-        for (const u of unapproved) {
-          logger.warn(`[invoice] NOT voiding ${u.invoice_number} for cancelled service ${scheduledServiceId} — minted after the operator's approval; needs office review`);
-        }
-      }
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
