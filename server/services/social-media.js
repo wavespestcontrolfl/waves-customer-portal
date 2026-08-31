@@ -728,6 +728,13 @@ function validateContent(text, platform) {
     issues.push('Contains pricing claim — link to /pest-control-calculator/ instead');
   }
   issues.push(...complianceLanguageIssues(text));
+  // Affiliate links are web-only: validateContent is the last check on
+  // every FINAL platform text (generated or custom), so generated copy that
+  // introduces an affiliate/tracking URL after input sanitization still
+  // cannot post (Codex r6 P1).
+  if (require('./content/content-guardrails').containsAffiliateMaterial(text)) {
+    issues.push('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: contains affiliate material — affiliate links publish on the blog only');
+  }
 
   const phones = text.match(PHONE_PATTERN) || [];
   for (const phone of phones) {
@@ -2051,6 +2058,49 @@ const SocialMediaService = {
   },
 
   /**
+   * Affiliate-material strip for the social channel (owner monetization
+   * pilot 2026-08-31: affiliate links are web-only). Pure; consumed by
+   * publishToAll (the convergence point for every share lane). A link that
+   * is itself affiliate material refuses the whole share; affiliate
+   * material in a copy field drops just that field.
+   */
+  sanitizeShareContent({ title, description, customContent, link }) {
+    const { containsAffiliateMaterial } = require('./content/content-guardrails');
+    if (containsAffiliateMaterial(link)) {
+      logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: refused share — link is affiliate material (${String(link).slice(0, 120)})`);
+      return { refused: true };
+    }
+    const drop = (field) => logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: dropped ${field} from share of ${String(link).slice(0, 120)}`);
+    const out = { refused: false, title, description, customContent };
+    for (const field of ['title', 'description']) {
+      if (out[field] && containsAffiliateMaterial(out[field])) { drop(field); out[field] = ''; }
+    }
+    // customContent is a per-platform caption map ({ facebook, gbp, … };
+    // gbp itself may be a nested { locationId: caption } map) or a single
+    // string — scan every string LEAF recursively, never a coerced object.
+    const scrub = (value, path) => {
+      if (typeof value === 'string') {
+        if (containsAffiliateMaterial(value)) { drop(path); return undefined; }
+        return value;
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const cleaned = {};
+        for (const [k, v] of Object.entries(value)) {
+          const kept = scrub(v, `${path}.${k}`);
+          if (kept !== undefined) cleaned[k] = kept;
+        }
+        return Object.keys(cleaned).length ? cleaned : undefined;
+      }
+      return value;
+    };
+    if (customContent) {
+      const kept = scrub(customContent, 'customContent');
+      out.customContent = kept === undefined ? null : kept;
+    }
+    return out;
+  },
+
+  /**
    * Publish content to all configured platforms.
    */
   // postId: update that existing social_media_posts row (a draft being approved
@@ -2063,6 +2113,17 @@ const SocialMediaService = {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
+    // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31):
+    // every share lane (RSS cron, poller post-merge, studio, manual) funnels
+    // through here, so this is the single strip point. A shared LINK that is
+    // itself affiliate material refuses the share outright; affiliate
+    // material in the copy fields is dropped field-by-field (the share goes
+    // out without it). Runs regardless of GATE_AFFILIATE_LINKS.
+    const stripped = this.sanitizeShareContent({ title, description, customContent, link });
+    if (stripped.refused) {
+      return { success: false, platforms: [{ platform: 'all', skipped: 'AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL' }] };
+    }
+    ({ title, description, customContent } = stripped);
     if (await isPausedByAdmin()) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] };
     }
@@ -2663,6 +2724,15 @@ const SocialMediaService = {
   async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true, complianceJudged = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { platform, success: false, error: 'Automation is disabled' };
+    }
+    // Same web-only affiliate guard as publishToAll: the admin
+    // publish-single route and the tech-social flow call this directly, so
+    // the strip must live at this lower level too.
+    {
+      const stripped = this.sanitizeShareContent({ title, description, customContent: content, link });
+      if (stripped.refused) return { platform, success: false, error: 'AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL' };
+      ({ title, description } = stripped);
+      content = stripped.customContent;
     }
     if (await isPausedByAdmin()) {
       return { platform, success: false, error: 'Automation is paused' };

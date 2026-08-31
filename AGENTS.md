@@ -457,7 +457,12 @@ finding and warns on P1. Reviewers must return JSON matching
 - **New `@waves/*` CJS workspace packages** must join
   `optimizeDeps.include` + `build.commonjsOptions.include` in
   `client/vite.config.js`, or linked packages fail Rollup named-export
-  analysis in prod builds.
+  analysis in prod builds. **Exception — SERVER-ONLY packages** (ones that
+  require Node built-ins such as `node:fs`, e.g. `@waves/affiliate-registry`;
+  `@waves/blog-schema` is data-only): they are never imported from `client/`
+  and must NOT be added to the Vite lists — pre-bundling a Node-API consumer
+  for the browser breaks the build. Mark them SERVER-ONLY in their
+  `package.json` description.
 - **Company name in written copy** is "Waves Pest Control" — never
   "Waves Lawn & Pest". The mascot logo artwork carrying the old name is
   current and intentional; do not flag it.

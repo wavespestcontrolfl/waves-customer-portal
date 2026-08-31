@@ -15,6 +15,14 @@
  *                                 policy-blocked (bed bug, cockroach, rodent, …)
  *   P0 DISALLOWED_EXTERNAL_LINK — a link/URL pointing off the hub/spoke fleet
  *                                 (spam/injection guard — drafts link internally)
+ *   P0/P1 affiliate family      — <AffiliateLink product="…"> components
+ *                                 (owner monetization pilot) resolve only
+ *                                 owner-approved registry products, on
+ *                                 eligible blog post types, with disclosure,
+ *                                 current yellow-class label review, ≤3 per
+ *                                 post, a Waves service CTA present, and
+ *                                 refreshes never add one (see
+ *                                 affiliateComponentFindings)
  *   P2 KEYWORD_STUFFING         — primary keyword density above threshold
  *
  * Phone-number injection is NOT re-checked here — content-quality-gate's
@@ -1589,6 +1597,295 @@ function allowedExactSourceUrls(requiredSourceUrls = []) {
   return urls;
 }
 
+// ── affiliate links (owner monetization pilot, 2026-08-31) ──────────────
+// Blog bodies reference affiliate products ONLY through
+// <AffiliateLink product="…" placement="…"> — never a raw tracking URL.
+// The Astro renderer resolves the product id to its owner-approved URL
+// (rel="sponsored nofollow noopener", visible label, click metadata) from
+// packages/affiliate-registry — the vendored registry whose astro source
+// the owner approves product-by-product via PR merge. Raw retailer URLs in
+// a draft stay plain DISALLOWED_EXTERNAL_LINK (no bypass exists), so the
+// tracking URL can never appear in publishable copy at all.
+//
+// The gate is GATE_AFFILIATE_LINKS === 'true' exactly (call-time read —
+// flips and tests take effect immediately; '1'/'on' stay dark). Gate off,
+// non-blog lane, or an unknown product id
+// all collapse to the same P0: the component resolves to nothing, so the
+// draft parks. FTC §255.5 disclosure, the yellow-class label-review ruling
+// (owner 2026-08-31), page-class eligibility, refresh no-additions, and
+// the density/service-CTA placement rules are all enforced here
+// deterministically — never as writer-prompt instructions.
+const AFFILIATE_LINK_MAX_PER_POST = 3;
+// Post types whose product rows may declare eligibility live in
+// @waves/affiliate-registry (PROTECTED_POST_TYPES is the deny side).
+// Service-CTA presence (affiliate is FALLBACK monetization — the Waves CTA
+// stays primary): any of these internal routes, or a real city-service
+// page, counts.
+const SERVICE_CTA_ROUTES = new Set([
+  '/book/', '/contact/', '/quote/', '/pest-control-quote/',
+  '/pest-control-calculator/', '/pest-control-services/',
+  '/waveguard-memberships/', '/termite-inspection/', '/termite-control/',
+  '/pest-inspection/',
+]);
+
+function affiliateRegistryModule() {
+  return require('../../../packages/affiliate-registry');
+}
+
+// Every <AffiliateLink> opening tag in a text, via the ONE tag scanner —
+// with its `product` prop when (and only when) it is a literal string.
+// A missing, expression-valued, or template product prop yields
+// productId:null — the component cannot resolve, so it gates as
+// unregistered (and an expression carrying a URL is independently the
+// executable-expression P0 in externalLinkFinding).
+// Attribute walk is sequential and quote/brace-aware (sticky regex over
+// the tag's attribute text): each attribute's value is consumed whole, so
+// `note='product="x"'` is the note's VALUE and `data-product="x"` is an
+// attribute named data-product — only an attribute whose complete name is
+// exactly `product` with a quoted literal value resolves (Codex r2 P1).
+const JSX_ATTR_RE = /\s*([^\s=/>"'{}]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\{[^{}]*\})|([^\s"'{}]+)))?/y;
+function literalAttribute(attrs, name) {
+  const re = new RegExp(JSX_ATTR_RE.source, 'y');
+  const s = String(attrs || '');
+  re.lastIndex = 0;
+  let m;
+  let value = null;
+  let seen = 0;
+  while (re.lastIndex < s.length && (m = re.exec(s)) !== null) {
+    if (m[0].length === 0) break;
+    if (m[1] !== name) continue;
+    seen += 1;
+    // expression, unquoted, or bare boolean — not a literal
+    value = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null;
+  }
+  // A DUPLICATED prop is ambiguous — React/MDX keeps the LAST value while
+  // a human reads the first — so it never resolves (fail closed; the
+  // draft parks as unregistered). Single occurrence: its literal value.
+  return seen === 1 ? value : null;
+}
+
+function collectAffiliateLinkTags(text) {
+  const tags = [];
+  for (const tag of eachTag(String(text || ''))) {
+    if (tag.isClose || tag.name !== 'affiliatelink') continue;
+    const productId = (literalAttribute(tag.attrs, 'product') || '').trim();
+    tags.push({ start: tag.start, productId: productId || null });
+  }
+  return tags;
+}
+
+function affiliateTagCountsByProduct(text) {
+  const counts = new Map();
+  for (const t of collectAffiliateLinkTags(text)) {
+    const key = t.productId || '(invalid)';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+// True when the body already carries a Waves service CTA — an allowlisted
+// CTA route or a real /{service}-{city}-fl/ page (validated against the
+// published-city set, same as internalRouteFinding).
+function hasServiceCtaLink(body) {
+  // Only a RENDERED link counts: comments, code, and definitely-hidden
+  // spans are masked first so `{/* [quote](/quote/) */}` cannot satisfy
+  // the requirement (Codex r6 P1).
+  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(String(body || ''))));
+  for (const { norm } of collectInternalDestinations(rendered)) {
+    if (SERVICE_CTA_ROUTES.has(norm)) return true;
+    const m = CITY_SERVICE_LINK_RE.exec(norm);
+    if (m && PAGE_CITY_SLUGS.has(m[1])) return true;
+  }
+  return false;
+}
+
+// All affiliate policy findings for a draft — an ARRAY (several can apply,
+// and review/redraft needs each named). Deduped per (code, product).
+function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+  const findings = [];
+  const seen = new Set();
+  const push = (severity, code, key, message) => {
+    const k = `${code}:${key}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    findings.push(finding(severity, code, message));
+  };
+
+  if (collectAffiliateLinkTags(editableMeta).length > 0) {
+    push('P0', 'AFFILIATE_LINK_IN_META', '', 'Draft carries an <AffiliateLink> in an editable meta field — affiliate links are body-only; metas stay informational.');
+  }
+  const tags = collectAffiliateLinkTags(body);
+  if (tags.length === 0) return findings;
+
+  // Exact 'true' at CALL time — the feature-gates `affiliateLinks` entry
+  // documents the flag; reading the env here (reserviceReportCopy pattern)
+  // keeps flips/tests immediate and keeps '1'/'on' dark (Codex r4 P1).
+  const gateOn = process.env.GATE_AFFILIATE_LINKS === 'true';
+  const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex() : new Map();
+  const postType = String(frontmatter?.post_type || '').trim().toLowerCase();
+
+  for (const tag of tags) {
+    if (!tag.productId) {
+      push('P0', 'UNREGISTERED_AFFILIATE_LINK', '(no-product)', 'Draft contains an <AffiliateLink> without a literal product="…" id — the component resolves ONLY registry product ids; never compute, omit, or paste a URL into it.');
+      continue;
+    }
+    const entry = index.get(tag.productId);
+    if (!entry) {
+      push('P0', 'UNREGISTERED_AFFILIATE_LINK', tag.productId, `Draft references affiliate product "${tag.productId}" which is not an available registry product${!gateOn ? ' (GATE_AFFILIATE_LINKS is off — the lane is dark)' : !targetIsBlog ? ' (affiliate links are blog-lane only)' : ''} — only owner-approved product ids from packages/affiliate-registry may be referenced.`);
+      continue;
+    }
+    if (entry.state === 'prohibited') {
+      push('P0', 'PROHIBITED_AFFILIATE_PRODUCT', tag.productId, `Affiliate product "${tag.productId}" is prohibited (${entry.row.risk_class === 'red' ? 'red risk class — restricted-use/professional products are never linked' : 'explicit owner denial record'}) — remove the recommendation.`);
+      continue;
+    }
+    if (entry.state === 'inactive') {
+      push('P0', 'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', tag.productId, `Affiliate product "${tag.productId}" is not currently usable (paused, structurally invalid, or missing owner approval) — remove it or reference an active product.`);
+      continue;
+    }
+    if (entry.state === 'stale_label_review') {
+      push('P0', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW', tag.productId, `Yellow-class product "${tag.productId}" lacks a current manual label review (EPA reg #, label URL, FL registration verification, reviewed within ${affiliateRegistryModule().YELLOW_LABEL_REVIEW_MAX_AGE_DAYS} days) — the owner ruling approving consumer pesticides is CONDITIONAL on that review; re-verify the row before this product can publish.`);
+      continue;
+    }
+    // Page-class eligibility applies to NEW drafts only — a refresh's
+    // frontmatter is frozen (often absent here), and the live page's
+    // eligibility was decided when it was authored; additions are blocked
+    // by AFFILIATE_LINK_ADDED_ON_REFRESH below regardless.
+    const allowed = Array.isArray(entry.row.allowed_post_types) ? entry.row.allowed_post_types : [];
+    if (!isRefresh && (!postType || !allowed.includes(postType))) {
+      push('P0', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', tag.productId, `Affiliate product "${tag.productId}" is not eligible on a "${postType || '(missing post_type)'}" post (its allowed_post_types: ${allowed.join(', ') || 'none'}) — pages that capture local service intent never carry affiliate links; fail closed when the post type is unknown.`);
+    }
+  }
+
+  if (isRefresh) {
+    // A refresh may preserve the affiliate links the live body already
+    // carries (frontmatter is frozen on refresh, so its live disclosure
+    // ships unchanged) but may never ADD one — count-compared per product
+    // id, fail closed without the prior body.
+    if (typeof priorBody !== 'string' || !priorBody.trim()) {
+      push('P0', 'AFFILIATE_LINK_ADDED_ON_REFRESH', '', 'Refresh draft carries an <AffiliateLink> but the live prior body is unavailable, so preserved-vs-added cannot be separated — fail closed.');
+    } else {
+      const prior = affiliateTagCountsByProduct(priorBody);
+      for (const [key, n] of affiliateTagCountsByProduct(body)) {
+        if ((prior.get(key) || 0) < n) {
+          push('P0', 'AFFILIATE_LINK_ADDED_ON_REFRESH', key, `Refresh draft adds an <AffiliateLink> (product "${key}") the live body does not carry (or carries fewer times) — refreshes preserve affiliate links, only the manual lane adds them (frozen frontmatter cannot carry the disclosure an added link would need).`);
+        }
+      }
+    }
+    return findings;
+  }
+
+  // New drafts: disclosure, density, and service-CTA placement.
+  // EXACT type only — the astro layout keys the rendered disclosure block
+  // (and the Amazon Associates statement) off disclosure.type ===
+  // 'affiliate'; free text mentioning "commission" renders nothing, and
+  // "we receive no commission" would pass a keyword test.
+  const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
+  if (String(disclosure.type || '').trim().toLowerCase() !== 'affiliate') {
+    push('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', '', 'Draft carries an <AffiliateLink> without an affiliate disclosure — frontmatter.disclosure.type must be exactly "affiliate" (the renderer emits the FTC material-connection disclosure from that type; free text is not a substitute).');
+  }
+  if (tags.length > AFFILIATE_LINK_MAX_PER_POST) {
+    push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'count', `Draft carries ${tags.length} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post (affiliate is fallback monetization, never the point of the page).`);
+  }
+  const firstHeading = String(body || '').search(/^#{2,3}\s/m);
+  if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
+    push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
+  }
+  if (!hasServiceCtaLink(body)) {
+    push('P1', 'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', '', 'Draft carries affiliate links but no Waves service CTA link — every affiliate post keeps an internal service/quote/calculator link (affiliate is fallback monetization; the service CTA stays primary).');
+  }
+  return findings;
+}
+
+// Affiliate MATERIAL detector for reuse channels (newsletter, social,
+// any surface that republishes blog copy) — affiliate links are web-only
+// (approved channel: the rendered blog page). True on an <AffiliateLink>
+// tag, any registry URL (approved tracking URL or plain fallback), or the
+// recognizable affiliate-network URL shapes even for unregistered links.
+// Runs REGARDLESS of GATE_AFFILIATE_LINKS: stripping must hold while the
+// publish lane is dark and after a kill-switch flip.
+const AFFILIATE_NETWORK_HOST_SUFFIXES = Object.freeze([
+  'amzn.to', 'awin1.com', 'shareasale.com', 'anrdoezrs.net', 'jdoqocy.com',
+  'tkqlhce.com', 'dpbolvw.net', 'prf.hn', 'pxf.io', 'sjv.io',
+  'linksynergy.com', 'refersion.com', 'goaffpro.com',
+]);
+// Direct-merchant tracking parameters (in-house programs and network click
+// refs carried on the merchant's own domain — Solutions' `?aff=`, Awin's
+// `awc`, CJ's `cjevent`, Impact's `irclickid`, Rakuten's `ranMID`, ShareASale's
+// `sscid`, Refersion's `rfsn`). Any URL carrying one is affiliate material
+// on ANY host, so an unregistered product path on a citation-allowlisted
+// merchant still hits the veto (Codex r5 P1). Names compared lowercased.
+const AFFILIATE_QUERY_PARAMS = Object.freeze(new Set([
+  'aff', 'affid', 'aff_id', 'affiliate', 'affiliate_id', 'affiliateid', 'afid',
+  'awc', 'cjevent', 'cjdata', 'clickid', 'clickref', 'irclickid', 'irgwc',
+  'ranmid', 'raneaid', 'ransiteid', 'sscid', 'rfsn', 'subid', 'sub_id',
+]));
+function hasAffiliateQueryParam(u) {
+  for (const [k, v] of u.searchParams) {
+    const key = k.toLowerCase();
+    if (AFFILIATE_QUERY_PARAMS.has(key)) return true;
+    if (key === 'utm_medium' && /affiliate/i.test(v)) return true;
+  }
+  return false;
+}
+
+// host + path (www-stripped, lowercased, trailing-slash-normalized) — the
+// part of a retailer URL that identifies the PRODUCT; query/fragment are
+// tracking and ordering noise.
+function affiliateUrlIdentity(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || ''));
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
+    return `${host}${path}`;
+  } catch { return null; }
+}
+
+// One URL → affiliate verdict. `u` is a parsed URL; registryIdentities is
+// the host+path set of every registered product URL.
+function urlIsAffiliate(u, registryIdentities) {
+  const identity = affiliateUrlIdentity(u.href);
+  if (identity && registryIdentities.has(identity)) return true;
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
+  if ((host === 'amazon.com' || host.endsWith('.amazon.com')) && (u.searchParams.has('tag') || u.searchParams.has('ascsubtag'))) return true;
+  if (hasAffiliateQueryParam(u)) return true;
+  return false;
+}
+
+// Scheme-less link shapes that autolink or that a reader copies verbatim
+// ("amzn.to/abc", "www.amazon.com/dp/X?tag=…", "//amzn.to/abc") — the
+// absolute-URL scanner never sees them (Codex r6 P1). Candidate = a
+// dotted host token followed by an optional path/query; each is parsed as
+// https and judged by the same predicate as absolute URLs.
+const SCHEMELESS_URL_RE = /(?:^|[\s(<\[>"'`])(?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(\/[^\s)>\]"'`]*|\?[^\s)>\]"'`]*)?/gi;
+
+function containsAffiliateMaterial(text) {
+  const raw = String(text || '');
+  if (!raw) return false;
+  const decoded = decodeEntitiesForScan(raw);
+  const registryIdentities = new Set(
+    affiliateRegistryModule().registryUrls().map(affiliateUrlIdentity).filter(Boolean),
+  );
+  for (const scan of decoded && decoded !== raw ? [raw, decoded] : [raw]) {
+    for (const tag of eachTag(scan)) {
+      if (!tag.isClose && tag.name === 'affiliatelink') return true;
+    }
+    const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
+    let m;
+    while ((m = urlRe.exec(scan)) !== null) {
+      const rawUrl = m[0].replace(/[.,;:!?]+$/, '');
+      try { if (urlIsAffiliate(new URL(rawUrl), registryIdentities)) return true; } catch { /* malformed — not a match */ }
+    }
+    const bareRe = new RegExp(SCHEMELESS_URL_RE.source, 'gi');
+    while ((m = bareRe.exec(scan)) !== null) {
+      const candidate = `https://${m[1]}${(m[2] || '').replace(/[.,;:!?]+$/, '')}`;
+      try { if (urlIsAffiliate(new URL(candidate), registryIdentities)) return true; } catch { /* not a URL */ }
+    }
+  }
+  return false;
+}
+
 function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const hosts = new Set();
   for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
@@ -1966,7 +2263,18 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
+    // Affiliate material is vetoed BEFORE any citation allowance: a tagged
+    // retailer URL smuggled in as a brief "required source" or hosted on
+    // CONTENT_ALLOWED_LINK_DOMAINS must never bypass the registry/component
+    // model (Codex r3 P1).
+    if (containsAffiliateMaterial(rawUrl)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links a raw affiliate/tracking URL ("${rawUrl.slice(0, 60)}") — affiliate products are referenced ONLY through <AffiliateLink product="…">, never a URL, and no citation allowance applies.`);
+    }
     if (exactUrls.has(normalizeSourceUrl(rawUrl) || '\u0000')) continue;
+    // NO affiliate bypass here by design: blog bodies reference affiliate
+    // products through <AffiliateLink product=…> only, so a raw tracking
+    // URL is always this P0 (affiliateComponentFindings owns the component
+    // rules).
     if (!hostAllowed(norm, allowed)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
@@ -5073,6 +5381,12 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
+    // Affiliate links: blog bodies reference registry product IDs through
+    // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
+    // above, no bypass). affiliateComponentFindings owns registration,
+    // risk-class/label-review, page-class eligibility, disclosure,
+    // density/CTA placement, and the refresh no-additions rule.
+    ...affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog, isRefresh, priorBody }),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -5155,6 +5469,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 
 module.exports = {
   evaluate,
+  // affiliate-material detector for reuse channels (newsletter validator,
+  // social share lanes) — affiliate links are web-only; runs regardless of
+  // GATE_AFFILIATE_LINKS so stripping holds while the lane is dark.
+  containsAffiliateMaterial,
   // single source of truth for the FAQ-section policy — consumed by
   // blog-writer, writer-agent-config, and content-quality-gate so the
   // generators/gates can never contradict the publish-time guard.
@@ -5226,5 +5544,5 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink },
 };
