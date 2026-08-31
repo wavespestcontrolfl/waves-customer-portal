@@ -1590,7 +1590,6 @@ export default function CustomersPageV2() {
           <Dialog
             open={showFilters}
             onClose={() => setShowFilters(false)}
-            style={{ zIndex: 100 }}
           >
             {" "}
             <DialogHeader onClose={() => setShowFilters(false)}>
