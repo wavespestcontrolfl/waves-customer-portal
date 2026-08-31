@@ -112,13 +112,13 @@ describe('cron-lock runExclusive', () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const herd = Array.from({ length: 10 }, (_, i) =>
-      runExclusive(`herd-${i}`, () => gate, { recordHealth: false }));
+      runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
 
     // 11th distinct job while 10 lock connections are pinned: it must wait
     // (holding no connection), not skip — date-scoped once-a-day jobs like
     // monthly billing cannot recover a dropped tick tomorrow.
     const overflowBody = jest.fn(async () => 'billed');
-    const overflow = runExclusive('billing-monthly', overflowBody, { recordHealth: false });
+    const overflow = runExclusive('billing-monthly', overflowBody, { recordHealth: false, waitForSlot: true });
     await new Promise((resolve) => setImmediate(resolve));
     expect(overflowBody).not.toHaveBeenCalled();
     // No 11th pool connection was checked out while waiting.
@@ -131,7 +131,7 @@ describe('cron-lock runExclusive', () => {
     expect(overflowBody).toHaveBeenCalledTimes(1);
 
     // Slots are returned: the next tick runs normally.
-    const after = await runExclusive('after-herd', async () => 'ran', { recordHealth: false });
+    const after = await runExclusive('after-herd', async () => 'ran', { recordHealth: false, waitForSlot: true });
     expect(after).toBe('ran');
   });
 
@@ -146,10 +146,10 @@ describe('cron-lock runExclusive', () => {
       let release;
       const gate = new Promise((resolve) => { release = resolve; });
       const herd = Array.from({ length: 5 }, (_, i) =>
-        runExclusive(`small-${i}`, () => gate, { recordHealth: false }));
+        runExclusive(`small-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
 
       const overflowBody = jest.fn(async () => 'ran');
-      const overflow = runExclusive('small-overflow', overflowBody, { recordHealth: false });
+      const overflow = runExclusive('small-overflow', overflowBody, { recordHealth: false, waitForSlot: true });
       await new Promise((resolve) => setImmediate(resolve));
       expect(overflowBody).not.toHaveBeenCalled();
       expect(db.client.acquireConnection).toHaveBeenCalledTimes(5);
@@ -157,6 +157,50 @@ describe('cron-lock runExclusive', () => {
       release('swept');
       await expect(Promise.all(herd)).resolves.toEqual(Array(5).fill('swept'));
       await expect(overflow).resolves.toBe('ran');
+    } finally {
+      delete db.client.pool;
+    }
+  });
+
+  test("an ACTIVE job's next tick coalesces — it never queues a replay of the sweep", async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const first = runExclusive('sms-sweep', () => gate, { recordHealth: false, waitForSlot: true });
+
+    // Second tick while the first still runs: must skip (the old advisory
+    // try-lock semantics), NOT wait — a queued tick would acquire the lock
+    // the moment the first run releases it and rerun the sweep, risking
+    // duplicate sends.
+    const replayBody = jest.fn();
+    const second = await runExclusive('sms-sweep', replayBody, { recordHealth: false, waitForSlot: true });
+    expect(second).toEqual({ skipped: true, reason: 'lease_held' });
+
+    release('swept');
+    await expect(first).resolves.toBe('swept');
+    expect(replayBody).not.toHaveBeenCalled();
+  });
+
+  test('request-scoped locks (recordHealth: false) never wait behind the herd', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    db.client.pool = { max: 10 };
+    try {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const herd = Array.from({ length: 5 }, (_, i) =>
+        runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
+
+      // Cap is full, but an admin-route dynamic lock keeps the immediate
+      // try-lock behavior — an HTTP request parked behind a long cron
+      // would mutate after the client gave up.
+      const sent = await runExclusive('review-send:cust-42', async () => 'sent', { recordHealth: false });
+      expect(sent).toBe('sent');
+
+      release('swept');
+      await Promise.all(herd);
     } finally {
       delete db.client.pool;
     }
@@ -196,13 +240,13 @@ describe('cron-lock runExclusive', () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const herd = Array.from({ length: 10 }, (_, i) =>
-      runExclusive(`herd-${i}`, () => gate, { recordHealth: false }));
+      runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
 
     const queuedBody = jest.fn(async () => 'ran-once');
-    const queued = runExclusive('minute-job', queuedBody, { recordHealth: false });
+    const queued = runExclusive('minute-job', queuedBody, { recordHealth: false, waitForSlot: true });
     // Cron fires again while the first tick still waits: coalesce, don't
     // stack a backlog of stale ticks behind the queued one.
-    const repeat = await runExclusive('minute-job', jest.fn(), { recordHealth: false });
+    const repeat = await runExclusive('minute-job', jest.fn(), { recordHealth: false, waitForSlot: true });
     expect(repeat).toEqual({ skipped: true, reason: 'lease_held' });
 
     release('swept');

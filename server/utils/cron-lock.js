@@ -161,41 +161,47 @@ function lockHolderCap() {
 let activeLockHolders = 0;
 const lockSlotWaiters = []; // FIFO of { jobName, resolve }
 const waitingJobs = new Set();
+const activeJobs = new Set(); // slot-holding runs, by job name
 // Tracks "this async context already holds a slot" so a body that calls
 // runExclusive again (route-tier reorder, backlink feeders do) bypasses the
 // semaphore instead of deadlocking on its own slot at small caps.
 const lockSlotContext = new AsyncLocalStorage();
 
-// Resolves true once a slot is held; false when a tick of this SAME job is
-// already queued for a slot — the queued tick will run and sweep the same
-// work, so piling a second waiter behind it would only replay stale ticks
-// (minute-cadence jobs fire faster than a saturated herd drains).
 async function acquireLockSlot(jobName) {
   if (activeLockHolders < lockHolderCap()) {
     activeLockHolders += 1;
-    return true;
+    activeJobs.add(jobName);
+    return;
   }
-  if (waitingJobs.has(jobName)) return false;
   logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${lockHolderCap()}) — waiting for a slot`);
   waitingJobs.add(jobName);
   // The releaser hands its slot over without decrementing, so the counter
   // already accounts for this waiter when the promise resolves.
   await new Promise((resolve) => lockSlotWaiters.push({ jobName, resolve }));
-  return true;
 }
 
-function releaseLockSlot() {
+function releaseLockSlot(jobName) {
+  activeJobs.delete(jobName);
   const next = lockSlotWaiters.shift();
   if (next) {
-    // Slot handed to the waiter; counter unchanged.
+    // Slot handed to the waiter; counter unchanged. The waiter is marked
+    // active HERE, before its continuation runs, so a tick of the same job
+    // arriving in the gap still coalesces instead of queueing a replay.
     waitingJobs.delete(next.jobName);
+    activeJobs.add(next.jobName);
     next.resolve();
   } else {
     activeLockHolders -= 1;
   }
 }
 
-async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
+// waitForSlot defaults to recordHealth: scheduled jobs (recordHealth on)
+// must wait — a dropped once-a-day tick is unrecoverable — while dynamic
+// per-entity locks (recordHealth off: review-send:${customerId}, manual
+// attribution from admin routes) are request-scoped and keep the immediate
+// try-lock behavior; parking an HTTP request behind the cron herd would
+// have it mutate after the client gave up.
+async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = recordHealth } = {}) {
   const lockKey = `cron:${jobName}`;
   // Reentrant path: already inside a held slot (nested runExclusive) —
   // no second slot AND no second connection. The nested advisory lock is
@@ -206,17 +212,23 @@ async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   if (nested) {
     return runExclusiveLocked(jobName, lockKey, fn, recordHealth, nested.conn);
   }
-  const acquired = await acquireLockSlot(jobName);
-  if (!acquired) {
-    // Same contract and meaning as an advisory-lock skip: a run of this
-    // job is already pending and will do the work.
-    logger.info(`[cron-lock] ${jobName}: a tick is already queued for a slot — skipping`);
+  if (!waitForSlot) {
+    return runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+  }
+  // Coalesce BEFORE queueing: if this job is running or already has a tick
+  // queued, this tick's work is covered — queueing it would replay the
+  // sweep right after the current run finishes (the advisory lock frees on
+  // release, so the queued tick WOULD acquire it), defeating the overlap
+  // guarantee and risking duplicate sends.
+  if (activeJobs.has(jobName) || waitingJobs.has(jobName)) {
+    logger.info(`[cron-lock] ${jobName}: a run is active or queued — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
   }
+  await acquireLockSlot(jobName);
   try {
     return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
   } finally {
-    releaseLockSlot();
+    releaseLockSlot(jobName);
   }
 }
 
