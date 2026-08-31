@@ -19,6 +19,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
+const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -419,17 +420,15 @@ function withCacheBreakpoint(messages) {
 
 // UI-backed write confirmation (issue #1568) is STRUCTURAL (owner rulings
 // 2026-08-30/31): NO environment value restores direct model-loop writes —
-// a config switch must never mean "turn off the safety layer". The
-// emergency control is IB_WRITES_DISABLED=true, which refuses every
-// Intelligence Bar write (proposals, /execute writes, /confirm-action
-// commits) while reads stay available; the fallback for a broken confirm
-// UI is the normal admin screen, never ungated AI execution. Read
-// per-request so it can be toggled without a restart. (GATE_IB_UI_CONFIRM
-// is retired and intentionally ignored.)
-function uiConfirmEnabled() {
-  return true;
-}
-
+// a config switch must never mean "turn off the safety layer". The old
+// "conversational mode" (model re-calls a write with confirmed:true after a
+// chat yes) was deleted in W0B; every gated write is proposed as a pending
+// action and commits only through /confirm-action against its frozen
+// authorization contract. The emergency control is IB_WRITES_DISABLED=true,
+// which refuses every Intelligence Bar write (proposals, /execute writes,
+// /confirm-action commits) while reads stay available; the fallback for a
+// broken confirm UI is the normal admin screen, never ungated AI execution.
+// (GATE_IB_UI_CONFIRM is retired and intentionally ignored.)
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
 }
@@ -726,12 +725,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     params.estimate_identifier = String(preview.estimate_id);
   }
 
+  // W0B authorization contract: the structured, server-built effect set the
+  // operator approves. Derived from the same curated display params the card
+  // lists plus the proposal-time pins — never model text — then hashed; the
+  // card echoes the hash on Confirm and the claim refuses any other.
+  const displayParams = confirmationDisplayParams(toolUse.name, params, preview);
+  const summary = summarizeProposal(toolUse.name, params, displayParams);
+  const contract = AuthorizationContract.buildContract({
+    toolName: toolUse.name, params, displayParams, preview, summary,
+  });
+  const contractHash = AuthorizationContract.contractHash(contract);
+
   const row = await PendingActions.createPendingAction({
     toolName: toolUse.name,
     params,
-    summary: summarizeProposal(toolUse.name, params, confirmationDisplayParams(toolUse.name, params, preview)),
+    summary,
     requestedBy: getAdminActorId(req),
     context,
+    contract,
+    contractHash,
   });
 
   return {
@@ -748,7 +760,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // behind the pending-action id/hash; do not make a road user scroll
       // through raw engine JSON, evidence quotes, and property ledgers just
       // to find the dollars and review flags they are approving.
-      params: confirmationDisplayParams(toolUse.name, params, preview),
+      params: displayParams,
+      // The authorization contract the card renders, and the hash the card
+      // must echo on Confirm (exact-effect approval — owner ruling 8).
+      contract,
+      contract_hash: contractHash,
       expiresAt: row.expires_at,
       // Server-computed remaining ms — the client countdown anchors on
       // receipt + this, never on comparing expiresAt to the device clock
@@ -1562,19 +1578,16 @@ router.post('/query', async (req, res, next) => {
     if (context === 'agent_estimate') {
       systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
     }
-    const uiConfirmActive = uiConfirmEnabled() || context === 'agent_estimate';
-    // Write-confirmation guidance must match the active mechanism (#1568) —
-    // the gate is read per-request, so the prompt is appended per-request.
+    // Write-confirmation guidance (#1568, structural since W0/W0B): the only
+    // mechanism is the confirmation card — there is no conversational mode.
     if (context !== 'tech') {
-      systemPrompt += uiConfirmActive
-        ? `\n\nWRITE CONFIRMATION (UI mode):
+      systemPrompt += `\n\nWRITE CONFIRMATION (UI mode):
 Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT execute when you call them. Your call returns a preview, and the action appears as a confirmation card in the portal UI next to your response.
 - NEVER call the same write tool again after a pending_confirmation result — that creates a duplicate card. One call per intended action.
 - Adding confirmed: true does nothing; it is ignored. Only the operator's Confirm click on the card executes the write.
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
-- The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`
-        : `\n\nWRITE CONFIRMATION (conversational mode):
-For create_customer, the route-optimization writes, and the inventory stock writes (adjust_stock, create_restock_request, update_restock_request): the first call returns a preview — show it to the operator and re-call with confirmed: true only after they approve. For all other writes: describe the change and get an explicit yes before calling the tool.`;
+- The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
+- The result of a confirmed write appears in the UI, not in this conversation — if asked, suggest re-querying the data.`;
     }
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
@@ -1675,9 +1688,10 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
           failed = true;
           errorMessage = result.error;
-        } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
+        } else if (UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
-          // model loop. The confirmation id goes to the client only.
+          // model loop — unconditionally (no mode switch exists). The
+          // confirmation id goes to the client only.
           if (ibWritesDisabled()) {
             result = { error: IB_WRITES_DISABLED_MESSAGE };
             failed = true;
@@ -1880,7 +1894,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // Pending write proposals for the client confirmation card. This is the
       // ONLY channel the confirmation ids travel on — the client must keep
       // them in component state, never in conversationHistory.
-      ...(uiConfirmActive ? { pendingActions: pendingProposals } : {}),
+      pendingActions: pendingProposals,
       // Return conversation history for multi-turn. Attached images are not
       // round-tripped (a text marker stands in) — keeps follow-up payloads
       // small and image bytes out of the stored history. Image and PII taint
@@ -1937,10 +1951,10 @@ router.post('/execute', async (req, res, next) => {
     if (!isToolAllowedForRole(action, req.techRole)) {
       return res.status(403).json({ error: 'This action is not available to your role' });
     }
-    if ((uiConfirmEnabled() || action === AGENT_ESTIMATE_WRITE_TOOL) && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
-      // With the UI-confirm gate on, gated writes commit exclusively through
-      // /confirm-action — /execute would skip the claim, payload hash, and
-      // single-use replay protection.
+    if (UI_GATED_WRITE_TOOL_NAMES.has(action)) {
+      // Gated writes commit exclusively through /confirm-action — /execute
+      // would skip the claim, payload hash, contract hash, and single-use
+      // replay protection. Structural: no env value changes this.
       return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
     }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
@@ -2009,12 +2023,19 @@ router.post('/confirm-action', async (req, res, next) => {
       return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
     }
 
-    const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req));
+    // Exact-effect confirm (W0B): the card echoes the contract hash it
+    // displayed; the claim refuses any other, so the operator can only ever
+    // approve exactly the effect set they saw.
+    const contractHash = req.body?.contract_hash ? String(req.body.contract_hash).trim() : null;
+    const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req), { contractHash });
     if (claim.error) {
       const status = claim.error === 'not_found' ? 404
         : claim.error === 'actor_mismatch' ? 403
-          : 409; // already_used | cancelled | expired | hash_mismatch
-      return res.status(status).json({ error: `Pending action ${claim.error.replace(/_/g, ' ')}` });
+          : 409; // already_used | cancelled | expired | hash_mismatch | contract_mismatch
+      const message = claim.error === 'contract_mismatch'
+        ? 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.'
+        : `Pending action ${claim.error.replace(/_/g, ' ')}`;
+      return res.status(status).json({ error: message });
     }
     const action = claim.action;
 

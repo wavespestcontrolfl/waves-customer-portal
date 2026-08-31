@@ -458,7 +458,7 @@ describe('/confirm-action commit path', () => {
 
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
-      expect(mockClaimForConfirm).toHaveBeenCalledWith(PENDING_ID, 'admin-1');
+      expect(mockClaimForConfirm).toHaveBeenCalledWith(PENDING_ID, 'admin-1', { contractHash: null });
       expect(mockExecuteTool).toHaveBeenCalledWith(
         'create_customer',
         { first_name: 'Jeff', phone: '9415550100', confirmed: true },

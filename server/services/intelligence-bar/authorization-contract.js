@@ -1,0 +1,226 @@
+/**
+ * Intelligence Bar authorization contract (W0B — owner rulings 7–9,
+ * 2026-08-31).
+ *
+ * A pending write is approved against a CONTRACT, not a sentence: a
+ * server-built, deterministic description of exactly what the commit will
+ * do — tier, action label, the effects list (operational / customer /
+ * billing / comms), whether it can be undone, and whether a customer gets
+ * contacted. It is derived ONLY from the curated display params and the
+ * proposal-time preview pins (the same deterministic inputs the card
+ * already trusts) — never from model-generated text.
+ *
+ * The contract is hashed; the card echoes the hash on Confirm and the claim
+ * refuses a mismatch. One approval = one frozen effect set; anything new
+ * (target, amount, recipient, effect) is a new proposal.
+ *
+ * Tiers surface the existing write-gate taxonomy rather than a new one:
+ *   yellow — two-step / legacy-bare writes: one operator Confirm on the card
+ *   red    — confirmed-endpoint writes (payouts, SEO pipeline): owner-only,
+ *            confirmed:true + idempotency key on /execute, never a card
+ *   green  — reads (never reach a card)
+ * Charges/refunds/sensitive money movement have no IB tool at all
+ * (blocked by absence — nothing to gate).
+ */
+
+const crypto = require('crypto');
+const {
+  WRITE_TWO_STEP_TOOL_NAMES,
+  LEGACY_BARE_WRITE_TOOL_NAMES,
+  CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+} = require('./write-gates');
+
+const CONTRACT_VERSION = 1;
+
+// Tools whose commit cannot be undone from the portal (a message leaves,
+// money moves, a public reply posts). Everything else is editable after.
+const IRREVERSIBLE_TOOL_NAMES = new Set([
+  'send_sms',
+  'reply_via_sms',
+  'send_email_reply',
+  'trigger_review_request',
+  'submit_review_reply',
+  'request_instant_payout',
+  'request_standard_payout',
+  'run_seo_pipeline',
+]);
+
+// Tools whose commit contacts a customer (directly, or via the automations
+// that fire on schedule changes). move_stops_to_day is conditional on its
+// notify_customers param and handled explicitly.
+const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
+  'send_sms',
+  'reply_via_sms',
+  'send_email_reply',
+  'trigger_review_request',
+  'create_appointment',
+  'reschedule_appointment',
+  'cancel_appointment',
+]);
+
+const BILLING_TOOL_NAMES = new Set([
+  'request_instant_payout',
+  'request_standard_payout',
+  'approve_price',
+  'create_pending_estimate',
+  'create_agent_estimate_draft',
+  'set_estimate_presentation',
+]);
+
+const ACTION_LABELS = {
+  send_sms: 'Send a text message',
+  reply_via_sms: 'Reply by text',
+  send_email_reply: 'Send an email reply',
+  create_customer: 'Create a customer',
+  update_customer: 'Update customer record',
+  bulk_update_customers: 'Update multiple customers',
+  update_property_access: 'Update property access notes',
+  create_appointment: 'Book an appointment',
+  reschedule_appointment: 'Move an appointment',
+  cancel_appointment: 'Cancel an appointment',
+  move_stops_to_day: 'Move stops to another day',
+  assign_technician: 'Assign a technician',
+  swap_tech_assignments: 'Swap technician assignments',
+  optimize_all_routes: 'Re-optimize all routes',
+  optimize_tech_route: 'Re-optimize a technician route',
+  update_lead_status: 'Change a lead status',
+  bulk_update_leads: 'Change status on multiple leads',
+  submit_review_reply: 'Post a public review reply',
+  trigger_review_request: 'Send a review request',
+  block_sender: 'Block a sender',
+  create_pending_estimate: 'Create an estimate',
+  create_agent_estimate_draft: 'Save an estimate draft',
+  set_estimate_presentation: 'Change estimate presentation',
+  toggle_estimate_v2_view: 'Toggle estimate view',
+  toggle_show_one_time_option: 'Toggle one-time option',
+  run_price_lookup: 'Run a vendor price lookup',
+  approve_price: 'Approve a vendor price',
+  run_tax_advisor: 'Run the tax advisor',
+  adjust_stock: 'Adjust inventory stock',
+  create_restock_request: 'Create a restock request',
+  update_restock_request: 'Update a restock request',
+  request_instant_payout: 'Request an INSTANT payout',
+  request_standard_payout: 'Request a standard payout',
+  run_seo_pipeline: 'Run the SEO pipeline',
+  approve_seo_action: 'Approve an SEO action',
+};
+
+function tierFor(toolName) {
+  if (CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(toolName)) return 'red';
+  if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) || LEGACY_BARE_WRITE_TOOL_NAMES.has(toolName)) return 'yellow';
+  return 'green';
+}
+
+function humanKey(k) {
+  return String(k).replace(/_/g, ' ');
+}
+
+function scalar(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'object') return null;
+  return String(v);
+}
+
+// Which lane an effect line belongs to, by tool + field name. Deterministic
+// and intentionally coarse — the card groups by kind; the wording is the
+// curated display param itself.
+function kindFor(toolName, key) {
+  const k = String(key).toLowerCase();
+  if (/(sms|text|message|email|recipient|reply|notify)/.test(k)) return 'comms';
+  if (BILLING_TOOL_NAMES.has(toolName) || /(price|monthly|annual|one_time|amount|fee|payout|discount)/.test(k)) return 'billing';
+  if (/(customer|lead|name|phone|address|access|status)/.test(k)) return 'customer';
+  return 'operational';
+}
+
+/**
+ * Build the contract for a proposal.
+ *  - displayParams: output of the route's confirmationDisplayParams (curated,
+ *    pinned identities by name, never `_`-prefixed internals)
+ *  - preview: the proposal-time preview (pins, before/after where known)
+ */
+function buildContract({ toolName, params, displayParams, preview, summary }) {
+  const effects = [];
+  const seen = new Set();
+  const push = (kind, label, extra = {}) => {
+    const key = `${kind}:${label}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    effects.push({ kind, label, ...extra });
+  };
+
+  // Before/after pins the proposal already resolved deterministically.
+  if (toolName === 'update_lead_status' && preview?.pinned_lead) {
+    push('customer', `Lead ${preview.pinned_lead.name}: status ${preview.pinned_lead.current_status} → ${params?.new_status}`, {
+      before: preview.pinned_lead.current_status, after: params?.new_status,
+    });
+  }
+  if (toolName === 'send_sms' && preview?.pinned_recipient) {
+    push('comms', `Text ${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})`);
+  }
+  if (toolName === 'create_appointment' && preview?.pinned_technician) {
+    push('operational', `Assigned to ${preview.pinned_technician.name}`);
+  }
+  if (toolName === 'bulk_update_leads') {
+    push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
+      before: params?.current_status, after: params?.new_status,
+    });
+  }
+
+  // Every curated display line is an effect the operator is approving.
+  for (const [k, v] of Object.entries(displayParams || {})) {
+    if (k.startsWith('_')) continue;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      for (const [k2, v2] of Object.entries(v)) {
+        const s = scalar(v2);
+        if (s !== null) push(kindFor(toolName, k2), `${humanKey(k2)}: ${s}`);
+      }
+      continue;
+    }
+    const s = Array.isArray(v) ? (v.length ? v.map(scalar).filter(Boolean).join(', ') : null) : scalar(v);
+    if (s !== null) push(kindFor(toolName, k), `${humanKey(k)}: ${s}`);
+  }
+
+  const notifiesCustomer = toolName === 'move_stops_to_day'
+    ? params?.notify_customers === true
+    : CUSTOMER_CONTACT_TOOL_NAMES.has(toolName);
+  if (notifiesCustomer) push('comms', 'Customer will be contacted');
+
+  // Canonical order (kind, then label) so the contract — and therefore its
+  // hash — never depends on param key order. The card groups by kind anyway.
+  const KIND_RANK = { comms: 0, billing: 1, customer: 2, operational: 3 };
+  effects.sort((x, y) => (KIND_RANK[x.kind] - KIND_RANK[y.kind]) || (x.label < y.label ? -1 : x.label > y.label ? 1 : 0));
+
+  return {
+    version: CONTRACT_VERSION,
+    tool: toolName,
+    tier: tierFor(toolName),
+    action_label: ACTION_LABELS[toolName] || humanKey(toolName),
+    effects,
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName),
+    notifies_customer: notifiesCustomer,
+    summary: summary || null,
+  };
+}
+
+// Deterministic stringify (sorted keys) so the hash is stable across JSON
+// property ordering — same approach as pending-actions.paramsHash.
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function contractHash(contract) {
+  return crypto.createHash('sha256').update(stableStringify(contract)).digest('hex');
+}
+
+module.exports = {
+  CONTRACT_VERSION,
+  tierFor,
+  buildContract,
+  contractHash,
+  IRREVERSIBLE_TOOL_NAMES,
+  CUSTOMER_CONTACT_TOOL_NAMES,
+};
