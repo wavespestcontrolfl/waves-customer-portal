@@ -59,7 +59,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import VisitBriefPanel from './VisitBriefPanel';
-import { fmtMoney, shortAddress, stopAccessIndicator, visitMoneySummary } from './visitBrief';
+import { fmtMoney, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
@@ -1224,7 +1224,10 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
   }[status] || DARK.muted;
   const windowLabel = stop.isVisit ? serviceWindowLabel(stopWindow(stop)) : serviceWindowLabel(service);
   const indicator = stopAccessIndicator(stopPropertyAlerts(stop));
-  const money = visitMoneySummary(service);
+  // Aggregated across every member service — grouped siblings keep
+  // separate invoices, so a prepaid primary must not hide a sibling's
+  // amount due.
+  const money = stopCollectSummary(stop);
   const street = shortAddress(service.address);
   const serviceLabel = stopSummaryLabel(stop)
     || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';

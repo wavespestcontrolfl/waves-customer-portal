@@ -6,6 +6,7 @@ import {
   shortAddress,
   smsHref,
   stopAccessIndicator,
+  stopCollectSummary,
   telHref,
   visitMoneySummary,
 } from './visitBrief';
@@ -106,8 +107,38 @@ describe('quotedLineLabel', () => {
     expect(quotedLineLabel({ perApplicationPrice: 55, monthlyPrice: 110, price: 660 })).toBe('$55 /application');
     expect(quotedLineLabel({ monthlyPrice: 110, price: 660 })).toBe('$110 /mo');
     expect(quotedLineLabel({ acceptedOneTimePrice: 250, price: 300 })).toBe('$250 one-time');
-    expect(quotedLineLabel({ price: 300 })).toBe('$300 one-time');
     expect(quotedLineLabel({})).toBe(null);
+  });
+
+  it('bare price gets the one-time unit ONLY with one-time provenance (source/cadence)', () => {
+    // Discounted/legacy recurring lines withhold per-application provenance
+    // but still return their recurring price — never label those one-time.
+    expect(quotedLineLabel({ price: 115, source: 'recurring', cadence: 'quarterly' })).toBe('$115');
+    expect(quotedLineLabel({ price: 300 })).toBe('$300');
+    expect(quotedLineLabel({ price: 300, source: 'one_time' })).toBe('$300 one-time');
+    expect(quotedLineLabel({ price: 300, cadence: 'one_time' })).toBe('$300 one-time');
+  });
+});
+
+describe('stopCollectSummary', () => {
+  const withPrediction = (id, kind, amount) => ({ id, billingLane: { prediction: { kind, amount } } });
+  const stopOf = (...services) => ({ services });
+
+  it('aggregates across every member — a prepaid primary must not hide a sibling due', () => {
+    const out = stopCollectSummary(stopOf(
+      withPrediction('a', 'prepaid', 0),
+      withPrediction('b', 'invoice', 95),
+      withPrediction('c', 'invoice', 30),
+    ));
+    expect(out).toEqual({ collectNeeded: true, amount: 125 });
+  });
+
+  it('no collect-kind member → no chip', () => {
+    expect(stopCollectSummary(stopOf(
+      withPrediction('a', 'auto_charge', 120),
+      withPrediction('b', 'covered_membership', 0),
+    ))).toEqual({ collectNeeded: false, amount: null });
+    expect(stopCollectSummary(null)).toEqual({ collectNeeded: false, amount: null });
   });
 });
 

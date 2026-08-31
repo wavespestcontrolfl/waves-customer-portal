@@ -12327,7 +12327,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const withFacts = async (payload) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
-        return { ...payload, facts: await PrevisitBrief.deterministicVisitFacts(svc) };
+        const facts = await PrevisitBrief.deterministicVisitFacts(svc);
+        // Re-verify the assignment AFTER the facts queries (Codex P1 on
+        // #3638): they run outside the atomic ownership-scoped fetch
+        // above, so a dispatch reassignment during them would otherwise
+        // hand gate/garage/lockbox codes to the former technician — the
+        // exact check-then-read race the single-fetch design exists to
+        // prevent. No longer assigned → answer without the facts key.
+        const stillOwned = await db('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .modify((q) => technicianCurrentVisitFilter(req, q))
+          .first('scheduled_services.id');
+        if (!stillOwned) return payload;
+        return { ...payload, facts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
         return payload;
@@ -12355,7 +12367,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return res.json(await withFacts({ brief: null, stale: staleReason }));
       }
     }
-    res.json({ brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+    const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
+    // A served visit brief already contains access + last_visit; the WDO
+    // and legacy brief shapes do not — the deterministic facts ride along
+    // for those so the tech still gets codes and product history.
+    res.json(String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE
+      ? served
+      : await withFacts(served));
   } catch (err) { next(err); }
 });
 

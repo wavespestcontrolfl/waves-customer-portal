@@ -154,6 +154,87 @@ describe('VisitBriefPanel', () => {
     expect(onRetry).toHaveBeenCalled();
   });
 
+  it('last-visit fallback uses ONLY the line-scoped day-row fields', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf({
+          ...BASE_SERVICE,
+          // Any-line newest (a pest visit) must NOT label this lawn stop's history…
+          lastServiceDate: '2026-08-20',
+          lastServiceType: 'Quarterly Pest Control',
+          lastServiceNotes: 'Pest visit notes',
+          // …the line-scoped fields are the truth for this stop.
+          lastLineServiceDate: '2026-06-02',
+          lastLineServiceType: 'Lawn Care Service',
+          lastLineServiceNotes: 'Fertilized front turf',
+        })}
+        detail={{ status: 'ready', estimate: null, brief: null }}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/2026-06-02 · Lawn Care Service/)).toBeInTheDocument();
+    expect(screen.getByText('Fertilized front turf')).toBeInTheDocument();
+    expect(screen.queryByText(/Quarterly Pest Control/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Pest visit notes')).not.toBeInTheDocument();
+  });
+
+  it('renders the WDO pre-inspection schema instead of dropping it', () => {
+    render(
+      <VisitBriefPanel
+        stop={stopOf(BASE_SERVICE)}
+        detail={{
+          status: 'ready',
+          estimate: null,
+          brief: {
+            brief: {
+              risk_score: 'High',
+              risk_reason: '1968 slab home near mapped activity',
+              top_3_priorities: ['Probe garage sill plate'],
+              top_3_unknowns: ['Crawlspace access'],
+              homeowner_questions: ['Any past termite treatment?'],
+            },
+            type: 'wdo_inspection',
+            facts: {
+              access: { codes: { neighborhoodGate: null, propertyGate: '4482', garage: null, lockbox: null }, alerts: [] },
+              last_visit: null,
+            },
+          },
+        }}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Risk: High/)).toBeInTheDocument();
+    expect(screen.getByText('• Probe garage sill plate')).toBeInTheDocument();
+    expect(screen.getByText('• Crawlspace access')).toBeInTheDocument();
+    expect(screen.getByText('• Any past termite treatment?')).toBeInTheDocument();
+    // The WDO response's facts still surface the codes.
+    expect(screen.getByText('4482')).toBeInTheDocument();
+  });
+
+  it('grouped stop renders money per member — a prepaid primary does not hide a sibling due', () => {
+    const primary = {
+      ...BASE_SERVICE,
+      id: 'svc-1',
+      serviceType: 'Quarterly Pest Control',
+      billingLane: { prediction: { kind: 'prepaid', amount: 0 } },
+    };
+    const sibling = {
+      ...BASE_SERVICE,
+      id: 'svc-2',
+      serviceType: 'Lawn Care Service',
+      billingLane: { prediction: { kind: 'invoice', amount: 60 } },
+    };
+    render(
+      <VisitBriefPanel
+        stop={{ key: 'visit:v1', isVisit: true, services: [primary, sibling], primary, liveCount: 2 }}
+        detail={{ status: 'ready', estimate: null, brief: null }}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Prepaid — nothing to collect')).toBeInTheDocument();
+    expect(screen.getByText('Collect $60 today')).toBeInTheDocument();
+  });
+
   it('renders the per-service action buttons with the old ServiceRow logic preserved', () => {
     const onProject = vi.fn();
     const onZone = vi.fn();
@@ -168,7 +249,9 @@ describe('VisitBriefPanel', () => {
     );
     // Terminal label for the sent report; member service types shown on a grouped stop.
     expect(screen.getByText('🗂️ Sent')).toBeInTheDocument();
-    expect(screen.getByText('Rodent Station Check')).toBeInTheDocument();
+    // Member type labels appear in both the per-member Money block and the
+    // Actions block on a grouped stop.
+    expect(screen.getAllByText('Rodent Station Check').length).toBeGreaterThan(0);
     // traceEligible === false hides Zone for that member only.
     expect(screen.getAllByLabelText('Trace treatment zone')).toHaveLength(1);
     fireEvent.click(screen.getByText('🗂️ Sent'));

@@ -73,7 +73,7 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
 
-function stubTables(rows, { ownsVisit = true } = {}) {
+function stubTables(rows, { ownsVisit = true, recheckOwns = null } = {}) {
   db.mockImplementation((table) => {
     const q = {};
     q.where = jest.fn(() => q);
@@ -84,8 +84,12 @@ function stubTables(rows, { ownsVisit = true } = {}) {
     // the atomic ownership-scoped reads select 'scheduled_services.*' —
     // both honor ownsVisit so a test can present a visit that EXISTS but
     // is not the tech's. Plain column lists are unscoped data reads.
+    // recheckOwns (default: follow ownsVisit) drives ONLY the
+    // 'scheduled_services.id' probe — the visit-brief facts path re-runs
+    // it AFTER computing facts, so a test can simulate a reassignment
+    // landing between the atomic fetch and the facts response.
     q.first = jest.fn(async (...cols) => {
-      if (cols[0] === 'scheduled_services.id') return ownsVisit ? { id: 'svc-1' } : undefined;
+      if (cols[0] === 'scheduled_services.id') return (recheckOwns ?? ownsVisit) ? { id: 'svc-1' } : undefined;
       if (cols[0] === 'scheduled_services.*') return ownsVisit ? rows[table] : undefined;
       return rows[table];
     });
@@ -324,6 +328,41 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
       expect(body.facts).toBeUndefined();
     });
     expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
+  });
+
+  test('a reassignment during the facts queries withholds the codes (post-facts ownership recheck)', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    // Atomic fetch succeeds, but by the time the facts queries finish the
+    // visit belongs to another tech — the recheck must drop the facts key.
+    stubTables(
+      { scheduled_services: { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null } },
+      { ownsVisit: true, recheckOwns: false },
+    );
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`, {
+        headers: { 'x-test-role': 'technician' },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ brief: null });
+    });
+    expect(mockDeterministicVisitFacts).toHaveBeenCalled();
+  });
+
+  test('a served WDO brief carries facts too (its schema has no access/last_visit)', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    stubTables({
+      scheduled_services: {
+        ...VISIT_BRIEF_ROW,
+        pre_service_brief: JSON.stringify({ risk_score: 'High' }),
+        pre_service_brief_type: 'wdo_inspection',
+      },
+    });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.brief).toEqual({ risk_score: 'High' });
+      expect(body.type).toBe('wdo_inspection');
+      expect(body.facts.access.codes.propertyGate).toBe('4482');
+    });
   });
 
   test('a facts computation failure still answers { brief: null } — never a 500, key omitted', async () => {

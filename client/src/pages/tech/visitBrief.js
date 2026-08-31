@@ -102,15 +102,43 @@ export function prepaidLine(service) {
  * Cadence-aware price label for one estimate-source line: the accepted
  * per-application price wins, then the monthly price, then the accepted
  * one-time price. Only what the estimate proved — never a catalog price.
+ * A bare `price` gets the one-time unit only when the LINE is provably
+ * one-time (source/cadence): scheduleLinesFromEstimate deliberately
+ * withholds per-application provenance for discounted/legacy recurring
+ * lines while still returning their recurring price, and labeling that
+ * "$115 one-time" would misstate the accepted terms — render the bare
+ * amount with no unit instead.
  */
 export function quotedLineLabel(line) {
   const per = Number(line?.perApplicationPrice);
   if (Number.isFinite(per) && per > 0) return `${fmtMoney(per)} /application`;
   const mo = Number(line?.monthlyPrice);
   if (Number.isFinite(mo) && mo > 0) return `${fmtMoney(mo)} /mo`;
-  const one = Number(line?.acceptedOneTimePrice ?? line?.price);
+  const one = Number(line?.acceptedOneTimePrice);
   if (Number.isFinite(one) && one > 0) return `${fmtMoney(one)} one-time`;
-  return null;
+  const price = Number(line?.price);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const provablyOneTime = line?.source === 'one_time' || line?.cadence === 'one_time';
+  return provablyOneTime ? `${fmtMoney(price)} one-time` : fmtMoney(price);
+}
+
+/**
+ * Stop-level collection summary: grouped-visit siblings keep separate
+ * invoices and billing lanes, so the collect signal must aggregate EVERY
+ * member service — a prepaid primary with an invoice-due sibling still
+ * needs the chip, with the summed amount.
+ */
+export function stopCollectSummary(stop) {
+  let collectNeeded = false;
+  let amount = 0;
+  for (const s of stop?.services || []) {
+    const m = visitMoneySummary(s);
+    if (m.collectNeeded) {
+      collectNeeded = true;
+      amount += m.amount;
+    }
+  }
+  return { collectNeeded, amount: collectNeeded ? Math.round(amount * 100) / 100 : null };
 }
 
 /** Collapsed-row chip signals from a stop's deduped property alerts. */

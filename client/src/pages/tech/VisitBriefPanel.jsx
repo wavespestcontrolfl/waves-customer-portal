@@ -189,12 +189,13 @@ function QuotedSection({ estimate, loading }) {
   );
 }
 
-function MoneySection({ service, quotedTotal }) {
+// One member service's Paid · prepaid / Amount due today rows. Grouped
+// stops render one block per member (siblings keep separate invoices and
+// billing lanes — a prepaid primary must not hide a sibling's amount due).
+function MemberMoney({ service, showType }) {
   const summary = visitMoneySummary(service);
   const prepaid = prepaidLine(service);
   const rows = [];
-  const quoted = fmtMoney(quotedTotal);
-  if (quoted) rows.push(['Quoted', quoted, null]);
   if (prepaid || summary.invoice?.settled) {
     rows.push(['Paid · prepaid', prepaid || summary.note, null]);
   }
@@ -204,7 +205,11 @@ function MoneySection({ service, quotedTotal }) {
   if (!rows.length) return null;
   return (
     <>
-      <SectionLabel>Money</SectionLabel>
+      {showType && (
+        <p style={{ ...factMutedStyle, margin: '6px 0 0' }}>
+          {service.serviceType || service.service_type || 'Service'}
+        </p>
+      )}
       {rows.map(([label, value, accent]) => (
         <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 700 : undefined }}>
           <span style={{ color: DARK.muted, fontWeight: 400 }}>{label}: </span>{value}
@@ -220,13 +225,76 @@ function MoneySection({ service, quotedTotal }) {
   );
 }
 
+function MoneySection({ stop, quotedTotal }) {
+  const quoted = fmtMoney(quotedTotal);
+  const memberHasMoney = stop.services.some((s) => {
+    const m = visitMoneySummary(s);
+    return m.headline || m.invoice || prepaidLine(s);
+  });
+  if (!quoted && !memberHasMoney) return null;
+  return (
+    <>
+      <SectionLabel>Money</SectionLabel>
+      {quoted && (
+        <p style={factRowStyle}>
+          <span style={{ color: DARK.muted }}>Quoted: </span>{quoted}
+        </p>
+      )}
+      {stop.services.map((s) => (
+        <MemberMoney key={s.id} service={s} showType={stop.services.length > 1} />
+      ))}
+    </>
+  );
+}
+
+// The WDO pre-inspection brief (appointment-tagger's shape: risk_score,
+// risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities,
+// homeowner_questions) — a different schema from the generic visit brief,
+// rendered on its own so the guidance is not silently dropped.
+function WdoBriefSection({ brief }) {
+  const list = (v) => (Array.isArray(v) ? v : []).filter(Boolean);
+  const priorities = list(brief.top_3_priorities);
+  const unknowns = list(brief.top_3_unknowns);
+  const vulnerabilities = list(brief.vulnerabilities);
+  const questions = list(brief.homeowner_questions);
+  if (!brief.risk_score && !priorities.length && !unknowns.length && !vulnerabilities.length && !questions.length) return null;
+  return (
+    <>
+      <SectionLabel>WDO pre-inspection</SectionLabel>
+      {brief.risk_score && (
+        <p style={{ ...factRowStyle, fontWeight: 700 }}>
+          Risk: {brief.risk_score}
+          {brief.risk_reason ? <span style={{ color: DARK.muted, fontWeight: 400 }}> — {brief.risk_reason}</span> : null}
+        </p>
+      )}
+      {priorities.map((p, i) => <p key={`p${i}`} style={factRowStyle}>• {p}</p>)}
+      {vulnerabilities.map((v, i) => <p key={`v${i}`} style={{ ...factRowStyle, color: DARK.amber }}>• {v}</p>)}
+      {unknowns.length > 0 && (
+        <>
+          <p style={{ ...factMutedStyle, marginTop: 6 }}>Unknowns:</p>
+          {unknowns.map((u, i) => <p key={`u${i}`} style={factMutedStyle}>• {u}</p>)}
+        </>
+      )}
+      {questions.length > 0 && (
+        <>
+          <p style={{ ...factMutedStyle, marginTop: 6 }}>Ask the homeowner:</p>
+          {questions.map((q, i) => <p key={`q${i}`} style={factRowStyle}>• {q}</p>)}
+        </>
+      )}
+    </>
+  );
+}
+
 function LastVisitSection({ service, servedBrief, facts }) {
   // Deterministic products from whichever source answered; LLM prose only
-  // from a served brief.
+  // from a served brief. Day-row fallbacks use the LINE-SCOPED fields
+  // only (lastLineService*): the any-line lastService* fields would label
+  // another line's visit — a recent pest stop on a lawn visit — as this
+  // stop's history.
   const briefLast = servedBrief?.last_visit || facts?.last_visit || null;
-  const date = briefLast?.date || service.lastServiceDate || null;
-  const type = briefLast?.type || service.lastServiceType || null;
-  const notes = service.lastServiceNotes || service.lastLineServiceNotes || null;
+  const date = briefLast?.date || service.lastLineServiceDate || null;
+  const type = briefLast?.type || service.lastLineServiceType || null;
+  const notes = service.lastLineServiceNotes || null;
   const summary = servedBrief?.last_visit?.summary || null;
   const products = Array.isArray(briefLast?.products) ? briefLast.products : [];
   const priorities = Array.isArray(servedBrief?.priorities) ? servedBrief.priorities : [];
@@ -303,9 +371,17 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
   const estimate = detail?.estimate || null;
+  // The endpoint serves briefs of different SHAPES by type: the generic
+  // visit brief carries access/last_visit/priorities; the WDO brief is
+  // the pre-inspection schema (risk_score, top_3_*, homeowner_questions)
+  // and gets its own section — reading visit-brief keys off it would
+  // silently drop all of its guidance.
+  const briefType = detail?.brief?.type || null;
   const servedBrief = detail?.brief?.brief || null;
+  const wdoBrief = briefType === 'wdo_inspection' ? servedBrief : null;
+  const visitBrief = wdoBrief ? null : servedBrief;
   const facts = detail?.brief?.facts || null;
-  const access = servedBrief?.access || facts?.access || null;
+  const access = visitBrief?.access || facts?.access || null;
   const tel = telHref(phone);
   const sms = smsHref(phone);
 
@@ -328,13 +404,15 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
 
       <AccessSection alerts={alerts} access={access} />
 
+      {wdoBrief && <WdoBriefSection brief={wdoBrief} />}
+
       <QuotedSection estimate={estimate} loading={loading} />
 
       {/* Quoted = only what the linked estimate proved — a visit with no
           estimate shows no Quoted row (never a catalog/current price). */}
-      <MoneySection service={service} quotedTotal={estimate?.linked ? estimate.quotedTotal : null} />
+      <MoneySection stop={stop} quotedTotal={estimate?.linked ? estimate.quotedTotal : null} />
 
-      <LastVisitSection service={service} servedBrief={servedBrief} facts={facts} />
+      <LastVisitSection service={service} servedBrief={visitBrief} facts={facts} />
 
       {failed && (
         <div style={{ marginTop: 10 }}>
