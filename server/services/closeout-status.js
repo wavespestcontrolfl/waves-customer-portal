@@ -233,7 +233,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   const customerId = visit.customer_id || null;
 
   const [
-    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe, technicianProbe,
+    customerProbe, recordProbe, attemptProbe, requirementsProbe, formsProbe, packetProbe, membersProbe,
   ] = await Promise.all([
     probe('customers', unavailable, () => (customerId
       ? knex('customers').where({ id: customerId }).first(
@@ -265,9 +265,6 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     probe('service_visits members', unavailable, () => (visit.visit_id
       ? knex('scheduled_services').where({ visit_id: visit.visit_id }).select('id')
       : [])),
-    probe('technicians', unavailable, () => (visit.technician_id
-      ? knex('technicians').where({ id: visit.technician_id }).first('id', 'fl_applicator_license', 'license_expiry', 'license_categories')
-      : null)),
   ]);
 
   inputs.customer = customerProbe.value || null;
@@ -288,9 +285,6 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.packetMemberIds = Array.isArray(membersProbe.value)
     ? membersProbe.value.map((r) => r.id)
     : (membersProbe.error ? null : []);
-  inputs.technician = technicianProbe.value || null;
-  inputs.technicianLookupFailed = Boolean(technicianProbe.error);
-
   const record = inputs.record;
   const recordId = record?.id || null;
   const recordIds = (inputs.records || []).map((r) => r.id).filter(Boolean);
@@ -309,6 +303,24 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.projectLookupFailed = Boolean(projectProbe.error);
   const projectId = inputs.project?.id || null;
 
+  // License identity: for a project-backed visit the license belongs to the
+  // applicator who performed and signed the project (created_by_tech_id —
+  // resolveProjectApplicator's authority), not the scheduled assignee.
+  const licenseTechId = inputs.project?.created_by_tech_id || visit.technician_id || null;
+  const technicianProbe = await probe('technicians', unavailable, () => (licenseTechId
+    ? knex('technicians').where({ id: licenseTechId }).first('id', 'fl_applicator_license', 'license_expiry', 'license_categories')
+    : null));
+  inputs.technician = technicianProbe.value || null;
+  inputs.technicianLookupFailed = Boolean(technicianProbe.error);
+  inputs.licenseTechSource = inputs.project?.created_by_tech_id ? 'project_applicator' : 'scheduled_technician';
+  if (!inputs.technician && inputs.project) {
+    // Legacy projects: applicator identity may live only in findings JSON.
+    const findings = parseJsonObjectSafe(inputs.project.findings);
+    if (findings.applicator_fdacs_id) {
+      inputs.applicatorFindingsId = String(findings.applicator_fdacs_id);
+    }
+  }
+
   const [
     activeAppsProbe, retractedAppsProbe, photosProbe, deliveryProbe, liveInvoiceProbe, terminalInvoiceProbe,
     autopayProbe, followupProbe, childProbe, dispositionProbe,
@@ -322,7 +334,8 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     probe(projectId ? 'project_photos' : 'service_photos', unavailable, () => {
       // Project completions store their evidence on the project, not the
       // service record (routes/admin-projects.js counts project_photos).
-      if (projectId) return knex('project_photos').where({ project_id: projectId }).count('* as n').first();
+      // Follow-up uploads never satisfy the SOURCE visit's evidence.
+      if (projectId) return knex('project_photos').where({ project_id: projectId, visit: 'primary' }).count('* as n').first();
       return recordIds.length
         ? knex('service_photos').whereIn('service_record_id', recordIds).count('* as n').first()
         : { n: 0 };
@@ -588,7 +601,16 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) application = awaiting();
   else if (!requirements) application = fact('unknown', 'requirements_unavailable');
   else if (!requirements.requiresApplicationLog) application = fact('not_required', 'catalog_no_application_log', { ruleSource: 'catalog', requirementsSource: requirements.source });
-  else if (!visitPerformed) application = fact('not_required', `visit_outcome_${visitOutcome}`, { ruleSource: 'frozen_record', visitOutcome });
+  else if (!visitPerformed) {
+    if ((inputs.activeApplicationCount ?? 0) > 0) {
+      // Products were logged on a visit whose frozen outcome says nothing
+      // was applied — surface the ledger, block the rollup (GH r5).
+      application = fact('done', 'applications_despite_non_performed_outcome', { activeCount: inputs.activeApplicationCount, visitOutcome });
+      contradictions.push({ code: 'applications_on_non_performed_visit', detail: `${inputs.activeApplicationCount} active application row(s) but frozen visitOutcome is '${visitOutcome}'` });
+    } else {
+      application = fact('not_required', `visit_outcome_${visitOutcome}`, { ruleSource: 'frozen_record', visitOutcome });
+    }
+  }
   else if (inputs.activeApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed');
   else if (inputs.activeApplicationCount > 0) application = fact('done', 'active_application_rows', { activeCount: inputs.activeApplicationCount, retractedCount: inputs.retractedApplicationCount ?? 0 });
   else if (requirements.source === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: requirements.source });
@@ -656,7 +678,9 @@ function deriveCloseoutFacts(inputs) {
     ? inputs.deliveries.filter((r) => !tokenRecord?.id || r.service_record_id === tokenRecord.id)
     : (inputs.delivery ? [inputs.delivery] : []);
   const delivery = deliveryRows.find((r) => String(r.status) === 'sent') || deliveryRows[0] || null;
-  const notesEmailStatus = notes.serviceReportV1EmailStatus ? String(notes.serviceReportV1EmailStatus).toLowerCase() : null;
+  // The delivery worker mirrors status onto the record OWNING the delivery —
+  // read the mirror from the same record as the artifact (GH r5).
+  const notesEmailStatus = tokenNotes.serviceReportV1EmailStatus ? String(tokenNotes.serviceReportV1EmailStatus).toLowerCase() : null;
   const recapSentAt = isoOrNull(record?.recap_sms_sent_at);
   // recap_sms_sent_at is an at-most-once CLAIM stamped before the provider
   // call (pest-recap clears it on a failed send) - a fresh claim is a send
@@ -712,11 +736,11 @@ function deriveCloseoutFacts(inputs) {
     else reportDelivery = fact('unknown', 'delivery_status_unrecognized', evidence);
   } else if (inputs.deliveryLookupFailed) reportDelivery = fact('unknown', 'service_report_deliveries_lookup_failed', { posture: reportPosture });
   else if (notesEmailStatus === 'disabled') reportDelivery = fact('not_required', 'report_email_kill_switch', { ruleSource: 'kill_switch', posture: reportPosture, notesStatus: notesEmailStatus });
-  else if (notesEmailStatus === 'sent') reportDelivery = fact('done', 'delivery_sent_per_record_notes', { posture: reportPosture, sentAt: isoOrNull(notes.serviceReportV1EmailSentAt) });
-  else if (notesEmailStatus === 'failed') reportDelivery = fact('failed', 'delivery_exhausted_per_record_notes', { posture: reportPosture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
+  else if (notesEmailStatus === 'sent') reportDelivery = fact('done', 'delivery_sent_per_record_notes', { posture: reportPosture, sentAt: isoOrNull(tokenNotes.serviceReportV1EmailSentAt) });
+  else if (notesEmailStatus === 'failed') reportDelivery = fact('failed', 'delivery_exhausted_per_record_notes', { posture: reportPosture, lastError: scrubErrorText(tokenNotes.serviceReportV1EmailError) });
   else if (notesEmailStatus === 'skipped') {
     const skip = classifyDeliverySkip(notes.serviceReportV1EmailError);
-    reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), posture: reportPosture, lastError: scrubErrorText(notes.serviceReportV1EmailError) });
+    reportDelivery = fact(skip.state, skip.reason, { ...(skip.ruleSource ? { ruleSource: skip.ruleSource } : {}), posture: reportPosture, lastError: scrubErrorText(tokenNotes.serviceReportV1EmailError) });
   }
   else if (notesEmailStatus === 'queued' || notesEmailStatus === 'sending') reportDelivery = fact('pending', `delivery_${notesEmailStatus}`, { posture: reportPosture });
   else if (isBackfill) reportDelivery = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', posture });
@@ -949,7 +973,11 @@ function deriveCloseoutFacts(inputs) {
   else if (!requirements) license = fact('unknown', 'requirements_unavailable');
   else if (requirements.requiresLicense !== true) license = fact('not_required', 'catalog_no_license_required', { ruleSource: 'catalog', requirementsSource: requirements.source });
   else if (inputs.technicianLookupFailed) license = fact('unknown', 'technicians_lookup_failed', { requiredCategory: requirements.licenseCategory || null });
-  else if (!visit?.technician_id || !tech) license = fact('pending', 'no_technician_on_visit', { requiredCategory: requirements.licenseCategory || null });
+  else if (!tech && inputs.applicatorFindingsId) {
+    // Legacy project: the applicator's FDACS id lives only in findings JSON —
+    // identity recorded, expiry/categories unknowable from here.
+    license = fact('done', 'project_applicator_on_findings', { applicatorFdacsId: inputs.applicatorFindingsId, expiryUnrecorded: true, source: 'project_findings' });
+  } else if (!tech) license = fact('pending', 'no_technician_on_visit', { requiredCategory: requirements.licenseCategory || null });
   else {
     let cats = tech.license_categories;
     if (typeof cats === 'string') { try { cats = JSON.parse(cats); } catch { cats = null; } }
@@ -962,7 +990,7 @@ function deriveCloseoutFacts(inputs) {
     const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
     const evidence = {
       technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
-      categories, judgedAt: visitDay, asOf: 'current_technician_row',
+      categories, judgedAt: visitDay, asOf: 'current_technician_row', identity: inputs.licenseTechSource || 'scheduled_technician',
     };
     if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
     // A missing expiry is ACTIVE by design - the certificate applicator

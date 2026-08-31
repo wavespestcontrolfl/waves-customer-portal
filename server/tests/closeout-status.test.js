@@ -565,6 +565,24 @@ describe('closeout-status: comms + follow-up', () => {
     expect(same.facts.reportDelivery.state).toBe('done');
   });
 
+  test('GH r5: applications on a non-performed outcome contradict; findings-only applicator counts; tokenNotes mirror scoping', () => {
+    const nonPerf = deriveCloseoutFacts(closedOutInputs({
+      activeApplicationCount: 2,
+      record: { ...closedOutInputs().record, structured_notes: { visitOutcome: 'inspection_only', completionSmsStatus: 'sent' } },
+    }));
+    expect(nonPerf.facts.application).toMatchObject({ state: 'done', reason: 'applications_despite_non_performed_outcome' });
+    expect(nonPerf.contradictions.map((c) => c.code)).toContain('applications_on_non_performed_visit');
+    const findingsOnly = deriveCloseoutFacts(closedOutInputs({
+      requirements: baseRequirements({ requiresLicense: true }), technician: null, applicatorFindingsId: 'JE362022',
+    }));
+    expect(findingsOnly.facts.license).toMatchObject({ state: 'done', reason: 'project_applicator_on_findings', applicatorFdacsId: 'JE362022' });
+    // Mirror fallback reads the TOKEN record's notes, not the primary's.
+    const rec1 = { ...closedOutInputs().record, id: 'rec-new', report_view_token: null, report_generated_at: null, structured_notes: { completionSmsStatus: 'sent' } };
+    const rec2 = { ...closedOutInputs().record, id: 'rec-old', structured_notes: { serviceReportV1EmailStatus: 'sent', serviceReportV1EmailSentAt: '2026-08-30T18:06:00Z' } };
+    const mirrored = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2], delivery: null, deliveries: [] }));
+    expect(mirrored.facts.reportDelivery).toMatchObject({ state: 'done', reason: 'delivery_sent_per_record_notes', sentAt: '2026-08-30T18:06:00.000Z' });
+  });
+
   test('license without a recorded expiry stays done (applicator-picker semantics) with expiryUnrecorded surfaced', () => {
     const req = baseRequirements({ requiresLicense: true, licenseCategory: null });
     const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: req, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: { id: 'tech-1', fl_applicator_license: 'JE362022', license_expiry: null, license_categories: null } }));
@@ -1051,7 +1069,7 @@ describe('closeout-status: loader against a fake knex', () => {
     tables.service_records = [{ ...recordRow, completion_source: 'project_completion', report_view_token: null, report_generated_at: null }];
     tables.service_report_deliveries = [];
     tables.projects = [{ id: 'proj-1', scheduled_service_id: SVC, service_record_id: null, status: 'closed', report_token: 'd'.repeat(32), delivery_status: 'sent', created_at: '2026-08-30T18:03:00Z' }];
-    tables.project_photos = [{ project_id: 'proj-1' }, { project_id: 'proj-1' }];
+    tables.project_photos = [{ project_id: 'proj-1', visit: 'primary' }, { project_id: 'proj-1', visit: 'primary' }, { project_id: 'proj-1', visit: 'followup' }];
     catalogRows[0].required_photo_count = 2;
     const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
     expect(result.unavailable).toEqual([]);
