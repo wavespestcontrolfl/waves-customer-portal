@@ -1860,6 +1860,16 @@ const gates = {
   // listing. Kill switch: unset the var (payload keeps `isCallback` as data).
   reserviceReportCopy: process.env.GATE_RESERVICE_REPORT_COPY === 'true',
 
+  // Server-persisted Intelligence Bar threads (owner-ratified 2026-08-31):
+  // admin conversations survive refresh/route changes; the palette resumes
+  // the latest thread. OFF everywhere until Adam flips it (explicit opt-in —
+  // it persists operator conversations to the DB). Kill switch: unset — the
+  // exact pre-thread ephemeral behavior returns and the /threads endpoints
+  // 404. Read at CALL time via gateEnvValue in
+  // services/intelligence-bar/threads.js (flip needs no redeploy); this
+  // entry is the status/log listing.
+  ibThreads: process.env.GATE_IB_THREADS === 'true',
+
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

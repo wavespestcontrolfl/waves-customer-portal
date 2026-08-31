@@ -14,6 +14,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { gateEnvValue } = require('../../config/feature-gates');
 
 // Retention (days) before a thread and its turns are hard-deleted. Owner
 // default 365; override via IB_THREAD_RETENTION_DAYS.
@@ -24,8 +25,10 @@ const DEFAULT_RETENTION_DAYS = 365;
 // re-displays.
 const RESUME_TURN_LIMIT = 40;
 
+// Call-time read (a flip needs no redeploy); registered in
+// config/feature-gates.js (`ibThreads`) for the centralized status listing.
 function threadsEnabled() {
-  return process.env.GATE_IB_THREADS === 'true';
+  return gateEnvValue('GATE_IB_THREADS');
 }
 
 function retentionDays() {

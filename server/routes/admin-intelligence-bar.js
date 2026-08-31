@@ -1803,12 +1803,19 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     if (IbThreads.threadsEnabled() && req.techRole === 'admin'
       && context !== 'tech' && context !== 'agent_estimate') {
       try {
+        // Pending-action cards (and their confirmation ids) are deliberately
+        // client-only and are NOT restored on resume — annotate the stored
+        // turn so a resumed model never believes a proposal is still awaiting
+        // confirmation and the operator knows to re-ask.
+        const threadAssistantTurn = pendingProposals.length
+          ? `${persistedAssistantTurn}\n[This reply proposed ${pendingProposals.length} pending action(s); those confirmation cards expired with the session and were not restored. If the action is still wanted, propose it again.]`
+          : persistedAssistantTurn;
         const appended = await IbThreads.appendExchange({
           actorId: getAdminActorId(req),
           threadId: req.body.thread_id ? String(req.body.thread_id) : null,
           context,
           userText: persistedUserTurn,
-          assistantText: persistedAssistantTurn,
+          assistantText: threadAssistantTurn,
         });
         persistedThreadId = appended?.threadId || null;
       } catch (err) {

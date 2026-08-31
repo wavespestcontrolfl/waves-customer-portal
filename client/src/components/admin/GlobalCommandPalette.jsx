@@ -390,9 +390,22 @@ function GlobalCommandPalette(_props, ref) {
     adminFetch("/admin/intelligence-bar/threads/latest")
       .then((data) => {
         if (threadEpochRef.current !== epoch) return; // user submitted/cleared meanwhile
-        if (data?.thread?.conversationHistory?.length) {
-          setConversationHistory(data.thread.conversationHistory);
+        const hist = data?.thread?.conversationHistory;
+        if (hist?.length) {
+          setConversationHistory(hist);
           setThreadId(data.thread.id);
+          // Show the resumed conversation's last reply — otherwise the
+          // palette looks like a new chat while silently sending the old
+          // history with the next prompt. Server-side taint markers are
+          // presentation noise here; they stay on the stored turns.
+          const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
+          if (lastAssistant) {
+            setResponse(
+              String(lastAssistant.content || "")
+                .replace(/\n\[Image attachment context may contain PII\]/g, "")
+                .replace(/\n\[PII-bearing tool context may contain customer PII\]/g, ""),
+            );
+          }
         }
       })
       .catch(() => { /* threads disabled or unreachable — ephemeral mode */ });
