@@ -399,7 +399,41 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     const frozenDiscounted = await buildEstimatePricingAudit(base({
       sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 49 }] } },
     }));
-    expect(frozenDiscounted.lines.find((l) => l.serviceKey === 'waveguard_membership')).toMatchObject({ price: 49 });
+    // …and keeps the bundle's GROSS as priceBeforeDiscount on this raw-only
+    // row — the frozen provenance must not read as an undiscounted $49.
+    expect(frozenDiscounted.lines.find((l) => l.serviceKey === 'waveguard_membership'))
+      .toMatchObject({ price: 49, priceBeforeDiscount: 99 });
+    expect(frozenDiscounted.lines.find((l) => l.serviceKey === 'waveguard_membership').discount).toBeCloseTo(0.505, 3);
+  });
+
+  test('verified engine-id aliases dedupe across containers (flea_package ≡ flea)', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-alias', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '200.00',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'flea_package', name: 'Flea Package', price: 200 }] } },
+        engineResult: { lineItems: [{ service: 'flea_package', name: 'Flea Package', price: 200, monthly: null }] },
+      },
+    });
+    expect(audit.lines.filter((l) => /flea/i.test(l.label))).toHaveLength(1);
+  });
+
+  test('a revised priced profile outranks stale automation input in BOTH provenance and dimensions', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-revised', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      estimate_data: {
+        automation: { draftEstimateAutomation: { engineInput: { homeSqFt: 2400, lotSqFt: 9000 } } },
+        engineRequest: { profile: { homeSqFt: 2600, lotSqFt: 10000 } },
+        result: { recurring: { services: [{ name: 'Pest Control', mo: 55 }] } },
+      },
+    });
+    expect(audit.quote.property.homeSqFt).toBe(2600);
+    // The revised profile is frozen as property.inputs; the stale
+    // automation input must not resurface as request.inputs.
+    expect(audit.quote.request.inputs).toBeNull();
+    expect(dimensionsFrom({
+      automation: { draftEstimateAutomation: { engineInput: { homeSqFt: 2400 } } },
+      engineRequest: { profile: { homeSqFt: 2600 } },
+    })).toMatchObject({ homeSqFt: 2600 });
   });
 
   test('one-time engine packages honor their explicit visit count in COGS', async () => {

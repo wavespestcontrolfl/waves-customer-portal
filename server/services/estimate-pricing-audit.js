@@ -219,6 +219,20 @@ function cadenceOccurrences(value) {
   return CADENCE_OCCURRENCES[String(value || '').toLowerCase().trim()];
 }
 
+// VERIFIED engine-id aliases → COGS family. Used by the raw-line
+// normalizer AND the container dedupe: a structured row keeps
+// `flea_package` while its raw twin normalizes to `flea` — without one
+// canonicalizer both survive and the charge doubles (GH codex P1).
+const ENGINE_ID_ALIASES = {
+  flea_package: 'flea',
+  flea_knockdown_single: 'flea',
+  stinging_insect: 'stinging',
+  stinging_insect_v2: 'stinging',
+  wasp: 'stinging',
+  exclusion_v2: 'exclusion',
+  rodent_exclusion: 'exclusion',
+};
+
 // Honest unmapped key: a plain slug with NO pattern matching, for
 // operator-authored text that must never pick a COGS family (GH codex P1:
 // "Termite Foam Renewal" is not bait).
@@ -286,13 +300,18 @@ function quoteProvenanceFrom(estimate, data, result) {
   // verbatim inputs freeze; the LOOKUP profile (enriched/marker-bearing
   // shapes via the win/loss classifier, markerless engineInputs as
   // fallback for click-mints/v1) supplies the provenance flags.
-  const lookupProfile = profileFromEstimateData(data) || data?.engineInputs || data?.inputs || {};
-  // Automated lead drafts persist their priced input only at the nested
-  // automation path — without it the property-provenance block froze all
-  // nulls for auto-sent estimates (codex pre-push P1).
+  const lookupProfile = profileFromEstimateData(data) || data?.engineInputs || data?.inputs || null;
+  const lookupFlags = lookupProfile || {};
+  // Same precedence as dimensionsFrom (GH codex P1): the CURRENTLY priced
+  // input wins — a revised admin-builder profile outranks the original
+  // automation engineInput left behind on an auto-drafted estimate, so
+  // the property provenance and the COGS dimensions describe the same
+  // property. The nested automation path is the LAST fallback (codex
+  // pre-push P1: without it auto-sent estimates froze all nulls).
   const profile = data?.engineInput
+    ?? lookupProfile
     ?? data?.automation?.draftEstimateAutomation?.engineInput
-    ?? lookupProfile;
+    ?? {};
   const recurring = result?.recurring || {};
   const bundle = data?.sendSnapshot?.pricingBundle || null;
   // Missing is null, never 0 — Number(null) is 0 and would fabricate a
@@ -343,10 +362,10 @@ function quoteProvenanceFrom(estimate, data, result) {
       measuredTurfSf: number(profile.measuredTurfSf),
       estimatedTurfSf: number(profile.estimatedTurfSf),
       stories: number(profile.stories),
-      propertyDataQuality: lookupProfile.propertyDataQuality ?? profile.propertyDataQuality ?? null,
-      dataSources: lookupProfile.dataSources ?? profile.dataSources ?? null,
-      fieldVerifyFlags: Array.isArray(lookupProfile.fieldVerifyFlags)
-        ? lookupProfile.fieldVerifyFlags
+      propertyDataQuality: lookupFlags.propertyDataQuality ?? profile.propertyDataQuality ?? null,
+      dataSources: lookupFlags.dataSources ?? profile.dataSources ?? null,
+      fieldVerifyFlags: Array.isArray(lookupFlags.fieldVerifyFlags)
+        ? lookupFlags.fieldVerifyFlags
         : (Array.isArray(profile.fieldVerifyFlags) ? profile.fieldVerifyFlags : null),
     },
     marginWarnings: result?.marginWarnings || recurring.marginWarnings || null,
@@ -362,8 +381,13 @@ function quoteProvenanceFrom(estimate, data, result) {
       selectedServices: data?.engineRequest?.selectedServices ?? null,
       // engineInput (singular) is the quote wizard's normalized, actually-
       // priced input — preferred over the raw shapes when present.
+      // engineRequest.profile is frozen as property.inputs above, so it is
+      // not repeated here; the automation input stays the LAST fallback.
+      // The stale automation input is a fallback ONLY when no priced
+      // profile exists — with a revised engineRequest.profile (frozen as
+      // property.inputs above) it must not resurface here (GH codex P1).
       inputs: data?.engineInput ?? data?.inputs ?? data?.engineInputs
-        ?? data?.automation?.draftEstimateAutomation?.engineInput ?? null,
+        ?? (lookupProfile ? null : data?.automation?.draftEstimateAutomation?.engineInput) ?? null,
       // Quote-wizard rows keep their price-bearing selection at top-level
       // estimate_data.services with none of the above (GH codex P2).
       services: data?.services ?? null,
@@ -642,7 +666,7 @@ function protocolFor(line) {
 // The persisted raw-engine lineItems shape (public-quote projection:
 // service/name/annual/monthly/price/total/perApp/...). monthly-bearing
 // rows are recurring; the rest are one-time.
-function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOverride = null } = {}) {
+function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOverride = null, initialFeeGross = null } = {}) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
   let membershipEmitted = false;
@@ -662,19 +686,11 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
       || hasPerUnitWitness;
     if (!hasBaseWitness && !Number.isFinite(numOrNaN(item.installation?.price))) continue;
     // Engine service IDs are not all SERVICE_MAP keys. VERIFIED aliases
+    // (module-level ENGINE_ID_ALIASES, shared with the container dedupe)
     // map to their COGS family; everything else keeps its RAW id — an
     // honest unmapped warning beats keyFromName's broad label patterns,
     // which would cost termite specialties (foam/bond/station rental) as
     // bait treatments (codex pre-push P1 x2).
-    const ENGINE_ID_ALIASES = {
-      flea_package: 'flea',
-      flea_knockdown_single: 'flea',
-      stinging_insect: 'stinging',
-      stinging_insect_v2: 'stinging',
-      wasp: 'stinging',
-      exclusion_v2: 'exclusion',
-      rodent_exclusion: 'exclusion',
-    };
     const serviceKey = SERVICE_MAP[item.service]
       ? item.service
       : (ENGINE_ID_ALIASES[item.service] || item.service || keyFromName(item.name));
@@ -792,14 +808,20 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     if (!membershipEmitted && emitInitialFee && Number.isFinite(initialFee) && initialFee > 0
       && (Number.isFinite(num(item.initialFee)) || Number.isFinite(numOrNaN(initialFeeOverride)))) {
       membershipEmitted = true;
+      // Gross = the row's own initialFee or the bundle's gross, never the
+      // discounted override (GH codex P2: raw-only rows recorded a
+      // discounted $49 as undiscounted).
+      const grossCandidates = [num(item.initialFee), numOrNaN(initialFeeGross), initialFee]
+        .filter((v) => Number.isFinite(v) && v > 0);
+      const gross = Math.max(...grossCandidates);
       lines.push({
         serviceKey: 'waveguard_membership',
         label: 'WaveGuard Membership',
         cadence: 'one_time',
         price: money(initialFee),
         monthly: null,
-        priceBeforeDiscount: money(initialFee),
-        discount: 0,
+        priceBeforeDiscount: money(gross),
+        discount: gross > initialFee ? Math.round((1 - initialFee / gross) * 1000) / 1000 : 0,
         priceSource: 'saved_estimate.engineResult.lineItems.initialFee',
         skipCogs: true,
       });
@@ -952,7 +974,14 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const initialFeeOverride = emitInitialFee && Number.isFinite(frozenSetupAmount) && frozenSetupAmount > 0
     ? frozenSetupAmount
     : null;
-  const setupOpts = { emitInitialFee, initialFeeOverride };
+  // The bundle's GROSS setup fee ({price: 99} beside priceAfterDiscount
+  // 49) — raw-only rows have no structured membership row to supply it,
+  // so without this the override recorded $49/$49/discount 0 (GH codex P2).
+  const frozenSetupGross = frozenSetupRow
+    ? Number(frozenSetupRow.price ?? frozenSetupRow.amount ?? frozenSetupRow.priceAfterDiscount)
+    : null;
+  const initialFeeGross = Number.isFinite(frozenSetupGross) && frozenSetupGross > 0 ? frozenSetupGross : null;
+  const setupOpts = { emitInitialFee, initialFeeOverride, initialFeeGross };
   let rawLines = proposalAuthoritative
     ? proposalLines
     : [
@@ -1000,7 +1029,9 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     const priceKey = (l) => {
       const key = String(l.serviceKey || '');
       // termite_bond persists with its term baked in (termite_bond_5yr).
-      const family = DEDUPE_FAMILY[key] || (key.startsWith('termite_bond') ? 'termite_bait' : key);
+      const family = DEDUPE_FAMILY[key]
+        || ENGINE_ID_ALIASES[key]
+        || (key.startsWith('termite_bond') ? 'termite_bait' : key);
       return `${family}|${l.cadence}`;
     };
     const remember = (l) => {
@@ -1049,7 +1080,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       survivors.forEach(remember);
     };
     const hadMappedLines = rawLines.length > 0;
-    const fromResult = normalizeEngineLineItems(result, { emitInitialFee, initialFeeOverride });
+    const fromResult = normalizeEngineLineItems(result, setupOpts);
     if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
       // The alternate container gets EVERY canonical collector, not just
       // the lineItems scan — a structured engineResult.oneTime/recurring
@@ -1061,7 +1092,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
         ...normalizeRecurringLines(data.engineResult),
         ...normalizeOneTimeLines(data.engineResult, setupOpts),
       ];
-      const altRaw = normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride });
+      const altRaw = normalizeEngineLineItems(data.engineResult, setupOpts);
       if (altMapped.length || altRaw.length) {
         result = data.engineResult;
         merge(altMapped);
@@ -1074,7 +1105,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
           ...normalizeRecurringLines(data.engineResult),
           ...normalizeOneTimeLines(data.engineResult, setupOpts),
         ], { consumeOnlyMappedServices: true });
-        merge(normalizeEngineLineItems(data.engineResult, { emitInitialFee, initialFeeOverride }), { consumeOnlyMappedServices: true });
+        merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true });
       }
     }
   }
