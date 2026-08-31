@@ -129,18 +129,18 @@ test('technician: never offered, and refused if the model tries it anyway', asyn
 });
 
 test('admin tool call is dispatched with the actor id from the request, not the model input', async () => {
-  mockExecuteHistoryTool.mockResolvedValue({ query: 'hesen', total: 0, results: [], receipts: [] });
+  mockExecuteHistoryTool.mockResolvedValue({ query: 'acct-1042', total: 0, results: [], receipts: [] });
   mockMessagesCreate
-    .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 'tu1', name: 'search_ib_history', input: { query: 'hesen', actorId: 'someone-else' } }] })
+    .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 'tu1', name: 'search_ib_history', input: { query: 'acct-1042', actorId: 'someone-else' } }] })
     .mockResolvedValueOnce({ content: [{ type: 'text', text: 'nothing found' }] });
   await withServer(async (baseUrl) => {
-    const { status, body } = await postQuery(baseUrl, { prompt: 'what did I decide about hesen', context: 'schedule' });
+    const { status, body } = await postQuery(baseUrl, { prompt: 'what did I decide about acct-1042', context: 'schedule' });
     expect(status).toBe(200);
     expect(body.response).toBe('nothing found');
     expect(mockExecuteHistoryTool).toHaveBeenCalledTimes(1);
     const [name, input, ctx] = mockExecuteHistoryTool.mock.calls[0];
     expect(name).toBe('search_ib_history');
-    expect(input.query).toBe('hesen');
+    expect(input.query).toBe('acct-1042');
     expect(ctx).toEqual({ actorId: 'admin-1' });
   });
 });

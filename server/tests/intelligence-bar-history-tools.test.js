@@ -53,7 +53,7 @@ test('tool is declared with a required query and an inline contract', () => {
 });
 
 test('fails closed without an actor — no query runs', async () => {
-  const r = await executeHistoryTool('search_ib_history', { query: 'hesen' }, {});
+  const r = await executeHistoryTool('search_ib_history', { query: 'acct-1042' }, {});
   expect(r.error).toMatch(/identity required/i);
   expect(r.results).toEqual([]);
   expect(mockDb).not.toHaveBeenCalled();
@@ -67,8 +67,8 @@ test('empty query is rejected before querying', async () => {
 
 test('full-text hit: actor-scoped, paired turn + receipts attached', async () => {
   queue.push(
-    [{ id: 'turn-2', thread_id: T1, seq: 2, role: 'assistant', created_at: '2026-08-30T01:00:00Z', title: 'Hesen reschedule', context: 'schedule', last_active_at: '2026-08-30T01:01:00Z', snippet: '…moved <b>Hesen</b> to Thursday…' }],
-    [{ thread_id: T1, seq: 1, role: 'user', content: 'move hesen to thursday' }],
+    [{ id: 'turn-2', thread_id: T1, seq: 2, role: 'assistant', created_at: '2026-08-30T01:00:00Z', title: 'acct-1042 reschedule', context: 'schedule', last_active_at: '2026-08-30T01:01:00Z', snippet: '…moved <b>acct-1042</b> to Thursday…' }],
+    [{ thread_id: T1, seq: 1, role: 'user', content: 'move acct-1042 to thursday' }],
     [
       // This exchange (assistant seq 2): confirmed + success → executed
       { id: 'pa-1', thread_id: T1, thread_turn_seq: 2, tool_name: 'reschedule_appointment', summary: 'Move → Thu', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:00:30Z', consumed_at: '2026-08-30T01:02:00Z' },
@@ -80,13 +80,13 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
       { id: 'pa-9', thread_id: T1, thread_turn_seq: 4, tool_name: 'create_customer', summary: 'Unrelated', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:10:00Z', consumed_at: '2026-08-30T01:10:05Z' },
     ],
   );
-  const r = await executeHistoryTool('search_ib_history', { query: 'hesen', days: 30 }, { actorId: 'admin-1' });
+  const r = await executeHistoryTool('search_ib_history', { query: 'acct-1042', days: 30 }, { actorId: 'admin-1' });
 
   expect(r.mode).toBe('full_text');
   expect(r.total).toBe(1);
   const hit = r.results[0];
-  expect(hit.thread_title).toBe('Hesen reschedule');
-  expect(hit.paired_turn).toEqual({ role: 'user', content: 'move hesen to thursday', truncated: false });
+  expect(hit.thread_title).toBe('acct-1042 reschedule');
+  expect(hit.paired_turn).toEqual({ role: 'user', content: 'move acct-1042 to thursday', truncated: false });
   expect(hit.receipts.map((x) => [x.id, x.outcome])).toEqual([
     ['pa-1', 'executed'], ['pa-2', 'failed'], ['pa-3', 'never_ran'],
   ]);
@@ -97,7 +97,7 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
   expect(fts.table).toBe('ib_thread_turns as tt');
   expect(fts.where).toEqual(expect.arrayContaining([['t.admin_actor_id', 'admin-1']]));
   expect(fts.whereRaw[0][0]).toMatch(/websearch_to_tsquery/);
-  expect(fts.whereRaw[0][1]).toEqual(['hesen']);
+  expect(fts.whereRaw[0][1]).toEqual(['acct-1042']);
   // Receipts query is scoped to the same actor and the matched threads.
   const receipts = calls.find((c) => c.table === 'ib_pending_actions');
   expect(receipts.whereIn).toEqual([['thread_id', [T1]]]);

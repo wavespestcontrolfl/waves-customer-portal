@@ -30,7 +30,7 @@ const HISTORY_TOOLS = [
   {
     name: 'search_ib_history',
     description: `Search YOUR OWN past Intelligence Bar conversations (verbatim, full-text) and return the matching exchanges with any pending-action receipts (proposed/confirmed/cancelled/expired) those conversations produced.
-Use for: "what did I decide about the Hesen reschedule last week?", "did I approve the Miller refund?", "find the conversation where I asked about mosquito pricing", "what did the bar tell me about the Palmetto duplex?"
+Use for: "what did I decide about the acct-1042 reschedule last week?", "did I approve the acct-2077 refund?", "find the conversation where I asked about mosquito pricing", "what did the bar tell me about the duplex on the Tuesday route?"
 Results are the operator's own threads only. Supports quoted phrases and -exclusions (web-search syntax).`,
     input_schema: {
       type: 'object',
