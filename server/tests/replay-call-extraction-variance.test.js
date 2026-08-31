@@ -4,6 +4,8 @@ const {
   buildReplayErrorResult,
   etScheduleParts,
   evaluateFixtureExpectation,
+  goldFieldValues,
+  GOLD_FIELDS,
   loadReplayFixture,
   parseArgs,
   shouldFailRun,
@@ -185,6 +187,152 @@ describe('call extraction replay variance reporting', () => {
       'fixture_error:invalid_current_block_reasons_subset_of',
       'fixture_error:no_recognized_checks',
     ]);
+  });
+
+  test('scores the per-field answer key: high misses fail, medium/low misses only lower accuracy', () => {
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        flags: ['voicemail'],
+        schedulingStatus: 'none',
+        fields: {
+          is_voicemail: true,
+          is_spam: false,
+          call_nature: 'new_lead',
+          scheduling_status: 'none',
+          recommended_disposition: 'callback_task_created',
+          primary_service_category: 'termite',
+          urgency: 'within_48_hours',
+          schedule_window_start: null,
+        },
+      },
+    });
+
+    const pass = evaluateFixtureExpectation(result, {
+      expect: { current_status: 'valid' },
+      gold: {
+        is_voicemail: true,
+        call_nature: ['new_lead', 'voicemail_message'],
+        recommended_disposition: 'CALLBACK_TASK_CREATED',
+      },
+    });
+    expect(pass).toMatchObject({ status: 'pass', checked: 3, failures: [] });
+    expect(pass.gold.scored).toHaveLength(3);
+    expect(pass.gold.misses).toEqual([]);
+
+    const mixed = evaluateFixtureExpectation(result, {
+      expect: { current_status: 'valid' },
+      gold: {
+        is_spam: true,                       // high miss -> fails the case
+        primary_service_category: 'wdo',     // medium miss -> accuracy only
+        urgency: ['emergency_same_day', 'within_48_hours'],
+      },
+    });
+    expect(mixed.status).toBe('fail');
+    expect(mixed.failures.map((failure) => failure.name)).toEqual(['gold:is_spam']);
+    expect(mixed.failures[0]).toMatchObject({ actual: false, expected: true });
+    expect(mixed.gold.misses.map((miss) => miss.field).sort()).toEqual(['is_spam', 'primary_service_category']);
+    expect(mixed.gold.scored.find((entry) => entry.field === 'urgency').correct).toBe(true);
+
+    // A missing/null model value never matches a gold label.
+    const nullMiss = evaluateFixtureExpectation(result, {
+      expect: { current_status: 'valid' },
+      gold: { schedule_window_start: '11:00' },
+    });
+    expect(nullMiss.status).toBe('fail');
+    expect(nullMiss.failures[0]).toMatchObject({ name: 'gold:schedule_window_start', actual: null });
+  });
+
+  test('answer key is unscored (not wrong) when the replay produced no extraction', () => {
+    const errored = validResult({ current: { status: 'error', wouldAutoRoute: false, flags: [], fields: null } });
+    const expectation = evaluateFixtureExpectation(errored, {
+      expect: { current_would_auto_route: false },
+      gold: { is_spam: false, call_nature: 'new_lead' },
+    });
+    expect(expectation.failures.map((failure) => failure.name)).toEqual([]);
+    expect(expectation.gold.scored).toEqual([]);
+    expect(expectation.gold.unscored.map((entry) => entry.field)).toEqual(['is_spam', 'call_nature']);
+  });
+
+  test('rejects unknown gold fields and malformed gold values as fixture errors', () => {
+    const expectation = evaluateFixtureExpectation(validResult({
+      current: { status: 'valid', wouldAutoRoute: true, flags: [], fields: { is_spam: false } },
+    }), {
+      expect: { current_status: 'valid' },
+      gold: { caller_phone: '+19415550100', is_spam: [], call_nature: 42 },
+    });
+    expect(expectation.status).toBe('fail');
+    expect(expectation.failures.map((failure) => failure.name)).toEqual([
+      'fixture_error:unknown_gold_field:caller_phone',
+      'fixture_error:invalid_gold_value:is_spam',
+      'fixture_error:invalid_gold_value:call_nature',
+    ]);
+
+    expect(evaluateFixtureExpectation(validResult(), { expect: { current_status: 'valid' }, gold: ['is_spam'] }).failures)
+      .toEqual([expect.objectContaining({ name: 'fixture_error:invalid_gold' })]);
+  });
+
+  test('summarizes answer-key accuracy overall and per field', () => {
+    const scoredResult = (caseId, scored, unscored = []) => validResult({
+      fixture: { caseId, expectation: { status: 'pass', checked: 1, failures: [], gold: { scored, unscored, misses: scored.filter((s) => !s.correct) } } },
+    });
+    const summary = summarizeResults([
+      scoredResult('a', [
+        { field: 'is_spam', severity: 'high', expected: false, actual: false, correct: true },
+        { field: 'call_nature', severity: 'high', expected: 'new_lead', actual: 'other', correct: false },
+      ]),
+      scoredResult('b', [
+        { field: 'is_spam', severity: 'high', expected: false, actual: false, correct: true },
+      ], [{ field: 'urgency', severity: 'medium', expected: 'within_48_hours' }]),
+      validResult(), // no fixture at all
+    ], parseArgs([]));
+
+    expect(summary.goldAccuracy).toEqual({
+      labeled: 3,
+      correct: 2,
+      unscored: 1,
+      accuracy: 0.6667,
+      byField: {
+        is_spam: { severity: 'high', labeled: 2, correct: 2, accuracy: 1, missCaseIds: [] },
+        call_nature: { severity: 'high', labeled: 1, correct: 0, accuracy: 0, missCaseIds: ['a'] },
+      },
+    });
+    expect(summarizeResults([validResult()], parseArgs([])).goldAccuracy).toEqual({
+      labeled: 0, correct: 0, unscored: 0, accuracy: null, byField: {},
+    });
+  });
+
+  test('goldFieldValues reads only enum/boolean/date fields off the extraction', () => {
+    const values = goldFieldValues({
+      meta: { is_voicemail: false, is_spam: false },
+      call_nature: 'new_lead',
+      recommended_disposition: 'estimate_send',
+      caller: { first_name: 'Pat', phone_e164: '+19415550100' },
+      property: { property_type: 'condo', service_address: { line1: '1 Main St' } },
+      scheduling: { status: 'confirmed', agent_committed_booking: true },
+      service_request: { primary_service_category: 'wdo', service_intent: 'quote_only', urgency: 'within_one_week', quote_promised: true },
+      customer_history: { status: 'new_customer' },
+      sentiment_and_lead: { lead_quality: 'hot' },
+      language: 'english',
+    }, { scheduled_date: '2026-06-15', window_start: '11:00' });
+
+    expect(Object.keys(values).sort()).toEqual(Object.keys(GOLD_FIELDS).sort());
+    expect(values).toMatchObject({
+      is_voicemail: false,
+      call_nature: 'new_lead',
+      scheduling_status: 'confirmed',
+      agent_committed_booking: true,
+      schedule_date: '2026-06-15',
+      schedule_window_start: '11:00',
+      quote_promised: true,
+      property_type: 'condo',
+      customer_history_status: 'new_customer',
+      lead_quality: 'hot',
+      language: 'english',
+    });
+    expect(JSON.stringify(values)).not.toMatch(/Pat|9415550100|Main St/);
+    expect(goldFieldValues({}, {})).toMatchObject({ is_spam: null, schedule_date: null });
   });
 
   test('checks call-nature and recommended-disposition membership expectations', () => {

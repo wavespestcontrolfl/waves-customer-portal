@@ -2501,7 +2501,7 @@ function initScheduledJobs() {
       await runExclusive('call-extraction-replay-eval', async () => {
         const { runCallExtractionReplayEval } = require('./eval/call-extraction-replay');
         const result = await runCallExtractionReplayEval();
-        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0}`);
+        logger.info(`Call extraction replay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} goldAccuracy=${result.goldAccuracy?.accuracy ?? 'n/a'} (${result.goldAccuracy?.correct || 0}/${result.goldAccuracy?.labeled || 0})`);
       });
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);

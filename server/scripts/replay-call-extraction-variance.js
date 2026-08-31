@@ -88,6 +88,33 @@ const EXPECTATION_KEYS = new Set([
   'legacy_schedule_variance_fields',
 ]);
 
+// Per-field answer key. A fixture case's `gold` block maps these keys to the
+// reviewer-confirmed value (a scalar, or an array meaning "any of these").
+// Every key is an enum/boolean/date read off the CURRENT v2 extraction — never
+// a name, phone, email, or address — so the committed fixture stays PII-free.
+// `high` fields are routing-critical: a miss fails the weekly run like any
+// other fixture expectation. `medium`/`low` misses only lower the reported
+// accuracy, so the answer key can grow without turning the cron into noise.
+const GOLD_FIELDS = {
+  is_voicemail: { severity: 'high', read: (x) => x?.meta?.is_voicemail },
+  is_spam: { severity: 'high', read: (x) => x?.meta?.is_spam },
+  call_nature: { severity: 'high', read: (x) => x?.call_nature },
+  scheduling_status: { severity: 'high', read: (x) => x?.scheduling?.status },
+  agent_committed_booking: { severity: 'high', read: (x) => x?.scheduling?.agent_committed_booking },
+  schedule_date: { severity: 'high', read: (x, schedule) => schedule?.scheduled_date },
+  schedule_window_start: { severity: 'high', read: (x, schedule) => schedule?.window_start, normalize: normalizeTime },
+  quote_promised: { severity: 'high', read: (x) => x?.service_request?.quote_promised },
+  recommended_disposition: { severity: 'medium', read: (x) => x?.recommended_disposition },
+  primary_service_category: { severity: 'medium', read: (x) => x?.service_request?.primary_service_category },
+  service_intent: { severity: 'medium', read: (x) => x?.service_request?.service_intent },
+  urgency: { severity: 'medium', read: (x) => x?.service_request?.urgency },
+  property_type: { severity: 'medium', read: (x) => x?.property?.property_type },
+  customer_history_status: { severity: 'medium', read: (x) => x?.customer_history?.status },
+  lead_quality: { severity: 'low', read: (x) => x?.sentiment_and_lead?.lead_quality },
+  language: { severity: 'low', read: (x) => x?.language },
+};
+const GOLD_FIELD_NAMES = Object.keys(GOLD_FIELDS);
+
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
     limit: DEFAULT_LIMIT,
@@ -323,6 +350,72 @@ function isStringArray(value) {
   return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim());
 }
 
+// The answer-key view of one extraction: every GOLD_FIELDS value, redacted by
+// construction (enums/booleans/dates only). Emitted on every replay result so
+// the weekly JSONL doubles as the candidate sheet for labeling new cases.
+function goldFieldValues(extraction, currentSchedule = {}) {
+  const values = {};
+  for (const field of GOLD_FIELD_NAMES) {
+    const raw = GOLD_FIELDS[field].read(extraction, currentSchedule);
+    values[field] = raw === undefined ? null : raw;
+  }
+  return values;
+}
+
+function normalizeGoldValue(field, value) {
+  if (value === null || value === undefined || value === '') return null;
+  const normalize = GOLD_FIELDS[field]?.normalize;
+  if (normalize) return normalize(value);
+  if (typeof value === 'boolean') return value;
+  return String(value).trim().toLowerCase();
+}
+
+function isGoldScalar(value) {
+  return typeof value === 'boolean' || (typeof value === 'string' && value.trim() !== '');
+}
+
+// Scores a case's `gold` block against result.current.fields. Returns
+// { scored, unscored, misses } where misses carry severity so the caller can
+// decide which ones fail the run. Unscored = the run produced no extraction to
+// grade (replay error / invalid shape) — the replay-error path already fails
+// those, so they stay out of the accuracy denominator rather than double-count.
+function evaluateGoldLabels(result, gold) {
+  const scored = [];
+  const unscored = [];
+  const misses = [];
+  const fixtureErrors = [];
+  if (gold === undefined) return { scored, unscored, misses, fixtureErrors };
+  if (!gold || typeof gold !== 'object' || Array.isArray(gold)) {
+    fixtureErrors.push({ name: 'fixture_error:invalid_gold', actual: gold, expected: 'object of GOLD_FIELDS keys' });
+    return { scored, unscored, misses, fixtureErrors };
+  }
+  const fields = result?.current?.status === 'valid' && result.current.fields ? result.current.fields : null;
+  for (const [field, expected] of Object.entries(gold)) {
+    if (!GOLD_FIELDS[field]) {
+      fixtureErrors.push({ name: `fixture_error:unknown_gold_field:${field}`, actual: field, expected: GOLD_FIELD_NAMES });
+      continue;
+    }
+    const accepted = Array.isArray(expected) ? expected : [expected];
+    if (!accepted.length || !accepted.every(isGoldScalar)) {
+      fixtureErrors.push({ name: `fixture_error:invalid_gold_value:${field}`, actual: expected, expected: 'boolean/string or non-empty array of them' });
+      continue;
+    }
+    const severity = GOLD_FIELDS[field].severity;
+    if (!fields) {
+      unscored.push({ field, severity, expected });
+      continue;
+    }
+    const actual = fields[field];
+    const actualNormalized = normalizeGoldValue(field, actual);
+    const correct = actualNormalized !== null
+      && accepted.some((value) => normalizeGoldValue(field, value) === actualNormalized);
+    const entry = { field, severity, expected, actual: actual ?? null, correct };
+    scored.push(entry);
+    if (!correct) misses.push(entry);
+  }
+  return { scored, unscored, misses, fixtureErrors };
+}
+
 function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
   const expect = fixtureCase?.expect;
   const currentSchedule = context.currentSchedule || {};
@@ -549,10 +642,61 @@ function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
     fixtureError('no_recognized_checks', Object.keys(expect), [...EXPECTATION_KEYS].sort());
   }
 
+  // Per-field answer key. Only `high` misses fail the case; every scored
+  // field feeds summary.goldAccuracy regardless of severity.
+  const gold = evaluateGoldLabels(result, fixtureCase?.gold);
+  failures.push(...gold.fixtureErrors);
+  for (const entry of gold.scored) {
+    if (entry.severity === 'high') {
+      check(`gold:${entry.field}`, entry.correct, entry.actual, entry.expected);
+    }
+  }
+
   return {
     status: failures.length ? 'fail' : 'pass',
     checked: checks.length,
     failures,
+    gold: {
+      scored: gold.scored,
+      unscored: gold.unscored,
+      misses: gold.misses,
+    },
+  };
+}
+
+// Answer-key accuracy across a run, overall and per field. `labeled` counts
+// only fields that were actually scored (a valid extraction existed); the
+// unscored count is reported beside it so a run of replay errors cannot read
+// as 100% accurate.
+function summarizeGoldAccuracy(results) {
+  const byField = {};
+  let labeled = 0;
+  let correct = 0;
+  let unscored = 0;
+  for (const result of results) {
+    const gold = result.fixture?.expectation?.gold;
+    if (!gold) continue;
+    unscored += (gold.unscored || []).length;
+    for (const entry of gold.scored || []) {
+      const bucket = byField[entry.field] || (byField[entry.field] = { severity: entry.severity, labeled: 0, correct: 0, missCaseIds: [] });
+      bucket.labeled += 1;
+      labeled += 1;
+      if (entry.correct) {
+        bucket.correct += 1;
+        correct += 1;
+      } else {
+        bucket.missCaseIds.push(result.fixture.caseId || result.callId);
+      }
+    }
+  }
+  const ratio = (num, den) => (den ? Number((num / den).toFixed(4)) : null);
+  for (const bucket of Object.values(byField)) bucket.accuracy = ratio(bucket.correct, bucket.labeled);
+  return {
+    labeled,
+    correct,
+    unscored,
+    accuracy: ratio(correct, labeled),
+    byField,
   };
 }
 
@@ -814,6 +958,7 @@ function summarizeResults(results, options) {
         .filter((r) => r.fixture?.expectation?.status === 'fail')
         .map((r) => r.callId),
     },
+    goldAccuracy: summarizeGoldAccuracy(results),
   };
 }
 
@@ -878,6 +1023,13 @@ function printHumanResult(result, index) {
     console.log(`     fixture=${result.fixture.caseId}:${result.fixture.expectation.status}`);
     for (const failure of result.fixture.expectation.failures || []) {
       console.log(`       fixture_failure=${failure.name} actual=${JSON.stringify(failure.actual)} expected=${JSON.stringify(failure.expected)}`);
+    }
+    const gold = result.fixture.expectation.gold;
+    if (gold && (gold.scored.length || gold.unscored.length)) {
+      console.log(`     gold=${gold.scored.length - gold.misses.length}/${gold.scored.length} correct${gold.unscored.length ? ` (${gold.unscored.length} unscored)` : ''}`);
+      for (const miss of gold.misses) {
+        console.log(`       gold_miss=${miss.field}:${miss.severity} actual=${JSON.stringify(miss.actual)} expected=${JSON.stringify(miss.expected)}`);
+      }
     }
   }
   if (result.error) {
@@ -1145,6 +1297,8 @@ async function replayCall(call, context) {
       serviceCategory: currentExtraction?.service_request?.primary_service_category || null,
       callNature: currentExtraction?.call_nature || null,
       recommendedDisposition: currentExtraction?.recommended_disposition || null,
+      // Answer-key view (enums/booleans/dates only — safe to emit unredacted).
+      fields: currentExtraction ? goldFieldValues(currentExtraction, currentSchedule) : null,
     },
     variance: {
       routeChangedVsLegacySchedule: !!scheduled !== !!currentRoute.allowed,
@@ -1213,6 +1367,7 @@ function buildReplayErrorResult(call, err, context = {}) {
       serviceCategory: null,
       callNature: null,
       recommendedDisposition: null,
+      fields: null,
     },
     variance: {
       routeChangedVsLegacySchedule: false,
@@ -1412,7 +1567,11 @@ module.exports = {
   parseArgs,
   normalizeField,
   summarizeResults,
+  summarizeGoldAccuracy,
   evaluateFixtureExpectation,
+  evaluateGoldLabels,
+  goldFieldValues,
+  GOLD_FIELDS,
   buildReplayErrorResult,
   buildMissingFixtureResults,
   shouldFailRun,

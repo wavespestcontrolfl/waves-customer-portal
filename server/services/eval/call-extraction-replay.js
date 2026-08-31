@@ -26,7 +26,33 @@ function compactSummary(summary = {}) {
       failedCallIds: summary.fixtureExpectations?.failedCallIds || [],
     },
     currentStatusCounts: summary.currentStatusCounts || {},
+    goldAccuracy: compactGoldAccuracy(summary.goldAccuracy),
   };
+}
+
+// Per-field answer-key accuracy (see GOLD_FIELDS in the replay script).
+// Kept small enough to ride inside notification metadata: overall ratio plus
+// one row per field with its miss list.
+function compactGoldAccuracy(gold) {
+  if (!gold) return { labeled: 0, correct: 0, unscored: 0, accuracy: null, byField: {} };
+  return {
+    labeled: gold.labeled || 0,
+    correct: gold.correct || 0,
+    unscored: gold.unscored || 0,
+    accuracy: gold.accuracy ?? null,
+    byField: gold.byField || {},
+  };
+}
+
+function goldAccuracyLine(gold) {
+  const compact = compactGoldAccuracy(gold);
+  if (!compact.labeled && !compact.unscored) return 'Answer-key accuracy: no gold labels scored';
+  const pct = compact.accuracy === null ? 'n/a' : `${(compact.accuracy * 100).toFixed(1)}%`;
+  const misses = Object.entries(compact.byField)
+    .filter(([, row]) => row.labeled > row.correct)
+    .map(([field, row]) => `${field} ${row.correct}/${row.labeled}`);
+  return `Answer-key accuracy: ${pct} (${compact.correct}/${compact.labeled} fields${compact.unscored ? `, ${compact.unscored} unscored` : ''})`
+    + (misses.length ? ` — misses: ${misses.join(', ')}` : '');
 }
 
 function isFailedRun(run) {
@@ -141,7 +167,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
     : '';
 
   const title = `Call extraction replay eval: ${failedExpectations + replayErrors} failure(s)`;
-  const body = `${lines.join('\n').slice(0, 1400)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
+  const body = `${lines.join('\n').slice(0, 1400)}\n\n${goldAccuracyLine(finalRun?.summary?.goldAccuracy)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
 
   // The email is an independent channel: attempt it even when the DB-backed
   // notification insert fails (a DB outage is exactly when it matters most).
@@ -251,11 +277,12 @@ async function runCallExtractionReplayEval(opts = {}) {
     checked: summary.checked || 0,
     replayErrors: summary.replayErrors || 0,
     fixtureExpectations: summary.fixtureExpectations || { checked: 0, passed: 0, failed: 0, failedCallIds: [] },
+    goldAccuracy: compactGoldAccuracy(summary.goldAccuracy),
     attempts: attempts.map(compactAttempt),
     results: finalAttempt.run?.results || [],
   };
 
-  logger.info(`[call-replay-eval] done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0}`);
+  logger.info(`[call-replay-eval] done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} goldAccuracy=${result.goldAccuracy.accuracy ?? 'n/a'} (${result.goldAccuracy.correct}/${result.goldAccuracy.labeled})`);
   return result;
 }
 
@@ -266,6 +293,8 @@ module.exports = {
     MANUAL_RERUN,
     attemptReplay,
     compactSummary,
+    compactGoldAccuracy,
+    goldAccuracyLine,
     failureLines,
     isFailedRun,
   },
