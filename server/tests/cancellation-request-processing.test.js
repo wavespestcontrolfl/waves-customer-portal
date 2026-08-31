@@ -756,7 +756,7 @@ describe('processCancellationRequest', () => {
 
   test('end-of-coverage cancel DATES the retrieval task for the coverage boundary — stations stay until paid termite visits deliver', async () => {
     db.__tables.scheduled_services = [
-      { id: 'tv1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice' },
+      { id: 'tv1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice', service_type: 'Termite Bait Station Quarterly' },
     ];
     db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
     db.__tables.termite_stations = [
@@ -775,6 +775,33 @@ describe('processCancellationRequest', () => {
     expect(opts.metadata).toEqual(expect.objectContaining({ retrieveAfter: '2099-02-28' }));
     // The covered termite visit stays on the calendar.
     expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
+  });
+
+  test('mixed account: a NON-termite prepaid term never dates the retrieval — the uncovered termite program ends now, stations come out now', async () => {
+    db.__tables.scheduled_services = [
+      // The prepaid PEST term's covered visit rides out the window…
+      { id: 'pest1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, service_type: 'Quarterly Pest Control' },
+      // …but the termite visit is uncovered and is pulled now.
+      { id: 'term1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-10', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, service_type: 'Termite Bait Station Quarterly' },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [
+      { id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true },
+    ];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+
+    await processCancellationRequest({ customerId: 'c1', requestId: 'reqT3', keepThrough: '2099-02-28', keepVisitIds: ['pest1'] });
+
+    const byId = Object.fromEntries(db.__tables.scheduled_services.map((r) => [r.id, r]));
+    expect(byId.pest1.status).toBe('confirmed');
+    expect(byId.term1.status).toBe('cancelled');
+    const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Termite stations to retrieve after cancellation');
+    expect(body).toContain('Schedule the retrieval visit.');
+    expect(body).not.toContain('AFTER that date');
+    expect(opts.metadata.retrieveAfter).toBeUndefined();
   });
 
   test('rental flag without pinned stations still raises the task; no rental → no task', async () => {

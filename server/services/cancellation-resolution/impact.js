@@ -49,11 +49,20 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
   // a refunded prior term keeps its audit link with the stamps cleared.
   const keepIds = after && Array.isArray(keepVisitIds) ? new Set(keepVisitIds.map(String)) : null;
   const perFamily = new Map();
+  // Rows with no WaveGuard family (commercial, rodent-led, unmatched text)
+  // have no bucket in the money table, but a WHOLE-account sweep still
+  // pulls them — their identities must reach the pulled count and the
+  // approved-facts fingerprint or Confirm removes appointments the preview
+  // never showed (and an unclassified visit appearing mid-window could not
+  // trigger preview_changed).
+  const unclassified = { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] };
   for (const row of rows) {
     const family = familyOfServiceRow(row);
-    if (!family) continue;
-    if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] });
-    const slot = perFamily.get(family);
+    let slot = unclassified;
+    if (family) {
+      if (!perFamily.has(family)) perFamily.set(family, { upcoming: 0, pulled: 0, nextVisitDate: null, nextPulledDate: null, pulledKeys: [] });
+      slot = perFamily.get(family);
+    }
     const d = String(row.scheduled_date).slice(0, 10);
     const upcoming = CANCELLABLE_STATUSES.includes(String(row.status)) && (d >= today || row.status === 'rescheduled');
     if (upcoming) {
@@ -138,17 +147,19 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
   }
 
   const cancelledFamilies = wholeAccount ? owned : scope;
-  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.pulled || 0), 0);
-  const nextVisitCancelled = cancelledFamilies
-    .map((f) => perFamily.get(f)?.nextPulledDate)
-    .filter(Boolean)
-    .sort()[0] || null;
+  const visitsCancelled = cancelledFamilies.reduce((sum, f) => sum + (perFamily.get(f)?.pulled || 0), 0)
+    + (wholeAccount ? unclassified.pulled : 0);
+  const nextVisitCancelled = [
+    ...cancelledFamilies.map((f) => perFamily.get(f)?.nextPulledDate),
+    ...(wholeAccount ? [unclassified.nextPulledDate] : []),
+  ].filter(Boolean).sort()[0] || null;
   // Stable identities of the visits this cancel pulls (id:date, sorted) —
   // the approved-facts fingerprint keys on them so a reschedule or a
   // complete-and-appear swap never slips past an unchanged count.
-  const pulledVisitKeys = cancelledFamilies
-    .flatMap((f) => perFamily.get(f)?.pulledKeys || [])
-    .sort();
+  const pulledVisitKeys = [
+    ...cancelledFamilies.flatMap((f) => perFamily.get(f)?.pulledKeys || []),
+    ...(wholeAccount ? unclassified.pulledKeys : []),
+  ].sort();
 
   const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
   const monthly = customer.monthly_rate == null ? null : Number(customer.monthly_rate);

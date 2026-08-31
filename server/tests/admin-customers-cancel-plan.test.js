@@ -334,7 +334,7 @@ describe('POST /:id/cancel-plan', () => {
     // the response's lateFeeWaived reflects that verdict, never the request.
     mockProcess.mockImplementation(async () => { order.push('processor'); return { ...PROCESSED, lateFeeWaived: true }; });
     mockOpenCase.mockImplementation(async (args) => { order.push('case'); return { id: 'case-1', ...args }; });
-    sendCancellationConfirmations.mockImplementation(async () => { order.push('confirm'); return { smsSent: true, emailSent: false, channels: ['sms'] }; });
+    sendCancellationConfirmations.mockImplementation(async () => { order.push('confirm'); return { smsSent: true, emailSent: true, channels: ['sms', 'email'] }; });
 
     const res = await post(baseUrl, '/cancel-plan', { reasonCode: 'price', note: 'Too expensive', waiveLateFee: true });
     expect(res.status).toBe(200);
@@ -363,7 +363,7 @@ describe('POST /:id/cancel-plan', () => {
     }));
     expect(body).toEqual(expect.objectContaining({
       success: true, requestId: request.id, caseId: 'case-1', processed: true, visitsPulled: 3, scope: [], remaining: [],
-      tierBefore: 'Silver', tierAfter: null, lateFeeWaived: true, confirmation: 'sms', confirmationChannels: ['sms'],
+      tierBefore: 'Silver', tierAfter: null, lateFeeWaived: true, confirmation: 'sms', confirmationChannels: ['sms', 'email'],
       confirmationRequested: true, errors: [],
     }));
     expect(body.effectiveDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -377,6 +377,26 @@ describe('POST /:id/cancel-plan', () => {
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     expect(body).toEqual(expect.objectContaining({ confirmation: null, confirmationChannels: [], confirmationRequested: false }));
     expect(mockOpenCase.mock.calls[0][0].snapshot.sendConfirmation).toBe(false);
+  }));
+
+  test('a requested confirmation a reachable channel did not accept is a surfaced failure — review bell, never a clean "Done."', () => withServer(async (baseUrl) => {
+    sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: false, channels: [] });
+    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(body.processed).toBe(true);
+    expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, , text] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(category).toBe('service');
+    expect(text).toContain('confirmation_sms_not_sent');
+
+    // An UNREACHABLE channel is not a failure — no email on file means the
+    // SMS alone is the requested confirmation.
+    NotificationService.notifyAdmin.mockClear();
+    mockState.customers[0].email = null;
+    sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: true, emailSent: false, channels: ['sms'] });
+    const clean = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(clean.errors).toEqual([]);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   }));
 
   test('scoped: feasibility runs BEFORE the request row; unattributed → 409 and nothing inserted; feasible → scoped processor call', () => withServer(async (baseUrl) => {
@@ -543,6 +563,17 @@ describe('POST /:id/cancel-plan', () => {
       // The same facts commit cleanly…
       const ok = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
       expect(ok.status).toBe(200);
+    }));
+
+    test('preview_changed: a payment or new invoice moving the open balance during the window refuses the commit', () => withServer(async (baseUrl) => {
+      const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
+      const previewBody = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
+      const base = await buildCancellationImpact();
+      buildCancellationImpact.mockResolvedValueOnce({ ...base, openBalance: 45 });
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('preview_changed');
+      expect(mockState.inserted).toBeUndefined();
     }));
 
     test('preview_changed: an edited term amount between preview and commit refuses before any write', () => withServer(async (baseUrl) => {
@@ -823,7 +854,8 @@ describe('POST /:id/cancel-plan', () => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'] });
     sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: true, channels: ['email'] });
     const body = await (await post(baseUrl, '/cancel-plan')).json();
-    expect(body).toEqual(expect.objectContaining({ processed: false, errors: ['in_progress_visit:s9'], confirmation: 'email', confirmationChannels: ['email'] }));
+    // The blocked SMS on a reachable phone is itself a surfaced failure.
+    expect(body).toEqual(expect.objectContaining({ processed: false, errors: ['in_progress_visit:s9', 'confirmation_sms_not_sent'], confirmation: 'email', confirmationChannels: ['email'] }));
     expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
     expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);

@@ -564,7 +564,37 @@ async function processCancellationRequest({
 
   if (churned || (scoped && scopedFamilies.includes('termite_bait'))) {
     try {
-      await raiseTermiteRetrievalTask(customerId, requestId, { retrieveAfter: sweepAfter });
+      // The DATED task exists so RETAINED covered termite visits stay
+      // deliverable. On a mixed account whose prepaid term covers a
+      // DIFFERENT service, the uncovered termite visits are pulled NOW —
+      // dating the task by the unrelated term's end would tell staff to
+      // leave Waves-owned hardware in the ground for months after the
+      // termite program ended. Date it only when a kept covered row is
+      // itself a termite visit; anything ambiguous retrieves now (staff
+      // can see a live covered visit on the calendar and hold off, but a
+      // months-late instruction self-executes).
+      let retrieveAfter = null;
+      if (sweepAfter && keepIds && keepIds.length) {
+        const keptRows = await db('scheduled_services')
+          .where({ customer_id: customerId })
+          .whereIn('id', keepIds)
+          .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
+          .select('id', 'scheduled_date', 'status', 'service_id', 'service_type');
+        const serviceIds = [...new Set(keptRows.map((r) => r.service_id).filter(Boolean))];
+        const services = serviceIds.length
+          ? await db('services').whereIn('id', serviceIds).select('id', 'service_key', 'service_name')
+          : [];
+        const byId = new Map(services.map((s) => [s.id, s]));
+        const keptTermite = keptRows.some((r) => {
+          const d = r.scheduled_date instanceof Date
+            ? r.scheduled_date.toISOString().slice(0, 10)
+            : String(r.scheduled_date || '').slice(0, 10);
+          return d && d <= sweepAfter
+            && familyOfServiceRow({ ...r, ...(byId.get(r.service_id) || {}) }) === 'termite_bait';
+        });
+        if (keptTermite) retrieveAfter = sweepAfter;
+      }
+      await raiseTermiteRetrievalTask(customerId, requestId, { retrieveAfter });
     } catch (err) {
       errors.push('termite_retrieval_task');
       logger.error(`[cancellation-processor] termite station retrieval task failed for ${customerId}: ${err.message}`);

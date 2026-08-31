@@ -88,3 +88,21 @@ test('keep-through boundary keeps COVERED dated visits on or before it out of th
   // Stable identities for the approved-facts fingerprint, sorted.
   expect(impact.pulledVisitKeys).toEqual(['v3:2099-03-01', 'v4:2099-01-20', 'v5:2001-01-01'].sort());
 });
+
+test('whole-account: rows with NO WaveGuard family (commercial/unmatched) still count as pulled — the unscoped sweep removes them', async () => {
+  mockRows = [
+    { id: 'v1', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-02-01', track_state: null },
+    // No family bucket, but the whole-account sweep cancels it all the same.
+    { id: 'v2', family: null, status: 'confirmed', scheduled_date: '2099-01-15', track_state: null },
+    // Unclassified AND live on the track layer — parked, never counted.
+    { id: 'v3', family: null, status: 'confirmed', scheduled_date: '2099-01-18', track_state: 'en_route' },
+  ];
+  const impact = await buildCancellationImpact('cust-1', []);
+  expect(impact.visitsCancelled).toBe(2);
+  expect(impact.nextVisitCancelled).toBe('2099-01-15');
+  // The unclassified identity reaches the fingerprint so an appearing
+  // commercial visit still trips preview_changed.
+  expect(impact.pulledVisitKeys).toEqual(['v1:2099-02-01', 'v2:2099-01-15'].sort());
+  // The money table stays family-bucketed — no phantom family row.
+  expect(impact.families.map((f) => f.key)).toEqual(['pest_control']);
+});

@@ -151,8 +151,18 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, scope, w
     termEnd: term ? dateOnly(term.term_end) : null,
     disposition: prepayPlan ? prepayPlan.prepayDisposition : null,
     keepThrough: prepayPlan ? prepayPlan.keepThrough : null,
+    // Every displayed refund COMPONENT, not just the total: prepaid ÷
+    // included × remaining can produce the same dollars from different
+    // inputs, and the operator approved the inputs too.
     refundAmount: refund ? refund.amount : null,
     refundManual: refund ? refund.needsManualCalc : null,
+    refundPrepaid: refund ? refund.prepaidAmount : null,
+    refundIncluded: refund ? refund.includedVisits : null,
+    refundCompleted: refund ? refund.completedVisits : null,
+    refundRemaining: refund ? refund.remainingVisits : null,
+    // The dialog shows the open balance beside the cancel — a payment or
+    // new invoice during the window changes what the operator approved.
+    openBalance: impact ? (impact.openBalance ?? null) : null,
     visitsPulled: impact ? (impact.visitsCancelled ?? null) : null,
     // Stable visit identities: a reschedule, or one visit completing while
     // another appears, keeps the count identical — the ids+dates don't.
@@ -817,6 +827,14 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       entryPoint: 'admin_cancel_plan',
       identityTrustLevel: 'admin_operator',
     });
+    // A requested confirmation a REACHABLE channel did not accept is a
+    // follow-up failure like a lost case write: without it the dialog says
+    // "Done." with the customer untold, no bell rings, and a retry answers
+    // from the recorded outcome. The channel errors ride the review-bell
+    // rail below (the confirmation verdict itself was already decided —
+    // the copy that DID go out stays truthful).
+    if (customer.phone && !confirmations.smsSent) errors.push('confirmation_sms_not_sent');
+    if (customer.email && !confirmations.emailSent) errors.push('confirmation_email_not_sent');
   }
 
   // Record the run's outcome on the case (best-effort): a later duplicate
