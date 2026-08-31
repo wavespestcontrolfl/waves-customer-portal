@@ -2063,12 +2063,23 @@ const SocialMediaService = {
       logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: refused share — link is affiliate material (${String(link).slice(0, 120)})`);
       return { refused: true };
     }
+    const drop = (field) => logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: dropped ${field} from share of ${String(link).slice(0, 120)}`);
     const out = { refused: false, title, description, customContent };
-    for (const field of ['title', 'description', 'customContent']) {
-      if (out[field] && containsAffiliateMaterial(out[field])) {
-        logger.warn(`[social] AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: dropped ${field} from share of ${String(link).slice(0, 120)}`);
-        out[field] = field === 'customContent' ? null : '';
+    for (const field of ['title', 'description']) {
+      if (out[field] && containsAffiliateMaterial(out[field])) { drop(field); out[field] = ''; }
+    }
+    // customContent is a per-platform caption map ({ facebook, gbp, … }) or
+    // a single string — scan every string leaf, never the coerced object.
+    if (customContent && typeof customContent === 'object') {
+      const cleaned = {};
+      for (const [platform, caption] of Object.entries(customContent)) {
+        if (typeof caption === 'string' && containsAffiliateMaterial(caption)) { drop(`customContent.${platform}`); continue; }
+        cleaned[platform] = caption;
       }
+      out.customContent = Object.keys(cleaned).length ? cleaned : null;
+    } else if (customContent && containsAffiliateMaterial(customContent)) {
+      drop('customContent');
+      out.customContent = null;
     }
     return out;
   },
@@ -2697,6 +2708,15 @@ const SocialMediaService = {
   async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true, complianceJudged = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { platform, success: false, error: 'Automation is disabled' };
+    }
+    // Same web-only affiliate guard as publishToAll: the admin
+    // publish-single route and the tech-social flow call this directly, so
+    // the strip must live at this lower level too.
+    {
+      const stripped = this.sanitizeShareContent({ title, description, customContent: content, link });
+      if (stripped.refused) return { platform, success: false, error: 'AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL' };
+      ({ title, description } = stripped);
+      content = stripped.customContent;
     }
     if (await isPausedByAdmin()) {
       return { platform, success: false, error: 'Automation is paused' };

@@ -429,6 +429,26 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('citation allowances never bypass the raw-URL ban: a tagged retailer URL as a required source or on an allowed domain is still P0 (Codex r3 P1)', () => {
+    withAffiliateEnv(() => {
+      const url = 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20';
+      const asSource = guardrails.evaluate({ body: `See [it](${url}).`, frontmatter: fm() }, { targetIsBlog: true, requiredSourceUrls: [url] });
+      expect(asSource.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+      const prev = process.env.CONTENT_ALLOWED_LINK_DOMAINS;
+      process.env.CONTENT_ALLOWED_LINK_DOMAINS = 'amazon.com';
+      try {
+        const onDomain = guardrails.evaluate({ body: `See [it](${url}).`, frontmatter: fm() }, { targetIsBlog: true });
+        expect(onDomain.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+        // …while an untagged, non-registry page on that domain keeps the allowance.
+        const plain = guardrails.evaluate({ body: 'See [it](https://www.amazon.com/gp/help/customer/display.html).', frontmatter: fm() }, { targetIsBlog: true });
+        expect(plain.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+      } finally {
+        if (prev === undefined) delete process.env.CONTENT_ALLOWED_LINK_DOMAINS;
+        else process.env.CONTENT_ALLOWED_LINK_DOMAINS = prev;
+      }
+    });
+  });
+
   test('non-blog targets never resolve products — UNREGISTERED on a service page', () => {
     withAffiliateEnv(() => {
       const r = guardrails.evaluate({ body: goodBody(), frontmatter: fm() }, { targetIsBlog: false });

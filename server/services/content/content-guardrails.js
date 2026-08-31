@@ -2219,6 +2219,13 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
+    // Affiliate material is vetoed BEFORE any citation allowance: a tagged
+    // retailer URL smuggled in as a brief "required source" or hosted on
+    // CONTENT_ALLOWED_LINK_DOMAINS must never bypass the registry/component
+    // model (Codex r3 P1).
+    if (containsAffiliateMaterial(rawUrl)) {
+      return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links a raw affiliate/tracking URL ("${rawUrl.slice(0, 60)}") — affiliate products are referenced ONLY through <AffiliateLink product="…">, never a URL, and no citation allowance applies.`);
+    }
     if (exactUrls.has(normalizeSourceUrl(rawUrl) || '\u0000')) continue;
     // NO affiliate bypass here by design: blog bodies reference affiliate
     // products through <AffiliateLink product=…> only, so a raw tracking

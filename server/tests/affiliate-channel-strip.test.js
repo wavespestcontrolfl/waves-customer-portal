@@ -56,6 +56,30 @@ describe('social sanitizeShareContent (publishToAll strip point)', () => {
     expect(out.customContent).toBeNull();
   });
 
+  test('per-platform customContent objects are scanned leaf by leaf (Codex r3 P1)', () => {
+    const out = social.sanitizeShareContent({
+      title: 'T',
+      description: 'D',
+      customContent: { facebook: 'Clean caption', gbp: `Buy https://amzn.to/abc`, instagram: 'Also clean' },
+      link: BLOG_URL,
+    });
+    expect(out.refused).toBe(false);
+    expect(out.customContent).toEqual({ facebook: 'Clean caption', instagram: 'Also clean' });
+    const allBad = social.sanitizeShareContent({ customContent: { gbp: `https://amzn.to/abc` }, link: BLOG_URL });
+    expect(allBad.customContent).toBeNull();
+  });
+
+  test('postToSingle (admin publish-single + tech-social path) applies the same guard', async () => {
+    process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
+    try {
+      const res = await social.postToSingle('facebook', { title: 'T', description: 'D', link: AFFILIATE_URL });
+      expect(res.success).toBe(false);
+      expect(res.error).toBe('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL');
+    } finally {
+      delete process.env.SOCIAL_AUTOMATION_ENABLED;
+    }
+  });
+
   test('publishToAll surfaces the refusal before any platform work', async () => {
     process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
     try {
