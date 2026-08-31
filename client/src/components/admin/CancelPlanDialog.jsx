@@ -23,6 +23,7 @@ import {
   Textarea,
 } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import { formatETDate, formatETDateOnly } from "../../lib/timezone";
 
 const REASON_LABELS = {
   price: "Price",
@@ -53,10 +54,12 @@ function money(v) {
 
 function fmtDate(d) {
   if (!d) return "—";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(String(d))) {
-    return new Date(`${d}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  }
-  return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const opts = { month: "short", day: "numeric", year: "numeric" };
+  // Canonical ET formatting (client/src/lib/timezone.js): a date-only value
+  // keeps its calendar day in every browser timezone; a timestamp renders
+  // as its ET wall-clock day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(d))) return formatETDateOnly(d, opts);
+  return formatETDate(d, opts);
 }
 
 function Fact({ label, children }) {

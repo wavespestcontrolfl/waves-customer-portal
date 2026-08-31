@@ -983,6 +983,23 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.auditInserts).toHaveLength(0);
   });
 
+  test('annual renewal decisions serialize on the cancel-plan commit lock (source guard)', () => {
+    // A renew/switch decision landing between the admin cancel's destructive
+    // wind-down and its term decision would leave a churned account with a
+    // renewing term — both writers hold the SAME per-customer advisory lock,
+    // so the decision lands before the cancel's pre-write term read (cancel
+    // refuses) or after its cancel decision (this CAS returns null).
+    const routePost = src.indexOf("router.post('/recurring-alerts/:id/action'");
+    const branch = src.slice(routePost, src.indexOf('await runRecurringAlertAction(db, {', routePost));
+    const lockAt = branch.indexOf('await acquireCancelCommitLock(termRow.customer_id)');
+    const decideAt = branch.indexOf('AnnualPrepayRenewals.recordDecision({');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(decideAt).toBeGreaterThan(lockAt);
+    // Released in finally — a thrown decision never wedges future cancels.
+    expect(branch.indexOf('await releaseDecisionLock()')).toBeGreaterThan(decideAt);
+    expect(branch).toContain('finally');
+  });
+
   test('alert actions run under the SAME per-parent maintenance lock, every dependent read after it (source guard)', () => {
     const core = src.indexOf('async function runRecurringAlertAction(');
     const routePost = src.indexOf("router.post('/recurring-alerts/:id/action'");

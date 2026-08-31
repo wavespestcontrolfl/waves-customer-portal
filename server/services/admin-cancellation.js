@@ -1128,4 +1128,8 @@ module.exports = {
   previewCancelPlan,
   commitCancelPlan,
   computePrepayRefund,
+  // Shared with the renew-decision route (admin-schedule): every writer of
+  // a term's renewal decision serializes on this lock so a renew can never
+  // land between the cancel's destructive wind-down and its term decision.
+  acquireCancelCommitLock,
 };
