@@ -1717,10 +1717,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // projection above erased the discount entirely, so audited
             // wizard quotes looked undiscounted and their tier/floor basis
             // was unrecoverable.
-            annualBeforeDiscount: item.annual ?? null,
-            monthlyBeforeDiscount: item.monthly ?? null,
-            priceBeforeDiscount: item.price ?? null,
-            totalBeforeDiscount: item.total ?? null,
+            // The engine's own *BeforeDiscount fields outrank the base
+            // values: discountHandledByPricingFunction services (one-time
+            // pest) return price/annual already NET with the gross only in
+            // *BeforeDiscount — copying the base there erased the discount
+            // from the permanent audit (codex pre-push P1).
+            annualBeforeDiscount: item.annualBeforeDiscount ?? item.annual ?? null,
+            monthlyBeforeDiscount: item.monthlyBeforeDiscount ?? item.monthly ?? null,
+            priceBeforeDiscount: item.priceBeforeDiscount ?? item.price ?? null,
+            totalBeforeDiscount: item.totalBeforeDiscount ?? item.total ?? null,
+            recurringCustomerDiscountRate: item.recurringCustomerDiscountRate ?? null,
             tier: item.tier ?? null,
             // Mosquito rows name their program via selectedProgram/tier and
             // carry station/dunk addOns — both feed the audit's COGS
