@@ -6006,6 +6006,7 @@ const EstimateConverter = {
           invoiceId: draftInvoiceId,
           anchorId: rodentRoot ? rodentRoot.id : null,
           amount: frozenRodentBaitSetupAmount(estimateData),
+          estimateId,
         });
         if (!rodentRoot) {
           logger.info(`[estimate-converter] Estimate ${estimateId}: prepay billed the rodent setup before any series root exists — claim ledgered anchor-less; the restore resolves the root from the estimate`);

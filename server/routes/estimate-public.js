@@ -11050,6 +11050,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             invoiceId: inv.id,
             anchorId: invoiceModeRodentRoot ? invoiceModeRodentRoot.id : null,
             amount: invoiceModeRodentSetup,
+            estimateId: estimate.id,
           });
         }
         // The customer-facing amount is the invoice's actual after-tax,
@@ -11500,6 +11501,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 invoiceId: inv.id,
                 anchorId: acceptRodentRoot ? acceptRodentRoot.id : null,
                 amount: acceptedRodentSetupAmount,
+                estimateId: estimate.id,
               });
             }
             // The customer-facing amount is the invoice's actual after-tax,

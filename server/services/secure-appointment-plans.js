@@ -309,11 +309,19 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
 // per-application claim back on the series parent
 // (InvoiceService.restoreRetiredSetupFeeClaimForPrepay). Idempotent on the
 // invoice id.
-async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount }) {
+// estimateId (codex #3591 r70 P1): the accepted estimate an accept-side mint
+// billed the setup for — the key a later booking from that estimate uses to
+// see the claim when it is still anchor-less (migration 20260831000030).
+async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount, estimateId = null }) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!invoiceId || !(fee > 0)) return false;
   await trx('setup_fee_claims')
-    .insert({ invoice_id: invoiceId, scheduled_service_id: anchorId || null, amount: fee })
+    .insert({
+      invoice_id: invoiceId,
+      scheduled_service_id: anchorId || null,
+      amount: fee,
+      ...(estimateId ? { estimate_id: estimateId } : {}),
+    })
     .onConflict('invoice_id')
     .ignore();
   return true;
@@ -343,7 +351,19 @@ async function settledSetupClaimForInvoice(database, invoiceId) {
 async function settledSetupClaimForEstimate(database, estimateId) {
   if (!estimateId) return null;
   const term = await database('annual_prepay_terms').where({ source_estimate_id: estimateId }).first('prepay_invoice_id');
-  return settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
+  const viaTerm = await settledSetupClaimForInvoice(database, term?.prepay_invoice_id || null);
+  if (viaTerm) return viaTerm;
+  // Claims the accept-side mints keyed to this estimate (codex #3591 r70
+  // P1): a standard/invoice-mode acceptance bills the setup with no term —
+  // and, for invoice-mode commercial accepts, before any series exists —
+  // so the term lookup alone misses it and the booking would stamp the
+  // same setup again. Live-invoice rule applies to each candidate.
+  const byEstimate = await database('setup_fee_claims').where({ estimate_id: estimateId }).select('id', 'invoice_id', 'scheduled_service_id', 'amount');
+  for (const candidate of byEstimate || []) {
+    const live = await settledSetupClaimForInvoice(database, candidate.invoice_id);
+    if (live) return live;
+  }
+  return null;
 }
 
 // A series can still CONSUME its setup stamp when the root is live, or when
