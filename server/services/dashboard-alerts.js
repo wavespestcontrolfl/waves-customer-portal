@@ -21,7 +21,7 @@ const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
 const { whereLiveCustomer } = require('./customer-stages');
 const { autopayActivePredicate } = require('./autopay-eligibility');
-const { loadCloseoutStatuses, closeoutIssuesForVisit } = require('./closeout-alerts');
+const { loadCloseoutStatuses, closeoutIssuesForVisit, factsFullyKnown } = require('./closeout-alerts');
 
 // Closeout sweep bound — the day view checks at most this many completed
 // visits (Waves runs one technician; a day is ~5-15).
@@ -450,7 +450,10 @@ async function computeDashboardAlertsUncached() {
       let issueCount = 0;
       for (const row of completedToday) {
         const status = statuses.get(row.id);
-        const unreadable = !status || !status.found || Boolean(status.unavailable && status.unavailable.length);
+        // Unreadable = one of the five MAPPED facts is unknown. Probes
+        // outside them (billing, follow-up, license context) failing must
+        // not hold the alert floor forever (pre-push r14 P1).
+        const unreadable = !factsFullyKnown(status);
         const issues = closeoutIssuesForVisit(status);
         if (unreadable) {
           // Any partial/failed read reconciles against the persisted row

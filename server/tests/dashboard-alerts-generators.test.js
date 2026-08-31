@@ -331,7 +331,8 @@ describe('Action Inbox generators', () => {
     __private.resetCloseoutCarry();
     const gap = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'pending', reason: 'no_report_artifact' } } };
     const clean = { found: true, facts: { completion: { state: 'done', reason: 'record_exists' }, report: { state: 'done', reason: 'report_published' } } };
-    const partialNoIssue = { ...clean, unavailable: [{ lookup: 'service_report_deliveries', error: 'timeout' }] };
+    // A failed probe that feeds a mapped fact surfaces there as 'unknown'.
+    const partialNoIssue = { ...clean, facts: { ...clean.facts, reportDelivery: { state: 'unknown', reason: 'delivery_lookup_failed' } }, unavailable: [{ lookup: 'service_report_deliveries', error: 'timeout' }] };
     primeDb({ scheduled_services: [{ id: 'svc-a' }] });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', gap]]));
     expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1 });

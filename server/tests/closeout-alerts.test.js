@@ -63,7 +63,7 @@ describe('closeoutIssuesForVisit', () => {
 });
 
 describe('loadCloseoutStatuses', () => {
-  test('bounded to 4 concurrent, dedupes ids, memoises fully-read results for 90s', async () => {
+  test('bounded to 2 concurrent, dedupes ids, memoises fully-read results for 90s', async () => {
     let inFlight = 0; let peak = 0;
     getCloseoutStatus.mockImplementation(async () => {
       inFlight += 1; peak = Math.max(peak, inFlight);
@@ -74,21 +74,34 @@ describe('loadCloseoutStatuses', () => {
     const ids = Array.from({ length: 10 }, (_, i) => `svc-${i}`);
     const first = await loadCloseoutStatuses([...ids, 'svc-0']);
     expect(first.size).toBe(10);
-    expect(peak).toBeLessThanOrEqual(4);
+    expect(peak).toBeLessThanOrEqual(2);
     expect(getCloseoutStatus).toHaveBeenCalledTimes(10);
     await loadCloseoutStatuses(ids);
     expect(getCloseoutStatus).toHaveBeenCalledTimes(10);
     await loadCloseoutStatuses(ids, { now: Date.now() + 91 * 1000 });
     expect(getCloseoutStatus).toHaveBeenCalledTimes(20);
   });
-  test('never memoises a full or PARTIAL outage', async () => {
+  test('outages memoise only BRIEFLY; unrelated-probe failures with fully-known facts memoise long (pre-push r14)', async () => {
+    const t0 = Date.now();
     getCloseoutStatus.mockRejectedValueOnce(new Error('down')).mockResolvedValue(base());
-    expect((await loadCloseoutStatuses(['a'])).get('a')).toBeNull();
-    await loadCloseoutStatuses(['a']);
+    expect((await loadCloseoutStatuses(['a'], { now: t0 })).get('a')).toBeNull();
+    // Within the short error TTL a partial outage does not re-pay the probe fan-out…
+    await loadCloseoutStatuses(['a'], { now: t0 + 1000 });
+    expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
+    // …but recovery is fast: past the error TTL it refetches.
+    await loadCloseoutStatuses(['a'], { now: t0 + 21 * 1000 });
     expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
+    // A read with a mapped fact unknown is an outage too — short TTL.
     getCloseoutStatus.mockReset();
-    getCloseoutStatus.mockResolvedValue({ ...base(), unavailable: [{ lookup: 'service_photos', error: 'timeout' }] });
-    await loadCloseoutStatuses(['b']); await loadCloseoutStatuses(['b']);
+    getCloseoutStatus.mockResolvedValue({ ...base({ photos: fact('unknown', 'service_photos_lookup_failed') }), unavailable: [{ lookup: 'service_photos', error: 'timeout' }] });
+    await loadCloseoutStatuses(['b'], { now: t0 });
+    await loadCloseoutStatuses(['b'], { now: t0 + 21 * 1000 });
     expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
+    // An UNRELATED probe failure with all mapped facts known is fully read → 90s memo.
+    getCloseoutStatus.mockReset();
+    getCloseoutStatus.mockResolvedValue({ ...base(), unavailable: [{ lookup: 'billing_context', error: 'timeout' }] });
+    await loadCloseoutStatuses(['c'], { now: t0 });
+    await loadCloseoutStatuses(['c'], { now: t0 + 60 * 1000 });
+    expect(getCloseoutStatus).toHaveBeenCalledTimes(1);
   });
 });

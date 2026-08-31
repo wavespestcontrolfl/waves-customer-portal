@@ -18,8 +18,14 @@
  */
 const { getCloseoutStatus } = require('./closeout-status');
 
-const CLOSEOUT_CONCURRENCY = 4;
+// One status fans out probe groups of up to ~10 concurrent queries; 2 keeps
+// a full sweep's worst case at ~20 in-flight queries so a dashboard poll
+// can't saturate the shared knex pool (pre-push r14 P1).
+const CLOSEOUT_CONCURRENCY = 2;
 const CLOSEOUT_MEMO_TTL_MS = 90 * 1000;
+// Partial/failed reads memo too, briefly — a partial outage must not re-pay
+// the full probe fan-out on every poll tick, but must recover fast.
+const CLOSEOUT_MEMO_ERROR_TTL_MS = 20 * 1000;
 const CLOSEOUT_MEMO_MAX = 500;
 const memo = new Map();
 
@@ -48,15 +54,24 @@ const TRANSIENT_DELIVERY_REASONS = new Set([
   'project_delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight',
 ]);
 
+// The five MAPPED facts are readable — probes outside them (billing,
+// follow-up, license context) failing must not mark the visit unreadable
+// and hold the alert floor forever (pre-push r14 P1). A failed probe that
+// feeds a mapped fact surfaces there as state 'unknown'.
+function factsFullyKnown(status) {
+  if (!status || !status.found) return false;
+  const facts = status.facts || {};
+  return Object.keys(CLOSEOUT_ALERT_TYPES)
+    .every((k) => facts[k]?.state !== 'unknown');
+}
+
 async function memoisedCloseoutStatus(serviceId, now) {
   const hit = memo.get(serviceId);
-  if (hit && now - hit.at < CLOSEOUT_MEMO_TTL_MS) return hit.value;
+  if (hit && now - hit.at < (hit.fullyRead ? CLOSEOUT_MEMO_TTL_MS : CLOSEOUT_MEMO_ERROR_TTL_MS)) return hit.value;
   const value = await getCloseoutStatus(serviceId).catch(() => null);
-  const fullyRead = Boolean(value && value.found && !(value.unavailable && value.unavailable.length));
-  if (fullyRead) {
-    if (memo.size >= CLOSEOUT_MEMO_MAX) memo.delete(memo.keys().next().value);
-    memo.set(serviceId, { at: now, value });
-  }
+  const fullyRead = factsFullyKnown(value);
+  if (memo.size >= CLOSEOUT_MEMO_MAX) memo.delete(memo.keys().next().value);
+  memo.set(serviceId, { at: now, value, fullyRead });
   return value;
 }
 
@@ -168,6 +183,7 @@ function closeoutIssuesForVisit(status) {
 module.exports = {
   loadCloseoutStatuses,
   closeoutIssuesForVisit,
+  factsFullyKnown,
   CLOSEOUT_ALERT_TYPES,
   CLOSEOUT_ALERT_LABELS,
   CLOSEOUT_CONCURRENCY,
