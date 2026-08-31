@@ -1117,7 +1117,14 @@ export function validateAffiliateUsage(
   // ctaHref is written straight into an anchor: an expression-valued or
   // duplicated value cannot be validated against the https/root-relative
   // rule, so it is a blocker in EVERY post, affiliate or not.
-  for (const { attrs } of tagsNamed(unmasked, 'InlineCTA')) {
+  // Tags spelled inside expression STRING LITERALS ({'<InlineCTA … />'})
+  // render as text, never as components — skip any tag whose opener sits
+  // in a string span (position check against the string-blanked view;
+  // attrs still read from `unmasked` so a REAL expression-wrapped tag's
+  // quoted props stay validatable).
+  const exprStringView = blankExpressionStrings(unmasked);
+  for (const { start, attrs } of tagsNamed(unmasked, 'InlineCTA')) {
+    if (exprStringView[start] === ' ') continue;
     if (attrs === null) continue;
     if (hasJsxSpread(attrs)) {
       blockers.push('<InlineCTA> may not carry a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated');
@@ -1156,7 +1163,8 @@ export function validateAffiliateUsage(
   // checks only work on quoted literals, and the resolver would receive a
   // value the gate never validated.
   const checked = new Set<string>();
-  for (const { attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
+  for (const { start, attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
+    if (exprStringView[start] === ' ') continue; // quoted JSX text renders as text
     if (attrs !== null && hasJsxSpread(attrs)) {
       blockers.push('<AffiliateLink> may not carry a JSX spread ({...}) — a spread can override product/placement at render time, so the invocation cannot be validated against the registry');
       continue;

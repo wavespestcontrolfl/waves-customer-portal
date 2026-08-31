@@ -1677,19 +1677,50 @@ function literalAttribute(attrs, name) {
   return seen === 1 ? value : null;
 }
 
+// JSX spelled inside an expression STRING LITERAL ({'<InlineCTA/>'})
+// renders as TEXT, never as a component (astro blankExpressionStrings
+// parity — Codex #3646 r11): blank every string literal inside a balanced
+// brace span (length-preserving) so tag scans can position-check against
+// this view while still reading attrs from the unblanked text (a REAL
+// expression-wrapped tag's quoted props stay validatable).
+function blankExpressionStringLiterals(text) {
+  const s = String(text || '');
+  const out = s.split('');
+  let depth = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '\\') { i += 1; continue; }
+    if (c === '{') { depth += 1; continue; }
+    if (c === '}') { if (depth > 0) depth -= 1; continue; }
+    if (depth > 0 && (c === '"' || c === "'" || c === '`')) {
+      let j = i + 1;
+      for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
+      if (j < s.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; }
+    }
+  }
+  return out.join('');
+}
+
 function collectAffiliateLinkTags(text) {
   // Astro-parity COUNTING view: code and comments never render, so an
   // <AffiliateLink> inside a fenced example is not a component (it would
   // force affiliate_review and withhold auto-merge on an affiliate-free
-  // post); expressions stay ({cond && <AffiliateLink/>} renders). The
+  // post); expressions stay ({cond && <AffiliateLink/>} renders) but a tag
+  // spelled inside an expression STRING is text and never counts. The
   // masks are length-preserving, so tag.start offsets stay valid against
   // the caller's original text. Channel stripping
   // (containsAffiliateMaterial) deliberately keeps the raw scan.
+  // Product/placement are the RAW literal values — no trimming: the astro
+  // contract validates the exact string, so " rain-gauge " must fail
+  // closed here (registry miss), never validate normalized.
   const tags = [];
-  for (const tag of eachTag(blankNonRenderedMarkdown(blankComments(String(text || ''))))) {
+  const masked = blankNonRenderedMarkdown(blankComments(String(text || '')));
+  const strView = blankExpressionStringLiterals(masked);
+  for (const tag of eachTag(masked)) {
     if (tag.isClose || tag.name !== 'affiliatelink') continue;
-    const productId = (literalAttribute(tag.attrs, 'product') || '').trim();
-    const placement = (literalAttribute(tag.attrs, 'placement') || '').trim();
+    if (strView[tag.start] === ' ') continue; // quoted JSX text
+    const productId = literalAttribute(tag.attrs, 'product');
+    const placement = literalAttribute(tag.attrs, 'placement');
     tags.push({ start: tag.start, productId: productId || null, placement: placement || null });
   }
   return tags;
@@ -1796,8 +1827,13 @@ function inlineCtaHrefValid(v) {
 }
 function inlineCtaContractFinding(body) {
   const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  // {'<InlineCTA ctaHref={dynamic} />'} is rendered TEXT — a tag whose
+  // opener sits inside an expression string never validates (astro
+  // contract-loop parity; Codex #3646 r11 P1).
+  const strView = blankExpressionStringLiterals(text);
   for (const tag of eachTag(text)) {
     if (tag.isClose || tag.name !== 'inlinecta') continue;
+    if (strView[tag.start] === ' ') continue;
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
     }

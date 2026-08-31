@@ -772,6 +772,28 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     expect(guardrails.affiliateProductIdsIn('no links')).toEqual([]);
   });
 
+  test('JSX spelled inside expression strings is TEXT — never counted or contract-validated (Codex #3646 r11)', () => {
+    withAffiliateEnv(() => {
+      // A quoted AffiliateLink never counts (no forced park on an affiliate-free draft)...
+      expect(guardrails.affiliateProductIdsIn("The docs show {'<AffiliateLink product=\"x\" />'} as markup.")).toEqual([]);
+      // ...and a quoted InlineCTA never trips the destination contract.
+      const quoted = "Intro.\n\n## Sec\n\nDocs show {'<InlineCTA ctaHref={dynamic} />'} as an example.";
+      expect(guardrails.evaluate({ body: quoted, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.filter((f) => f.code === 'INVALID_INLINECTA_DESTINATION')).toEqual([]);
+      // A REAL expression-wrapped tag is still seen (bad href still blocks).
+      const real = 'Intro.\n\n## Sec\n\n{true && <InlineCTA ctaHref={dynamic} />}';
+      expect(guardrails.evaluate({ body: real, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.some((f) => f.code === 'INVALID_INLINECTA_DESTINATION')).toBe(true);
+    });
+  });
+
+  test('whitespace-padded product/placement props fail closed against the exact astro contract (Codex #3646 r11)', () => {
+    withAffiliateEnv(() => {
+      const padded = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product=" rain-gauge " placement="primary-rec">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: padded, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:UNREGISTERED_AFFILIATE_LINK');
+      const paddedPlacement = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement=" primary-rec ">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: paddedPlacement, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+    });
+  });
+
   test('every affiliate finding code has a gate-retry directive', () => {
     const { GATE_RETRY_INSTRUCTIONS } = require('../services/content/gate-retry-directives');
     for (const code of [
