@@ -604,6 +604,19 @@ describe('closeout-status: Agent D findings', () => {
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, record: { ...closedOutInputs().record, structured_notes: { visitOutcome: 'completed', completionSmsStatus: 'sent' } } })).facts.invoice.state).toBe('pending');
   });
 
+  test('GH r2: customer lookup failure → invoice unknown; rescheduled child does not satisfy follow-up; indeterminate follow-up → unknown; license judged at service_date', () => {
+    expect(deriveCloseoutFacts(closedOutInputs({ customer: null, lane: null, customerLookupFailed: true })).facts.invoice)
+      .toMatchObject({ state: 'unknown', reason: 'billing_inputs_unavailable', failed: ['customer'] });
+    const required = { suggestion: { required: true, days: 14 }, frozen: true };
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: { indeterminate: true, reason: 'typed_snapshot_missing', serviceRecordId: REC } })).facts.followUp)
+      .toMatchObject({ state: 'unknown', reason: 'followup_typed_snapshot_missing' });
+    expect(deriveCloseoutFacts(closedOutInputs({ followup: required, followupChild: null })).facts.followUp.state).toBe('pending');
+    const req = baseRequirements({ requiresLicense: true });
+    const tech = { id: 'tech-1', fl_applicator_license: 'JF1', license_expiry: '2026-08-31', license_categories: [] };
+    const late = deriveCloseoutFacts(closedOutInputs({ requirements: req, visit: { ...closedOutInputs().visit, technician_id: 'tech-1', scheduled_date: '2026-08-30' }, record: { ...closedOutInputs().record, service_date: '2026-09-01' }, technician: tech }));
+    expect(late.facts.license).toMatchObject({ state: 'failed', reason: 'technician_license_expired_at_visit', judgedAt: '2026-09-01' });
+  });
+
   test('license fact: catalog requirement vs technician license, expiry at visit date, category match', () => {
     const req = baseRequirements({ requiresLicense: true, licenseCategory: 'Lawn & Ornamental' });
     const tech = (o) => ({ id: 'tech-1', fl_applicator_license: 'JF123456', license_expiry: '2027-01-01', license_categories: ['Lawn & Ornamental', 'General Household Pest'], ...o });
@@ -850,11 +863,30 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.summary.open).toEqual([]);
   });
 
-  test('catalog requiresCustomerSignature → requirements.unevaluated + summary.closedOut false', async () => {
+  test('catalog requiresCustomerSignature → requirements.unevaluated + summary.closedOut false — but not for a cancelled visit', async () => {
     catalogRows[0].requires_customer_signature = true;
     const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(healthyTables()), now: NOW });
     expect(result.requirements.unevaluated).toEqual(['requiresCustomerSignature']);
     expect(result.summary).toMatchObject({ unevaluated: ['requiresCustomerSignature'], closedOut: false });
+    const tables = healthyTables();
+    tables.scheduled_services = [{ ...visitRow, status: 'cancelled' }]; tables.service_records = []; tables.service_completion_attempts = []; tables.invoices = [];
+    const cancelled = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(cancelled.summary).toMatchObject({ unevaluated: [], closedOut: true });
+  });
+
+  test('typed-followup-obligation strict: pre-freeze snapshot mismatch is indeterminate, default stays null', async () => {
+    const actual = jest.requireActual('../services/typed-followup-obligation');
+    const rec = { id: REC, structured_notes: {}, service_data: { typedReportSnapshot: { type: 'other', values: {} } } };
+    const q = { where() { return q; }, orderBy() { return q; }, first() { return Promise.resolve(rec); } };
+    const knex = () => q;
+    jest.doMock('../services/service-completion-profiles', () => ({ resolveCompletionProfileForScheduledService: async () => ({ findingsType: 'cockroach', followupPolicy: 'alert' }) }));
+    jest.resetModules();
+    const fresh = jest.requireActual('../services/typed-followup-obligation');
+    const completed = { id: SVC, status: 'completed' };
+    await expect(fresh.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex, strict: true })).resolves.toMatchObject({ indeterminate: true, reason: 'typed_snapshot_type_mismatch' });
+    await expect(fresh.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex })).resolves.toBeNull();
+    jest.dontMock('../services/service-completion-profiles');
+    void actual;
   });
 
   test('a project linked through projects.scheduled_service_id drives report, delivery, and photos', async () => {

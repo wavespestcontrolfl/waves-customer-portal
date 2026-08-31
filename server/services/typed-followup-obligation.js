@@ -175,7 +175,11 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
   const profilePromise = resolveCompletionProfileForScheduledService(scheduledService, knex, { strict });
   const profile = strict ? await profilePromise : await profilePromise.catch(() => null);
-  if (!profile) return null;
+  // strict callers get a DISTINGUISHABLE indeterminate result where the
+  // default path returns null for "could not reconstruct" — a status reader
+  // must not read that as "no obligation".
+  const indeterminate = (reason) => (strict ? { indeterminate: true, reason, serviceRecordId: record.id } : null);
+  if (!profile) return indeterminate('profile_unavailable');
   const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;
   // A now-untyped alert-policy profile (bed_bug post-20260731400000) still
   // owes pre-freeze TYPED completions their obligation — the pointer was
@@ -185,7 +189,8 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   const findingsType = profile.findingsType
     || (profile.followupPolicy === 'alert' ? (snapshot?.type || null) : null);
   if (!findingsType) return null;
-  if (!snapshot || String(snapshot.type || '') !== String(findingsType)) return null;
+  if (!snapshot) return indeterminate('typed_snapshot_missing');
+  if (String(snapshot.type || '') !== String(findingsType)) return indeterminate('typed_snapshot_type_mismatch');
   const suggestion = typedFollowupVerdict({
     scheduledService,
     profile,

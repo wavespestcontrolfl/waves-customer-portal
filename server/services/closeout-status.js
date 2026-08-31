@@ -96,7 +96,9 @@ const INACTIVE_VISIT_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no
 // projects.service_record_id — scheduled_services carries no project_id.
 // Follow-up children in these statuses do not satisfy the obligation
 // (lockstep with FOLLOWUP_CHILD_INACTIVE_STATUSES in typed-followup-obligation).
-const FOLLOWUP_CHILD_INACTIVE_STATUSES = ['cancelled', 'skipped', 'no_show'];
+// + 'rescheduled': a phantom row (the visit moved) does not satisfy the
+// obligation until the replacement is booked.
+const FOLLOWUP_CHILD_INACTIVE_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
 // Invoice statuses that prove the customer was shown the bill even when the
 // sent_at stamp predates the column.
 const INVOICE_DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'partially_paid']);
@@ -230,6 +232,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   ]);
 
   inputs.customer = customerProbe.value || null;
+  inputs.customerLookupFailed = Boolean(customerProbe.error);
   inputs.record = recordProbe.value || null;
   inputs.recordLookupFailed = Boolean(recordProbe.error);
   inputs.attempt = attemptProbe.value || null;
@@ -611,6 +614,7 @@ function deriveCloseoutFacts(inputs) {
   // ---- 6. invoice -----------------------------------------------------------------
   let invoice;
   const billingInputsFailed = [
+    inputs.customerLookupFailed ? 'customer' : null,
     inputs.customer && inputs.autopayActive === null ? 'autopay' : null,
     inputs.duesLookupFailed === true ? 'monthly_dues' : null,
     inputs.payerBilled === null ? 'bill_to_payer' : null,
@@ -751,6 +755,7 @@ function deriveCloseoutFacts(inputs) {
   const obligation = inputs.followup;
   if (!completed) followUp = awaiting();
   else if (obligation === undefined) followUp = fact('unknown', 'followup_obligation_lookup_failed');
+  else if (obligation?.indeterminate) followUp = fact('unknown', `followup_${obligation.reason || 'indeterminate'}`, { serviceRecordId: obligation.serviceRecordId || null });
   else if (!obligation || !obligation.suggestion) followUp = fact('not_required', 'no_typed_followup_obligation', { ruleSource: 'frozen_record' });
   else if (obligation.suggestion.required !== true) followUp = fact('not_required', 'typed_verdict_not_required', { ruleSource: obligation.frozen ? 'frozen_record' : 'derived_snapshot', frozen: obligation.frozen === true });
   else if (inputs.followupChild) {
@@ -780,11 +785,14 @@ function deriveCloseoutFacts(inputs) {
     if (typeof cats === 'string') { try { cats = JSON.parse(cats); } catch { cats = null; } }
     const categories = Array.isArray(cats) ? cats.map((c) => String(c).trim().toLowerCase()).filter(Boolean) : [];
     const required = requirements.licenseCategory ? String(requirements.licenseCategory).trim().toLowerCase() : null;
-    const visitDay = visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null;
+    // Judge expiry at the day the work was RECORDED (service_records.service_date);
+    // the scheduled day is only a fallback for records without one.
+    const visitDay = (record?.service_date ? String(record.service_date).slice(0, 10) : null)
+      || (visit.scheduled_date ? String(visit.scheduled_date).slice(0, 10) : null);
     const expiry = tech.license_expiry ? String(tech.license_expiry).slice(0, 10) : null;
     const evidence = {
       technicianId: tech.id, hasLicense: Boolean(tech.fl_applicator_license), licenseExpiry: expiry, requiredCategory: required,
-      categories, asOf: 'current_technician_row',
+      categories, judgedAt: visitDay, asOf: 'current_technician_row',
     };
     if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
     else if (expiry && visitDay && expiry < visitDay) license = fact('failed', 'technician_license_expired_at_visit', evidence);
@@ -866,7 +874,11 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
   }
   const derived = deriveCloseoutFacts(inputs);
   const { visit, record, requirements } = inputs;
-  const unevaluated = requirements?.requiresCustomerSignature === true ? ['requiresCustomerSignature'] : [];
+  // Only a visit that actually owes closeout evidence (completion done) can
+  // be blocked by an unevaluable requirement; cancelled/skipped/rescheduled
+  // visits owe nothing.
+  const unevaluated = requirements?.requiresCustomerSignature === true && derived.facts.completion.state === 'done'
+    ? ['requiresCustomerSignature'] : [];
   if (inputs.unavailable.length) {
     logger.info(`[closeout-status] ${serviceId}: ${inputs.unavailable.length} lookup(s) unavailable: ${inputs.unavailable.map((u) => u.lookup).join(', ')}`);
   }
