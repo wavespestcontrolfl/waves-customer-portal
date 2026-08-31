@@ -73,7 +73,7 @@ const {
 } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { customerOnAutopay } = require('./autopay-eligibility');
-const { typedFollowupObligationForCompletedSource } = require('./typed-followup-obligation');
+const { typedFollowupObligationForCompletedSource, FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 
 const FACT_STATES = Object.freeze(['not_required', 'pending', 'done', 'failed', 'unknown']);
 const FACT_NAMES = Object.freeze([
@@ -95,11 +95,9 @@ const INACTIVE_VISIT_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no
 // NOT service_records.report_view_token (project-completion.js nulls it), and
 // the project links to the visit through projects.scheduled_service_id /
 // projects.service_record_id — scheduled_services carries no project_id.
-// Follow-up children in these statuses do not satisfy the obligation
-// (lockstep with FOLLOWUP_CHILD_INACTIVE_STATUSES in typed-followup-obligation).
-// + 'rescheduled': a phantom row (the visit moved) does not satisfy the
-// obligation until the replacement is booked.
-const FOLLOWUP_CHILD_INACTIVE_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
+// Follow-up children that do not satisfy the obligation come from the
+// canonical helper (typed-followup-obligation.js) — the same list its partial
+// unique index enforces; never a local copy.
 // Invoice statuses that prove the customer was shown the bill even when the
 // sent_at stamp predates the column.
 const INVOICE_DELIVERED_STATUSES = new Set(['sent', 'viewed', 'overdue', 'paid', 'prepaid', 'partially_paid']);
@@ -393,6 +391,17 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.disposition = dispositionProbe.value || null;
   inputs.dispositionLookupFailed = Boolean(dispositionProbe.error);
 
+  // The reads above are not one snapshot: a completion can commit between
+  // the first visit read and the record probes. Re-read the visit row so a
+  // status that moved mid-read does not manufacture a contradiction.
+  const reReadProbe = await probe('scheduled_services (re-read)', unavailable, () => knex('scheduled_services')
+    .where({ id: serviceId })
+    .first());
+  if (reReadProbe.value && String(reReadProbe.value.status || '') !== String(visit.status || '')) {
+    inputs.visit = reReadProbe.value;
+    inputs.visitReRead = { from: visit.status || null, to: reReadProbe.value.status || null };
+  }
+
 
 
   // Billing prediction inputs — same shape the appointment card assembles
@@ -541,6 +550,9 @@ function deriveCloseoutFacts(inputs) {
   // Downstream facts before completion are all "waiting on completion" —
   // except for an inactive visit, where nothing is owed.
   const awaiting = (extra = {}) => {
+    // A completion OUTAGE (record/attempt lookup failed) is unknown all the
+    // way down — never a list of apparent compliance gaps.
+    if (completion.state === 'unknown') return fact('unknown', 'completion_unknown', { completionReason: completion.reason, ...extra });
     if (visitInactive && !record) return fact('not_required', `visit_${String(visit.status).toLowerCase()}`, { ruleSource: 'visit_flag', ...extra });
     // A record the tech marked incomplete owes nothing downstream — the
     // visit gets rescheduled and the next completion carries the artifacts.
@@ -1008,6 +1020,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
       posture: derived.posture,
     } : null,
     packet: derived.packet,
+    visitReRead: inputs.visitReRead || null,
     requirements: requirements ? {
       ...requirements,
       // No frozen requirement snapshot exists — see header. A catalog edit

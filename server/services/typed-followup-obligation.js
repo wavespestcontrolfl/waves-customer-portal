@@ -181,6 +181,9 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   const indeterminate = (reason) => (strict ? { indeterminate: true, reason, serviceRecordId: record.id } : null);
   if (!profile) return indeterminate('profile_unavailable');
   const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;
+  // A synthesized default (profile row removed/deactivated) meeting a typed
+  // snapshot cannot say whether a follow-up was promised.
+  if (profile.synthesized === true && snapshot) return indeterminate('profile_fallback_with_typed_snapshot');
   // A now-untyped alert-policy profile (bed_bug post-20260731400000) still
   // owes pre-freeze TYPED completions their obligation — the pointer was
   // cleared, not the record: derive through the snapshot's own type

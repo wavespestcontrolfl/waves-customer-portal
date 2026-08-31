@@ -515,6 +515,9 @@ async function resolveCompletionProfileForScheduledService(scheduledService = {}
 
   return {
     ...DEFAULT_SERVICE_REPORT_PROFILE,
+    // Marks the fallback so strict readers can tell "no profile row" from a
+    // real untyped profile (closeout-status follow-up derivation).
+    synthesized: true,
     companions: [],
     serviceKey: service?.service_key || null,
     serviceName: service?.name || scheduledService.service_type || scheduledService.serviceType || null,

@@ -20,6 +20,7 @@ jest.mock('../services/autopay-eligibility', () => ({
 }));
 jest.mock('../services/typed-followup-obligation', () => ({
   typedFollowupObligationForCompletedSource: jest.fn(async () => null),
+  FOLLOWUP_CHILD_INACTIVE_STATUSES: ['cancelled', 'skipped', 'no_show'],
 }));
 jest.mock('../services/estimate-first-application-invoice', () => ({
   findFirstApplicationInvoiceForEstimateService: jest.fn(async () => ({ invoice: null, liveBeside: null })),
@@ -199,9 +200,15 @@ describe('closeout-status: completion fact', () => {
     expect(withRecord.facts.completion).toMatchObject({ state: 'unknown', recordId: REC });
   });
 
-  test('service_records lookup failure → unknown, never pending', () => {
+  test('service_records lookup failure → unknown, never pending — and every downstream fact is unknown, not open (GH r3)', () => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ record: null, recordLookupFailed: true }));
     expect(facts.completion).toMatchObject({ state: 'unknown', reason: 'service_records_lookup_failed' });
+    for (const name of FACT_NAMES.filter((n) => n !== 'completion')) {
+      expect(facts[name]).toMatchObject({ state: 'unknown', reason: 'completion_unknown' });
+    }
+    const summary = summarizeCloseout(facts, []);
+    expect(summary.open).toEqual([]);
+    expect(summary.unknown).toEqual([...FACT_NAMES]);
   });
 });
 
@@ -934,6 +941,13 @@ describe('closeout-status: loader against a fake knex', () => {
     await expect(fresh.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex, strict: true })).resolves.toMatchObject({ indeterminate: true, reason: 'typed_snapshot_type_mismatch' });
     await expect(fresh.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex })).resolves.toBeNull();
     jest.dontMock('../services/service-completion-profiles');
+    // A synthesized fallback profile (row removed/deactivated) meeting a typed snapshot is indeterminate in strict mode (GH r3).
+    jest.doMock('../services/service-completion-profiles', () => ({ resolveCompletionProfileForScheduledService: async () => ({ synthesized: true, findingsType: null, followupPolicy: 'none' }) }));
+    jest.resetModules();
+    const fresh2 = jest.requireActual('../services/typed-followup-obligation');
+    await expect(fresh2.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex, strict: true })).resolves.toMatchObject({ indeterminate: true, reason: 'profile_fallback_with_typed_snapshot' });
+    await expect(fresh2.typedFollowupObligationForCompletedSource({ scheduledService: completed, knex })).resolves.toBeNull();
+    jest.dontMock('../services/service-completion-profiles');
     void actual;
   });
 
@@ -950,6 +964,20 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.facts.report).toMatchObject({ state: 'done', reason: 'project_report_published' });
     expect(result.facts.reportDelivery).toMatchObject({ state: 'done', reason: 'project_delivery_sent' });
     expect(result.facts.photos).toMatchObject({ state: 'done', actual: 2, source: 'project_photos' });
+  });
+
+  test('visit status that moves between the first read and the probes is re-read, not reported as a contradiction (GH r3)', async () => {
+    const tables = healthyTables();
+    let reads = 0;
+    const flipping = makeFakeKnex(tables);
+    const knex = (table) => {
+      if (table === 'scheduled_services') { reads += 1; if (reads === 1) return makeFakeKnex({ ...tables, scheduled_services: [{ ...visitRow, status: 'on_site' }] })(table); }
+      return flipping(table);
+    };
+    const result = await getCloseoutStatus(SVC, { knex, now: NOW });
+    expect(result.visitReRead).toEqual({ from: 'on_site', to: 'completed' });
+    expect(result.contradictions).toEqual([]);
+    expect(result.facts.completion.state).toBe('done');
   });
 
   test('unknown service id → found:false, no facts fabricated', async () => {
