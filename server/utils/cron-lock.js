@@ -198,9 +198,13 @@ function releaseLockSlot() {
 async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
   // Reentrant path: already inside a held slot (nested runExclusive) —
-  // only the advisory lock applies, exactly the pre-cap behavior.
-  if (lockSlotContext.getStore()) {
-    return runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+  // no second slot AND no second connection. The nested advisory lock is
+  // taken on the OUTER call's session (advisory locks are per-session, so
+  // a different key on the same session is fine); pinning a second pooled
+  // connection here would recreate the deadlock at DB_POOL_MAX=2.
+  const nested = lockSlotContext.getStore();
+  if (nested) {
+    return runExclusiveLocked(jobName, lockKey, fn, recordHealth, nested.conn);
   }
   const acquired = await acquireLockSlot(jobName);
   if (!acquired) {
@@ -210,20 +214,21 @@ async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
     return { skipped: true, reason: 'lease_held' };
   }
   try {
-    return await lockSlotContext.run({ held: true },
-      () => runExclusiveLocked(jobName, lockKey, fn, recordHealth));
+    return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
   } finally {
     releaseLockSlot();
   }
 }
 
-async function runExclusiveLocked(jobName, lockKey, fn, recordHealth) {
-  let conn;
-  try {
-    conn = await db.client.acquireConnection();
-  } catch (err) {
-    logger.error(`[cron-lock] ${jobName}: could not acquire DB connection (${err.message}) — skipping tick`);
-    return { skipped: true, reason: 'no_connection' };
+async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn) {
+  let conn = heldConn;
+  if (!conn) {
+    try {
+      conn = await db.client.acquireConnection();
+    } catch (err) {
+      logger.error(`[cron-lock] ${jobName}: could not acquire DB connection (${err.message}) — skipping tick`);
+      return { skipped: true, reason: 'no_connection' };
+    }
   }
 
   let locked = false;
@@ -240,7 +245,9 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth) {
     const startedAtMs = Date.now();
     if (recordHealth) await recordJobStart(jobName, conn);
     try {
-      const result = await fn();
+      // The held connection rides the async context so nested runExclusive
+      // calls (any depth) reuse this session instead of pinning another.
+      const result = await lockSlotContext.run({ conn }, fn);
       if (recordHealth) await recordJobEnd(jobName, startedAtMs, null, conn);
       return result;
     } catch (err) {
@@ -266,10 +273,13 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth) {
         logger.error(`[cron-lock] ${jobName}: advisory unlock failed (${err.message}) — connection flagged for destruction so the lock is freed`);
       }
     }
-    try {
-      db.client.releaseConnection(conn);
-    } catch (err) {
-      logger.error(`[cron-lock] ${jobName}: connection release failed: ${err.message}`);
+    if (!heldConn) {
+      // A borrowed session (nested call) is released by its owner.
+      try {
+        db.client.releaseConnection(conn);
+      } catch (err) {
+        logger.error(`[cron-lock] ${jobName}: connection release failed: ${err.message}`);
+      }
     }
   }
 }

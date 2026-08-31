@@ -173,6 +173,17 @@ describe('cron-lock runExclusive', () => {
         runExclusive('inner-job', async () => 'nested-ok', { recordHealth: false }),
       { recordHealth: false });
       expect(result).toBe('nested-ok');
+      // The nested lock must ride the OUTER session — a second pooled
+      // connection at max 2 pins the whole pool before the inner body
+      // ever queries it.
+      expect(db.client.acquireConnection).toHaveBeenCalledTimes(1);
+      const conn = await db.client.acquireConnection.mock.results[0].value;
+      const lockCalls = conn.query.mock.calls
+        .map(([arg]) => arg)
+        .filter((arg) => arg.text.includes('pg_try_advisory_lock'));
+      expect(lockCalls.map((c) => c.values[0])).toEqual(['cron:outer-job', 'cron:inner-job']);
+      // Owner releases once; the nested call must not double-release.
+      expect(db.client.releaseConnection).toHaveBeenCalledTimes(1);
     } finally {
       delete db.client.pool;
     }
