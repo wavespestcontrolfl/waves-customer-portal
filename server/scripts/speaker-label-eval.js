@@ -45,7 +45,14 @@ const SPEAKERS = new Set(['agent', 'caller']);
 // Exact key allowlist for a fixture case. Anything else (a note, a name, a
 // snippet) is rejected so PII cannot ride into the repo on an extra field.
 const CASE_KEYS = new Set(['id', 'call_log_id', 'labeled_at', 'labeled_by', 'transcript_sha256', 'segment_speakers']);
+const TOP_KEYS = new Set(['schemaVersion', 'description', 'cases']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Case ids are generated, never authored: "label-" + the call id's first 8
+// hex chars. A free-form id is one more place a name could be typed.
+function expectedCaseId(callLogId) {
+  return `label-${String(callLogId).slice(0, 8).toLowerCase()}`;
+}
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
@@ -198,6 +205,10 @@ function loadFixture(fixturePath) {
   if (doc.schemaVersion !== SCHEMA_VERSION) {
     throw new Error(`Unexpected speaker-label fixture schemaVersion: ${doc.schemaVersion}`);
   }
+  for (const key of Object.keys(doc)) {
+    if (!TOP_KEYS.has(key)) throw new Error(`speaker-label fixture has unsupported top-level key "${key}" (allowed: ${[...TOP_KEYS].join(', ')})`);
+  }
+  if (typeof doc.description !== 'string') throw new Error('speaker-label fixture description must be a string');
   if (!Array.isArray(doc.cases)) throw new Error('speaker-label fixture must contain a cases array');
   const seen = new Set();
   for (const item of doc.cases) {
@@ -206,10 +217,12 @@ function loadFixture(fixturePath) {
     for (const key of Object.keys(item)) {
       if (!CASE_KEYS.has(key)) throw new Error(`case ${label} has unsupported key "${key}" (allowed: ${[...CASE_KEYS].join(', ')})`);
     }
-    if (!/^[a-z0-9-]+$/.test(String(item.id || ''))) throw new Error(`case ${label} id must be kebab-case`);
+    if (!UUID_RE.test(String(item.call_log_id || ''))) throw new Error(`case ${label} call_log_id must be a uuid`);
+    if (item.id !== expectedCaseId(item.call_log_id)) {
+      throw new Error(`case ${label} id must be the generated form ${expectedCaseId(item.call_log_id)}`);
+    }
     if (seen.has(item.id)) throw new Error(`duplicate case id ${item.id}`);
     seen.add(item.id);
-    if (!UUID_RE.test(String(item.call_log_id || ''))) throw new Error(`case ${label} call_log_id must be a uuid`);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(item.labeled_at || ''))) throw new Error(`case ${label} labeled_at must be YYYY-MM-DD`);
     if (item.labeled_by !== 'owner') throw new Error(`case ${label} labeled_by must be "owner"`);
     if (!/^[0-9a-f]{64}$/i.test(String(item.transcript_sha256 || ''))) throw new Error(`case ${label} has an invalid transcript_sha256`);
@@ -346,7 +359,7 @@ function buildSheet(picked) {
       for (const cont of rest) out.push(`        ${cont}`);
     });
     const stub = {
-      id: `label-${String(row.id).slice(0, 8)}`,
+      id: expectedCaseId(row.id),
       call_log_id: row.id,
       labeled_at: etDateString(), // ET calendar date — UTC would roll over at 8/9 PM Eastern
       labeled_by: 'owner',
@@ -460,9 +473,11 @@ if (require.main === module) {
 
 module.exports = {
   CASE_KEYS,
+  TOP_KEYS,
   assertMatchesProductionNormalizer,
   buildSheet,
   canonicalRawTranscript,
+  expectedCaseId,
   goldWordStream,
   lineTokens,
   loadFixture,
