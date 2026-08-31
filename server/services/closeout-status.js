@@ -505,7 +505,11 @@ function deriveCloseoutFacts(inputs) {
     const hold = project?.report_hold_status ? String(project.report_hold_status).toLowerCase() : null;
     const channels = parseJsonObjectSafe(project?.delivery_channels);
     const channelOk = Object.fromEntries(Object.entries(channels).map(([k, v]) => [k, v?.ok === true]));
-    const anyChannelOk = Object.values(channelOk).some(Boolean);
+    // Only CUSTOMER report channels count (never a payer/AP leg), and a WDO
+    // report is email-only — the FDACS PDF rides the email
+    // (routes/admin-projects.js `delivered = isWdo ? email.ok : any`).
+    const isWdo = String(project?.project_type || '') === 'wdo_inspection';
+    const anyChannelOk = isWdo ? channelOk.email === true : (channelOk.email === true || channelOk.sms === true);
     const evidence = {
       projectId: project?.id || null, deliveryStatus: ds, lastDeliveryAt: isoOrNull(project?.last_delivery_at),
       reportHoldStatus: hold, channelOk, source: 'projects.delivery_status',

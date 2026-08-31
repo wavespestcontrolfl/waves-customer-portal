@@ -534,6 +534,9 @@ describe('closeout-status: Agent D findings', () => {
       .toMatchObject({ state: 'done', reason: 'project_delivery_partial', channelOk: { email: true, sms: false } });
     expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { email: { ok: false }, sms: { ok: false } } }) }).facts.reportDelivery)
       .toMatchObject({ state: 'failed', reason: 'project_delivery_partial_no_channel' });
+    // WDO is email-only: SMS success alone does not deliver the FDACS report; a payer leg never counts.
+    expect(deriveCloseoutFacts({ ...base, project: proj({ project_type: 'wdo_inspection', delivery_status: 'partial', delivery_channels: { email: { ok: false }, sms: { ok: true } } }) }).facts.reportDelivery.state).toBe('failed');
+    expect(deriveCloseoutFacts({ ...base, project: proj({ delivery_status: 'partial', delivery_channels: { payer_email: { ok: true } } }) }).facts.reportDelivery.state).toBe('failed');
   });
 
   test('comms vocabulary: sending → pending, blocked → not_required (consent), skipped_recap → done; immediate-path sentSmsAt is read', () => {
