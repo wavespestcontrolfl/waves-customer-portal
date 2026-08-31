@@ -364,18 +364,29 @@ function affiliateBeltVerdict(run, head, prHeadSha = null) {
   const headIds = ids(content);
   const extra = headIds.filter((id) => !approved.has(id));
   if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
-  // Registry state is re-validated at MERGE time — the approval and the
-  // green preview may be days old, and a product paused, prohibited, or
-  // gone stale (yellow label review lapsed) since then must not land.
-  let registry;
-  try { registry = require('../../../packages/affiliate-registry'); } catch (_) { return { ok: false, reason: 'affiliate registry unavailable for the merge-time recheck' }; }
-  const index = registry.productIndex();
-  for (const id of headIds) {
-    const entry = index.get(id);
-    const state = entry ? entry.state : 'unregistered';
-    if (state !== 'active') {
-      return { ok: false, reason: `affiliate product "${id}" is no longer active at merge time (${state}) — re-verify or pause the registry row; auto-merge withheld` };
-    }
+  // The FULL affiliate guardrail contract is re-run on the HEAD file at
+  // MERGE time (not a partial state check): registration, risk-class/label
+  // currency, page-type eligibility, and placement against the LIVE
+  // registry — the approval and green preview may be days old, and a row
+  // paused, gone stale, or narrowed since then must not land. P0s only:
+  // the P1 placement nudges were judged at review time.
+  let guard; let parseFm;
+  try {
+    guard = require('./content-guardrails');
+    ({ parse: parseFm } = require('../content-astro/frontmatter'));
+  } catch (_) { return { ok: false, reason: 'guardrails/frontmatter unavailable for the merge-time affiliate recheck' }; }
+  let fmHead = {};
+  let bodyHead = content;
+  try {
+    const parsed = parseFm(content);
+    fmHead = parsed?.data || {};
+    bodyHead = typeof parsed?.content === 'string' ? parsed.content : content;
+  } catch (_) { /* unparseable frontmatter → scan raw; missing post_type fails closed below */ }
+  const hard = guard._internals
+    .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true })
+    .filter((f) => f.severity === 'P0');
+  if (hard.length) {
+    return { ok: false, reason: `affiliate guardrail contract no longer clear at merge time: ${[...new Set(hard.map((f) => f.code))].join(', ')} — re-verify the registry rows or dismiss` };
   }
   return { ok: true };
 }

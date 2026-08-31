@@ -290,16 +290,25 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     process.env.AFFILIATE_REGISTRY_PATH = __affReg; registryPkg._resetCache();
   });
 
-  test('registry state is re-validated at merge time: a product paused/stale since approval withholds', () => {
-    const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+  test('the full guardrail contract is re-run at merge time: unregistered-since-approval and wrong post_type withhold', () => {
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
     expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
-    delete process.env.AFFILIATE_REGISTRY_PATH; registryPkg._resetCache(); // empty vendored registry → unregistered
+    // registry emptied since approval → UNREGISTERED at merge time
     process.env.AFFILIATE_REGISTRY_PATH = '/nonexistent/registry.json'; registryPkg._resetCache();
-    expect(affiliateBeltVerdict(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/no longer active at merge time \(unregistered\)/) });
+    expect(affiliateBeltVerdict(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/UNREGISTERED_AFFILIATE_LINK/) });
+    process.env.AFFILIATE_REGISTRY_PATH = __affReg; registryPkg._resetCache();
+    // post_type narrowed out of eligibility since approval
+    const wrongType = body.replace('post_type: protocol', 'post_type: seasonal');
+    const approvedWrong = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongType, trust_build_approved_head_sha: 'headsha1' }) };
+    expect(affiliateBeltVerdict(approvedWrong, wrongType, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_LINK_ON_PROTECTED_PAGE/) });
+    // placement removed from the row's allowlist since approval
+    const wrongPlacement = body.replace('placement="primary-rec"', 'placement="sidebar"');
+    const approvedWp = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongPlacement, trust_build_approved_head_sha: 'headsha1' }) };
+    expect(affiliateBeltVerdict(approvedWp, wrongPlacement, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/AFFILIATE_PLACEMENT_NOT_ALLOWED/) });
   });
   test('the kill switch is re-checked at merge time: an approved affiliate head is withheld once GATE_AFFILIATE_LINKS is off', () => {
-    const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
     delete process.env.GATE_AFFILIATE_LINKS;
     expect(affiliateBeltVerdict(approved, body, 'headsha1')).toMatchObject({ ok: false, reason: expect.stringMatching(/GATE_AFFILIATE_LINKS/) });
@@ -313,7 +322,7 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     expect(affiliateBeltVerdict({}, null).ok).toBe(false);
   });
   test('a head carrying <AffiliateLink> is withheld without the owner approval stamp and passes with it (bound to the approved draft)', () => {
-    const body = '## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
     const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
     expect(affiliateBeltVerdict({ trust_build_approved_by: null, draft_payload: JSON.stringify({ body }) }, body, 'headsha1').ok).toBe(false);
     expect(affiliateBeltVerdict(approved, body, 'headsha1').ok).toBe(true);
@@ -1169,7 +1178,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('affiliate belt (full polling path): a head carrying <AffiliateLink> is withheld without the owner approval stamp and merges with it (Codex PR3 r6)', async () => {
-    const affiliateFile = { content: '---\ntitle: Affiliate Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' };
+    const affiliateFile = { content: '---\ntitle: Affiliate Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' };
     const arm = () => {
       process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
       process.env.GATE_AFFILIATE_LINKS = 'true';
@@ -1198,7 +1207,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('affiliate belt on a REFRESH run inspects the resolved target file at the head: withheld without approval, merges with it; unresolvable fails closed', async () => {
-    const affiliateFile = { path: 'src/content/blog/legacy-post.mdx', file: { content: '---\ntitle: Legacy\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' } };
+    const affiliateFile = { path: 'src/content/blog/legacy-post.mdx', file: { content: '---\ntitle: Legacy\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' } };
     const arm = () => {
       process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
       process.env.GATE_AFFILIATE_LINKS = 'true';

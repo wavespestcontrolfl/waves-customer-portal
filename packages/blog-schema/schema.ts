@@ -691,7 +691,18 @@ function blankMdxExpressions(src: string): string {
       i += 1; continue;
     }
     if (ch === '<' && /[A-Za-z/!]/.test(src[i + 1] || '')) { inTag = true; i += 1; continue; }
-    if (ch === '{') { const j = closeOfExpression(i); if (j > 0) { blankRange(i, j); i = j + 1; continue; } }
+    if (ch === '{') {
+      const j = closeOfExpression(i);
+      if (j > 0) {
+        // An expression that can render JSX ({true && <AffiliateLink …/>})
+        // is NOT blanked: the component scans must still see it (fail
+        // closed — leftover expression text can only ADD blockers, never
+        // satisfy a CTA/heading rule by itself once quoted strings without
+        // JSX are gone).
+        if (!/<[A-Z]/.test(src.slice(i, j + 1))) blankRange(i, j);
+        i = j + 1; continue;
+      }
+    }
     i += 1;
   }
   return out.join('');
