@@ -16,11 +16,19 @@
  * working — the claim only enforces the hash when the row carries one.
  */
 
+// Per-column guards (pre-push r21 P1): a drifted environment holding only
+// ONE of the two columns must neither skip the missing one nor try to
+// recreate/drop the other — each column is checked independently in both
+// directions.
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('ib_pending_actions'))) return;
   if (!(await knex.schema.hasColumn('ib_pending_actions', 'contract'))) {
     await knex.schema.alterTable('ib_pending_actions', (t) => {
       t.jsonb('contract').nullable();
+    });
+  }
+  if (!(await knex.schema.hasColumn('ib_pending_actions', 'contract_hash'))) {
+    await knex.schema.alterTable('ib_pending_actions', (t) => {
       t.string('contract_hash', 64).nullable();
     });
   }
@@ -28,9 +36,13 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('ib_pending_actions'))) return;
-  if (await knex.schema.hasColumn('ib_pending_actions', 'contract')) {
+  if (await knex.schema.hasColumn('ib_pending_actions', 'contract_hash')) {
     await knex.schema.alterTable('ib_pending_actions', (t) => {
       t.dropColumn('contract_hash');
+    });
+  }
+  if (await knex.schema.hasColumn('ib_pending_actions', 'contract')) {
+    await knex.schema.alterTable('ib_pending_actions', (t) => {
       t.dropColumn('contract');
     });
   }
