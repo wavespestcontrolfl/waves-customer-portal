@@ -135,13 +135,28 @@ const GOLD_FIELDS = {
 };
 const GOLD_FIELD_NAMES = Object.keys(GOLD_FIELDS);
 
+// Real values, not just shapes: 2026-99-99 or 29:75 would otherwise pass the
+// fixture test and become a permanent high-severity weekly failure.
+function isRealCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function isRealWallClockTime(value) {
+  if (typeof value !== 'string' || !/^\d{1,2}:\d{2}$/.test(value)) return false;
+  const [hours, minutes] = value.split(':').map(Number);
+  return hours <= 23 && minutes <= 59;
+}
+
 // A single gold label value is valid only inside its field's domain.
 function isValidGoldValue(field, value) {
   const kind = GOLD_FIELDS[field]?.kind;
   if (!kind) return false;
   if (kind === 'boolean') return typeof value === 'boolean';
-  if (kind === 'date') return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-  if (kind === 'time') return typeof value === 'string' && /^\d{1,2}:\d{2}$/.test(value);
+  if (kind === 'date') return isRealCalendarDate(value);
+  if (kind === 'time') return isRealWallClockTime(value);
   return typeof value === 'string' && kind.has(value);
 }
 

@@ -5,6 +5,7 @@ const {
   etScheduleParts,
   evaluateFixtureExpectation,
   goldFieldValues,
+  isValidGoldValue,
   GOLD_FIELDS,
   loadReplayFixture,
   parseArgs,
@@ -267,6 +268,7 @@ describe('call extraction replay variance reporting', () => {
         is_voicemail: 'false',            // boolean-as-string
         urgency: 'urgent',                // enum typo
         schedule_date: '06/15/2026',      // wrong date shape
+        schedule_window_start: '29:75',   // impossible wall-clock time
       },
     });
     expect(expectation.status).toBe('fail');
@@ -277,9 +279,21 @@ describe('call extraction replay variance reporting', () => {
       'fixture_error:invalid_gold_value:is_voicemail',
       'fixture_error:invalid_gold_value:urgency',
       'fixture_error:invalid_gold_value:schedule_date',
+      'fixture_error:invalid_gold_value:schedule_window_start',
     ]);
     // None of the invalid labels were scored — they must not count as misses.
     expect(expectation.gold.scored).toEqual([]);
+
+    // Shape-valid but impossible calendar dates/times are rejected too.
+    for (const [field, bad, good] of [
+      ['schedule_date', '2026-99-99', '2026-06-15'],
+      ['schedule_date', '2026-02-30', '2026-02-28'],
+      ['schedule_window_start', '24:00', '23:59'],
+      ['schedule_window_start', '11:60', '11:00'],
+    ]) {
+      expect(isValidGoldValue(field, bad)).toBe(false);
+      expect(isValidGoldValue(field, good)).toBe(true);
+    }
 
     expect(evaluateFixtureExpectation(validResult(), { expect: { current_status: 'valid' }, gold: ['is_spam'] }).failures)
       .toEqual([expect.objectContaining({ name: 'fixture_error:invalid_gold' })]);
