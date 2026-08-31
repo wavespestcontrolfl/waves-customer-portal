@@ -436,6 +436,14 @@ describe('closeout-status: invoice + invoice delivery', () => {
     expect(done.facts.invoiceDelivery).toMatchObject({ state: 'done', reason: 'invoice_delivered', source: 'sibling_first_application' });
     const parked = deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoice: { invoice: { ...sib, status: 'refunded' }, liveBeside: { id: 'inv-live', status: 'sent' } } }));
     expect(parked.facts.invoice).toMatchObject({ state: 'pending', reason: 'parked_manual_refunded_invoice', refundedInvoiceId: 'inv-sib', liveBesideInvoiceId: 'inv-live' });
+    // A canceled acceptance invoice that carried the SETUP FEE parks the visit even on a covered lane (codex r13 P0).
+    const member = closedOutInputs({
+      customer: { id: 'cust-1', billing_mode: 'monthly_membership', waveguard_tier: 'Silver', monthly_rate: 89, autopay_enabled: true },
+      lane: { mode: 'monthly_membership', source: 'explicit' }, autopayActive: true,
+      visit: { ...closedOutInputs().visit, estimated_price: null }, liveInvoice: null,
+      siblingInvoice: { invoice: null, liveBeside: null, canceledSetupFee: { id: 'inv-c', invoice_number: 'INV-C', status: 'canceled' } },
+    });
+    expect(deriveCloseoutFacts(member).facts.invoice).toMatchObject({ state: 'pending', reason: 'parked_manual_canceled_setup_fee', canceledInvoiceId: 'inv-c', includedSetupFee: true });
     // A canceled sibling is dropped from reuse — the lane expectation decides.
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoice: { invoice: { ...sib, status: 'canceled' }, liveBeside: null } })).facts.invoice.state).toBe('pending');
     expect(deriveCloseoutFacts(closedOutInputs({ liveInvoice: null, siblingInvoiceLookupFailed: true })).facts.invoice).toMatchObject({ state: 'unknown', failed: ['sibling_first_application'] });

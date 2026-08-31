@@ -357,6 +357,21 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
     inputs.siblingInvoice = siblingProbe.value || null;
     inputs.siblingInvoiceLookupFailed = Boolean(siblingProbe.error);
   }
+
+  // Paid-receipt delivery is a queue (receipt_delivery_jobs); the invoice's
+  // receipt_sent_at is stamped only on confirmed delivery. Keyed on the
+  // EFFECTIVE invoice — the visit's own live row, else the live sibling.
+  const siblingLive = inputs.siblingInvoice?.invoice && !splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).terminal
+    ? splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).existing : null;
+  const effectiveInvoice = inputs.liveInvoice || siblingLive || null;
+  if (effectiveInvoice?.id && INVOICE_SETTLED_STATUSES.has(String(effectiveInvoice.status)) && !effectiveInvoice.receipt_sent_at) {
+    const receiptProbe = await probe('receipt_delivery_jobs', unavailable, () => knex('receipt_delivery_jobs')
+      .where({ invoice_id: effectiveInvoice.id })
+      .orderBy('created_at', 'desc')
+      .first('id', 'status', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at', 'sms_result', 'email_result'));
+    inputs.receiptJob = receiptProbe.value || null;
+    inputs.receiptJobLookupFailed = Boolean(receiptProbe.error);
+  }
   inputs.autopayActive = autopayProbe.error ? null : Boolean(autopayProbe.value);
   inputs.followup = followupProbe.error ? undefined : (followupProbe.value || null);
   inputs.followupChild = childProbe.value || null;
@@ -364,17 +379,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date() } = {
   inputs.disposition = dispositionProbe.value || null;
   inputs.dispositionLookupFailed = Boolean(dispositionProbe.error);
 
-  // Paid-receipt delivery is a queue (receipt_delivery_jobs); the invoice's
-  // receipt_sent_at is stamped only on confirmed delivery.
-  const liveInvoiceId = inputs.liveInvoice?.id || null;
-  if (liveInvoiceId && INVOICE_SETTLED_STATUSES.has(String(inputs.liveInvoice.status)) && !inputs.liveInvoice.receipt_sent_at) {
-    const receiptProbe = await probe('receipt_delivery_jobs', unavailable, () => knex('receipt_delivery_jobs')
-      .where({ invoice_id: liveInvoiceId })
-      .orderBy('created_at', 'desc')
-      .first('id', 'status', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at', 'sms_result', 'email_result'));
-    inputs.receiptJob = receiptProbe.value || null;
-    inputs.receiptJobLookupFailed = Boolean(receiptProbe.error);
-  }
+
 
   // Billing prediction inputs — same shape the appointment card assembles
   // (routes/admin-schedule.js), so "no invoice needed" here agrees with the
@@ -698,6 +703,15 @@ function deriveCloseoutFacts(inputs) {
     invoice = fact('pending', 'parked_manual_refunded_invoice', {
       refundedInvoiceId: t.id, liveBesideInvoiceId: inputs.siblingInvoice.liveBeside?.id || null,
       liveBesideStatus: inputs.siblingInvoice.liveBeside?.status || null, source: 'sibling_first_application', expectation: expectation?.kind || null,
+    });
+  } else if (!live && !inputs.siblingInvoice?.invoice && inputs.siblingInvoice?.canceledSetupFee) {
+    // Canceled ACCEPTANCE invoice that carried the one-time setup fee beside
+    // the visit charge (/complete parks the manual path so the office bills
+    // BOTH by hand) — never not_required, whatever the lane says now.
+    const c = inputs.siblingInvoice.canceledSetupFee;
+    invoice = fact('pending', 'parked_manual_canceled_setup_fee', {
+      canceledInvoiceId: c.id, canceledInvoiceNumber: c.invoice_number || null, canceledStatus: c.status || null,
+      includedSetupFee: true, source: 'sibling_first_application', expectation: expectation?.kind || null,
     });
   } else if (!live && inputs.siblingInvoice?.invoice && splitTerminalCompletionInvoice(inputs.siblingInvoice.invoice).existing) {
     const sib = inputs.siblingInvoice.invoice;
