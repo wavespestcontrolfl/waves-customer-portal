@@ -142,7 +142,7 @@ function excludeInternalLeads(qb) {
 // The notification bell adapter (toNotifications below) reshapes these
 // into notification-table-shaped objects with `id: 'live:<id>'`,
 // `read_at: null`, `created_at: now`.
-async function computeDashboardAlertsUncached() {
+async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   const today = etDateString();
   const alerts = [];
 
@@ -444,7 +444,10 @@ async function computeDashboardAlertsUncached() {
       for (const id of [...carry.keys()]) if (!current.has(id)) carry.delete(id);
     }
     if (completedToday.length) {
-      const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
+      // fresh (dismissals / the cron writing durable state) bypasses the
+      // 90s per-visit memo — a write-sensitive snapshot must not persist a
+      // stale count or membership (pre-push r20 P1).
+      const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id), { fresh });
       const carry = closeoutCarryFor(today);
       const gapIds = [];
       const gapIdentities = []; // `visitId:issueType` — new work on a listed visit must re-surface
@@ -463,7 +466,7 @@ async function computeDashboardAlertsUncached() {
           // what was known and what is readable now — never a shrink.
           unreadableIds.push(row.id);
           const prev = carry.get(row.id) || { count: 0, identities: [] };
-          const merged = [...new Set([...prev.identities, ...issues.map((i) => `${row.id}:${i.type}`)])];
+          const merged = [...new Set([...prev.identities, ...issues.map((i) => `${row.id}:${i.identity || i.type}`)])];
           if (merged.length) {
             carry.set(row.id, { count: merged.length, identities: merged });
             gapIds.push(row.id); issueCount += merged.length; gapIdentities.push(...merged);
@@ -864,7 +867,7 @@ async function computeDashboardAlerts({ fresh = false } = {}) {
   if (!fresh && alertsMemo.promise && Date.now() - alertsMemo.at < ALERTS_MEMO_TTL_MS) {
     return alertsMemo.promise;
   }
-  const promise = computeDashboardAlertsUncached();
+  const promise = computeDashboardAlertsUncached({ fresh });
   alertsMemo = { at: Date.now(), promise };
   try {
     return await promise;

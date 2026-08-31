@@ -322,7 +322,7 @@ describe('Action Inbox generators', () => {
     // Members are visit:issue identities so a new issue on a listed visit re-surfaces a dismissal (GH r2).
     expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: expect.stringMatching(/^\/admin\/dispatch\?tab=schedule&date=\d{4}-\d{2}-\d{2}$/), members: ['svc-b:missing_required_photos', 'svc-b:missing_required_service_report'] });
     expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
-    expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d']);
+    expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d'], { fresh: false });
   });
 
   test('closeout_gaps_today: a lookup outage holds the last-known gap (no clear/re-fire); a complete clean read clears it (codex r5)', async () => {

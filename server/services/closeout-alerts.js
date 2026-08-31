@@ -96,8 +96,8 @@ function factsFullyKnown(status) {
   return ISSUE_INPUT_FACT_KEYS.every((k) => facts[k]?.state !== 'unknown');
 }
 
-async function memoisedCloseoutStatus(serviceId, now) {
-  const hit = memo.get(serviceId);
+async function memoisedCloseoutStatus(serviceId, now, fresh = false) {
+  const hit = fresh ? null : memo.get(serviceId);
   if (hit && now - hit.at < (hit.fullyRead ? CLOSEOUT_MEMO_TTL_MS : CLOSEOUT_MEMO_ERROR_TTL_MS)) return hit.value;
   const value = await getCloseoutStatus(serviceId).catch(() => null);
   const fullyRead = factsFullyKnown(value);
@@ -109,13 +109,16 @@ async function memoisedCloseoutStatus(serviceId, now) {
 /**
  * Load closeout statuses for many visits with bounded concurrency + memo.
  * Returns Map<serviceId, status|null> (null = the load itself failed).
+ * `fresh: true` bypasses the memo READ (write-sensitive snapshots —
+ * dismissals, the state-persisting cron — must not act on a stale count or
+ * membership; pre-push r20 P1); the fresh result still refreshes the memo.
  */
-async function loadCloseoutStatuses(serviceIds, { now = Date.now() } = {}) {
+async function loadCloseoutStatuses(serviceIds, { now = Date.now(), fresh = false } = {}) {
   const out = new Map();
   const ids = [...new Set((serviceIds || []).filter(Boolean))];
   for (let i = 0; i < ids.length; i += CLOSEOUT_CONCURRENCY) {
     const slice = ids.slice(i, i + CLOSEOUT_CONCURRENCY);
-    const loaded = await Promise.all(slice.map((id) => memoisedCloseoutStatus(id, now)));
+    const loaded = await Promise.all(slice.map((id) => memoisedCloseoutStatus(id, now, fresh)));
     slice.forEach((id, j) => out.set(id, loaded[j]));
   }
   return out;

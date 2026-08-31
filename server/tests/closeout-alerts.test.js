@@ -149,5 +149,15 @@ describe('loadCloseoutStatuses', () => {
     await loadCloseoutStatuses(['d'], { now: t0 });
     await loadCloseoutStatuses(['d'], { now: t0 + 21 * 1000 });
     expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
+    // fresh:true bypasses the memo READ inside the TTL (write-sensitive
+    // snapshots must not persist a stale count — pre-push r20) but still
+    // refreshes the memo for subsequent non-fresh reads.
+    getCloseoutStatus.mockReset();
+    getCloseoutStatus.mockResolvedValue(base());
+    await loadCloseoutStatuses(['e'], { now: t0 });
+    await loadCloseoutStatuses(['e'], { now: t0 + 1000, fresh: true });
+    expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
+    await loadCloseoutStatuses(['e'], { now: t0 + 2000 });
+    expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
   });
 });
