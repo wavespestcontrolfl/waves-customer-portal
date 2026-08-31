@@ -3268,15 +3268,19 @@ function recurringWithoutBillableAmount({
   isRecurring,
   recurringFloorPrice,
   customer,
-  effectiveBillingTerm,
   prepaid,
   isCallback,
   serviceType,
 }) {
   if (!isRecurring) return null;
-  // Annual prepay's money is the term invoice, not the visit — and only once
-  // the route has actually settled on it.
-  if (effectiveBillingTerm === 'prepay_annual') return null;
+  // NO annual-prepay exemption either. The term invoice that would BE the
+  // money is created by markEstimateManuallyAccepted, which runs AFTER the
+  // appointment transaction commits and is explicitly allowed to fail with
+  // the booking left standing. A failed or raced acceptance would leave an
+  // unpriced recurring series with no prepay invoice and no term — the same
+  // lost-AR condition (Codex P0). A real prepay booking carries its quoted
+  // price on the series anyway, so this costs nothing legitimate: it only
+  // refuses a prepay booking that has no amount on it at all.
   if (prepaid && Number(prepaid.totalAmount) > 0) return null;
   // NO payer exemption. An active payer identifies who owes the invoice; it
   // supplies no amount, and completion derives invoiceAmount from the visit
@@ -5027,7 +5031,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
         isRecurring,
         recurringFloorPrice,
         customer,
-        effectiveBillingTerm: bookingBillingTermEffective,
         prepaid: req.body.prepaid || null,
         isCallback: resolvedIsCallback,
         serviceType,

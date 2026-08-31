@@ -87,7 +87,6 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     isRecurring: true,
     recurringFloorPrice: 0,
     customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
-    effectiveBillingTerm: 'standard',
     prepaid: null,
     isCallback: false,
     serviceType: 'Monthly Pest Control Service',
@@ -131,11 +130,15 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: 0 }))).toBeTruthy();
   });
 
-  test('annual prepay passes on the EFFECTIVE term, never the requested one (Codex P0)', () => {
-    expect(recurringWithoutBillableAmount({ ...unbillable, effectiveBillingTerm: 'prepay_annual' })).toBeNull();
-    // A request the route downgraded back to standard must NOT slip through.
-    expect(recurringWithoutBillableAmount({ ...unbillable, effectiveBillingTerm: 'standard' })).toBeTruthy();
-    // The annual_prepay LANE keeps its own exemption via the prediction.
+  test('an UNPRICED annual-prepay booking is still refused (Codex P0)', () => {
+    // The prepay term invoice is created post-commit by
+    // markEstimateManuallyAccepted, which may fail with the booking left
+    // standing — so a requested prepay term is not an amount. A real prepay
+    // booking carries its quoted price and passes on that.
+    expect(recurringWithoutBillableAmount(unbillable)).toBeTruthy();
+    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
+    // The annual_prepay LANE on an EXISTING customer keeps its own exemption
+    // through the canonical prediction (coverage is the renewal flow's).
     expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'annual_prepay' }))).toBeNull();
   });
 

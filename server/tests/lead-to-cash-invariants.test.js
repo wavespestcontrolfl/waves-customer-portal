@@ -408,3 +408,16 @@ describe('detector adapters', () => {
     expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
   });
 });
+
+describe('unbilled_completed_visits — ET calendar discipline', () => {
+  const byKey = (k) => DETECTORS.find((d) => d.key === k);
+
+  test('sweeps YESTERDAY across a DST boundary, not now-minus-24h (Codex P1)', async () => {
+    mockTables.scheduled_services = mockChain({ select: [] });
+    mockTables.invoices = mockChain({ select: [] });
+    // 2026-03-09 00:30 ET (EDT, UTC-4). Elapsed-time subtraction lands on
+    // Mar 7 here — skipping Mar 8 entirely.
+    const out = await byKey('unbilled_completed_visits').run({ now: new Date('2026-03-09T04:30:00Z') });
+    expect(out.detail.date).toBe('2026-03-08');
+  });
+});

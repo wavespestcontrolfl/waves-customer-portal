@@ -31,7 +31,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { scrubSentryText, safeErrorToken } = require('../utils/sentry-scrub');
 
 const SEND_MARKER_KEY = 'lead-to-cash-invariants';
@@ -177,7 +177,11 @@ const DETECTORS = Object.freeze([
     provenance: 'prod 2026-08-31 — a hand-booked customer took recurring visits at monthly_rate 0; the sheet said "nothing bills" and nothing else did',
     async run({ now }) {
       const { resolveBillingLane, predictCompletionBilling, unbilledCompletionGap } = require('./billing-lane');
-      const yesterday = etDateString(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+      // ET CALENDAR subtraction, not 24 elapsed hours: across a DST boundary
+      // `now - 24h` lands on the wrong day (2026-03-09 00:30 ET resolves to
+      // Mar 7, not Mar 8), so a manual or shifted run would sweep the wrong
+      // date entirely (Codex P1).
+      const yesterday = etDateString(addETDays(now, -1));
       // Re-runs the SAME prediction the sheet and the completion path use —
       // never a SQL re-derivation of the billing decision (the 2026-07
       // double-billing incident came from a second classifier).
