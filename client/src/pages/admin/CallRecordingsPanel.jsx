@@ -40,6 +40,7 @@
 import { useState, useEffect, useCallback } from "react";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { formatAddress } from "../../utils/format-address";
+import { describeProcessResult } from "../../lib/callProcessResult";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple/gray fold to zinc tokens. Semantic green/amber/red preserved.
@@ -60,6 +61,13 @@ const D = {
   gray: "#71717A",
   heading: "#09090B",
   inputBorder: "#D4D4D8",
+};
+
+// A blocked claim is amber, not red: nothing broke, but nothing ran either.
+const PROCESS_VERDICT_COLOR = {
+  ok: D.muted,
+  blocked: D.amber,
+  failed: D.red,
 };
 
 function adminFetch(path, options = {}) {
@@ -230,10 +238,13 @@ export default function CallRecordingsPanel() {
   const processOne = async (callSid, { force = false } = {}) => {
     try {
       const qs = force ? "?force=true" : "";
-      await adminFetch(`/admin/call-recordings/process/${callSid}${qs}`, {
-        method: "POST",
-      });
-      showToast("Recording processed");
+      const res = await adminFetch(
+        `/admin/call-recordings/process/${callSid}${qs}`,
+        { method: "POST" },
+      );
+      // "Recording processed" was a lie on every skip: a blocked claim comes
+      // back HTTP 200 with success:true and nothing done.
+      showToast(describeProcessResult(res).text);
       loadData();
     } catch (e) {
       showToast(`Failed: ${e.message}`);
@@ -606,6 +617,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   const [r, setR] = useState(recording);
   const [generatingSynopsis, setGeneratingSynopsis] = useState(false);
   const [processingOne, setProcessingOne] = useState(false);
+  const [processVerdict, setProcessVerdict] = useState(null);
   const [synopsisExpanded, setSynopsisExpanded] = useState(true);
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const extraction = parseExtraction(r);
@@ -619,17 +631,27 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
 
   const handleProcess = async () => {
     setProcessingOne(true);
+    setProcessVerdict(null);
     try {
-      await adminFetch(`/admin/call-recordings/process/${r.twilio_call_sid}`, {
-        method: "POST",
-      });
+      const res = await adminFetch(
+        `/admin/call-recordings/process/${r.twilio_call_sid}`,
+        { method: "POST" },
+      );
+      // This detail pane gave NO feedback at all — a blocked claim looked
+      // identical to a successful run, which is how a stuck call read as
+      // processed on 2026-08-31.
+      setProcessVerdict(describeProcessResult(res));
       const fresh = await adminFetch(
         `/admin/call-recordings/recording/${r.id}`,
       );
       if (fresh?.recording) setR(fresh.recording);
       if (onUpdate) onUpdate();
     } catch (e) {
-      /* ignore */
+      setProcessVerdict({
+        didWork: false,
+        severity: "failed",
+        text: `Process failed — ${e.message || "unknown error"}`,
+      });
     }
     setProcessingOne(false);
   };
@@ -856,6 +878,19 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
             >
               {processingOne ? "Processing..." : "Process Recording"}
             </button>
+          )}
+          {processVerdict && (
+            <div
+              style={{
+                width: "100%",
+                fontSize: 12,
+                // Amber, not red: on a blocked claim nothing broke — but
+                // nothing ran either, and the operator has to run it again.
+                color: PROCESS_VERDICT_COLOR[processVerdict.severity],
+              }}
+            >
+              {processVerdict.text}
+            </div>
           )}
           {canGenerateSynopsis && (
             <button

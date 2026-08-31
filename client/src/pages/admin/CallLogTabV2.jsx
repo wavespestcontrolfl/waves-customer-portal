@@ -35,8 +35,17 @@ import {
 } from "../../components/ui";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
+import { describeProcessResult } from "../../lib/callProcessResult";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+// 'blocked' is amber, not alert red: nothing broke, but nothing ran either —
+// the operator has to hit Reprocess. alert-fg stays reserved for a genuine
+// failure.
+const PROCESS_RESULT_CLASS = {
+  ok: "text-ink-secondary",
+  blocked: "text-amber-700",
+  failed: "text-alert-fg",
+};
 const ADMIN_BRIDGE_PHONE_KEYS = new Set(["9415993489"]);
 
 function phoneKey(value) {
@@ -473,37 +482,18 @@ export default function CallLogTabV2() {
         `/admin/call-recordings/process/${callSid}${force ? "?force=true" : ""}`,
         { method: "POST" },
       );
-      if (res?.success === false) {
-        setProcessResult({
-          ok: false,
-          callSid,
-          text: `Process failed: ${res.error || "unknown error"}`,
-        });
-      } else if (res?.skipped) {
-        setProcessResult({
-          ok: true,
-          callSid,
-          text: `Skipped — ${res.reason || "no work to do"}`,
-        });
-      } else {
-        const extracted = res?.extracted || {};
-        const parts = [];
-        const name = [extracted.first_name, extracted.last_name]
-          .filter(Boolean)
-          .join(" ");
-        if (name) parts.push(`Name: ${name}`);
-        if (extracted.email) parts.push(`Email: ${extracted.email}`);
-        const addr = extracted.address_line1 || extracted.address;
-        if (addr) parts.push(`Address: ${addr}`);
-        const detail = parts.length ? ` — ${parts.join(" · ")}` : "";
-        setProcessResult({ ok: true, callSid, text: `Processed${detail}` });
-      }
+      // A skip is an HTTP 200 with success:true, and several of them mean
+      // NOTHING RAN — painting those in the success style is how a stuck
+      // call read as processed on 2026-08-31.
+      const verdict = describeProcessResult(res);
+      setProcessResult({ ...verdict, callSid });
       await loadCalls(callLogSearch.trim());
     } catch (err) {
       setProcessResult({
-        ok: false,
+        didWork: false,
+        severity: "failed",
         callSid,
-        text: `Process failed: ${err.message || "unknown error"}`,
+        text: `Process failed — ${err.message || "unknown error"}`,
       });
     } finally {
       setProcessingCallSid(null);
@@ -846,7 +836,7 @@ export default function CallLogTabV2() {
                       <div
                         className={cn(
                           "mt-2 text-12",
-                          processResult.ok ? "text-ink-secondary" : "text-alert-fg",
+                          PROCESS_RESULT_CLASS[processResult.severity],
                         )}
                       >
                         {processResult.text}
@@ -1292,9 +1282,7 @@ export default function CallLogTabV2() {
                             <span
                               className={cn(
                                 "text-12",
-                                processResult.ok
-                                  ? "text-ink-secondary"
-                                  : "text-alert-fg",
+                                PROCESS_RESULT_CLASS[processResult.severity],
                               )}
                             >
                               {processResult.text}
