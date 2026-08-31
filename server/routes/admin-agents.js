@@ -1769,7 +1769,22 @@ router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
     // is still working skips harmlessly (lease_held) and the UI keeps polling.
     setImmediate(() => {
       const { runExclusive } = require('../utils/cron-lock');
-      runExclusive('sms-sealed-eval', () => sealedEval.runSealedExam({ runId }), { recordHealth: false })
+      void runExclusive('sms-sealed-eval', () => sealedEval.runSealedExam({ runId }), { recordHealth: false })
+        .then(async (outcome) => {
+          // A resolved lock skip is not a rejection. lease_held means the
+          // original holder is still working the run — fine. no_connection
+          // (no holder slot under the cron herd) means NOBODY ran it: the
+          // row just created as 'running' would sit there and block every
+          // new experiment through the one-running index until an operator
+          // or the nightly recovery noticed. Retire it so the UI's retry
+          // (resumeRunId) reopens it cleanly.
+          if (outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
+            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start: ${outcome.reason}`);
+            await db('sms_sealed_eval_runs')
+              .where({ id: runId, status: 'running' })
+              .update({ status: 'failed', error: 'could not start: no lock slot available — resume to retry', finished_at: new Date() });
+          }
+        })
         .catch((err) => logger.error(`[sealed-eval] background run ${String(runId).slice(0, 8)} failed: ${err.message}`));
     });
     res.status(202).json({ runId, resumed: Boolean(resumeRunId) });

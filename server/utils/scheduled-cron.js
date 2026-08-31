@@ -24,4 +24,18 @@ function isScheduledTick() {
   return !!tickContext.getStore();
 }
 
-module.exports = { ...nodeCron, schedule, isScheduledTick };
+// The same marking for sweeps driven by plain timers (index.js boot
+// sweeps: pdf queue, hold sweeps, wizard recovery, WDO attention…) — they
+// are scheduled work too, and must wait for a holder slot like a cron
+// tick rather than fail fast and silently lose the sweep.
+function runAsScheduledTick(task) {
+  return tickContext.run({ scheduled: true }, task);
+}
+function scheduleTimeout(task, ms) {
+  return setTimeout(() => runAsScheduledTick(task), ms);
+}
+function scheduleInterval(task, ms) {
+  return setInterval(() => runAsScheduledTick(task), ms);
+}
+
+module.exports = { ...nodeCron, schedule, isScheduledTick, runAsScheduledTick, scheduleTimeout, scheduleInterval };

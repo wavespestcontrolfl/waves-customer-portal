@@ -424,6 +424,50 @@ describe('cron-lock runExclusive', () => {
     await expect(fromTick).resolves.toBe('billed');
   });
 
+  test('a lease won AFTER the tick deadline does not run — recorded as a failed run', async () => {
+    jest.useFakeTimers();
+    try {
+      // Slot is free, but the pool acquire stalls past the deadline.
+      let giveConn;
+      const stalledAcquire = new Promise((resolve) => { giveConn = resolve; });
+      db.client.acquireConnection.mockReturnValueOnce(stalledAcquire);
+      const conn = mockConnection(true);
+
+      const body = jest.fn(async () => 'snapshotted');
+      const run = runExclusive('mrr-month-end', body, { waitForSlot: true });
+      await jest.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      giveConn(conn);
+
+      await expect(run).resolves.toEqual({ skipped: true, reason: 'no_connection' });
+      expect(body).not.toHaveBeenCalled();
+      const texts = conn.query.mock.calls.map(([arg]) => arg.text);
+      expect(texts.some((x) => x.includes('pg_try_advisory_lock'))).toBe(true);
+      expect(texts.some((x) => x.includes('pg_advisory_unlock'))).toBe(true); // lease released
+      const fail = healthCalls(conn).find((c) => c.text.includes("last_status = 'failed'"));
+      expect(fail.values[3]).toContain('after tick deadline');
+      expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('timer-driven sweeps registered through scheduled-cron run as scheduled ticks', async () => {
+    jest.useFakeTimers();
+    try {
+      const scheduledCron = require('../utils/scheduled-cron');
+      const seen = [];
+      const timer = scheduledCron.scheduleTimeout(() => seen.push(scheduledCron.isScheduledTick()), 5);
+      const interval = scheduledCron.scheduleInterval(() => seen.push(scheduledCron.isScheduledTick()), 7);
+      expect(typeof timer.unref).toBe('function'); // index.js chains .unref()
+      await jest.advanceTimersByTimeAsync(8);
+      clearInterval(interval);
+      expect(seen).toEqual([true, true]);
+      expect(scheduledCron.isScheduledTick()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('nested runExclusive is reentrant — no self-deadlock at the minimum cap', async () => {
     const conn = mockConnection(true);
     db.client.acquireConnection.mockResolvedValue(conn);

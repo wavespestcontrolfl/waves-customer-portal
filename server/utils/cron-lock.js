@@ -272,8 +272,8 @@ async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt) {
     logger.info(`[cron-lock] ${jobName}: covered by a concurrent run — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
   }
-  const lease = { held: false };
   const tickStartedAtMs = Date.now();
+  const lease = { held: false, deadlineAt, tickStartedAtMs };
   const runPromise = (async () => {
     const granted = await acquireLockSlot(jobName, deadlineAt);
     if (!granted) {
@@ -329,6 +329,21 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, 
     if (!locked) {
       logger.info(`[cron-lock] ${jobName}: lease held elsewhere (overlapping instance or prior tick) — skipping`);
       return { skipped: true, reason: 'lease_held' };
+    }
+    // The slot wait honoured the deadline, but the pool acquire and the
+    // try-lock query above can eat the remainder of the window. A lease
+    // won after the deadline must not run either: the month-end MRR
+    // snapshot (scheduler.js) invoked after midnight records the NEW month
+    // and permanently misses the ending one. Same visible failure as a
+    // slot timeout; the coalesced tick (if any) sees no_connection and
+    // fails on its own passed deadline.
+    if (lease && Date.now() >= lease.deadlineAt) {
+      logger.error(`[cron-lock] ${jobName}: lease acquired after the tick's deadline — not running`);
+      if (recordHealth) {
+        await recordJobStart(jobName, conn);
+        await recordJobEnd(jobName, lease.tickStartedAtMs, new Error('lease acquired after tick deadline — tick failed'), conn);
+      }
+      return { skipped: true, reason: 'no_connection' };
     }
     if (lease) lease.held = true;
     const startedAtMs = Date.now();

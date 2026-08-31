@@ -14,6 +14,7 @@ process.on('uncaughtException', (err) => {
 });
 
 const express = require('express');
+const scheduledCron = require('./utils/scheduled-cron');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -1063,8 +1064,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[service-report-pdf-queue] processor failed: ${err.message}`);
         }
       };
-      setTimeout(runPdfQueue, 30 * 1000).unref();
-      setInterval(runPdfQueue, 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runPdfQueue, 30 * 1000).unref();
+      scheduledCron.scheduleInterval(runPdfQueue, 60 * 1000).unref();
     }
 
     {
@@ -1079,8 +1080,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[receipt-delivery-queue] processor failed: ${err.message}`);
         }
       };
-      setTimeout(runReceiptDeliveryQueue, 30 * 1000).unref();
-      setInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runReceiptDeliveryQueue, 30 * 1000).unref();
+      scheduledCron.scheduleInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
     }
 
     // Contact-correction jobs (codex #3413 r17): the durable queue behind
@@ -1106,8 +1107,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
       // exiting deploy left behind, so the reserve path's ordering insert
       // never waits on a first-request schema check.
       void runContactCorrectionQueue();
-      setTimeout(runContactCorrectionQueue, 30 * 1000).unref();
-      setInterval(runContactCorrectionQueue, 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runContactCorrectionQueue, 30 * 1000).unref();
+      scheduledCron.scheduleInterval(runContactCorrectionQueue, 60 * 1000).unref();
     }
 
     // WDO report payment-hold release sweep — delivers held reports once
@@ -1124,8 +1125,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[report-hold] sweep failed: ${err.message}`);
         }
       };
-      setTimeout(runReportHoldSweep, 45 * 1000).unref();
-      setInterval(runReportHoldSweep, 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runReportHoldSweep, 45 * 1000).unref();
+      scheduledCron.scheduleInterval(runReportHoldSweep, 60 * 1000).unref();
     }
 
     // First-touch hold ledger sweep — retries abandoned release claims on
@@ -1142,8 +1143,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[first-touch-resume] sweep failed: ${err.message}`);
         }
       };
-      setTimeout(runFirstTouchHoldSweep, 90 * 1000).unref();
-      setInterval(runFirstTouchHoldSweep, 5 * 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runFirstTouchHoldSweep, 90 * 1000).unref();
+      scheduledCron.scheduleInterval(runFirstTouchHoldSweep, 5 * 60 * 1000).unref();
     }
 
     // Stranded wizard-series activation sweep (codex #3504 r6) — a worker
@@ -1171,8 +1172,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           }, { recordHealth: false });
         } catch (err) { logger.warn(`[link-registry] catch-up failed: ${err.message}`); }
       };
-      setTimeout(linkRegistryCatchup, 90 * 1000).unref();
-      setInterval(linkRegistryCatchup, 6 * 60 * 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(linkRegistryCatchup, 90 * 1000).unref();
+      scheduledCron.scheduleInterval(linkRegistryCatchup, 6 * 60 * 60 * 1000).unref();
     }
     {
       const runWizardActivationSweep = async () => {
@@ -1196,8 +1197,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[wizard-series-recovery] sweep failed: ${err.message}`);
         }
       };
-      setTimeout(runWizardActivationSweep, 2 * 60 * 1000).unref();
-      setInterval(runWizardActivationSweep, 10 * 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runWizardActivationSweep, 2 * 60 * 1000).unref();
+      scheduledCron.scheduleInterval(runWizardActivationSweep, 10 * 60 * 1000).unref();
     }
 
     // WDO report attention sweep — exception-based bell for reports stalled
@@ -1214,8 +1215,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[wdo-report-attention] sweep failed: ${err.message}`);
         }
       };
-      setTimeout(runWdoAttentionSweep, 2 * 60 * 1000).unref();
-      setInterval(runWdoAttentionSweep, 6 * 60 * 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runWdoAttentionSweep, 2 * 60 * 1000).unref();
+      scheduledCron.scheduleInterval(runWdoAttentionSweep, 6 * 60 * 60 * 1000).unref();
     }
 
     // Orphaned-photo reclaim — drains project_photo_delete_orphaned
@@ -1231,8 +1232,8 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           logger.error(`[photo-orphan-reclaim] sweep failed: ${err.message}`);
         }
       };
-      setTimeout(runPhotoOrphanReclaim, 3 * 60 * 1000).unref();
-      setInterval(runPhotoOrphanReclaim, 6 * 60 * 60 * 1000).unref();
+      scheduledCron.scheduleTimeout(runPhotoOrphanReclaim, 3 * 60 * 1000).unref();
+      scheduledCron.scheduleInterval(runPhotoOrphanReclaim, 6 * 60 * 60 * 1000).unref();
     }
 
     // Call recordings are processed by the every-5-minute scheduler.js
