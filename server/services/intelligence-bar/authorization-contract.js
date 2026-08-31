@@ -112,13 +112,36 @@ function tierFor(toolName) {
 }
 
 function humanKey(k) {
-  return String(k).replace(/_/g, ' ');
+  // snake_case and camelCase both read as words on the card.
+  return String(k).replace(/_/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
 }
 
 function scalar(v) {
   if (v === undefined || v === null) return null;
   if (typeof v === 'object') return null;
   return String(v);
+}
+
+// Render ANY curated value as a disclosure string. Nested objects and
+// arrays of objects (e.g. engineInputs.services on an estimate draft) must
+// never vanish from the contract — the card hides raw params once a
+// contract exists, so the contract is the complete disclosure.
+function describe(v, depth = 0) {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'object') return String(v);
+  if (Array.isArray(v)) {
+    const parts = v.map((x) => describe(x, depth + 1)).filter((x) => x !== null);
+    return parts.length ? parts.join(', ') : null;
+  }
+  const parts = Object.entries(v)
+    .filter(([k]) => !String(k).startsWith('_'))
+    .map(([k, x]) => {
+      const d = describe(x, depth + 1);
+      return d === null ? null : `${humanKey(k)}: ${d}`;
+    })
+    .filter((x) => x !== null);
+  if (!parts.length) return null;
+  return depth === 0 ? parts.join('; ') : `{ ${parts.join('; ')} }`;
 }
 
 // Which lane an effect line belongs to, by tool + field name. Deterministic
@@ -166,18 +189,34 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     });
   }
 
-  // Every curated display line is an effect the operator is approving.
+  // Every curated display line is an effect the operator is approving —
+  // one level of plain-object params flattens to its own lines (so an
+  // update_customer card says WHAT changes), deeper structure is described
+  // in full rather than dropped.
   for (const [k, v] of Object.entries(displayParams || {})) {
     if (k.startsWith('_')) continue;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
-        const s = scalar(v2);
+        if (String(k2).startsWith('_')) continue;
+        const s = describe(v2, 1);
         if (s !== null) push(kindFor(toolName, k2), `${humanKey(k2)}: ${s}`);
       }
       continue;
     }
-    const s = Array.isArray(v) ? (v.length ? v.map(scalar).filter(Boolean).join(', ') : null) : scalar(v);
+    const s = describe(v, 1);
     if (s !== null) push(kindFor(toolName, k), `${humanKey(k)}: ${s}`);
+  }
+
+  // Deterministic ripples the Confirm also covers (customer-email-fanout /
+  // customer-contact-fanout): an email/name/phone change syncs to other
+  // surfaces. These are mandatory disclosures — encoded as effects, not
+  // left in the free-text summary.
+  if (toolName === 'update_customer' && params?.updates?.email) {
+    push('customer', require('../customer-email-fanout').EMAIL_FANOUT_DISCLOSURE);
+  }
+  if (toolName === 'update_customer'
+    && (params?.updates?.first_name !== undefined || params?.updates?.last_name !== undefined || params?.updates?.phone !== undefined)) {
+    push('customer', require('../customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);
   }
 
   const notifiesCustomer = toolName === 'move_stops_to_day'

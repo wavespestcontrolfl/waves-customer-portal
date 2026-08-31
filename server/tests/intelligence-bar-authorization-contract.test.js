@@ -73,6 +73,38 @@ test('nested display params flatten one level; arrays join; nulls dropped', () =
   expect(c.effects.find((e) => e.label.startsWith('email'))?.kind).toBe('comms');
 });
 
+test('nested structures are described in full, never dropped (estimate draft services)', () => {
+  const c = buildContract({
+    toolName: 'create_pending_estimate',
+    params: {},
+    displayParams: {
+      customerName: 'acct-3001',
+      engineInputs: { services: { pest_quarterly: { tier: 'silver' }, lawn: { sqft: 4200 } }, _internal: 'x' },
+      lineItems: [{ name: 'Setup', amount: 99 }, { name: 'Mosquito', amount: 60 }],
+    },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual('services: { pest quarterly: { tier: silver }; lawn: { sqft: 4200 } }');
+  expect(labels).toContainEqual('line items: { name: Setup; amount: 99 }, { name: Mosquito; amount: 60 }');
+  expect(labels.some((l) => l.includes('internal'))).toBe(false);
+  expect(c.tier).toBe('yellow');
+});
+
+test('update_customer email/name/phone changes carry the mandatory fan-out disclosures as effects', () => {
+  const { EMAIL_FANOUT_DISCLOSURE } = require('../services/customer-email-fanout');
+  const { CONTACT_FANOUT_DISCLOSURE } = require('../services/customer-contact-fanout');
+  const c = buildContract({
+    toolName: 'update_customer',
+    params: { customer_id: 'c9', updates: { email: 'x@example.test', phone: '9415550000' } },
+    displayParams: { customer_id: 'c9', updates: { email: 'x@example.test', phone: '9415550000' } },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual(EMAIL_FANOUT_DISCLOSURE);
+  expect(labels).toContainEqual(CONTACT_FANOUT_DISCLOSURE);
+  const only = buildContract({ toolName: 'update_customer', params: { updates: { notes: 'gate code 1234' } }, displayParams: { updates: { notes: 'gate code 1234' } } });
+  expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
+});
+
 test('hash is order-independent and sensitive to any effect change', () => {
   const a = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { appointment_id: 'ap1', reason: 'rain' } });
   const b = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { reason: 'rain', appointment_id: 'ap1' } });
