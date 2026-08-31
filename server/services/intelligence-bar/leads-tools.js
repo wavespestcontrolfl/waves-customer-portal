@@ -526,11 +526,25 @@ async function updateLeadStatus(input) {
   // (and liveness), so a concurrent transition between the SELECT above and
   // this statement matches zero rows instead of being overwritten — the
   // _expected_status pre-check alone cannot close that race (codex P1).
-  const updatedRows = await db('leads')
-    .where('id', lead.id)
-    .where('status', oldStatus)
-    .whereNull('deleted_at')
-    .update(updates, ['id']);
+  // The activity-history entry commits WITH the status change (GH r14 P2):
+  // the card promises the audit entry, and the claimed card cannot be
+  // retried — a failed insert must roll the whole transition back rather
+  // than leave a changed status with the promised entry absent.
+  const updatedRows = await db.transaction(async (trx) => {
+    const rows = await trx('leads')
+      .where('id', lead.id)
+      .where('status', oldStatus)
+      .whereNull('deleted_at')
+      .update(updates, ['id']);
+    if (!rows || rows.length === 0) return rows;
+    await trx('lead_activities').insert({
+      lead_id: lead.id,
+      activity_type: 'status_change',
+      description: `Status: ${oldStatus} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
+      performed_by: 'Intelligence Bar',
+    });
+    return rows;
+  });
   if (!updatedRows || updatedRows.length === 0) {
     return {
       error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
@@ -546,13 +560,6 @@ async function updateLeadStatus(input) {
   const funnelWarning = funnel?.reason === 'error'
     ? "Status updated, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this transition."
     : null;
-
-  await db('lead_activities').insert({
-    lead_id: lead.id,
-    activity_type: 'status_change',
-    description: `Status: ${oldStatus} → ${new_status}${lost_reason ? ` (${lost_reason})` : ''}`,
-    performed_by: 'Intelligence Bar',
-  });
 
   logger.info(`[intelligence-bar:leads] Updated lead ${lead.id} ${lead.first_name} ${lead.last_name}: ${oldStatus} → ${new_status}`);
 

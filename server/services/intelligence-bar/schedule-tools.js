@@ -184,6 +184,47 @@ function getZone(city) {
 }
 
 
+// Applies a card-approved route_order sequence under the tech-day fence —
+// shared by both optimizers' confirmed paths (GH r14 P1). Per-row CAS: each
+// write is constrained to the date and the technician the stop was READ on;
+// any miss (row moved or reassigned since) aborts the whole rewrite
+// untouched, and an approved id missing from the fresh day set refuses with
+// preview_changed.
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor }) {
+  const byId = new Map(services.map((s) => [String(s.id), s]));
+  if (approvedIds.some((id) => !byId.has(id))) {
+    return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
+  }
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  try {
+    await db.transaction(async (trx) => {
+      await lockTechDays(trx, lockKeys);
+      for (let i = 0; i < approvedIds.length; i++) {
+        const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
+        const updated = await trx('scheduled_services')
+          .where('id', approvedIds[i])
+          .where('scheduled_date', date)
+          .modify((q) => (expectTech ? q.where('technician_id', expectTech) : q.whereNull('technician_id')))
+          .update({ route_order: i + 1, updated_at: new Date() });
+        if (updated !== 1) {
+          throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+        }
+      }
+    });
+  } catch (e) {
+    if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
+    throw e;
+  }
+  logger.info(`[intelligence-bar:schedule] Applied approved route order for ${date}: ${approvedIds.length} stops`);
+  return {
+    success: true,
+    date,
+    total_stops: approvedIds.length,
+    source: 'approved_plan',
+    note: 'Applied the stop order approved on the card (not re-optimized at commit).',
+  };
+}
+
 async function optimizeAllRoutes(input) {
   const { date, confirmed } = input;
   let RouteOptimizer;
@@ -209,6 +250,21 @@ async function optimizeAllRoutes(input) {
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
   if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
+
+  // The card's approved sequence IS the plan (GH r14 P1): a confirmed run
+  // with the fingerprint-verified order applies exactly that order under
+  // the tech-day locks — never a fresh optimizer answer, which traffic, a
+  // transient API fallback, or a coordinate edit can change between the
+  // confirm preflight and here.
+  if (confirmed === true && Array.isArray(input._verified_ordered_stops) && input._verified_ordered_stops.length) {
+    return applyApprovedRouteOrder({
+      date,
+      approvedIds: input._verified_ordered_stops.map(String),
+      services,
+      lockKeys: services.map((s) => ({ techId: s.technician_id, date })),
+      expectTechFor: (s) => s.technician_id || null,
+    });
+  }
 
   const result = await RouteOptimizer.optimizeRoute(
     stopsWithCoords.map(s => ({
@@ -320,6 +376,19 @@ async function optimizeTechRoute(input) {
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
   if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
 
+  // Approved-plan application — same contract as optimize_all_routes above
+  // (GH r14 P1).
+  if (confirmed === true && Array.isArray(input._verified_ordered_stops) && input._verified_ordered_stops.length) {
+    const applied = await applyApprovedRouteOrder({
+      date,
+      approvedIds: input._verified_ordered_stops.map(String),
+      services,
+      lockKeys: [{ techId: tech.id, date }],
+      expectTechFor: () => tech.id,
+    });
+    return applied.success ? { ...applied, tech: tech.name } : applied;
+  }
+
   const result = await RouteOptimizer.optimizeRoute(
     stopsWithCoords.map(s => ({
       id: s.id, lat: parseFloat(s.lat), lng: parseFloat(s.lng),
@@ -403,6 +472,11 @@ async function assignTechnician(input) {
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
       'scheduled_services.technician_id as current_tech_id',
+      // Grouped-visit membership rides the preview (GH r14 P1): the
+      // post-commit seam can adopt the new technician for the whole visit
+      // or detach the child — effects the card must disclose, and a
+      // membership change during the pending window must drift.
+      'scheduled_services.visit_id',
       // Canonical YYYY-MM-DD for the tech-day fence key — a JS Date
       // stringified any other way builds a key that never collides with the
       // other lock holders' keys (see tech-day-lock.js).
@@ -418,6 +492,7 @@ async function assignTechnician(input) {
     service_type: s.service_type,
     scheduled_date: s.scheduled_date,
     current_tech: s.current_tech_name || 'Unassigned',
+    ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
   }));
 
   if (confirmed !== true) {
@@ -449,7 +524,11 @@ async function assignTechnician(input) {
         // approved one.
         return !a
           || String(a.current_tech || 'Unassigned') !== String(s.current_tech_name || 'Unassigned')
-          || approvedDateStr(a.scheduled_date) !== s.scheduled_date_str;
+          || approvedDateStr(a.scheduled_date) !== s.scheduled_date_str
+          // Grouped membership binds too (GH r14 P1): a stop that joined,
+          // left, or switched grouped visits after the card was shown gets
+          // seam effects (visit adoption/detach) the card never disclosed.
+          || String(a.grouped_visit_id || '') !== String(s.visit_id || '');
       });
     if (drifted) {
       return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
@@ -478,14 +557,17 @@ async function assignTechnician(input) {
       const live = await trx('scheduled_services')
         .whereIn('id', serviceIds)
         .forUpdate()
-        .select('id', 'technician_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
+        .select('id', 'technician_id', 'visit_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
       const liveById = new Map(live.map((r) => [String(r.id), r]));
       const changed = live.length !== services.length
         || services.some((s) => {
           const l = liveById.get(String(s.id));
           return !l
             || String(l.technician_id || '') !== String(s.current_tech_id || '')
-            || l.scheduled_date_str !== s.scheduled_date_str;
+            || l.scheduled_date_str !== s.scheduled_date_str
+            // Same grouped-membership bind as the pre-lock compare (GH r14
+            // P1) — asserted on the rows the UPDATE itself will touch.
+            || String(l.visit_id || '') !== String(s.visit_id || '');
         });
       if (changed) {
         const err = new Error('assign_set_changed');
@@ -522,11 +604,18 @@ async function assignTechnician(input) {
   // itself — a reassigned child whose tech now conflicts with its visit
   // detaches (or the visit adopts, per the helper's rules). Post-commit,
   // best-effort, no-op for ungrouped rows.
+  let groupWarning = null;
   try {
     const { handleChildStopChanged } = require('../visit-groups');
     for (const sid of serviceIds) await handleChildStopChanged(sid);
   } catch (vgErr) {
     logger.warn(`[intelligence-bar:schedule] visit-group seam failed after assign: ${vgErr.message}`);
+    // The card disclosed the grouped-visit adoption/detach for grouped
+    // stops — a failed repair leaves stale group state and must surface,
+    // never a bare Done (GH r14).
+    if (services.some((s) => s.visit_id)) {
+      groupWarning = 'Assigned, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit assignment; re-check the affected visits on the schedule.';
+    }
   }
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
@@ -536,6 +625,7 @@ async function assignTechnician(input) {
     assigned_count: count,
     technician: tech.name,
     stops,
+    ...(groupWarning ? { warning: groupWarning } : {}),
   };
 }
 

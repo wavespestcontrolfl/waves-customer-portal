@@ -470,6 +470,22 @@ test('reschedule_appointment: sole-open-member grouped visit discloses detach/di
   expect(appointmentPinFingerprint({ ...pin, visit_id: 'v1' })).not.toBe(appointmentPinFingerprint(pin));
 });
 
+test('assign_technician: grouped stops disclose the visit-membership seam effect (GH r14 P1)', () => {
+  const mk = (grouped) => buildContract({
+    toolName: 'assign_technician',
+    params: { service_ids: ['s1'], technician_name: 'Adam' },
+    displayParams: { technician_name: 'Adam' },
+    preview: { proposal: true, stops: [{ id: 's1', customer: 'acct-7001', current_tech: 'Unassigned', ...(grouped ? { grouped_visit_id: 'v1' } : {}) }] },
+  });
+  expect(mk(true).effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/belong to grouped visits/));
+  expect(mk(false).effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
+});
+
+test('unit-only address edit (address_line2) carries the address fan-out disclosure (GH r14 P2)', () => {
+  const c = buildContract({ toolName: 'update_customer', params: { customer_id: 'c9', updates: { address_line2: 'Unit 4B' } }, displayParams: { customer_id: 'c9', updates: { address_line2: 'Unit 4B' } } });
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Address change also clears saved coordinates/));
+});
+
 test('lead status derived effects: the funnel advance is conditional, never promised (GH r13 P2)', () => {
   const c = buildContract({
     toolName: 'update_lead_status',

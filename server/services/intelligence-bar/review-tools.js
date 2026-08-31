@@ -448,6 +448,11 @@ async function triggerReviewRequest(input) {
     const request = await ReviewService.create({
       customerId: customer.id,
       triggeredBy: 'intelligence_bar',
+      // The approved phone rides to the FINAL recipient read (GH r14 P1):
+      // sendSMS re-resolves the recipient from a fresh customer load, so
+      // the pre-create check above cannot cover a phone changed after it —
+      // the sender itself refuses the drifted number.
+      expectedPhone: input._pinned_phone || null,
     });
     const fresh = await db('review_requests').where({ id: request.id }).first().catch(() => null);
     const status = fresh?.status || request.status || 'pending';
@@ -471,6 +476,9 @@ async function triggerReviewRequest(input) {
       }),
     };
   } catch (err) {
+    if (err && err.code === 'approved_phone_drift') {
+      return { error: 'The review-request recipient changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+    }
     return { error: `Failed to create review request: ${err.message}` };
   }
 }

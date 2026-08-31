@@ -2350,11 +2350,17 @@ async function rescheduleAppointment(input) {
   // Visit-group seam (visit-group-scope.md §2; codex #3590 r11): this
   // writer moves the date/window directly (not via the rebooker), so it
   // repairs grouped membership itself. Runs LAST, after every query this
-  // tool issues for its own result. Best-effort, no-op for ungrouped rows.
+  // tool issues for its own result. Best-effort, no-op for ungrouped rows —
+  // but for a GROUPED row the card promised the detach/dissolve, so a
+  // failed repair surfaces as a warning, never a bare Done (GH r14 P2).
+  let groupWarning = null;
   try {
     await require('../visit-groups').handleChildStopChanged(appointment_id);
   } catch (vgErr) {
     logger.warn(`[intelligence-bar] visit-group seam failed for ${appointment_id}: ${vgErr.message}`);
+    if (appt.visit_id) {
+      groupWarning = 'The move committed, but repairing grouped-visit membership failed — the visit may still list this service at the old stop; re-check the visit on the schedule.';
+    }
   }
 
   return {
@@ -2365,9 +2371,10 @@ async function rescheduleAppointment(input) {
     new_date: dateStr,
     service_type: appt.service_type,
     // ONE warning key (card renders result.warning only): advisory overlap
-    // note + lifecycle-cleanup failure COMBINE, never overwrite.
-    ...(overlapAdvisory || lifecycleWarning
-      ? { warning: [overlapAdvisory, lifecycleWarning].filter(Boolean).join(' ') }
+    // note + lifecycle-cleanup + group-repair failures COMBINE, never
+    // overwrite.
+    ...(overlapAdvisory || lifecycleWarning || groupWarning
+      ? { warning: [overlapAdvisory, lifecycleWarning, groupWarning].filter(Boolean).join(' ') }
       : {}),
   };
 }

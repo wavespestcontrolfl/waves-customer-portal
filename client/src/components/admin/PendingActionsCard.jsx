@@ -64,14 +64,14 @@ function ContractView({ contract, dark }) {
   const red = contract.tier === "red";
   const tierStyle = dark
     ? {
-        display: "inline-block", padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+        display: "inline-block", padding: "2px 8px", borderRadius: 6, fontSize: 14, fontWeight: 600,
         background: red ? `${D.red}22` : `${D.amber}22`, color: red ? D.red : D.amber,
         border: `1px solid ${red ? D.red : D.amber}55`,
       }
     : undefined;
   const tierClass = dark
     ? undefined
-    : `inline-block px-2 py-0.5 rounded-sm text-[12px] font-semibold border ${
+    : `inline-block px-2 py-0.5 rounded-sm text-[14px] font-semibold border ${
         red ? "border-alert-fg text-alert-fg" : "border-zinc-400 text-zinc-700"
       }`;
   return (
@@ -80,22 +80,22 @@ function ContractView({ contract, dark }) {
         className={dark ? undefined : "flex items-center gap-2 mb-1.5 flex-wrap"}>
         <span style={tierStyle} className={tierClass}>{TIER_LABEL[contract.tier] || contract.tier}</span>
         {contract.irreversible && (
-          <span style={dark ? { fontSize: 12, color: D.red, fontWeight: 500 } : undefined}
-            className={dark ? undefined : "text-[12px] text-alert-fg font-medium"}>
+          <span style={dark ? { fontSize: 14, color: D.red, fontWeight: 500 } : undefined}
+            className={dark ? undefined : "text-[14px] text-alert-fg font-medium"}>
             Cannot be undone
           </span>
         )}
         {contract.notifies_customer && (
-          <span style={dark ? { fontSize: 12, color: D.amber, fontWeight: 500 } : undefined}
-            className={dark ? undefined : "text-[12px] text-zinc-700 font-medium"}>
+          <span style={dark ? { fontSize: 14, color: D.amber, fontWeight: 500 } : undefined}
+            className={dark ? undefined : "text-[14px] text-zinc-700 font-medium"}>
             Contacts the customer
           </span>
         )}
       </div>
       {groupEffects(contract.effects).map(([kind, items]) => (
         <div key={kind} style={dark ? { marginBottom: 6 } : undefined} className={dark ? undefined : "mb-1.5"}>
-          <div style={dark ? { fontSize: 12, color: D.muted, textTransform: "uppercase", letterSpacing: "0.04em" } : undefined}
-            className={dark ? undefined : "text-[12px] text-zinc-500 uppercase tracking-wide"}>
+          <div style={dark ? { fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.04em" } : undefined}
+            className={dark ? undefined : "text-[14px] text-zinc-500 uppercase tracking-wide"}>
             {KIND_LABEL[kind] || kind}
           </div>
           {items.map((e, i) => (
@@ -110,13 +110,13 @@ function ContractView({ contract, dark }) {
         // Complete text of every capped/overflow line — nothing the operator
         // approves is hidden; the summary above is just the short form.
         <details style={dark ? { marginTop: 4 } : undefined} className={dark ? undefined : "mt-1"}>
-          <summary style={dark ? { fontSize: 13, color: D.teal, cursor: "pointer" } : undefined}
-            className={dark ? undefined : "text-[13px] text-zinc-700 cursor-pointer underline"}>
+          <summary style={dark ? { fontSize: 14, color: D.teal, cursor: "pointer" } : undefined}
+            className={dark ? undefined : "text-[14px] text-zinc-700 cursor-pointer underline"}>
             Show more ({contract.more_effects.length} full detail{contract.more_effects.length > 1 ? "s" : ""})
           </summary>
           {contract.more_effects.map((e, i) => (
-            <div key={`more-${i}`} style={dark ? { fontSize: 13, color: D.text, wordBreak: "break-word", marginTop: 4 } : undefined}
-              className={dark ? undefined : "text-[13px] text-zinc-800 break-words mt-1"}>
+            <div key={`more-${i}`} style={dark ? { fontSize: 14, color: D.text, wordBreak: "break-word", marginTop: 4 } : undefined}
+              className={dark ? undefined : "text-[14px] text-zinc-800 break-words mt-1"}>
               • {e.label}
             </div>
           ))}

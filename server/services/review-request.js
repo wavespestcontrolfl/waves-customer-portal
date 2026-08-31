@@ -480,6 +480,7 @@ const ReviewService = {
     customerId,
     serviceRecordId,
     triggeredBy = "auto",
+    expectedPhone = null,
     delayMinutes,
     locationId,
     techName: overrideTechName,
@@ -542,7 +543,13 @@ const ReviewService = {
       if (!gate.allowed && !(gate.outcome === "already_queued" && gate.queuedId === existing.id)) {
         throw gateError(gate);
       }
-      await this.sendSMS(existing.id);
+      const resendOutcome = await this.sendSMS(existing.id, { expectedPhone });
+      if (resendOutcome && resendOutcome.suppressed === "approved_phone_drift") {
+        throw Object.assign(
+          new Error("The review-request recipient changed after the card was shown — nothing was sent."),
+          { statusCode: 409, code: "approved_phone_drift" },
+        );
+      }
       return (
         (await db("review_requests").where({ id: existing.id }).first()) ||
         existing
@@ -640,7 +647,13 @@ const ReviewService = {
     );
 
     if (shouldSendImmediately) {
-      await this.sendSMS(request.id);
+      const outcome = await this.sendSMS(request.id, { expectedPhone });
+      if (outcome && outcome.suppressed === "approved_phone_drift") {
+        throw Object.assign(
+          new Error("The review-request recipient changed after the card was shown — nothing was sent."),
+          { statusCode: 409, code: "approved_phone_drift" },
+        );
+      }
     }
 
     return request;
@@ -1367,7 +1380,7 @@ const ReviewService = {
   /**
    * Send the review request SMS.
    */
-  async sendSMS(requestId) {
+  async sendSMS(requestId, { expectedPhone = null } = {}) {
     const request = await db("review_requests")
       .where({ id: requestId })
       .first();
@@ -1408,6 +1421,17 @@ const ReviewService = {
     // falls back to the billing phone when no service contact is configured.
     const { getServiceContactSmsRecipient } = require("./customer-contact");
     const contact = getServiceContactSmsRecipient(customer);
+    // W0B pinned recipient at the FINAL recipient read (GH r14 P1): an
+    // operator-confirmed card promised a specific number, and this reload
+    // re-resolves the recipient — a phone changed between the card's
+    // preflight and here must suppress, never send the irreversible SMS to
+    // a number the operator did not approve. Only in-process confirmed
+    // sends pass expectedPhone; the scheduler's deferred batch does not.
+    if (expectedPhone && contact.phone && String(contact.phone) !== String(expectedPhone)) {
+      await db("review_requests").where({ id: requestId }).update({ status: "suppressed" }).catch(() => {});
+      logger.info(`[review] Suppressed request (requestId=${requestId} reason=approved-phone-drift)`);
+      return { suppressed: "approved_phone_drift" };
+    }
     if (!contact.phone) {
       // No consented SMS recipient (e.g. unstamped contact phone and no
       // primary phone): mark the row so the scheduler's 20-row batch can't

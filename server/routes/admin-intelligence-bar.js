@@ -2610,8 +2610,19 @@ router.post('/confirm-action', async (req, res, next) => {
         }
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
-        // under its locks (swap_tech_assignments). `_`-prefixed: never shown.
-        if (livePreview?.stops) execParams._verified_stops = livePreview.stops;
+        // under its locks (swap_tech_assignments, assign_technician).
+        // `_`-prefixed: never shown. Arrays only (GH r14): the tech-route
+        // optimizer's `stops` is a bare count, not a set.
+        if (Array.isArray(livePreview?.stops)) execParams._verified_stops = livePreview.stops;
+        // Route optimizers (GH r14 P1): the verified preview's ordered
+        // sequence IS the approved plan — hand the ordered ids to the
+        // executor so it applies THAT order under the tech-day locks
+        // instead of re-running the traffic-aware optimizer, whose fresh
+        // answer can differ from what the card showed.
+        if ((action.tool_name === 'optimize_all_routes' || action.tool_name === 'optimize_tech_route')
+          && Array.isArray(livePreview?.ordered_stops) && livePreview.ordered_stops.length) {
+          execParams._verified_ordered_stops = livePreview.ordered_stops.map((s) => String(s.id));
+        }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate
         // row lock (GH r10 P2) — the stable engine key would still match a

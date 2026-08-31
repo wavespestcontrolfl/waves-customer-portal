@@ -194,7 +194,10 @@ function kindFor(toolName, key) {
  *  - preview: the proposal-time preview (pins, before/after where known)
  */
 const CUSTOMER_UPDATE_TOOL_NAMES = new Set(['update_customer', 'bulk_update_customers']);
-const ADDRESS_UPDATE_KEYS = ['address_line1', 'city', 'state', 'zip'];
+// address_line2 included (GH r14 P2): a unit/apartment-only edit runs the
+// same executor fan-out (addressSubmitted in both customer executors), so
+// it carries the same derived-effect disclosure.
+const ADDRESS_UPDATE_KEYS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 
 // Derived writes the lead-status executors perform BESIDE the status column
 // (GH r10 P2): the transition mirrors onto the lead's ad_service_attribution
@@ -358,6 +361,19 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (rewindStops.length) {
       const who = rewindStops.map((st) => String(st.customer || st.id)).join(', ');
       push('operational', `Clears stale tracker evidence on ${rewindStops.length} stop(s) — ${who}: tracker state is released and cleanup runs (no status change)`);
+    }
+  }
+  // Grouped stops in a reassignment get seam effects beyond the tech column
+  // (GH r14 P1): after commit the visit-group seam either adopts the new
+  // technician for the whole visit or detaches the child from its visit,
+  // per the group's rules. Membership rides the fingerprinted preview
+  // (grouped_visit_id), so joining/leaving a group mid-pending is drift,
+  // and the executor re-asserts it pre-lock and under the tech-day locks.
+  if (toolName === 'assign_technician' && Array.isArray(preview?.stops)) {
+    const grouped = preview.stops.filter((st) => st && st.grouped_visit_id);
+    if (grouped.length) {
+      const who = grouped.map((st) => String(st.customer || st.id)).join(', ');
+      push('operational', `${grouped.length} stop(s) belong to grouped visits — ${who}: the reassignment also updates grouped-visit membership (the visit adopts the new technician, or the stop detaches from its visit, per the group's rules; a failed repair surfaces as a warning)`);
     }
   }
   // Receiving a restock also re-runs the WaveGuard lawn-readiness recheck,
