@@ -299,3 +299,70 @@ test('hash is order-independent and sensitive to any effect change', () => {
   expect(contractHash(a)).not.toBe(contractHash(c));
   expect(contractHash(a)).toMatch(/^[0-9a-f]{64}$/);
 });
+
+test('move_stops_to_day: a live stop discloses the field-workflow reset, and its status binds the fingerprint (codex r7)', () => {
+  const mk = (status) => buildContract({
+    toolName: 'move_stops_to_day',
+    params: { new_date: '2026-09-03' },
+    displayParams: { new_date: '2026-09-03', notify_customers: false },
+    preview: {
+      proposal: true,
+      stop_count: 2,
+      stops: [
+        { id: 's1', customer: 'acct-9001', city: 'Venice', service_type: 'pest_control', status: 'confirmed', old_date: '2026-09-01', new_date: '2026-09-03' },
+        { id: 's2', customer: 'acct-9002', city: 'Venice', service_type: 'pest_control', status, old_date: '2026-09-01', new_date: '2026-09-03' },
+      ],
+    },
+  });
+  const live = mk('on_site');
+  expect(live.effects.map((e) => e.label)).toContainEqual(expect.stringContaining('Ends the active field workflow for 1 live stop(s) — acct-9002 (on_site)'));
+  const calm = mk('confirmed');
+  expect(calm.effects.some((e) => e.label.includes('Ends the active field workflow'))).toBe(false);
+  // The stop status rides the preview, so going live during the pending
+  // window is fingerprint drift — confirm refuses, never a silent reset.
+  expect(live.preview_fingerprint).toBeDefined();
+  expect(live.preview_fingerprint).not.toBe(calm.preview_fingerprint);
+});
+
+test('update_restock_request: receive discloses the readiness-alert recheck; cancel does not (codex r7)', () => {
+  const receive = buildContract({
+    toolName: 'update_restock_request',
+    params: { request_id: 'r1', action: 'receive' },
+    displayParams: { request_id: 'r1', action: 'receive' },
+    preview: { preview: true, action: 'receive', new_status: 'received', stock_before: 2, adds: 3, stock_after: 5 },
+  });
+  expect(receive.effects.map((e) => e.label)).toContainEqual(expect.stringContaining('re-checks WaveGuard lawn-protocol readiness'));
+  const cancel = buildContract({
+    toolName: 'update_restock_request',
+    params: { request_id: 'r1', action: 'cancel' },
+    displayParams: { request_id: 'r1', action: 'cancel' },
+    preview: { preview: true, action: 'cancel', new_status: 'cancelled' },
+  });
+  expect(cancel.effects.some((e) => e.label.includes('lawn-protocol readiness'))).toBe(false);
+});
+
+test('bulk_update_customers: every pinned customer name rides Show more and the id list is fingerprinted order-independently (codex r7)', () => {
+  const ids = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+  const c = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ids, updates: { city: 'Venice' } },
+    displayParams: { customer_ids: ids, updates: { city: 'Venice' } },
+    preview: { all_customer_names: ['acct-9001', 'acct-9002'] },
+  });
+  expect(c.effects.map((e) => e.label)).toContainEqual('All 2 customer names are listed under "Show more"');
+  expect((c.more_effects || []).map((e) => e.label)).toEqual(expect.arrayContaining(['acct-9001', 'acct-9002']));
+  expect(c.targets_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  const swapped = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: [...ids].reverse(), updates: { city: 'Venice' } },
+    displayParams: { customer_ids: [...ids].reverse(), updates: { city: 'Venice' } },
+    preview: { all_customer_names: ['acct-9002', 'acct-9001'] },
+  });
+  expect(swapped.targets_fingerprint).toBe(c.targets_fingerprint);
+});
+
+test('the proposal terminal set matches the executor: rescheduled visits stay movable (codex r7)', () => {
+  const { TERMINAL_APPOINTMENT_STATUSES } = require('../services/intelligence-bar/proposal-pins');
+  expect(TERMINAL_APPOINTMENT_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show']);
+  expect(TERMINAL_APPOINTMENT_STATUSES).not.toContain('rescheduled');
+});

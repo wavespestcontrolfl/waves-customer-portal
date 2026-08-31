@@ -280,7 +280,25 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
   }
-  for (const [kind, label] of JOB_EFFECTS[toolName] || []) push(kind, label);
+  // A live (en_route/on_site) stop in a bulk move is more than a date move —
+  // the commit resets it to confirmed, releases technician/tracker state,
+  // and appends lifecycle history (codex r7 on #3648; same disclosure the
+  // single-visit reschedule card carries). The stop statuses ride in the
+  // preview, so the two-step fingerprint also binds them.
+  if (toolName === 'move_stops_to_day' && Array.isArray(preview?.stops)) {
+    const liveStops = preview.stops.filter((st) => st && (st.status === 'en_route' || st.status === 'on_site'));
+    if (liveStops.length) {
+      const who = liveStops.map((st) => `${st.customer || st.id} (${st.status})`).join(', ');
+      push('operational', `Ends the active field workflow for ${liveStops.length} live stop(s) — ${who}: status resets to confirmed, technician/tracker state is released, lifecycle history is appended`);
+    }
+  }
+  // Receiving a restock also re-runs the WaveGuard lawn-readiness recheck,
+  // which can resolve or rewrite open lawn_protocol_readiness rows in the
+  // Command Center (codex r7 on #3648) — a conditional alert write the
+  // operator is approving, so it must be on the card.
+  if (toolName === 'update_restock_request' && params?.action === 'receive') {
+    push('operational', 'Receiving also re-checks WaveGuard lawn-protocol readiness: open readiness alerts in the Command Center may be resolved or rewritten by that recheck (runs after the stock commit; a recheck failure is reported, never silent)');
+  }
   if (toolName === 'cancel_appointment' && preview?.cancellation) {
     // The follow-through's money effects, from the rails' own previews.
     const c = preview.cancellation;
@@ -331,6 +349,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'bulk_update_leads' && Array.isArray(preview?.all_names) && preview.all_names.length) {
     for (const n of preview.all_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_names.length} lead names are listed under "Show more"`);
+  }
+  // Bulk customer update: same rule (codex r7 on #3648) — the card hides
+  // raw params once a contract exists, so opaque UUIDs alone would leave
+  // the operator unable to tell WHO gets edited. The route resolves every
+  // pinned id to a name (fail-closed) and the full list rides here.
+  if (toolName === 'bulk_update_customers' && Array.isArray(preview?.all_customer_names) && preview.all_customer_names.length) {
+    for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
+    push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
@@ -441,6 +467,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)
       ? { targets_fingerprint: crypto.createHash('sha256').update(JSON.stringify([...params.lead_ids].map(String).sort())).digest('hex') }
+      : {}),
+    ...(toolName === 'bulk_update_customers' && Array.isArray(params?.customer_ids)
+      ? { targets_fingerprint: crypto.createHash('sha256').update(JSON.stringify([...params.customer_ids].map(String).sort())).digest('hex') }
       : {}),
     // Proposal-time pins the confirm re-checks (recipient phone/email,
     // appointment state) also bind the hash so the card can't drift.

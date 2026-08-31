@@ -486,7 +486,7 @@ async function assignTechnician(input) {
 // (en_route/on_site) rows ARE movable, but the move must rewind the tracker
 // lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival timestamps
 // don't survive onto the new date.
-const TERMINAL_MOVE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+const TERMINAL_MOVE_STATUSES = new Set(require('./proposal-pins').TERMINAL_APPOINTMENT_STATUSES);
 const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
 async function moveStopsToDay(input) {
@@ -577,6 +577,12 @@ async function moveStopsToDay(input) {
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
     city: s.city,
     service_type: s.service_type,
+    // Lifecycle state rides in the preview (codex r7 on #3648): a live
+    // (en_route/on_site) stop is more than a date move — the commit resets
+    // it to confirmed and releases tech/tracker state — so the card must
+    // disclose it, and the two-step fingerprint must bind it (a stop going
+    // live during the pending window is drift, not a silent workflow kill).
+    status: s.status,
     old_date: s.scheduled_date,
     new_date: dateStr,
   }));

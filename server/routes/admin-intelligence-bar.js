@@ -523,7 +523,10 @@ function operatorAdjustmentCardLine(adj) {
 // card, hashed into the contract, and re-resolved by /confirm-action —
 // drift ⇒ preview_changed, never a commit against a target the operator
 // didn't see.
-const TERMINAL_APPOINTMENT_STATUSES_FOR_PINS = ['completed', 'cancelled', 'no_show', 'skipped', 'rescheduled'];
+// The executor's OWN terminal set (codex r7 on #3648): 'rescheduled' is a
+// valid, still-movable status there — listing it here as terminal refused
+// every re-move of an already-rescheduled visit that the executor accepts.
+const TERMINAL_APPOINTMENT_STATUSES_FOR_PINS = require('../services/intelligence-bar/proposal-pins').TERMINAL_APPOINTMENT_STATUSES;
 
 async function loadAppointmentPin(appointmentId) {
   const a = await db('scheduled_services as ss')
@@ -977,6 +980,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         return { failed: true, modelResult: { error: 'Could not load every matched lead for the confirmation card — narrow the criteria and retry.' } };
       }
       preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action, all_names: allNames };
+    }
+    if (toolUse.name === 'bulk_update_customers') {
+      // Name every pinned target (codex r7 on #3648): the card hides raw
+      // params once a contract exists, so `customer_ids` alone left the
+      // operator approving opaque UUIDs. Resolve each id NOW, FAIL CLOSED
+      // if any doesn't load (same rule as bulk_update_leads all_names) —
+      // a wrong-id selection must be visible before Confirm, and the
+      // contract carries a fingerprint of the full id list.
+      const ids = Array.isArray(params.customer_ids) ? params.customer_ids.map(String) : [];
+      if (!ids.length) {
+        return { failed: true, modelResult: { error: 'customer_ids is empty — nothing to update.' } };
+      }
+      // Shape-validate before querying: a malformed id in whereIn on a uuid
+      // column is a raw PG cast error (500), not a clean refusal.
+      if (ids.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+        return { failed: true, modelResult: { error: 'One or more customer_ids are not valid ids — nothing was proposed.' } };
+      }
+      const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
+      const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
+      const missing = ids.filter((id) => !nameById.has(id));
+      if (missing.length) {
+        return { failed: true, modelResult: { error: `${missing.length} of the listed customer ids do not resolve — nothing was proposed. Re-select the customers and retry.` } };
+      }
+      preview = { ...preview, all_customer_names: ids.map((id) => nameById.get(id)) };
     }
     // create_pending_estimate with an operator price adjustment: the Confirm
     // card must show the engine anchor vs adjusted totals and any floor

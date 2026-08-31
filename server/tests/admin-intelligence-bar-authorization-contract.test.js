@@ -14,6 +14,7 @@ const mockClaimForConfirm = jest.fn();
 const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
+const mockDbWhereInSelect = jest.fn(async () => []);
 const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
@@ -25,7 +26,10 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
 })));
 
-jest.mock('../models/db', () => jest.fn(() => ({ insert: mockDbInsert })));
+jest.mock('../models/db', () => jest.fn(() => ({
+  insert: mockDbInsert,
+  whereIn: (...whereArgs) => ({ select: () => mockDbWhereInSelect(...whereArgs) }),
+})));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   getBreaker: jest.fn(() => ({
@@ -574,6 +578,60 @@ describe('W0B id-shaped proposals pin like name-shaped ones (codex r3)', () => {
       expect(stored.params._expected_status).toBe('contacted');
       expect(stored.contract.effects).toContainEqual(expect.objectContaining({ label: 'Lead acct 2077: status contacted → won', before: 'contacted', after: 'won' }));
       expect(body.pendingActions[0].params.lead).toBe('acct 2077 — contacted → won');
+    });
+  });
+});
+
+describe('W0B bulk_update_customers names every pinned target (codex r7)', () => {
+  const IDS = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'bulk_update_customers', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+
+  test('all ids resolve: full name list rides the contract with a targets fingerprint', async () => {
+    mockDbWhereInSelect.mockResolvedValue([
+      { id: IDS[0], first_name: 'acct', last_name: '9001' },
+      { id: IDS[1], first_name: 'acct', last_name: '9002' },
+    ]);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_customers', input: { customer_ids: IDS, updates: { city: 'Venice' } } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'update them', context: 'customers' });
+      expect(mockDbWhereInSelect).toHaveBeenCalledWith('id', IDS);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.contract.effects.map((e) => e.label)).toContainEqual('All 2 customer names are listed under "Show more"');
+      expect((stored.contract.more_effects || []).map((e) => e.label)).toEqual(expect.arrayContaining(['acct 9001', 'acct 9002']));
+      expect(stored.contract.targets_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
+  test('an unresolvable id FAILS CLOSED: refused at proposal, nothing pinned', async () => {
+    mockDbWhereInSelect.mockResolvedValue([{ id: IDS[0], first_name: 'acct', last_name: '9001' }]);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_customers', input: { customer_ids: IDS, updates: { city: 'Venice' } } }],
+      [{ type: 'text', text: 'Could not propose.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'update them', context: 'customers' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect((body.pendingActions || []).length).toBe(0);
+    });
+  });
+
+  test('a malformed id never reaches the uuid column: clean refusal, no query', async () => {
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_customers', input: { customer_ids: ['not-a-uuid'], updates: { city: 'Venice' } } }],
+      [{ type: 'text', text: 'Could not propose.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'update them', context: 'customers' });
+      expect(mockDbWhereInSelect).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
     });
   });
 });

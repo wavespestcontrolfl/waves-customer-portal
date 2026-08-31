@@ -1592,8 +1592,9 @@ async function updatePropertyAccess(input) {
 }
 
 
-// Terminal scheduled_services statuses — one-way; never movable.
-const TERMINAL_APPOINTMENT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+// Terminal scheduled_services statuses — one-way; never movable. Shared
+// with the route's proposal guard via proposal-pins (codex r7 on #3648).
+const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 // Live tracker-lifecycle statuses — movable, but the move must rewind the
 // tracker lifecycle (rebooker LIVE_LIFECYCLE_RESET) so stale arrival
 // timestamps don't survive onto the new date.

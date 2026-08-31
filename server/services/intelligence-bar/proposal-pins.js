@@ -11,6 +11,13 @@
 
 const crypto = require('crypto');
 
+// Terminal scheduled_services statuses — one-way; never movable. Owned here
+// (the shared leaf both the route and the executors load, mocks never
+// replace it) so the proposal guard and the executor can NEVER disagree:
+// codex r7 on #3648 caught the route listing 'rescheduled' as terminal
+// while the executor deliberately allows re-moving such visits.
+const TERMINAL_APPOINTMENT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+
 function sha(parts) {
   return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
@@ -67,4 +74,4 @@ function priceApprovalFingerprint(a) {
   ]);
 }
 
-module.exports = { normalizeAppointmentPin, appointmentPinFingerprint, priceApprovalFingerprint, emailPinFingerprint };
+module.exports = { normalizeAppointmentPin, appointmentPinFingerprint, priceApprovalFingerprint, emailPinFingerprint, TERMINAL_APPOINTMENT_STATUSES };
