@@ -1265,8 +1265,17 @@ function selectAutonomousVersusPlan(now = new Date()) {
 // milestonePublishBlocker): a versus draft can sit in the queue past its
 // pair's season window, and publishing it then is exactly the stale
 // off-season content the gate exists to prevent. Null = publishable.
+//
+// Seasonality is resolved from the CANONICAL bank by key, never from the
+// stored pair: run.input is a JSON snapshot frozen at selection, so a draft
+// created before `months` existed carries a pair object without it, and
+// trusting that snapshot would wave an off-season card straight through.
+// Keying off the bank also means editing a pair's season applies to drafts
+// already queued.
 function versusPublishBlocker(input, now = new Date()) {
-  const months = input?.versusPair?.months;
+  const key = input?.versusPair?.key;
+  if (!key) return null;
+  const months = PEST_VERSUS_PAIRS.find((p) => p.key === key)?.months;
   if (!Array.isArray(months) || !months.length) return null;
   if (months.includes(etParts(now).month)) return null;
   return 'versus pair is out of season — reject this draft so the lane can regenerate';

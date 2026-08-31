@@ -516,6 +516,30 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(Studio.versusPublishBlocker({}, etNoon('2026-08-14'))).toBeNull();
   });
 
+  test('approval gate reads seasonality from the canonical bank, not the stored snapshot', () => {
+    // run.input is a JSON snapshot frozen at selection: a draft created before
+    // `months` existed stores a pair object WITHOUT it. Trusting that snapshot
+    // let a June swarmer draft publish in August (Codex finding); the guard
+    // resolves the pair by key against PEST_VERSUS_PAIRS instead.
+    const legacyDraft = {
+      versusPair: {
+        key: 'termite_swarmer_vs_winged_ant',
+        service: 'termite',
+        left: { name: 'Termite Swarmer', points: ['Straight antennae'] },
+        right: { name: 'Winged Ant', points: ['Bent antennae'] },
+        verdict: 'Wings on the windowsill? Check the waist first.',
+      },
+    };
+    expect(legacyDraft.versusPair.months).toBeUndefined(); // pre-`months` snapshot
+    expect(Studio.versusPublishBlocker(legacyDraft, etNoon('2026-08-14'))).toMatch(/out of season/);
+    expect(Studio.versusPublishBlocker(legacyDraft, etNoon('2026-03-14'))).toBeNull();
+    // A snapshot claiming a season the bank does not grant cannot self-approve.
+    const forgedDraft = { versusPair: { key: 'termite_swarmer_vs_winged_ant', months: [8] } };
+    expect(Studio.versusPublishBlocker(forgedDraft, etNoon('2026-08-14'))).toMatch(/out of season/);
+    // An unrecognized key (pair retired from the bank) is not blocked here.
+    expect(Studio.versusPublishBlocker({ versusPair: { key: 'gone_from_bank' } }, etNoon('2026-08-14'))).toBeNull();
+  });
+
   test('every pair in the bank produces drafts that pass the compliance validators', () => {
     for (const pair of Studio.PEST_VERSUS_PAIRS) {
       const drafts = Studio.buildVersusDrafts(pair, 'Sarasota');
