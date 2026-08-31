@@ -16,7 +16,8 @@
  * Enforcement (tests/lead-writer-registry.test.js, no DB): the test scans
  * server/ for every knex insert spelling — `<qb>('leads').insert(`,
  * `<qb>.table('leads').insert(`, `.into('leads')`, `insert('leads')`,
- * `batchInsert('leads'`, and the stored-builder alias form
+ * `batchInsert('leads'`, raw SQL (`INSERT INTO leads`), and the
+ * stored-builder alias form
  * (`const leads = trx('leads'); ... leads.insert(`) — and requires a 1:1
  * match with the entries below. A new insert site that is
  * not registered FAILS CI; a registered site that no longer exists (stale

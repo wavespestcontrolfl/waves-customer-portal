@@ -166,6 +166,51 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     }
   });
 
+  // Names are an explicit synthetic vocabulary, same deliberate declaration
+  // the phone/email sentinels make: adding a fixture person means adding
+  // their name HERE too, so a real customer name cannot slip in silently.
+  // Compared via namePart, so case/punctuation/hyphen variants of one name
+  // ('Sofia'/'SOFIA', 'Okonkwo-Reyes'/'Okonkwo Reyes') are one entry.
+  const SYNTHETIC_FIRST_NAMES = new Set([
+    'anneliese', 'beatrix', 'bill', 'bob', 'cornelius', 'dario', 'desmond',
+    'elizabeth', 'emeka', 'gunnar', 'harriet', 'ingrid', 'liz', 'lucian',
+    'marisol', 'meredith', 'michael', 'mike', 'ngozi', 'oluwaseun', 'petra',
+    'priyanka', 'ravindra', 'renata', 'robert', 'sofia', 'tobias', 'william',
+    'yusuf',
+  ]);
+  const SYNTHETIC_LAST_NAMES = new Set([
+    'abernathy', 'achterberg', 'adebayolindqvist', 'ashworthvane',
+    'brightwater', 'delacroixostrowski', 'fairweather', 'ferreira',
+    'halvorsen', 'havlicek', 'lindgrenamato', 'marchetti', 'moorcroft',
+    'nakagawa', 'okonkwo', 'okonkworeyes', 'ostrowski', 'pemberly',
+    'quintero', 'sandovalibsen', 'sorensen', 'szczepanik', 'tremontaine',
+    'vasquezthorne', 'vellore', 'wrencastellanos',
+  ]);
+
+  test('names come from the synthetic vocabulary; every address declares itself fictional', () => {
+    for (const c of CASES) {
+      for (const rec of [c.a, c.b]) {
+        if (rec.first_name) {
+          const ok = SYNTHETIC_FIRST_NAMES.has(namePart(rec.first_name));
+          expect({ id: c.id, first_name: rec.first_name, ok })
+            .toEqual({ id: c.id, first_name: rec.first_name, ok: true });
+        }
+        if (rec.last_name) {
+          const ok = SYNTHETIC_LAST_NAMES.has(namePart(rec.last_name));
+          expect({ id: c.id, last_name: rec.last_name, ok })
+            .toEqual({ id: c.id, last_name: rec.last_name, ok: true });
+        }
+        if (rec.address != null) {
+          // A real street can't satisfy this by shape alone, so the corpus
+          // requires each address to NAME itself invented.
+          const ok = /\b(?:fictional|imaginary)\b/i.test(String(rec.address));
+          expect({ id: c.id, address: rec.address, ok })
+            .toEqual({ id: c.id, address: rec.address, ok: true });
+        }
+      }
+    }
+  });
+
   test('no case relies on exactly one usable phone (direction-dependent in production)', () => {
     for (const c of CASES) {
       const phones = [phoneKey(c.a.phone), phoneKey(c.b.phone)].filter(Boolean).length;

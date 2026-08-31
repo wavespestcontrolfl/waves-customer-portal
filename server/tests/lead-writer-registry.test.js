@@ -38,6 +38,11 @@ const INSERT_PATTERNS = [
   /\binsert\s*\(\s*['"`]leads['"`]\s*\)/g,
   /\bbatchInsert\s*\(\s*['"`]leads['"`]/g,
   new RegExp(String.raw`\bfrom\(\s*${Q}leads${Q}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  // Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting. Word
+  // characters after `leads` (lead_activities etc.) break the \b and don't
+  // match. Also fires on a comment SAYING "insert into leads" — that's fine,
+  // registering (or rewording) it is cheaper than an unscanned writer form.
+  new RegExp(String.raw`\binsert\s+into\s+${Q}?leads\b`, 'gi'),
 ];
 
 // Aliased-builder form: a `leads` query builder stored in a variable first
@@ -121,6 +126,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['stored builder alias', "const leads = trx('leads');\nawait leads.insert({ a: 1 });"],
     ['stored table alias', "const t = db.table('leads');\nawait t.returning('id').insert({ a: 1 });"],
     ['stored withSchema table alias', "const leads = db.withSchema('public').table('leads');\nawait leads.insert({ a: 1 });"],
+    ['raw SQL insert', "await db.raw('INSERT INTO leads (name) VALUES (?)', [name]);"],
+    ['raw SQL insert, template + quoted table', 'await db.raw(`insert into "leads" (name) values (?)`, [name]);'],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
   });
@@ -129,6 +136,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['awaited read is not a builder alias', "const rows = await db('leads').where({ id });\nrows.insert = noop;"],
     ['read-only query', "const open = await db('leads').where({ status: 'new' }).select('id');"],
     ['insert into another table', "await db('lead_activities').insert({ a: 1 });"],
+    ['raw SQL insert into another table', "await db.raw('INSERT INTO lead_activities (a) VALUES (?)', [1]);"],
   ])('ignores: %s', (_name, src) => {
     expect(found(src)).toEqual([]);
   });
@@ -180,19 +188,35 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     }
   });
 
-  // The enclosing top-level statement's span: nearest column-0 opener line at
-  // or above the anchor, through the first column-0 closer at or after it.
-  // Scopes the "no paper resolvers" check to the top-level statement holding
-  // the registered insert — a function, or the containing object literal when
-  // the insert lives in a method (call-recording-processor). Coarser than a
-  // real AST scope but deterministic, and it rejects the failure Codex named:
-  // a resolver mentioned only in imports, comments, or a sibling top-level
-  // function is not evidence for THIS site.
-  function enclosingTopLevelSpan(lines, idx) {
-    let start = idx;
-    while (start > 0 && !/^[A-Za-z_$(]/.test(lines[start])) start--;
-    let end = idx;
-    while (end < lines.length - 1 && !/^[}\])]/.test(lines[end])) end++;
+  // Innermost enclosing function/method for the anchor line, by indentation:
+  // walk upward keeping the smallest indent seen; each line at a smaller
+  // indent is an enclosing construct, and the first one that reads as a
+  // function header (function decl/expr, arrow, object method — control
+  // keywords excluded) starts the span, falling back to column 0. The span
+  // ends at the first closer at or below the header's indent. eslint's
+  // enforced indentation (lint-staged) is what makes this sound without a
+  // real JS parser. Scopes the "no paper resolvers" check to the METHOD
+  // holding the registered insert — a resolver mentioned only in imports,
+  // comments, or a sibling method is not evidence for THIS site.
+  const FUNCTION_HEADER_RE = /(?:\bfunction\b|=>|^\s*(?:async\s+)?(?!if\b|for\b|while\b|switch\b|catch\b|return\b)[\w$]+\s*\([^()]*\)\s*{\s*$|^\s*[\w$]+\s*:\s*(?:async\b|function\b|\())/;
+  const indentOf = (l) => l.match(/^\s*/)[0].length;
+  function enclosingFunctionSpan(lines, idx) {
+    let threshold = indentOf(lines[idx]);
+    let start = 0;
+    for (let i = idx - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (!l.trim()) continue;
+      const ind = indentOf(l);
+      if (ind >= threshold) continue;
+      threshold = ind;
+      if (FUNCTION_HEADER_RE.test(l) || ind === 0) { start = i; break; }
+    }
+    const startIndent = indentOf(lines[start]);
+    let end = lines.length - 1;
+    for (let j = idx + 1; j < lines.length; j++) {
+      const t = lines[j].trim();
+      if (t && indentOf(lines[j]) <= startIndent && /^[}\])]/.test(t)) { end = j; break; }
+    }
     return lines.slice(start, end + 1).join('\n');
   }
 
@@ -206,7 +230,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       const lines = fs.readFileSync(path.join(SERVER_ROOT, w.file), 'utf8').split('\n');
       const anchorIdx = lines.findIndex((l) => l.trim() === w.anchor);
       expect({ site: key(w), anchorFound: anchorIdx >= 0 }).toEqual({ site: key(w), anchorFound: true });
-      const span = enclosingTopLevelSpan(lines, anchorIdx);
+      const span = enclosingFunctionSpan(lines, anchorIdx);
       const identifier = w.identityResolver.split(/[\s(]/)[0];
       const referenced = new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(span);
       expect({ site: key(w), resolver: identifier, referenced }).toEqual({ site: key(w), resolver: identifier, referenced: true });
@@ -216,19 +240,22 @@ describe('lead-writer registry (#3137 groundwork)', () => {
   test('PENDING_RULING_REASON is frozen text (a new writer must bring its own justification)', () => {
     expect(PENDING_RULING_REASON).toBe('pre-existing — dedup pending #3137 ruling');
     const pending = LEAD_WRITERS.filter((w) => w.reason === PENDING_RULING_REASON);
-    // Snapshot of the pre-existing resolver-less population. Entries may be
-    // REMOVED as writers adopt a resolver; adding a new file here is a policy
-    // violation, not a fix for a red run.
-    expect(pending.map((w) => w.file).sort()).toEqual([
-      'routes/admin-leads.js',
-      'routes/public-lawn-assessment.js',
-      'routes/public-lawn-diagnostic.js',
-      'routes/public-pest-identifier.js',
-      'routes/public-property-lookup.js',
-      'routes/public-quote.js',
-      'routes/tech-field-lead.js',
-      'routes/tech-lawn-diagnostic.js',
-      'services/referral-engine.js',
+    // Snapshot of the pre-existing resolver-less population, frozen by FULL
+    // site key (file :: anchor). Entries may be REMOVED as writers adopt a
+    // resolver; adding a key — a new file, OR a rewritten/moved insert in a
+    // listed file keeping PENDING_RULING_REASON — is a policy violation, not
+    // a fix for a red run (a rewrite is a re-review; a new writer brings its
+    // own justification).
+    expect(pending.map(key).sort()).toEqual([
+      "routes/admin-leads.js :: const [lead] = await db('leads').insert({",
+      "routes/public-lawn-assessment.js :: const [lead] = await trx('leads').insert({",
+      "routes/public-lawn-diagnostic.js :: const [lead] = await trx('leads').insert({",
+      "routes/public-pest-identifier.js :: const [lead] = await trx('leads').insert({",
+      "routes/public-property-lookup.js :: [lead] = await db('leads').insert({",
+      "routes/public-quote.js :: const rows = await db('leads').insert({",
+      "routes/tech-field-lead.js :: const [lead] = await db('leads')",
+      "routes/tech-lawn-diagnostic.js :: const [lead] = await trx('leads').insert({",
+      "services/referral-engine.js :: const [lead] = await db('leads').insert({",
     ]);
   });
 });
