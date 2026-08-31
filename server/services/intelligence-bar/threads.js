@@ -43,11 +43,13 @@ function deriveTitle(userText) {
 
 /**
  * Append one exchange to a thread, creating the thread when threadId is null.
- * Returns { threadId } on success, null when the thread is missing or owned
- * by a different actor (the caller then responds without a thread id — the
- * client falls back to its ephemeral history).
+ * Returns { threadId, lastSeq } on success, null when the thread is missing,
+ * owned by a different actor, or when expectedSeq no longer matches the
+ * thread's tail — a concurrent append from another tab landed first, so this
+ * exchange was generated without seeing it (the caller then responds without
+ * a thread id and the client detaches rather than interleaving).
  */
-async function appendExchange({ actorId, threadId, context, userText, assistantText }) {
+async function appendExchange({ actorId, threadId, expectedSeq, context, userText, assistantText }) {
   if (!actorId || !userText || assistantText === undefined) return null;
   return db.transaction(async (trx) => {
     let thread;
@@ -66,14 +68,16 @@ async function appendExchange({ actorId, threadId, context, userText, assistantT
     }
 
     const [{ max }] = await trx('ib_thread_turns').where('thread_id', thread.id).max('seq');
-    const nextSeq = (max || 0) + 1;
+    const tail = max || 0;
+    if (threadId && Number.isInteger(expectedSeq) && expectedSeq !== tail) return null;
+    const nextSeq = tail + 1;
     await trx('ib_thread_turns').insert([
       { thread_id: thread.id, seq: nextSeq, role: 'user', content: String(userText) },
       { thread_id: thread.id, seq: nextSeq + 1, role: 'assistant', content: String(assistantText) },
     ]);
     await trx('ib_threads').where('id', thread.id)
       .update({ last_active_at: trx.fn.now(), updated_at: trx.fn.now() });
-    return { threadId: thread.id };
+    return { threadId: thread.id, lastSeq: nextSeq + 1 };
   });
 }
 
@@ -83,7 +87,12 @@ async function turnsAsHistory(threadId) {
     .orderBy('seq', 'desc')
     .limit(RESUME_TURN_LIMIT)
     .select('seq', 'role', 'content');
-  return turns.reverse().map(t => ({ role: t.role, content: t.content }));
+  return {
+    // The tail seq anchors the client's optimistic-concurrency check on the
+    // next append (two tabs resuming the same thread can't interleave).
+    lastSeq: turns.length ? turns[0].seq : 0,
+    history: turns.reverse().map(t => ({ role: t.role, content: t.content })),
+  };
 }
 
 /** The actor's most recently active thread, hydrated for the palette. */
@@ -94,12 +103,14 @@ async function latestThread(actorId) {
     .orderBy('last_active_at', 'desc')
     .first();
   if (!thread) return null;
+  const { lastSeq, history } = await turnsAsHistory(thread.id);
   return {
     id: thread.id,
     title: thread.title,
     context: thread.context,
     last_active_at: thread.last_active_at,
-    conversationHistory: await turnsAsHistory(thread.id),
+    lastSeq,
+    conversationHistory: history,
   };
 }
 
@@ -110,12 +121,14 @@ async function getThread(actorId, threadId) {
     .where({ id: threadId, admin_actor_id: actorId })
     .first();
   if (!thread) return null;
+  const { lastSeq, history } = await turnsAsHistory(thread.id);
   return {
     id: thread.id,
     title: thread.title,
     context: thread.context,
     last_active_at: thread.last_active_at,
-    conversationHistory: await turnsAsHistory(thread.id),
+    lastSeq,
+    conversationHistory: history,
   };
 }
 

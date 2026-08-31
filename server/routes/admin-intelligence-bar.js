@@ -1800,6 +1800,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // thread_id the actor doesn't own appends nothing and returns no id, so
     // the client quietly falls back to its ephemeral history.
     let persistedThreadId = null;
+    let persistedThreadSeq = null;
     const threadPersistenceActive = IbThreads.threadsEnabled() && req.techRole === 'admin'
       && context !== 'tech' && context !== 'agent_estimate';
     if (threadPersistenceActive) {
@@ -1811,14 +1812,20 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         const threadAssistantTurn = pendingProposals.length
           ? `${persistedAssistantTurn}\n[This reply proposed ${pendingProposals.length} pending action(s); those confirmation cards expired with the session and were not restored. If the action is still wanted, propose it again.]`
           : persistedAssistantTurn;
+        // thread_seq is the client's view of the thread tail — a mismatch
+        // means a concurrent append (another tab) landed first, so this
+        // exchange would interleave without having seen it; the append is
+        // rejected and the client detaches instead.
         const appended = await IbThreads.appendExchange({
           actorId: getAdminActorId(req),
           threadId: req.body.thread_id ? String(req.body.thread_id) : null,
+          expectedSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
           context,
           userText: persistedUserTurn,
           assistantText: threadAssistantTurn,
         });
         persistedThreadId = appended?.threadId || null;
+        persistedThreadSeq = appended?.lastSeq ?? null;
       } catch (err) {
         logger.error('[intelligence-bar] thread persistence failed:', err);
       }
@@ -1843,7 +1850,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         { role: 'user', content: persistedUserTurn },
         { role: 'assistant', content: persistedAssistantTurn },
       ],
-      ...(persistedThreadId ? { threadId: persistedThreadId } : {}),
+      ...(persistedThreadId ? { threadId: persistedThreadId, threadSeq: persistedThreadSeq } : {}),
       // Explicit availability so the client tracks a RUNTIME gate change:
       // false detaches its thread state (the kill switch's exact-ephemeral
       // promise), true keeps thread mode even when this exchange's append

@@ -53,7 +53,9 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
-      throw new Error(body.message || body.error || `HTTP ${r.status}`);
+      const err = new Error(body.message || body.error || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
     }
     return r.json();
   });
@@ -293,6 +295,9 @@ function GlobalCommandPalette(_props, ref) {
   // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
   // the id is set from query responses and from resume-on-open.
   const [threadId, setThreadId] = useState(null);
+  // The thread tail seq this client last saw — sent with each query so the
+  // server rejects an append that would interleave with another tab's.
+  const threadSeqRef = useRef(null);
   const resumeAttemptedRef = useRef(false);
   // Bumped by submit/"New chat" so a still-inflight resume or query response
   // can't clobber newer state (it only applies if the epoch is unchanged).
@@ -392,6 +397,7 @@ function GlobalCommandPalette(_props, ref) {
       // failed; appending a fresh conversation to it would corrupt the
       // thread.
       setThreadId(null);
+      threadSeqRef.current = null;
     }
     resetAttachments();
   }, [context, resetAttachments]);
@@ -411,6 +417,7 @@ function GlobalCommandPalette(_props, ref) {
         if (hist?.length) {
           setConversationHistory(hist);
           setThreadId(data.thread.id);
+          threadSeqRef.current = Number.isInteger(data.thread.lastSeq) ? data.thread.lastSeq : null;
           // Show the resumed conversation's last reply — otherwise the
           // palette looks like a new chat while silently sending the old
           // history with the next prompt. Server-side taint markers are
@@ -425,7 +432,15 @@ function GlobalCommandPalette(_props, ref) {
           }
         }
       })
-      .catch(() => { /* threads disabled or unreachable — ephemeral mode */ });
+      .catch((err) => {
+        // 404 = gate off, 403 = not an admin — definitive, stay ephemeral.
+        // Anything else is transient (network/5xx): allow the next palette
+        // open to retry the probe instead of losing resume for the
+        // component's lifetime.
+        if (err?.status !== 404 && err?.status !== 403) {
+          resumeAttemptedRef.current = false;
+        }
+      });
   }, [open, conversationHistory.length]);
 
   const submit = useCallback(
@@ -447,7 +462,12 @@ function GlobalCommandPalette(_props, ref) {
             prompt: q,
             conversationHistory,
             context,
-            ...(threadId ? { thread_id: threadId } : {}),
+            ...(threadId
+              ? {
+                  thread_id: threadId,
+                  ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
+                }
+              : {}),
             pageData: { route: location.pathname },
             ...(attachments.length
               ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
@@ -460,7 +480,17 @@ function GlobalCommandPalette(_props, ref) {
           setResponse(data.response);
           setPendingActions(data.pendingActions || []);
           setConversationHistory(data.conversationHistory || []);
-          if (data.threadId) setThreadId(data.threadId);
+          if (data.threadId) {
+            setThreadId(data.threadId);
+            threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
+          } else if (data.threadsEnabled === true && threadId) {
+            // Threads are on but this exchange wasn't appended — the server
+            // rejected it (another tab appended first, or the thread is
+            // gone) or the best-effort write failed. Detach so the next
+            // exchange starts a fresh thread instead of interleaving.
+            setThreadId(null);
+            threadSeqRef.current = null;
+          }
           // The server states thread availability on every query, so a
           // RUNTIME gate change is reflected: off → detach and return to
           // ephemeral mode (the kill switch's promise); on → thread mode
@@ -471,6 +501,7 @@ function GlobalCommandPalette(_props, ref) {
           } else if (data.threadsEnabled === false) {
             threadsAvailableRef.current = false;
             setThreadId(null);
+            threadSeqRef.current = null;
           }
         }
       } catch (err) {
@@ -525,6 +556,7 @@ function GlobalCommandPalette(_props, ref) {
     setPendingActions([]);
     setPrompt("");
     setThreadId(null);
+    threadSeqRef.current = null;
     resetAttachments();
   };
 

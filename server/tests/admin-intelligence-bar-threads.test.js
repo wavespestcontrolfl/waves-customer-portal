@@ -185,13 +185,14 @@ describe('threads gate ON', () => {
   });
 
   test('admin /query appends the exchange and returns the thread id', async () => {
-    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID });
+    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 2 });
     scriptModelTurns([[{ type: 'text', text: 'the answer' }]]);
 
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'remember this', context: 'customers' });
       expect(status).toBe(200);
       expect(body.threadId).toBe(THREAD_ID);
+      expect(body.threadSeq).toBe(2);
       expect(body.threadsEnabled).toBe(true);
 
       expect(mockAppendExchange).toHaveBeenCalledTimes(1);
@@ -203,14 +204,33 @@ describe('threads gate ON', () => {
     });
   });
 
-  test('an existing thread_id is passed through to the service', async () => {
-    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID });
+  test('an existing thread_id and thread_seq are passed through to the service', async () => {
+    mockAppendExchange.mockResolvedValue({ threadId: THREAD_ID, lastSeq: 6 });
     scriptModelTurns([[{ type: 'text', text: 'ok' }]]);
 
     await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'follow-up', context: 'customers', thread_id: THREAD_ID });
+      const { body } = await postQuery(baseUrl, {
+        prompt: 'follow-up', context: 'customers', thread_id: THREAD_ID, thread_seq: 4,
+      });
       expect(mockAppendExchange.mock.calls[0][0].threadId).toBe(THREAD_ID);
+      expect(mockAppendExchange.mock.calls[0][0].expectedSeq).toBe(4);
       expect(body.threadId).toBe(THREAD_ID);
+      expect(body.threadSeq).toBe(6);
+    });
+  });
+
+  test('a rejected append (stale seq / foreign thread) returns no threadId but threadsEnabled stays true', async () => {
+    mockAppendExchange.mockResolvedValue(null);
+    scriptModelTurns([[{ type: 'text', text: 'answered anyway' }]]);
+
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, {
+        prompt: 'follow-up', context: 'customers', thread_id: THREAD_ID, thread_seq: 4,
+      });
+      expect(status).toBe(200);
+      expect(body.response).toBe('answered anyway');
+      expect(body.threadId).toBeUndefined();
+      expect(body.threadsEnabled).toBe(true);
     });
   });
 
