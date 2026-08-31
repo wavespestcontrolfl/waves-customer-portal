@@ -260,6 +260,18 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Two-program combined visits retired (owner 2026-08-31, follow-through
+  // on the 08-28 combo ruling "I want to remove all of these"): with visit
+  // groups live, a sold pest + termite-bait pair (and lawn + tree & shrub)
+  // schedules as TWO standalone catalog visits the office can group at one
+  // stop, instead of one combined row. The termite bait + BOND routes are
+  // NOT two programs — the bond is a billing rider on the bait check (one
+  // visit is the product; whole-plan per-application pricing divides
+  // across it) — and keep combining. The converter reads the env at CALL
+  // time so a Railway flip takes effect on the next accept; this entry is
+  // the status-listing registration. Fail-closed ==='true'; kill: unset.
+  separateComboVisits: process.env.GATE_SEPARATE_COMBO_VISITS === 'true',
+
   // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
   // report offers the next service family the customer lacks (pest ↔ lawn,
   // then tree & shrub, then termite) with estimator-backed pricing, falling
