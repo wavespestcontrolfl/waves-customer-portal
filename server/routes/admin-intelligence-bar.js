@@ -990,7 +990,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (blockEmail || blockDomain) {
         const existing = blockEmail
           ? await db('blocked_email_senders').where('email_address', blockEmail).first('id', 'gmail_filter_id')
-          : await db('blocked_email_senders').where('domain', blockDomain).first('id', 'gmail_filter_id');
+          // Pure domain rows only (pre-push r20 P1) — a legacy address row
+          // that also stored its domain must not read as a domain block.
+          : await db('blocked_email_senders').where('domain', blockDomain).whereNull('email_address').first('id', 'gmail_filter_id');
         if (existing && existing.gmail_filter_id) {
           return { failed: true, modelResult: { error: `${blockEmail || `@${blockDomain}`} is already blocked (blocklist row + Gmail filter in place) — nothing was proposed.`, already_blocked: true } };
         }

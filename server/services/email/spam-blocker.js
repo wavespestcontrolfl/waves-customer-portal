@@ -247,7 +247,10 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
   // the filter re-applied onto the SAME row instead.
   const existing = blockEmail
     ? await db('blocked_email_senders').where('email_address', blockEmail).first()
-    : await db('blocked_email_senders').where('domain', blockDomain).first();
+    // Pure domain rows only (pre-push r20 P1): a legacy row storing BOTH an
+    // address and its domain is an address block — matching it here would
+    // report the whole domain blocked without any domain filter existing.
+    : await db('blocked_email_senders').where('domain', blockDomain).whereNull('email_address').first();
   if (existing && existing.gmail_filter_id) {
     logger.info(`[spam-blocker] Manual block requested for already-blocked ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`} — existing block kept`);
     return {
@@ -355,7 +358,7 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     if (insertErr && insertErr.code === '23505') {
       const winner = blockEmail
         ? await db('blocked_email_senders').where('email_address', blockEmail).first()
-        : await db('blocked_email_senders').where('domain', blockDomain).first();
+        : await db('blocked_email_senders').where('domain', blockDomain).whereNull('email_address').first();
       if (winner) {
         logger.info(`[spam-blocker] concurrent manual block won for ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`} — reusing it`);
         return {

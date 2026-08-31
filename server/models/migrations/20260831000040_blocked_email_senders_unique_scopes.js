@@ -40,6 +40,12 @@ exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('blocked_email_senders');
   if (!hasTable) return;
 
+  // Legacy rows from the old admin endpoint could store BOTH the address
+  // and its domain while the Gmail filter targeted only the address —
+  // normalize them to pure address scope (pre-push r20 P1) so they can
+  // never read as domain blocks and the partial indexes partition cleanly.
+  await knex.raw('UPDATE blocked_email_senders SET domain = NULL WHERE email_address IS NOT NULL AND domain IS NOT NULL');
+
   const hasLedger = await knex.schema.hasTable('blocked_email_senders_dedupe_orphans');
   if (!hasLedger) {
     await knex.schema.createTable('blocked_email_senders_dedupe_orphans', (t) => {

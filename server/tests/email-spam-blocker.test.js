@@ -312,13 +312,17 @@ describe('manualBlockSender — the ONE operator-confirmed manual blocker (GH r9
     db.mockImplementation((table) => {
       if (table === 'blocked_email_senders') {
         return {
-          where: jest.fn(() => ({
-            first: jest.fn(async () => existingRow),
-            update: jest.fn((patch) => {
-              updatedPatch = patch;
-              return { returning: jest.fn(async () => [{ ...existingRow, ...patch }]) };
-            }),
-          })),
+          where: jest.fn(() => {
+            const c = {
+              whereNull: jest.fn(() => c),
+              first: jest.fn(async () => existingRow),
+              update: jest.fn((patch) => {
+                updatedPatch = patch;
+                return { returning: jest.fn(async () => [{ ...existingRow, ...patch }]) };
+              }),
+            };
+            return c;
+          }),
           insert: jest.fn((row) => {
             inserted = row;
             return { returning: jest.fn(async () => [{ id: 'row-1', ...row }]) };
