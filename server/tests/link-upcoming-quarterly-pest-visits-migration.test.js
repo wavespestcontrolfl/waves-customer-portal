@@ -149,12 +149,24 @@ describe('20260831000030 alias-link open quarterly pest visits', () => {
     expect(row(db, 'v1').service_key_snapshot).toBeUndefined();
   });
 
-  test('idempotent: a second up() re-scans but links nothing new that is already linked', async () => {
+  test('a second up() links nothing new, KEEPS the first run\'s ledger, and down() still undoes the first run', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     const before = JSON.stringify(db.scheduled_services);
     await migration.up(fakeKnex(db));
     expect(JSON.stringify(db.scheduled_services)).toBe(before);
+    expect(state(db).linked.map((l) => l.id).sort()).toEqual(['v-agree', 'v1', 'v2', 'v3']);
+    await migration.down(fakeKnex(db));
+    expect(row(db, 'v1').service_id).toBeNull();
+    expect(row(db, 'v3').service_id).toBeNull();
+  });
+
+  test('a later up() that links a NEW row appends to the ledger without dropping earlier entries', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    db.scheduled_services.push({ id: 'v-new', service_type: 'Quarterly Pest Control', service_id: null, service_key_snapshot: null, status: 'pending' });
+    await migration.up(fakeKnex(db));
+    expect(state(db).linked.map((l) => l.id).sort()).toEqual(['v-agree', 'v-new', 'v1', 'v2', 'v3']);
   });
 
   test('down() unlinks only rows still open with the exact label + linkage, clearing only snapshots it stamped', async () => {

@@ -39,6 +39,13 @@ function openVisitStatus(q) {
   return q.where((b) => b.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES));
 }
 
+async function loadState(knex) {
+  if (!(await knex.schema.hasTable('system_settings'))) return null;
+  const row = await knex('system_settings').where({ key: STATE_KEY }).first();
+  if (!row) return null;
+  try { return typeof row.value === 'string' ? JSON.parse(row.value) : row.value; } catch { return null; }
+}
+
 // Stored label alias → catalog service_key. One entry on purpose (see header).
 const LABEL_TO_KEY = {
   'quarterly pest control': 'pest_general_quarterly',
@@ -50,7 +57,12 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasColumn('scheduled_services', 'service_id'))) return;
   const hasSnapshotCol = await knex.schema.hasColumn('scheduled_services', 'service_key_snapshot');
 
-  const state = { linked: [], conflicts: [], missing_catalog: [] };
+  // A re-run must never erase the rollback ledger: links from an earlier
+  // run stay recorded (keyed by visit id) so down() can still undo them;
+  // conflicts/missing_catalog are re-derived from this scan.
+  const prior = await loadState(knex);
+  const state = { linked: Array.isArray(prior?.linked) ? prior.linked : [], conflicts: [], missing_catalog: [] };
+  const alreadyLinked = new Set(state.linked.map((l) => l.id));
   const cols = ['id', 'service_type', ...(hasSnapshotCol ? ['service_key_snapshot'] : [])];
   const visits = await openVisitStatus(knex('scheduled_services').whereNull('service_id')).select(...cols);
 
@@ -81,7 +93,7 @@ exports.up = async function up(knex) {
       const patch = { service_id: svc.id };
       if (stampSnapshot) patch.service_key_snapshot = svc.service_key;
       const count = await q.update(patch);
-      if (count) {
+      if (count && !alreadyLinked.has(v.id)) {
         state.linked.push({
           id: v.id,
           service_type: v.service_type,
@@ -101,14 +113,8 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('scheduled_services'))) return;
   if (!(await knex.schema.hasTable('system_settings'))) return;
-  const row = await knex('system_settings').where({ key: STATE_KEY }).first();
-  if (!row) return;
-  let state;
-  try {
-    state = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
-  } catch {
-    return; // unreadable state — leave data as-is rather than guess
-  }
+  const state = await loadState(knex);
+  if (!state) return; // no ledger (or unreadable) — leave data as-is rather than guess
   const hasSnapshotCol = await knex.schema.hasColumn('scheduled_services', 'service_key_snapshot');
 
   for (const rec of Array.isArray(state.linked) ? state.linked : []) {
