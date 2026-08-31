@@ -327,6 +327,22 @@ function compactLineItem(item = {}) {
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
     price: item.priceAfterDiscount ?? item.price ?? null,
     total: item.totalAfterDiscount ?? item.total ?? null,
+    // Gross + cost provenance for the send-time pricing audit (codex
+    // pre-push P1, mirroring the quote-wizard projection): the engine's
+    // own *BeforeDiscount fields are the true gross, manualFinal* are the
+    // customer-paid net witnesses, and costs/installation/bedArea are the
+    // audit's only cost authority for commercial/hybrid/T&S rows.
+    annualBeforeDiscount: item.annualBeforeDiscount ?? item.annual ?? null,
+    monthlyBeforeDiscount: item.monthlyBeforeDiscount ?? item.monthly ?? null,
+    priceBeforeDiscount: item.priceBeforeDiscount ?? item.price ?? null,
+    totalBeforeDiscount: item.totalBeforeDiscount ?? item.total ?? null,
+    manualFinalAnnual: item.manualFinalAnnual ?? null,
+    manualFinalOneTime: item.manualFinalOneTime ?? null,
+    recurringCustomerDiscountRate: item.recurringCustomerDiscountRate ?? null,
+    costs: item.costs ?? null,
+    installation: item.installation ?? null,
+    bedArea: item.bedArea ?? null,
+    initialFee: item.initialFee ?? null,
     perApp: item.perApp ?? null,
     // Cadence + COGS inputs for the send-time pricing audit (codex
     // pre-push P1, same contract as the quote-wizard mirror): without the

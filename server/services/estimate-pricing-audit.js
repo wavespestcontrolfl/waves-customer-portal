@@ -156,7 +156,12 @@ function dimensionsFrom(data, resultOverride) {
   // automation.draftEstimateAutomation.engineInput, and their compact
   // engineResult has no property object — without this path every
   // auto-sent lead estimate audited at zero square feet (GH codex P1).
+  // engineRequest.profile is the canonical admin-builder shape (per
+  // profileFromEstimateData) — without it admin-created estimates whose
+  // mapped result lacks `property` audited at zero square feet (codex
+  // pre-push P1).
   const inputs = data?.engineInput || data?.inputs || data?.engineInputs
+    || data?.engineRequest?.profile
     || data?.automation?.draftEstimateAutomation?.engineInput || {};
   const result = resultOverride || data?.result || data?.engineResult || {};
   const property = result.property || {};
@@ -1218,6 +1223,10 @@ module.exports = {
   // Exported for regression tests (turf must map to lawn_care, not fall through
   // to an unmapped key that trips a false "Missing COGS" warning).
   keyFromName,
+  // Exported for regression tests (every persisted priced-input shape —
+  // wizard engineInput, admin engineRequest.profile, automated-lead
+  // nested engineInput — must resolve to nonzero COGS dimensions).
+  dimensionsFrom,
   // Live bottom-up COGS primitives — reused by the weekly lawn pricing
   // invariant sweep to compare hardcoded material budgets against inventory.
   loadInventoryCostRows,

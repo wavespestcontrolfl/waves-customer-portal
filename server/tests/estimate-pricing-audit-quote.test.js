@@ -30,6 +30,7 @@ const {
   buildEstimatePricingAudit,
   saveEstimatePricingAuditSnapshot,
   quotedFieldsFrom,
+  dimensionsFrom,
 } = require('../services/estimate-pricing-audit');
 
 function fixtureEstimate() {
@@ -496,6 +497,18 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       },
     });
     expect(audit.lines.find((l) => l.serviceKey === 'pest_control').cogs.visitsPerYear).toBe(12);
+  });
+
+  test('every persisted priced-input shape resolves COGS dimensions', () => {
+    // Admin builder: the request profile is the only input container.
+    expect(dimensionsFrom({ engineRequest: { profile: { homeSqFt: 2600, lotSqFt: 10000, measuredTurfSf: 5200 } } }))
+      .toMatchObject({ homeSqFt: 2600, lotSqFt: 10000, lawnSqFt: 5200 });
+    // Automated lead draft: nested automation engineInput.
+    expect(dimensionsFrom({ automation: { draftEstimateAutomation: { engineInput: { homeSqFt: 2400, lotSqFt: 9000 } } } }))
+      .toMatchObject({ homeSqFt: 2400, lotSqFt: 9000 });
+    // Wizard engineInput outranks the raw shapes.
+    expect(dimensionsFrom({ engineInput: { homeSqFt: 1800 }, engineRequest: { profile: { homeSqFt: 9999 } } }))
+      .toMatchObject({ homeSqFt: 1800 });
   });
 
   test('dedupe transfers cost metadata from the consumed raw row', async () => {
