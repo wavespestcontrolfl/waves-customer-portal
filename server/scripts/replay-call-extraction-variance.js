@@ -95,25 +95,52 @@ const EXPECTATION_KEYS = new Set([
 // `high` fields are routing-critical: a miss fails the weekly run like any
 // other fixture expectation. `medium`/`low` misses only lower the reported
 // accuracy, so the answer key can grow without turning the cron into noise.
+// Each field declares its value domain (`kind`) so a mistyped gold label — a
+// boolean written as "false", an enum typo like "newlead" — is rejected as a
+// fixture error instead of becoming a permanent (possibly run-failing) miss.
+// Enum domains are read from the extraction model-output schema, never
+// retyped, so the answer key cannot drift from what the model may emit.
+const MODEL_OUTPUT_SCHEMA = require('../schemas/call-extraction.model-output.schema.json');
+
+function schemaEnum(...propertyPath) {
+  let node = MODEL_OUTPUT_SCHEMA;
+  for (const key of propertyPath) {
+    node = node?.properties?.[key];
+    if (!node) throw new Error(`GOLD_FIELDS schema enum missing: ${propertyPath.join('.')}`);
+  }
+  if (!Array.isArray(node.enum)) throw new Error(`GOLD_FIELDS schema path is not an enum: ${propertyPath.join('.')}`);
+  return new Set(node.enum.filter((value) => typeof value === 'string'));
+}
+
 const GOLD_FIELDS = {
-  is_voicemail: { severity: 'high', read: (x) => x?.meta?.is_voicemail },
-  is_spam: { severity: 'high', read: (x) => x?.meta?.is_spam },
-  call_nature: { severity: 'high', read: (x) => x?.call_nature },
-  scheduling_status: { severity: 'high', read: (x) => x?.scheduling?.status },
-  agent_committed_booking: { severity: 'high', read: (x) => x?.scheduling?.agent_committed_booking },
-  schedule_date: { severity: 'high', read: (x, schedule) => schedule?.scheduled_date },
-  schedule_window_start: { severity: 'high', read: (x, schedule) => schedule?.window_start, normalize: normalizeTime },
-  quote_promised: { severity: 'high', read: (x) => x?.service_request?.quote_promised },
-  recommended_disposition: { severity: 'medium', read: (x) => x?.recommended_disposition },
-  primary_service_category: { severity: 'medium', read: (x) => x?.service_request?.primary_service_category },
-  service_intent: { severity: 'medium', read: (x) => x?.service_request?.service_intent },
-  urgency: { severity: 'medium', read: (x) => x?.service_request?.urgency },
-  property_type: { severity: 'medium', read: (x) => x?.property?.property_type },
-  customer_history_status: { severity: 'medium', read: (x) => x?.customer_history?.status },
-  lead_quality: { severity: 'low', read: (x) => x?.sentiment_and_lead?.lead_quality },
-  language: { severity: 'low', read: (x) => x?.language },
+  is_voicemail: { severity: 'high', kind: 'boolean', read: (x) => x?.meta?.is_voicemail },
+  is_spam: { severity: 'high', kind: 'boolean', read: (x) => x?.meta?.is_spam },
+  call_nature: { severity: 'high', kind: schemaEnum('call_nature'), read: (x) => x?.call_nature },
+  scheduling_status: { severity: 'high', kind: schemaEnum('scheduling', 'status'), read: (x) => x?.scheduling?.status },
+  agent_committed_booking: { severity: 'high', kind: 'boolean', read: (x) => x?.scheduling?.agent_committed_booking },
+  schedule_date: { severity: 'high', kind: 'date', read: (x, schedule) => schedule?.scheduled_date },
+  schedule_window_start: { severity: 'high', kind: 'time', read: (x, schedule) => schedule?.window_start, normalize: normalizeTime },
+  quote_promised: { severity: 'high', kind: 'boolean', read: (x) => x?.service_request?.quote_promised },
+  recommended_disposition: { severity: 'medium', kind: schemaEnum('recommended_disposition'), read: (x) => x?.recommended_disposition },
+  primary_service_category: { severity: 'medium', kind: schemaEnum('service_request', 'primary_service_category'), read: (x) => x?.service_request?.primary_service_category },
+  service_intent: { severity: 'medium', kind: schemaEnum('service_request', 'service_intent'), read: (x) => x?.service_request?.service_intent },
+  urgency: { severity: 'medium', kind: schemaEnum('service_request', 'urgency'), read: (x) => x?.service_request?.urgency },
+  property_type: { severity: 'medium', kind: schemaEnum('property', 'property_type'), read: (x) => x?.property?.property_type },
+  customer_history_status: { severity: 'medium', kind: schemaEnum('customer_history', 'status'), read: (x) => x?.customer_history?.status },
+  lead_quality: { severity: 'low', kind: schemaEnum('sentiment_and_lead', 'lead_quality'), read: (x) => x?.sentiment_and_lead?.lead_quality },
+  language: { severity: 'low', kind: schemaEnum('language'), read: (x) => x?.language },
 };
 const GOLD_FIELD_NAMES = Object.keys(GOLD_FIELDS);
+
+// A single gold label value is valid only inside its field's domain.
+function isValidGoldValue(field, value) {
+  const kind = GOLD_FIELDS[field]?.kind;
+  if (!kind) return false;
+  if (kind === 'boolean') return typeof value === 'boolean';
+  if (kind === 'date') return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (kind === 'time') return typeof value === 'string' && /^\d{1,2}:\d{2}$/.test(value);
+  return typeof value === 'string' && kind.has(value);
+}
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
@@ -362,6 +389,12 @@ function goldFieldValues(extraction, currentSchedule = {}) {
   return values;
 }
 
+function describeGoldDomain(field) {
+  const kind = GOLD_FIELDS[field]?.kind;
+  if (typeof kind === 'string') return kind;
+  return kind ? [...kind].sort().join('|') : 'unknown field';
+}
+
 function normalizeGoldValue(field, value) {
   if (value === null || value === undefined || value === '') return null;
   const normalize = GOLD_FIELDS[field]?.normalize;
@@ -370,9 +403,6 @@ function normalizeGoldValue(field, value) {
   return String(value).trim().toLowerCase();
 }
 
-function isGoldScalar(value) {
-  return typeof value === 'boolean' || (typeof value === 'string' && value.trim() !== '');
-}
 
 // Scores a case's `gold` block against result.current.fields. Returns
 // { scored, unscored, misses } where misses carry severity so the caller can
@@ -396,8 +426,8 @@ function evaluateGoldLabels(result, gold) {
       continue;
     }
     const accepted = Array.isArray(expected) ? expected : [expected];
-    if (!accepted.length || !accepted.every(isGoldScalar)) {
-      fixtureErrors.push({ name: `fixture_error:invalid_gold_value:${field}`, actual: expected, expected: 'boolean/string or non-empty array of them' });
+    if (!accepted.length || !accepted.every((value) => isValidGoldValue(field, value))) {
+      fixtureErrors.push({ name: `fixture_error:invalid_gold_value:${field}`, actual: expected, expected: `value(s) in the ${field} domain (${describeGoldDomain(field)})` });
       continue;
     }
     const severity = GOLD_FIELDS[field].severity;
@@ -1571,6 +1601,7 @@ module.exports = {
   evaluateFixtureExpectation,
   evaluateGoldLabels,
   goldFieldValues,
+  isValidGoldValue,
   GOLD_FIELDS,
   buildReplayErrorResult,
   buildMissingFixtureResults,

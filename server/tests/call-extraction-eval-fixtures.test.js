@@ -1,9 +1,8 @@
 const fs = require('fs');
 const path = require('path');
-const { GOLD_FIELDS } = require('../scripts/replay-call-extraction-variance');
+const { GOLD_FIELDS, isValidGoldValue } = require('../scripts/replay-call-extraction-variance');
 
 const fixturePath = path.join(__dirname, '../fixtures/call-extraction-eval/reviewed-calls.json');
-const GOLD_SCALAR = (value) => typeof value === 'boolean' || (typeof value === 'string' && value.trim() !== '');
 const ALLOWED_EXPECTATION_KEYS = new Set([
   'current_status',
   'current_scheduling_status',
@@ -68,7 +67,13 @@ describe('call extraction eval fixtures', () => {
         const value = item.gold[field];
         const accepted = Array.isArray(value) ? value : [value];
         expect(accepted.length).toBeGreaterThan(0);
-        expect(accepted.every(GOLD_SCALAR)).toBe(true);
+        // Domain check (boolean / schema enum / date / time): an enum typo or
+        // a boolean-as-string here would otherwise score as a permanent miss.
+        for (const entry of accepted) {
+          if (!isValidGoldValue(field, entry)) {
+            throw new Error(`${item.id}: gold.${field} value ${JSON.stringify(entry)} is outside the field's domain`);
+          }
+        }
       }
     }
   });

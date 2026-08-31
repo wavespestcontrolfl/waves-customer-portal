@@ -214,7 +214,7 @@ describe('call extraction replay variance reporting', () => {
       gold: {
         is_voicemail: true,
         call_nature: ['new_lead', 'voicemail_message'],
-        recommended_disposition: 'CALLBACK_TASK_CREATED',
+        recommended_disposition: 'callback_task_created',
       },
     });
     expect(pass).toMatchObject({ status: 'pass', checked: 3, failures: [] });
@@ -260,14 +260,26 @@ describe('call extraction replay variance reporting', () => {
       current: { status: 'valid', wouldAutoRoute: true, flags: [], fields: { is_spam: false } },
     }), {
       expect: { current_status: 'valid' },
-      gold: { caller_phone: '+19415550100', is_spam: [], call_nature: 42 },
+      gold: {
+        caller_phone: '+19415550100',
+        is_spam: [],
+        call_nature: 42,
+        is_voicemail: 'false',            // boolean-as-string
+        urgency: 'urgent',                // enum typo
+        schedule_date: '06/15/2026',      // wrong date shape
+      },
     });
     expect(expectation.status).toBe('fail');
     expect(expectation.failures.map((failure) => failure.name)).toEqual([
       'fixture_error:unknown_gold_field:caller_phone',
       'fixture_error:invalid_gold_value:is_spam',
       'fixture_error:invalid_gold_value:call_nature',
+      'fixture_error:invalid_gold_value:is_voicemail',
+      'fixture_error:invalid_gold_value:urgency',
+      'fixture_error:invalid_gold_value:schedule_date',
     ]);
+    // None of the invalid labels were scored — they must not count as misses.
+    expect(expectation.gold.scored).toEqual([]);
 
     expect(evaluateFixtureExpectation(validResult(), { expect: { current_status: 'valid' }, gold: ['is_spam'] }).failures)
       .toEqual([expect.objectContaining({ name: 'fixture_error:invalid_gold' })]);

@@ -25,8 +25,11 @@ Rules for labeling:
 - Gold values come from the reviewer's `reviewed_outcome` note (or an owner
   re-review), never from what the current model happens to output. If the note
   does not settle a field, leave it unlabeled — the fixture test rejects free
-  text and unknown fields, and `GOLD_FIELDS` deliberately contains no
-  name/phone/email/address keys, so PII cannot enter the answer key.
+  text, unknown fields, and any value outside the field's domain (boolean /
+  schema enum / date / time, enums read from
+  `call-extraction.model-output.schema.json`), and `GOLD_FIELDS` deliberately
+  contains no name/phone/email/address keys, so PII cannot enter the answer
+  key and an enum typo is a fixture error, never a permanent miss.
 - To label a new field, read the candidate off the weekly `--jsonl` output:
   every result carries `current.fields` (the same redacted view), so the
   candidate sheet never needs transcript access.
