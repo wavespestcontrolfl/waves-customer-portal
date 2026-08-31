@@ -163,7 +163,11 @@ const AFFILIATE_NETWORK_HOSTS = Object.freeze(['amzn.to', 'awin1.com', 'shareasa
 // DNS-normalized host: lowercase, no trailing dot (amzn.to. resolves like
 // amzn.to), no leading www.
 function normalizeHostname(hostname) {
-  return String(hostname || '').toLowerCase().replace(/\.+$/, '').replace(/^www\./, '');
+  // At most ONE DNS root dot is stripped; any empty label left (amazon.com..,
+  // .amazon.com, a..b) is malformed → '' (fails every host check).
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!h || h.startsWith('.') || h.includes('..')) return '';
+  return h.replace(/^www\./, '');
 }
 function isAffiliateNetworkHost(hostname) {
   const host = normalizeHostname(hostname);
@@ -214,6 +218,10 @@ function validateProduct(row, { now = new Date() } = {}) {
   }
   const url = parseHttpsUrl(row.approved_affiliate_url);
   if (!url) errors.push('approved_affiliate_url must be an https URL');
+  for (const f of ['approved_affiliate_url', 'plain_url', 'label_url']) {
+    const u = row[f] ? parseHttpsUrl(row[f]) : null;
+    if (u && !normalizeHostname(u.hostname)) errors.push(`${f} has a malformed hostname (empty DNS label)`);
+  }
   if (row.plain_url !== undefined && row.plain_url !== null) {
     const plain = parseHttpsUrl(row.plain_url);
     if (!plain) errors.push('plain_url, when present, must be an https URL');

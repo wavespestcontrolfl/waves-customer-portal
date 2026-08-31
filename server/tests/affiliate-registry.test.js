@@ -75,6 +75,7 @@ describe('validateProduct', () => {
     expect(registry.validateProduct(green({ allowed_placements: [] })).join(' ')).toMatch(/allowed_placements/);
     expect(registry.validateProduct(green({ plain_url: 'https://amzn.to./abc' })).join(' ')).toMatch(/network|direct amazon\.com/);
     expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com./dp/B1?tag=wavespest-20' }))).toEqual([]);
+    expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com../dp/B1?tag=wavespest-20' })).join(' ')).toMatch(/malformed hostname/);
   });
   test('protected post types can never be declared eligible', () => {
     for (const pt of registry.PROTECTED_POST_TYPES) {

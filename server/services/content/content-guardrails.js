@@ -1891,7 +1891,11 @@ function hasAffiliateQueryParam(u) {
 // DNS-normalized host: lowercase, trailing dot stripped (amzn.to. resolves
 // like amzn.to), leading www. dropped.
 function normalizeAffiliateHost(hostname) {
-  return String(hostname || '').toLowerCase().replace(/\.+$/, '').replace(/^www\./, '');
+  // At most ONE DNS root dot is stripped; an empty label (a..b, .host) is
+  // malformed → '' (matches nothing — the URL still fails the host allowlist).
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!h || h.startsWith('.') || h.includes('..')) return '';
+  return h.replace(/^www\./, '');
 }
 
 function affiliateUrlIdentity(rawUrl) {
