@@ -87,6 +87,12 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   15-minute TTL can clear a successor's fresh claim and overwrite its status
   (a duplicate-notice window). Pre-existing behavior; the fix is a claim-token
   compare in `releaseClaim` — a code change to the module, separate PR.
+- Move 1's existing-row re-run preserves a decided status via a snapshot read
+  (`existing.renewal_decision ? existing.status : nextStatus`) with an
+  id-only UPDATE — a `recordDecision` committing between the read and the
+  write can be overwritten by `nextStatus` (TOCTOU). Pre-existing; the fix is
+  a DB-side CASE or a `renewal_decision IS NULL` guard on that UPDATE —
+  a code change to the module, same follow-up lane as the releaseClaim race.
 - `cancelled` carries two meanings. A dedicated `lapsed` status would remove
   the `renewal_decision` disambiguation everywhere, but that is a CHECK change
   plus ~10 read sites — not a one-PR move.
