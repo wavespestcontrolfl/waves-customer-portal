@@ -170,13 +170,41 @@ const LEAD_WRITERS = [
     file: 'services/referral-engine.js',
     anchor: "const [lead] = await db('leads').insert({",
     // Reached from BOTH referral surfaces: the customer portal
-    // (routes/referrals-v2.js → POST /api/referrals/submit) and the admin
-    // portal (routes/admin-referrals-v2.js → POST /api/admin/referrals/submit,
-    // source: 'admin') — server/index.js:510,571.
-    context: 'submitReferral — referral → lead for the referred contact (portal /api/referrals + admin /api/admin/referrals entry points)',
+    // (routes/referrals-v2.js router.post('/') → POST /api/referrals) and the
+    // admin portal (routes/admin-referrals-v2.js router.post('/submit') →
+    // POST /api/admin/referrals/submit, source: 'admin') — server/index.js
+    // mounts at /api/referrals and /api/admin/referrals.
+    context: 'submitReferral — referral → lead for the referred contact (POST /api/referrals + POST /api/admin/referrals/submit)',
     identityResolver: 'none',
     reason: PENDING_RULING_REASON,
   },
 ];
 
-module.exports = { LEAD_WRITERS, PENDING_RULING_REASON };
+// Dynamic-table inserts — `db(tableVar).insert(` where the table name is a
+// parameter or object member the scanner cannot resolve to a string literal.
+// The contract test requires every such site to be listed here with a reason
+// its table set can NEVER contain 'leads'. Writing leads through a
+// dynamic-table helper is prohibited — use a literal insert + a LEAD_WRITERS
+// entry instead.
+const DYNAMIC_TABLE_INSERTS = [
+  {
+    file: 'routes/admin-photo-assessments.js',
+    anchor: 'const [row] = await db(config.table).insert({',
+    expr: 'config.table',
+    reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' (routes/admin-photo-assessments.js), never leads",
+  },
+  {
+    file: 'services/property-lookup/manatee-permit-sync.js',
+    anchor: 'await trx(table).insert(chunk).onConflict(conflictCol).merge(mergeCols);',
+    expr: 'table',
+    reason: 'permit-sync upsert over the county permit dataset tables, never leads',
+  },
+  {
+    file: 'utils/funnel-photos.js',
+    anchor: 'await db(table).insert({',
+    expr: 'table',
+    reason: 'caller-supplied funnel PHOTO table (lawn/pest assessment photo tables), never leads',
+  },
+];
+
+module.exports = { LEAD_WRITERS, PENDING_RULING_REASON, DYNAMIC_TABLE_INSERTS };

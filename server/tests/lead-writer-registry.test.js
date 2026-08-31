@@ -15,7 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { LEAD_WRITERS, PENDING_RULING_REASON } = require('../config/lead-writer-registry');
+const { LEAD_WRITERS, PENDING_RULING_REASON, DYNAMIC_TABLE_INSERTS } = require('../config/lead-writer-registry');
 
 const SERVER_ROOT = path.join(__dirname, '..');
 const SKIP_DIRS = new Set(['node_modules', 'tests', 'coverage']);
@@ -99,6 +99,58 @@ function aliasInsertPatterns(src, token) {
   return patterns;
 }
 
+// Dynamic-table inserts: the table argument is an identifier or member
+// expression (`db(table)`, `db(config.table)`), so the scanner cannot prove
+// it is not 'leads'. A site is RESOLVED (and skipped) when a same-file
+// constant binds the expression's root identifier to a string literal — the
+// literal either is leads-shaped (the main scan owns it) or provably is not.
+// Everything else must appear in DYNAMIC_TABLE_INSERTS with a reason its
+// table set can never contain 'leads'.
+// Newline-preserving comment/string blanking for the dynamic scan — a regex
+// or label STRING that spells `.into(table)` (contract-tests/validators)
+// must not read as a dynamic insert. Newlines survive so line numbers stay
+// aligned with the original source.
+function blankCommentsAndStrings(code) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+  return code
+    .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p) => p + blank(m.slice(p.length)))
+    .replace(/'(?:\\.|[^'\\\n])*'/g, blank)
+    .replace(/"(?:\\.|[^"\\\n])*"/g, blank)
+    .replace(/`(?:\\.|[^`\\])*`/g, blank);
+}
+
+const DYN_EXPR = String.raw`([A-Za-z_$][\w$]*(?:\.[\w$]+)*)`;
+const DYNAMIC_INSERT_PATTERNS = [
+  new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\(\s*${DYN_EXPR}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  new RegExp(String.raw`\.\s*table\s*\(\s*${DYN_EXPR}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  new RegExp(String.raw`\bbatchInsert\s*\(\s*${DYN_EXPR}\s*,`, 'g'),
+  new RegExp(String.raw`\.into\(\s*${DYN_EXPR}\s*\)`, 'g'),
+];
+
+function scanSourceForDynamicTableInserts(src) {
+  const lines = src.split('\n');
+  const code = blankCommentsAndStrings(src); // patterns run on CODE only …
+  const seen = new Set();
+  const sites = [];
+  for (const pattern of DYNAMIC_INSERT_PATTERNS) {
+    pattern.lastIndex = 0;
+    let m;
+    while ((m = pattern.exec(code))) {
+      const root = m[1].split('.')[0];
+      // … but constant resolution needs the ORIGINAL source (the literal
+      // lives in a string).
+      const constRe = new RegExp(String.raw`\b(?:const|let|var)\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}`);
+      if (constRe.test(src)) continue; // resolved to a string literal
+      const line = code.slice(0, m.index).split('\n').length;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      sites.push({ line, anchor: lines[line - 1].trim(), expr: m[1] });
+    }
+  }
+  return sites;
+}
+
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
@@ -148,6 +200,18 @@ function scanLeadInsertSites() {
     const rel = path.relative(SERVER_ROOT, abs).split(path.sep).join('/');
     if (SKIP_FILES.has(rel)) continue;
     for (const site of scanSourceForLeadInserts(fs.readFileSync(abs, 'utf8'))) {
+      sites.push({ file: rel, ...site });
+    }
+  }
+  return sites;
+}
+
+function scanDynamicTableInsertSites() {
+  const sites = [];
+  for (const abs of walk(SERVER_ROOT).sort()) {
+    const rel = path.relative(SERVER_ROOT, abs).split(path.sep).join('/');
+    if (SKIP_FILES.has(rel)) continue;
+    for (const site of scanSourceForDynamicTableInserts(fs.readFileSync(abs, 'utf8'))) {
       sites.push({ file: rel, ...site });
     }
   }
@@ -204,6 +268,18 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(sites).toHaveLength(1);
     expect(sites[0].siteCount).toBe(1);
   });
+
+  test('dynamic-table scan: a parameterized insert is flagged; a const-resolved one is not', () => {
+    const flagged = scanSourceForDynamicTableInserts(
+      'async function store({ table, row }) {\n  await db(table).insert(row);\n}'
+    );
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].expr).toBe('table');
+    const resolved = scanSourceForDynamicTableInserts(
+      "const TABLE = 'other_things';\nawait db(TABLE).insert({ a: 1 });"
+    );
+    expect(resolved).toEqual([]);
+  });
 });
 
 describe('lead-writer registry (#3137 groundwork)', () => {
@@ -214,6 +290,21 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     // root). The exact set is asserted below; this only proves the scan ran.
     expect(scanned.length).toBeGreaterThanOrEqual(10);
     expect(scanned.some((s) => s.file === 'services/call-recording-processor.js')).toBe(true);
+  });
+
+  test('every dynamic-table insert is allowlisted with a never-leads reason (and the allowlist is live)', () => {
+    const dynamic = scanDynamicTableInsertSites();
+    const allowed = new Set(DYNAMIC_TABLE_INSERTS.map(key));
+    const unlisted = dynamic.filter((s) => !allowed.has(key(s)));
+    expect(unlisted.map((s) => `${s.file}:${s.line} — ${s.anchor} (expr: ${s.expr})`)).toEqual([]);
+    const present = new Set(dynamic.map(key));
+    const stale = DYNAMIC_TABLE_INSERTS.filter((w) => !present.has(key(w)));
+    expect(stale.map(key)).toEqual([]);
+    for (const w of DYNAMIC_TABLE_INSERTS) {
+      expect({ site: key(w), reason: typeof w.reason }).toEqual({ site: key(w), reason: 'string' });
+      expect(w.reason.length).toBeGreaterThan(10);
+      expect(/never leads/i.test(w.reason)).toBe(true);
+    }
   });
 
   test('a source line hosts at most one lead insert (same-line sites cannot be registered distinctly)', () => {

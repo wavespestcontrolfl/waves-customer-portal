@@ -244,9 +244,12 @@ describe('lead identity corpus — shape and PII hygiene', () => {
             .toEqual({ id: c.id, last_name: rec.last_name, ok: true });
         }
         if (rec.address != null) {
-          // A real street can't satisfy this by shape alone, so the corpus
-          // requires each address to NAME itself invented.
-          const ok = /\b(?:fictional|imaginary)\b/i.test(String(rec.address));
+          // FULL reserved shape: house number, then a street name that
+          // literally starts with Fictional/Imaginary, a suffix, and
+          // optionally a unit tail. Position matters — a real street with an
+          // appended marker ('123 Main St (fictional)') fails.
+          const ok = /^\d{1,5} (?:Fictional|Imaginary)(?: [A-Z][a-z]+){1,2} (?:Way|Blvd|St|Ave|Ln|Dr|Ct|Ter)(?:,? (?:Unit|Apt|Ste) ?\w+| ?#\w+)?$/
+            .test(String(rec.address));
           expect({ id: c.id, address: rec.address, ok })
             .toEqual({ id: c.id, address: rec.address, ok: true });
         }
