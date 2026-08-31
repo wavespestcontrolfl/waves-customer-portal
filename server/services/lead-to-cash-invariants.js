@@ -209,9 +209,15 @@ const DETECTORS = Object.freeze([
       // prediction says now — completion may have stamped a price the
       // prediction can no longer see.
       const evaluated = visits.slice(0, CLOSEOUT_VISIT_CAP);
+      // VOID invoices are not proof of billing — the completion and schedule
+      // paths both exclude them, and a stale void would otherwise suppress a
+      // visit that now has no bill at all (Codex P1).
       const invoicedIds = new Set(
         evaluated.length
-          ? (await db('invoices').whereIn('scheduled_service_id', evaluated.map((v) => v.id)).select('scheduled_service_id'))
+          ? (await db('invoices')
+            .whereIn('scheduled_service_id', evaluated.map((v) => v.id))
+            .whereNot('status', 'void')
+            .select('scheduled_service_id'))
             .map((r) => r.scheduled_service_id)
           : [],
       );
@@ -254,7 +260,11 @@ const DETECTORS = Object.freeze([
         });
         // hasChargeableMethod omitted: the wallet only sharpens the tech's
         // on-site message, and this detector reports ids only (PII rule).
-        if (unbilledCompletionGap({ prediction })) ids.push(`${v.id} [${prediction.reason}]`);
+        // Label from the GAP, not the prediction: a payer-billed prediction
+        // carries no `reason` of its own, and the gap is the thing being
+        // reported.
+        const gap = unbilledCompletionGap({ prediction });
+        if (gap) ids.push(`${v.id} [${gap.reason}]`);
       }
       return { count: ids.length, ids, detail: { checked: evaluated.length, date: yesterday, truncated } };
     },

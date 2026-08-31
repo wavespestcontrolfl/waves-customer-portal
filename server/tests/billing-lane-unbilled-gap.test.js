@@ -100,8 +100,11 @@ describe('gap never fires where money IS moving', () => {
     expect(unbilledCompletionGap({ prediction: p })).toBeNull();
   });
 
-  test('a payer-billed visit does not warn', () => {
-    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true });
+  test('a PRICED payer-billed visit does not warn', () => {
+    // The unpriced case is NOT silent — see the payer-billed describe below.
+    // This assertion originally covered every payer visit, which encoded the
+    // bug Codex found: an unpriced payer visit bills nobody.
+    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true, estimatedPrice: 183 });
     expect(p.kind).toBe('payer');
     expect(unbilledCompletionGap({ prediction: p })).toBeNull();
   });
@@ -118,5 +121,23 @@ describe('wallet context sharpens the message without widening the gap', () => {
 
   test('a null prediction is not a gap', () => {
     expect(unbilledCompletionGap({ prediction: null })).toBeNull();
+  });
+});
+
+describe('payer-billed visits', () => {
+  test('an UNPRICED payer visit is a gap — a payer says who owes, not how much', () => {
+    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true });
+    expect(p.kind).toBe('payer');
+    expect(p.amount).toBeNull();
+    // Completion derives the amount from the visit price/rate alone and
+    // refuses to mint at <= 0, so this bills nobody.
+    expect(unbilledCompletionGap({ prediction: p })).toMatchObject({ reason: 'no_amount_on_file' });
+  });
+
+  test('a PRICED payer visit is not a gap', () => {
+    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true, estimatedPrice: 183 });
+    expect(p.kind).toBe('payer');
+    expect(p.amount).toBe(183);
+    expect(unbilledCompletionGap({ prediction: p })).toBeNull();
   });
 });

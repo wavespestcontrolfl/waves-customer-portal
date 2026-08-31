@@ -613,10 +613,19 @@ const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file']);
  * Returns null when there is no gap, else { reason, noPaymentMethod }.
  */
 function unbilledCompletionGap({ prediction, hasChargeableMethod = null }) {
-  if (!prediction || prediction.kind !== 'no_charge') return null;
-  if (!UNBILLED_MONEY_GAP_REASONS.has(prediction.reason)) return null;
+  if (!prediction) return null;
+  // A payer says WHO owes, never HOW MUCH. Completion still derives the
+  // amount from the visit price / rate alone and categorically refuses to
+  // mint at <= 0, so an UNPRICED payer-billed visit bills nobody — the
+  // customer or the payer (Codex P0). A priced one carries its amount here
+  // and is not a gap.
+  const payerWithoutAmount = prediction.kind === 'payer' && !(Number(prediction.amount) > 0);
+  if (!payerWithoutAmount) {
+    if (prediction.kind !== 'no_charge') return null;
+    if (!UNBILLED_MONEY_GAP_REASONS.has(prediction.reason)) return null;
+  }
   return {
-    reason: prediction.reason,
+    reason: payerWithoutAmount ? 'no_amount_on_file' : prediction.reason,
     // null = unknown (caller could not read the wallet); only `true` asserts
     // it, so an unreadable wallet never invents "no card on file".
     noPaymentMethod: hasChargeableMethod == null ? null : hasChargeableMethod === false,

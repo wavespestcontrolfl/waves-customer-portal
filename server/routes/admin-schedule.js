@@ -3270,7 +3270,6 @@ function recurringWithoutBillableAmount({
   customer,
   effectiveBillingTerm,
   prepaid,
-  payerBilled,
   isCallback,
   serviceType,
 }) {
@@ -3279,11 +3278,12 @@ function recurringWithoutBillableAmount({
   // the route has actually settled on it.
   if (effectiveBillingTerm === 'prepay_annual') return null;
   if (prepaid && Number(prepaid.totalAmount) > 0) return null;
-  // An ACTIVE payer, resolved by the same authority completion uses. A raw
-  // id is not enough: completion's resolveForInvoice falls back to self-pay
-  // for a deactivated payer (and honors self_pay_override), so trusting the
-  // id exempted series that then complete at $0 (Codex P0).
-  if (payerBilled) return null;
+  // NO payer exemption. An active payer identifies who owes the invoice; it
+  // supplies no amount, and completion derives invoiceAmount from the visit
+  // price / rate alone and categorically refuses to mint at <= 0. An
+  // unpriced payer-billed series therefore completes at $0 and bills nobody
+  // — the exact lost-AR case this gate exists to stop (Codex P0). A payer
+  // still needs a price or a rate behind it.
 
   const lane = resolveBillingLane(customer);
   const prediction = predictCompletionBilling({
@@ -5029,13 +5029,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
         customer,
         effectiveBillingTerm: bookingBillingTermEffective,
         prepaid: req.body.prepaid || null,
-        // resolveForInvoice never throws (it self-pays on any error), honors
-        // self_pay_override, and only returns an ACTIVE payer — the same
-        // verdict completion will reach. `billedToPayerId` is NOT read here:
-        // this route never persists it, so accepting it would have been a
-        // caller-supplied bypass of the gate (Codex P0).
-        payerBilled: !!(await require('../services/payer')
-          .resolveForInvoice({ database: db, customerId, customer })).payerId,
         isCallback: resolvedIsCallback,
         serviceType,
       });

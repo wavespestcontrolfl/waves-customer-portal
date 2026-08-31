@@ -89,7 +89,6 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
     effectiveBillingTerm: 'standard',
     prepaid: null,
-    payerBilled: false,
     isCallback: false,
     serviceType: 'Monthly Pest Control Service',
   };
@@ -142,13 +141,16 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
 
   test('the remaining legitimate arrangements pass', () => {
     expect(recurringWithoutBillableAmount({ ...unbillable, prepaid: { totalAmount: 900 } })).toBeNull();
-    // Validated ACTIVE payer only — the caller resolves it through
-    // resolveForInvoice, so a deactivated payer arrives here as false and the
-    // series is still refused (Codex P0).
-    expect(recurringWithoutBillableAmount({ ...unbillable, payerBilled: true })).toBeNull();
-    expect(recurringWithoutBillableAmount({ ...unbillable, payerBilled: false })).toBeTruthy();
+
     expect(recurringWithoutBillableAmount({ ...unbillable, isCallback: true })).toBeNull();
     expect(recurringWithoutBillableAmount({ ...unbillable, serviceType: 'Pest Control Re-Service' })).toBeNull();
+  });
+
+  test('a payer does NOT substitute for a price (Codex P0)', () => {
+    // A payer says who owes; completion still refuses to mint at <= 0, so an
+    // unpriced payer-billed series bills nobody. Only a real amount clears it.
+    expect(recurringWithoutBillableAmount(unbillable)).toBeTruthy();
+    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
   });
 
   test('a zero-amount prepay is not an arrangement', () => {

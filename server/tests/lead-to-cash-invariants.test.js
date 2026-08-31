@@ -10,7 +10,7 @@ const mockTables = {};
 function mockChain(cfg = {}) {
   const b = {};
   for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'whereRaw', 'orWhereRaw',
-    'whereExists', 'whereNotExists', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'limit', 'modify', 'forUpdate', 'insert', 'onConflict', 'update', 'count']) {
+    'whereExists', 'whereNotExists', 'whereNot', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'limit', 'modify', 'forUpdate', 'insert', 'onConflict', 'update', 'count']) {
     b[m] = jest.fn(() => b);
   }
   b.select = jest.fn(async () => cfg.select ?? []);
@@ -331,17 +331,41 @@ describe('detector adapters', () => {
     expect(out.detail).toMatchObject({ checked: 4, truncated: false });
   });
 
-  test('unbilled_completed_visits: an inherited ACTIVE customer-default payer is not a gap (Codex P1)', async () => {
+  test('unbilled_completed_visits: a VOID invoice is not proof of billing (Codex P1)', async () => {
     mockTables.scheduled_services = mockChain({ select: [
       { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
     ] });
+    // The detector must EXCLUDE void rows in the query, so the mock returns
+    // none — pin the filter itself, since a mocked db cannot enforce it.
+    mockTables.invoices = mockChain({ select: [] });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(mockTables.invoices.whereNot).toHaveBeenCalledWith('status', 'void');
+    expect(out.count).toBe(1);
+  });
+
+  test('unbilled_completed_visits: a PRICED visit on an inherited ACTIVE default payer is not a gap (Codex P1)', async () => {
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: 183, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
+    ] });
     mockTables.invoices = mockChain({ select: [] });
     // No ss.payer_id on the row — the payer comes from customers.payer_id,
-    // which only resolveForInvoice knows about.
+    // which only resolveForInvoice knows about. Both ids must reach it or the
+    // default-payer and self_pay_override semantics diverge from completion.
     resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
     const out = await byKey('unbilled_completed_visits').run({ now: NOW });
     expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'v1', customerId: 'c1' }));
     expect(out.count).toBe(0);
+  });
+
+  test('unbilled_completed_visits: an UNPRICED payer-billed visit IS reported — a payer is not an amount', async () => {
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: 42 },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    expect(out.count).toBe(1);
+    expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
   });
 
   test('unbilled_completed_visits: visits beyond the cap make the day a finding, never a silent pass', async () => {
