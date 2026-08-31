@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { etDateString } = require('../utils/datetime-et');
 
 const {
   CASE_KEYS,
@@ -177,6 +178,7 @@ describe('speaker label eval', () => {
     expect(sheet).toContain('CONTAINS TRANSCRIPT TEXT (PII)');
     expect(sheet).toContain('[  0] (agent) Speaker 1:');
     expect(sheet).toContain(`"transcript_sha256": "${sha256(built.text)}"`);
+    expect(sheet).toContain(`"labeled_at": "${etDateString()}"`); // ET calendar date, not UTC
 
     const out = path.join(TMP_DIR, 'tmp-speaker-sheet.txt');
     fs.rmSync(out, { force: true });
@@ -223,7 +225,9 @@ describe('speaker label eval', () => {
       return relabel(text);
     };
     try {
-      const summary = await runScore({ fixturePath: tmp }, { db, labelTranscript, normalizeTranscript: prodNormalize });
+      const summary = await runScore({ fixturePath: tmp }, { db, labelTranscript, normalizeTranscript: prodNormalize, labelModel: 'resolved-by-processor' });
+      // Attribution comes from the processor's resolved constant, not re-derived env.
+      expect(summary.model).toBe('resolved-by-processor');
       expect(summary.scored).toBe(1);
       expect(summary.wordAccuracy).toBe(1);
       expect(summary.segmentAccuracy).toBe(1);

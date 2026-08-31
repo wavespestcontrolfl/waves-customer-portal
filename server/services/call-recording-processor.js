@@ -5937,6 +5937,9 @@ const CallRecordingProcessor = {
   // eval's rebuilt replay input is checked against this exact normalizer.
   labelTranscriptWithOpenAI,
   normalizeOpenAITranscript,
+  // The resolved label model (OPENAI_TRANSCRIPT_LABEL_MODEL || OPENAI_MODEL ||
+  // default) so the eval attributes results to the model it actually ran.
+  OPENAI_TRANSCRIPT_LABEL_MODEL,
   /**
    * Process a call recording end-to-end.
    * Called from recording-status webhook or manually from admin.

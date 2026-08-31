@@ -37,6 +37,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { etDateString } = require('../utils/datetime-et');
 
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', 'fixtures', 'call-extraction-eval', 'speaker-labels.json');
 const SCHEMA_VERSION = 'call-speaker-labels.v1';
@@ -292,7 +293,10 @@ async function runScore(opts, deps) {
   const ratio = (num, den) => (den ? Number((num / den).toFixed(4)) : null);
   return {
     status: 'scored',
-    model: process.env.OPENAI_TRANSCRIPT_LABEL_MODEL || 'gpt-5-mini (default)',
+    // The processor's resolved constant (OPENAI_TRANSCRIPT_LABEL_MODEL ||
+    // OPENAI_MODEL || default), never re-derived here — results must be
+    // attributed to the model that actually ran.
+    model: deps.labelModel || 'unknown',
     cases: fixture.cases.length,
     scored: scored.length,
     unscored: results.filter((r) => r.status !== 'scored').map((r) => ({ caseId: r.caseId, status: r.status })),
@@ -344,7 +348,7 @@ function buildSheet(picked) {
     const stub = {
       id: `label-${String(row.id).slice(0, 8)}`,
       call_log_id: row.id,
-      labeled_at: new Date().toISOString().slice(0, 10),
+      labeled_at: etDateString(), // ET calendar date — UTC would roll over at 8/9 PM Eastern
       labeled_by: 'owner',
       transcript_sha256: sha256(canonical.text),
       segment_speakers: suggestions.map((s) => s || 'VERIFY'),
@@ -404,8 +408,17 @@ async function runSheet(opts, deps) {
 async function main() {
   const opts = parseArgs();
   const db = require('../models/db');
-  const { labelTranscriptWithOpenAI, normalizeOpenAITranscript } = require('../services/call-recording-processor');
-  const deps = { db, labelTranscript: labelTranscriptWithOpenAI, normalizeTranscript: normalizeOpenAITranscript };
+  const {
+    labelTranscriptWithOpenAI,
+    normalizeOpenAITranscript,
+    OPENAI_TRANSCRIPT_LABEL_MODEL,
+  } = require('../services/call-recording-processor');
+  const deps = {
+    db,
+    labelTranscript: labelTranscriptWithOpenAI,
+    normalizeTranscript: normalizeOpenAITranscript,
+    labelModel: OPENAI_TRANSCRIPT_LABEL_MODEL,
+  };
   try {
     if (opts.sheet) {
       await runSheet(opts, deps);
