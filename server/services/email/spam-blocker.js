@@ -273,11 +273,27 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
   if (existing) {
     // Existing row, missing filter: repair in place — record the fresh
     // filter (if Gmail was reachable) on the row every unblock path
-    // already knows about.
+    // already knows about. Same orphan-filter rollback contract as the
+    // insert branches (GH r13 P2): a filter recorded nowhere is invisible
+    // to every unblock path, and a retry would stack another.
     let entry = existing;
     if (filterId) {
-      [entry] = await db('blocked_email_senders').where({ id: existing.id })
-        .update({ gmail_filter_id: filterId }).returning('*');
+      try {
+        [entry] = await db('blocked_email_senders').where({ id: existing.id })
+          .update({ gmail_filter_id: filterId }).returning('*');
+      } catch (updateErr) {
+        try {
+          const gmailClient = require('./gmail-client');
+          const auth = await gmailClient.getAuthClient();
+          if (auth) {
+            const gmail = google.gmail({ version: 'v1', auth });
+            await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
+          }
+        } catch (rollbackErr) {
+          logger.warn(`[spam-blocker] repair filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+        }
+        throw updateErr;
+      }
     }
     logger.info(`[spam-blocker] Manual re-block ${filterId ? 'repaired the missing Gmail filter for' : 'found no Gmail filter and could not create one for'} ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`}`);
     return {

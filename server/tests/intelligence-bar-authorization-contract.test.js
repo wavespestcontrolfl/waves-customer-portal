@@ -447,10 +447,10 @@ test('reschedule_appointment: evidence-only rewind disclosed on a DATE move of a
   expect(mk({ pin: { status: 'en_route' } }).effects.some((e) => /stale tracker evidence/.test(e.label))).toBe(false);
 });
 
-test('reschedule_appointment: sole-open-member grouped visit discloses detach/dissolve; visit_id binds the pin (GH r12 P1)', () => {
-  const mk = (visitId) => buildContract({
+test('reschedule_appointment: sole-open-member grouped visit discloses detach/dissolve on DATE moves; visit_id binds the pin (GH r12 P1, r13 P2)', () => {
+  const mk = (visitId, newDate = '2026-09-04') => buildContract({
     toolName: 'reschedule_appointment',
-    params: { appointment_id: 'ap1', new_date: '2026-09-04' },
+    params: { appointment_id: 'ap1', new_date: newDate },
     displayParams: {},
     preview: { pinned_appointment: { id: 'ap1', status: 'scheduled', scheduled_date: '2026-09-02', service_type: 'Pest', visit_id: visitId } },
   });
@@ -460,9 +460,26 @@ test('reschedule_appointment: sole-open-member grouped visit discloses detach/di
   // card must say so.
   expect(mk('v1').effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/sole open member of a grouped visit/));
   expect(mk(null).effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
+  // Same-day window edit (GH r13 P2): the seam keeps a date-matching sole
+  // member grouped (no detach, no dissolve) — no disclosure.
+  expect(mk('v1', '2026-09-02').effects.some((e) => /grouped visit/.test(e.label))).toBe(false);
   // Joining/leaving a group during the pending window must drift the
   // appointment fingerprint (preview_changed), never execute undisclosed.
   const { appointmentPinFingerprint } = require('../services/intelligence-bar/proposal-pins');
   const pin = { id: 'ap1', status: 'scheduled', scheduled_date: '2026-09-02', service_type: 'Pest', track_rewind: false };
   expect(appointmentPinFingerprint({ ...pin, visit_id: 'v1' })).not.toBe(appointmentPinFingerprint(pin));
+});
+
+test('lead status derived effects: the funnel advance is conditional, never promised (GH r13 P2)', () => {
+  const c = buildContract({
+    toolName: 'update_lead_status',
+    params: { lead_id: 'l1', new_status: 'won' },
+    displayParams: { lead_id: 'l1', new_status: 'won' },
+    preview: { pinned_lead: { id: 'l1', name: 'acct-2077', current_status: 'contacted' } },
+  });
+  // The bridge is update-only and best-effort: no linked
+  // ad_service_attribution row is a no-op, and a failure surfaces as a
+  // result warning — the card must not report the advance as a done deal.
+  expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^If the lead has a linked ad-attribution row, its funnel stage advances/));
+  expect(c.effects.some((e) => /^Advances/.test(e.label))).toBe(false);
 });

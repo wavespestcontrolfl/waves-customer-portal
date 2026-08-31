@@ -436,11 +436,27 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
   }
 }
 
-async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone }) {
+async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone, _pinned_email }) {
   try {
     let phone = null;
     let custName = customer_name;
     let custId = null;
+
+    let sourceEmail = null;
+    if (email_id) {
+      sourceEmail = await db('emails').where('id', email_id).first();
+      // W0B source-email pin (GH r13 P2): the card disclosed the inbox
+      // update on THIS email's identity and attributed customer — asserted
+      // on the executor's own read, so a row re-synced or re-attributed
+      // after the confirm preflight refuses instead of receiving another
+      // customer's replied-via-SMS stamp.
+      if (_pinned_email) {
+        const { emailPinFingerprint } = require('./proposal-pins');
+        if (!sourceEmail || emailPinFingerprint(sourceEmail) !== String(_pinned_email)) {
+          return { error: 'The source email changed after the card was shown — nothing was sent. Ask again for a fresh card.', preview_changed: true };
+        }
+      }
+    }
 
     if (customer_id) {
       // Pinned recipient (Intelligence Bar confirm card, W0B): the proposal
@@ -452,7 +468,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
       custName = `${customer.first_name} ${customer.last_name}`;
       custId = customer.id;
     } else if (email_id) {
-      const email = await db('emails').where('id', email_id).first();
+      const email = sourceEmail;
       if (email?.customer_id) {
         const customer = await db('customers').where('id', email.customer_id).first();
         if (customer) {
@@ -511,13 +527,23 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
     // must surface as a warning, never a silent Done (GH r9 P2).
     let inboxWarning = null;
     if (email_id) {
-      const marked = await db('emails').where('id', email_id).update({
+      // The approved customer attribution rides into the UPDATE's own WHERE
+      // (GH r13 P2): a row re-attributed between the read above and this
+      // write misses and surfaces the warning, never stamping an email that
+      // now belongs to a different customer.
+      let markQuery = db('emails').where('id', email_id);
+      if (sourceEmail && _pinned_email) {
+        markQuery = sourceEmail.customer_id == null
+          ? markQuery.whereNull('customer_id')
+          : markQuery.where('customer_id', sourceEmail.customer_id);
+      }
+      const marked = await markQuery.update({
         auto_action: db.raw("COALESCE(auto_action, '') || ',replied_via_sms'"),
         is_read: true,
         updated_at: new Date(),
       });
       if (!marked) {
-        inboxWarning = 'The SMS was sent, but the source email no longer exists — it could not be marked read/replied.';
+        inboxWarning = 'The SMS was sent, but the source email no longer exists or was re-attributed — it could not be marked read/replied.';
       }
     }
 

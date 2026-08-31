@@ -208,7 +208,10 @@ function pushLeadStatusDerivedEffects(push, newStatus, { bulk = false } = {}) {
   const stage = LEAD_STATUS_TO_FUNNEL_STAGE[newStatus];
   const each = bulk ? 'each lead' : 'the lead';
   if (stage) {
-    push('operational', `Advances ${each}'s ad-attribution funnel stage toward '${stage}' (monotonic — never downgraded) and appends a status-change entry to ${each}'s activity history`);
+    // Conditional, not promised (GH r13 P2): the bridge is update-only and
+    // best-effort — a lead with no linked ad_service_attribution row is a
+    // no-op, and a bridge failure surfaces as a result warning.
+    push('operational', `If ${each} has a linked ad-attribution row, its funnel stage advances toward '${stage}' (monotonic — never downgraded; a bridge failure surfaces as a warning); a status-change entry is appended to ${each}'s activity history`);
   } else {
     push('operational', `Appends a status-change entry to ${each}'s activity history`);
   }
@@ -506,11 +509,17 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // only reaches a card when the row is the SOLE open member of its visit
   // (multi-member and frozen visits are refused at proposal) — the
   // executor's post-move seam then detaches the row and dissolves the
-  // empty group. Disclosed here; visit_id rides the appointment
-  // fingerprint, so a membership change during the pending window drifts
-  // to preview_changed instead of executing undisclosed.
-  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment?.visit_id) {
-    push('operational', 'This service is the sole open member of a grouped visit — the move also detaches it from that visit and dissolves the now-empty group');
+  // empty group. DATE moves only (GH r13 P2): a same-day window edit of a
+  // sole member keeps the date matching its parent, so
+  // handleChildStopChanged retains membership (empty sibling set counts
+  // as overlapping) and just recomputes the visit window — no detach, no
+  // dissolve, no disclosure. Same date-gate as the tracker-rewind effect
+  // above. visit_id rides the appointment fingerprint either way, so a
+  // membership change during the pending window drifts to preview_changed
+  // instead of executing undisclosed.
+  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment?.visit_id
+    && params?.new_date && String(params.new_date) !== String(preview.pinned_appointment.scheduled_date)) {
+    push('operational', 'This service is the sole open member of a grouped visit — the date move also detaches it from that visit and dissolves the now-empty group');
   }
 
   // An email change may re-send the newsletter double-opt-in confirmation

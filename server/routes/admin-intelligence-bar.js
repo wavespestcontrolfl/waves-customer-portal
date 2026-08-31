@@ -934,6 +934,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Canonicalize to the pinned row: the executor sends to THIS customer
       // id, never a fresh name/email match (codex P1 on #3648).
       params.customer_id = recipient.id;
+      if (toolUse.name === 'reply_via_sms' && params.email_id) {
+        // Source-email pin (GH r13 P2): the card also discloses the inbox
+        // update on THIS email — pin its full identity (address, subject,
+        // thread, attributed customer) so a re-synced or re-attributed row
+        // refuses at the confirm preflight and again at the executor's own
+        // read, instead of another customer's email getting the
+        // replied-via-SMS stamp.
+        const srcEmail = await db('emails').where('id', String(params.email_id)).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');
+        if (!srcEmail) return { failed: true, modelResult: { error: 'That email could not be found — nothing was proposed.' } };
+        params._pinned_email = emailPinFingerprint(srcEmail);
+      }
       preview = {
         ...preview,
         pinned_recipient: {
@@ -1067,8 +1078,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // classified missing by the case-sensitive lookup below — and the
       // executor's skipped-set compare has the same trap. The pinned set,
       // fingerprint, and stored params all carry the canonical form.
+      // Deduplicated (GH r13 P2): a repeated id would be listed and counted
+      // twice on the card while the executor's locked-set collapse updates
+      // the row once and reports nothing skipped — the card must show the
+      // set that is actually applied.
       const ids = Array.isArray(params.customer_ids)
-        ? params.customer_ids.map((id) => String(id).trim().toLowerCase()) : [];
+        ? [...new Set(params.customer_ids.map((id) => String(id).trim().toLowerCase()))] : [];
       if (!ids.length) {
         return { failed: true, modelResult: { error: 'customer_ids is empty — nothing to update.' } };
       }

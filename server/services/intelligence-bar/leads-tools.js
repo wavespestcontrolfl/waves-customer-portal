@@ -540,7 +540,12 @@ async function updateLeadStatus(input) {
 
   // Mirror the transition onto the lead's ad_service_attribution funnel row
   // (same guarded pattern as the admin-leads routes — monotonic, best-effort).
-  await bridgeLeadFunnelStage(lead.id, new_status);
+  // The card describes this as conditional on a linked row; a bridge ERROR
+  // still surfaces as a warning, never a silent Done (GH r13 P2).
+  const funnel = await bridgeLeadFunnelStage(lead.id, new_status);
+  const funnelWarning = funnel?.reason === 'error'
+    ? "Status updated, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this transition."
+    : null;
 
   await db('lead_activities').insert({
     lead_id: lead.id,
@@ -557,6 +562,7 @@ async function updateLeadStatus(input) {
     old_status: oldStatus,
     new_status,
     lost_reason: lost_reason || null,
+    ...(funnelWarning ? { warning: funnelWarning } : {}),
   };
 }
 
@@ -654,8 +660,12 @@ async function bulkUpdateLeads(input) {
   if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
-  // same monotonic stage predicate as the single-lead bridge.
-  await bridgeLeadsFunnelStage(ids, new_status);
+  // same monotonic stage predicate as the single-lead bridge. Conditional
+  // on linked rows; an ERROR surfaces as a warning (GH r13 P2).
+  const funnel = await bridgeLeadsFunnelStage(ids, new_status);
+  const funnelWarning = funnel?.reason === 'error'
+    ? "Statuses updated, but mirroring them onto the leads' ad-attribution funnel rows failed — attribution reporting may lag this transition."
+    : null;
 
   // Log activity for each
   const activities = ids.map(id => ({
@@ -680,7 +690,11 @@ async function bulkUpdateLeads(input) {
     updated: ids.length,
     from_status: current_status,
     to_status: new_status,
-    ...(activityWarning ? { warning: activityWarning } : {}),
+    // ONE warning key (card renders result.warning only) — combine, never
+    // overwrite.
+    ...(activityWarning || funnelWarning
+      ? { warning: [activityWarning, funnelWarning].filter(Boolean).join(' ') }
+      : {}),
   };
 }
 
