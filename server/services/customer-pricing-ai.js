@@ -1383,6 +1383,10 @@ module.exports = {
   // loader, one street-scope resolution, no second derivation to drift.
   loadCurrentServiceKeys,
   withTurfProfileFence,
+  // Which required property dimension a service set still lacks — the
+  // plan-restart mint (C4) applies the same guard the panel does before
+  // recomputing, so it is a real export, not a test hook.
+  missingPropertyFor,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },

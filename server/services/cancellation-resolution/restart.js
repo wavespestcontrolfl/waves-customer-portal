@@ -52,25 +52,32 @@ function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
-// Families the customer cancelled, newest committed case first.
+// Families the customer cancelled, tied to the LATEST cancellation attempt.
 async function cancelledFamiliesFor(customerId, dbh = db) {
+  // Newest case regardless of status: when a cancellation partially
+  // completes (case left 'open' while the customer is already stamped
+  // churned), an OLDER committed case's scope must never answer for it —
+  // recovery falls through to the rows of THIS attempt instead.
   const latest = await dbh('cancellation_cases')
-    .where({ customer_id: customerId, status: 'committed' })
+    .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
-    .first('id', 'scope');
-  const scope = latest ? parseJson(latest.scope, []) : [];
+    .first('id', 'scope', 'status', 'created_at');
+  const scope = latest && latest.status === 'committed' ? parseJson(latest.scope, []) : [];
   const scoped = (Array.isArray(scope) ? scope : []).filter((f) => RESTARTABLE_FAMILIES.includes(f));
   if (scoped.length) return { families: scoped, caseId: latest.id, source: 'case_scope' };
 
-  // Whole account ([]) or no case row: the recurring rows the processor
-  // cancelled name the prior plan. Cancelled rows carry no recurring_ongoing
-  // signal any more, so read the family off the row/catalog text the same
-  // way the facts loader does for live rows.
+  // Whole account ([]), uncommitted latest case, or no case row: the
+  // recurring rows the processor cancelled name the prior plan. Cancelled
+  // rows carry no recurring_ongoing signal any more, so read the family off
+  // the row/catalog text the same way the facts loader does for live rows.
+  // When a case exists, only rows cancelled during THAT attempt count — a
+  // historically cancelled family from an earlier cancellation must not
+  // sneak into the quote.
   const {
     detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
   } = require('../self-booking-plan-sync');
   const { CHURN_REASON } = require('../cancellation-processor');
-  const rows = await dbh('scheduled_services as s')
+  let rowsQuery = dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .where('s.status', 'cancelled')
@@ -80,6 +87,10 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     .orderBy('s.cancelled_at', 'desc')
     .limit(50)
     .select('s.*', 'sv.service_key', 'sv.service_name');
+  if (latest && latest.created_at) {
+    rowsQuery = rowsQuery.where('s.cancelled_at', '>=', latest.created_at);
+  }
+  const rows = await rowsQuery;
   const keys = [];
   for (const row of rows) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
@@ -89,12 +100,14 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   if (fromRows.length) return { families: fromRows, caseId: latest ? latest.id : null, source: 'cancelled_rows' };
 
   // Last resort: the scoped-cancel audit note ("Cancelled Pest Control, Lawn
-  // Care — plan continues with …") names families by label.
-  const note = await dbh('customer_interactions')
+  // Care — plan continues with …") names families by label — again bounded
+  // to the latest attempt when a case exists.
+  let noteQuery = dbh('customer_interactions')
     .where({ customer_id: customerId, interaction_type: 'note' })
     .where('subject', 'like', 'Cancelled %')
-    .orderBy('created_at', 'desc')
-    .first('subject');
+    .orderBy('created_at', 'desc');
+  if (latest && latest.created_at) noteQuery = noteQuery.where('created_at', '>=', latest.created_at);
+  const note = await noteQuery.first('subject');
   if (note && note.subject) {
     const named = String(note.subject).split(' — ')[0].replace(/^Cancelled\s+/, '');
     const fromNote = Object.entries(FAMILY_LABELS)
@@ -137,8 +150,52 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       throw new RestartUnavailableError('not_cancelled', 'This account is not cancelled.');
     }
 
-    // Reuse a live restart estimate before pricing anything (idempotent
-    // button; one honorable price at a time).
+    const { families, caseId, source } = await cancelledFamiliesFor(fresh.id, trx);
+    if (!families.length) {
+      throw new RestartUnavailableError('nothing_to_restart', 'We could not find the plan to restart from this account.');
+    }
+
+    // Ownership — FAIL CLOSED: a family with LIVE recurring rows on this
+    // account is never re-priced beside its live rate. The pricing-ai
+    // ownership loaders deliberately answer [] for an inactive customer
+    // (loadActiveRecurringServiceRows), so a churned restart reads the
+    // residual rows directly — same family detection as the recovery above.
+    const {
+      detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
+    } = require('../self-booking-plan-sync');
+    const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
+    let residualRows;
+    try {
+      residualRows = await trx('scheduled_services as s')
+        .leftJoin('services as sv', 's.service_id', 'sv.id')
+        .where('s.customer_id', fresh.id)
+        .whereNotIn('s.status', TERMINAL_STATUSES)
+        .where('s.is_recurring', true)
+        .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
+        .limit(200)
+        .select('s.*', 'sv.service_key', 'sv.service_name');
+    } catch (err) {
+      logger.warn(`[plan-restart] residual ownership lookup failed for ${fresh.id} — refusing: ${err.message}`);
+      throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
+    }
+    const residualKeys = [];
+    for (const row of residualRows) {
+      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+      for (const key of detectWaveGuardPlanKeys(row)) if (!residualKeys.includes(key)) residualKeys.push(key);
+    }
+    const ownedFamilies = uniqueServiceFamilies(residualKeys);
+    const owned = new Set(ownedFamilies.map(pricingKeyFor));
+    const toPrice = families.map(pricingKeyFor).filter((key) => !owned.has(key));
+    if (!toPrice.length) {
+      throw new RestartUnavailableError('nothing_to_restart', 'Those services are already active on this account.');
+    }
+
+    // Reuse a live restart estimate ONLY after the scope + ownership checks
+    // above, and only when it quotes exactly today's eligible families — a
+    // quote minted before staff restored a service, or before a
+    // re-cancellation changed the scope, is archived and re-priced instead
+    // of handed back stale (idempotent button; one honorable price at a
+    // time).
     const priorRows = await trx('estimates')
       .where({ customer_id: fresh.id, source: SOURCE })
       .whereNull('archived_at')
@@ -146,31 +203,40 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       .limit(10);
     const live = liveRestartEstimate(priorRows, nowDate);
     if (live) {
-      return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+      const liveFamilies = parseJson(live.estimate_data, {})?.planRestart?.families;
+      const sameScope = Array.isArray(liveFamilies)
+        && liveFamilies.length === families.length
+        && [...liveFamilies].sort().join(',') === [...families].sort().join(',');
+      if (sameScope) {
+        return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+      }
+      await trx('estimates').where({ id: live.id }).update({ archived_at: nowDate, updated_at: nowDate });
     }
 
-    const { families, caseId, source } = await cancelledFamiliesFor(fresh.id, trx);
-    if (!families.length) {
-      throw new RestartUnavailableError('nothing_to_restart', 'We could not find the plan to restart from this account.');
+    // Property context: profile first, then the SAME cache-only lookup +
+    // accepted-estimate seed discipline the portal offer surfaces price
+    // under (cross-sell/one-tap). No LIVE lookup spend from a restart tap —
+    // a cached lookup row or a prior accepted estimate for THIS street
+    // supplies the footprint the stored profile lacks.
+    const crossSell = deps.crossSell || require('../service-report/cross-sell');
+    const { normalizedStampedStreet } = require('../estimate-property-linkage');
+    const primaryStreet = normalizedStampedStreet(fresh.address_line1, fresh.address_line2, fresh.city, fresh.zip);
+    let propertySeed = null;
+    if (primaryStreet) {
+      try {
+        propertySeed = await crossSell.loadEstimateSeed(trx, fresh.id, primaryStreet);
+      } catch (err) {
+        logger.warn(`[plan-restart] estimate property seed skipped for ${fresh.id}: ${err.message}`);
+      }
     }
-
-    // Ownership — FAIL CLOSED like every pricing-ai consumer: a family the
-    // customer somehow still holds is never re-priced beside its live rate.
-    const ownership = await pricingAi.loadCurrentServiceKeys(trx, fresh);
-    if (ownership.ownershipLookupFailed) {
-      throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
-    }
-    const owned = new Set([...ownership.currentServiceKeys, ...ownership.ownedServiceKeys]);
-    const toPrice = families.map(pricingKeyFor).filter((key) => !owned.has(key));
-    if (!toPrice.length) {
-      throw new RestartUnavailableError('nothing_to_restart', 'Those services are already active on this account.');
-    }
-
-    // Property context: the same resolver the portal pricing panel uses,
-    // profile-only (no external lookup spend from a restart tap).
     const turfProfile = await pricingAi.loadTurfProfile(trx, fresh.id);
-    const propertyContext = await pricingAi.resolvePropertyContext({ customer: fresh, turfProfile, propertyLookup: null });
-    const missing = pricingAi._private.missingPropertyFor(toPrice, propertyContext);
+    const propertyContext = await pricingAi.resolvePropertyContext({
+      customer: fresh,
+      turfProfile,
+      propertyLookup: 'propertyLookup' in deps ? deps.propertyLookup : crossSell.cacheOnlyPropertyLookup,
+      propertySeed,
+    });
+    const missing = pricingAi.missingPropertyFor(toPrice, propertyContext);
     if (missing) {
       throw new RestartUnavailableError('pricing_unavailable', 'We need a property measurement on file before we can price this online.');
     }
@@ -199,10 +265,11 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
         mintedAt: nowDate.toISOString(),
       },
     };
-    // priorQualifyingServices from the SERVER-derived ownership set — empty
-    // for a cancelled customer, so the engine prices at today's list.
-    const canonical = (key) => (key === 'termite' ? 'termite_bait' : key);
-    const priorQualifyingServices = ownership.currentServiceKeys.map(canonical);
+    // priorQualifyingServices from the SERVER-derived residual set —
+    // normally empty for a cancelled customer, so the engine prices at
+    // today's list; a family they somehow still hold prices the restart at
+    // the combined tier instead of standalone. Already family-canonical.
+    const priorQualifyingServices = [...ownedFamilies];
     const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
       priorQualifyingServices,
       recurringCustomer: priorQualifyingServices.length > 0,

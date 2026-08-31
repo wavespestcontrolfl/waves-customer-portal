@@ -45,6 +45,9 @@ function builder(table) {
   const b = {};
   const rows = () => (tables[table] || []).filter((r) => conds.every((c) => c(r)));
   b.where = (a, op, val) => {
+    // Grouped predicate (login admissibility OR-group) — pass-through; the
+    // JS-side sessionCustomerAdmitted filter still applies in the routes.
+    if (typeof a === 'function') return b;
     if (typeof a === 'object') Object.entries(a).forEach(([k, v]) => conds.push((r) => String(r[norm(k)]) === String(v)));
     else if (val === undefined) conds.push((r) => String(r[norm(a)]) === String(op));
     else if (op === '>=') conds.push((r) => r[norm(a)] >= val);
@@ -221,6 +224,17 @@ describe('cancelled customer — read allowance (gate on)', () => {
       const res = await call(method, path, bearer('cust-deact'), method === 'POST' ? {} : undefined);
       expect([method, path, res.status]).toEqual([method, path, 401]);
     }
+  });
+
+  test('an active=NULL churned row is NOT a processed cancellation — refused on reads and at login', async () => {
+    tables.customers.push({ ...CHURNED, id: 'cust-null', account_id: 'cust-null', active: null, phone: '+19415550104' });
+    tables.customer_accounts.push({ id: 'cust-null' });
+    for (const [method, path] of WIDENED_READS) {
+      const res = await call(method, path, bearer('cust-null'), method === 'POST' ? {} : undefined);
+      expect([method, path, res.status]).toEqual([method, path, 401]);
+    }
+    const login = await call('POST', '/api/auth/verify-code', {}, { phone: '+19415550104', code: '123456' });
+    expect(login.status).toBe(401);
   });
 
   test('an active customer is unaffected: reads and writes both pass, /me says not cancelled', async () => {

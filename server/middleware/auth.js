@@ -39,7 +39,10 @@ function cancelledReadAllowed() {
 }
 
 function isCancelledCustomerRow(customer) {
-  return !!customer && customer.active !== true && customer.pipeline_stage === 'churned';
+  // Exactly the processor's stamp: active EXPLICITLY false. An active=NULL
+  // legacy/partially-populated churned row is not a processed cancellation
+  // and gains nothing from the allowance.
+  return !!customer && customer.active === false && customer.pipeline_stage === 'churned';
 }
 
 function sessionCustomerAdmitted(customer) {
@@ -370,11 +373,14 @@ async function revokeRefreshSession(refreshToken, reason = 'logout') {
         // Validate the current customer/account exactly as rotation does
         // before inserting anything; arbitrary, access, deleted-customer, or
         // account-mismatched credentials never reach the session table.
+        // Same admission rule as rotation (C4): a cancelled customer CAN
+        // rotate, so their logout must tombstone too — otherwise a retained
+        // legacy token outlives the logout and migrates into a live family.
         const customer = await trx('customers')
-          .where({ id: decoded.customerId, active: true })
+          .where({ id: decoded.customerId })
           .whereNull('deleted_at')
           .first();
-        if (!customer) return { revoked: false };
+        if (!sessionCustomerAdmitted(customer)) return { revoked: false };
 
         const accountId = decoded.accountId || accountIdForCustomer(customer);
         if (!accountId

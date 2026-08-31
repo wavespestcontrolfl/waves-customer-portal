@@ -143,9 +143,11 @@ function builder(table) {
     if (typeof a === 'object') Object.entries(a).forEach(([k, v]) => conds.push((r) => String(r[norm(k)]) === String(v)));
     else if (val === undefined) conds.push((r) => String(r[norm(a)]) === String(op));
     else if (op === 'like') { const prefix = String(val).replace(/%$/, ''); conds.push((r) => String(r[norm(a)] || '').startsWith(prefix)); }
+    else if (op === '>=') conds.push((r) => (r[norm(a)] ?? '') >= val);
     else conds.push((r) => String(r[norm(a)]) === String(val));
     return b;
   };
+  b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[norm(col)]))); return b; };
   b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
   b.orderBy = () => b;
   b.leftJoin = () => b;
@@ -180,11 +182,14 @@ function deps(overrides = {}) {
       variantsForService: pricingAi.variantsForService,
       optionServices: pricingAi.optionServices,
       addressForCustomer: () => '1 Main St, Parrish, FL 34219',
-      loadCurrentServiceKeys: async () => ({ currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: false }),
       loadTurfProfile: async () => null,
       resolvePropertyContext: async () => ({ propertyInput: { homeSqFt: 2200, lotSqFt: 9000, stories: 1 }, grassType: 'st_augustine', palmCount: null }),
-      _private: { missingPropertyFor: () => null },
+      missingPropertyFor: () => null,
     },
+    // Injected so the mint never requires the heavy cross-sell/lookup
+    // modules in this suite; the seed and cache-only lookup paths are inert.
+    crossSell: { loadEstimateSeed: async () => null },
+    propertyLookup: null,
     bundleUtils: { pricingBundleMatchesEstimateTotals: () => true },
     buildEstimateSendSnapshot: async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: { frozen: true } } }),
     ...overrides,
@@ -256,10 +261,26 @@ describe('mintRestartEstimate', () => {
   });
 
   test('a second tap reuses the live restart estimate instead of minting beside it', async () => {
-    tables.estimates.push({ id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null });
+    tables.estimates.push({
+      id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+    });
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
     expect(result).toEqual({ estimateId: 'est-live', token: 'live-tok', url: '/estimate/live-tok', reused: true });
     expect(recompute).not.toHaveBeenCalled();
+  });
+
+  test('a live estimate whose scope no longer matches is archived and re-priced, never handed back stale', async () => {
+    tables.estimates.push({
+      id: 'est-stale', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'stale-tok', expires_at: '2099-01-01', archived_at: null,
+      // Minted when the cancellation covered pest only; the current case
+      // scope is pest + lawn.
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control'] } }),
+    });
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), now: () => new Date('2026-08-31T12:00:00Z'), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(result.reused).toBe(false);
+    expect(recompute).toHaveBeenCalledTimes(1);
+    expect(tables.estimates.find((r) => r.id === 'est-stale').archived_at).not.toBeNull();
   });
 
   test('an expired or archived prior restart estimate does not block a fresh mint', async () => {
@@ -281,14 +302,32 @@ describe('mintRestartEstimate', () => {
   test('whole-account scope ([]) recovers the families from the rows the processor pulled', async () => {
     tables.cancellation_cases[0].scope = '[]';
     tables.scheduled_services = [
-      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Quarterly Pest Control' },
-      { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Monthly Mosquito Program' },
+      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-23' },
+      { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Monthly Mosquito Program', cancelled_at: '2026-08-23' },
       // A staff-cancelled one-off and a rodent row are not plan evidence.
-      { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: false, cancellation_reason: 'weather', service_type: 'Lawn Care Program' },
-      { id: 's4', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Rodent Bait Stations' },
+      { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: false, cancellation_reason: 'weather', service_type: 'Lawn Care Program', cancelled_at: '2026-08-23' },
+      { id: 's4', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Rodent Bait Stations', cancelled_at: '2026-08-23' },
+      // A family churned in an EARLIER cancellation (before this case) is
+      // not part of the plan the customer just cancelled.
+      { id: 's5', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Tree & Shrub Program', cancelled_at: '2026-05-01' },
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
     expect(found).toEqual({ families: ['pest_control', 'mosquito'], caseId: 'case-1', source: 'cancelled_rows' });
+  });
+
+  test('an uncommitted LATEST case never lets an older committed scope answer — recovery keys to the new attempt', async () => {
+    // Newest first — this suite's builder does not sort, so fixture order
+    // stands in for the created_at DESC the real query applies.
+    tables.cancellation_cases = [
+      { id: 'case-new', customer_id: 'cust-1', status: 'open', scope: JSON.stringify(['pest_control']), created_at: '2026-08-22' },
+      { id: 'case-old', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['lawn_care']), created_at: '2026-07-01' },
+    ];
+    tables.scheduled_services = [
+      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-23' },
+      { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Lawn Care Program', cancelled_at: '2026-07-02' },
+    ];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-new', source: 'cancelled_rows' });
   });
 
   test('falls back to the scoped churn note, then reports nothing to restart', async () => {
@@ -301,25 +340,57 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
-  test('ownership fails closed; a family still owned is dropped; nothing left = nothing_to_restart', async () => {
-    const d = deps();
-    d.pricingAi.loadCurrentServiceKeys = async () => ({ currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: true });
-    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+  test('residual ownership fails closed; a family with LIVE recurring rows is dropped; nothing left = nothing_to_restart', async () => {
+    // The pricing-ai ownership loaders answer [] for an inactive customer,
+    // so the mint reads scheduled_services directly — a broken read refuses.
+    const failingDb = {
+      transaction: async (fn) => fn((table) => {
+        const b = builder(table);
+        if (table.startsWith('scheduled_services')) {
+          b.whereNotIn = () => { throw new Error('rows read boom'); };
+        }
+        return b;
+      }),
+    };
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: failingDb }) }))
+      .rejects.toMatchObject({ code: 'pricing_unavailable' });
 
-    d.pricingAi.loadCurrentServiceKeys = async () => ({ currentServiceKeys: ['pest_control'], ownedServiceKeys: [], ownershipLookupFailed: false });
-    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d });
+    // A LIVE recurring pest row (staff restored it) drops pest from the
+    // quote and prices lawn at the combined tier.
+    tables.scheduled_services = [
+      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+    ];
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
     const [estimateData, recomputeDeps] = recompute.mock.calls[0];
     expect(Object.keys(estimateData.engineInputs.services)).toEqual(['lawn']);
     expect(recomputeDeps.priorQualifyingServices).toEqual(['pest_control']);
 
-    d.pricingAi.loadCurrentServiceKeys = async () => ({ currentServiceKeys: ['pest_control', 'lawn_care'], ownedServiceKeys: [], ownershipLookupFailed: false });
+    // Both families live again = nothing to restart.
+    tables.scheduled_services.push(
+      { id: 'live-2', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Lawn Care Program' },
+    );
     tables.estimates = [];
-    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'nothing_to_restart' });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });
+  });
+
+  test('the accepted-estimate property seed and cache-only lookup reach the property resolver', async () => {
+    const seen = {};
+    const d = deps({
+      crossSell: { loadEstimateSeed: async () => ({ homeSqFt: 2450 }) },
+      propertyLookup: 'cache-only-stub',
+    });
+    d.pricingAi.resolvePropertyContext = async (args) => {
+      Object.assign(seen, { propertySeed: args.propertySeed, propertyLookup: args.propertyLookup });
+      return { propertyInput: { homeSqFt: 2450, lotSqFt: 9000, stories: 1 }, grassType: 'st_augustine', palmCount: null };
+    };
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(seen.propertySeed).toEqual({ homeSqFt: 2450 });
+    expect(seen.propertyLookup).toBe('cache-only-stub');
   });
 
   test('a property that cannot be priced online is pricing_unavailable, and a snapshot that will not freeze throws (no row survives)', async () => {
     const d = deps();
-    d.pricingAi._private.missingPropertyFor = () => 'home_sqft';
+    d.pricingAi.missingPropertyFor = () => 'home_sqft';
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
     expect(tables.estimates).toHaveLength(0);
 

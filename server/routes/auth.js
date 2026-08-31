@@ -92,6 +92,14 @@ async function activeCustomerByPhone(phone) {
   const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
   const rows = await db('customers')
     .whereNull('deleted_at')
+    // Admissibility in SQL, BEFORE the limit: on a phone shared by many
+    // inactive profiles, a deactivated pile must not push the one eligible
+    // row past the cut. The gate-aware check below still decides.
+    .where(function admissible() {
+      this.where('active', true).orWhere(function churned() {
+        this.where('active', false).where('pipeline_stage', 'churned');
+      });
+    })
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${last10}`])
     .orderBy('active', 'desc')
     .orderBy('is_primary_profile', 'desc')
@@ -168,14 +176,18 @@ async function accountPropertiesForCustomer(customer) {
     query.where({ id: customer.id });
   }
 
-  const rows = await query;
-  const properties = rows.map(propertyPayload);
-  // A cancelled profile is filtered out of the active list above; the
-  // signed-in one must still appear so the shell can name it (C4).
-  if (customer.active !== true && !properties.some((p) => String(p.id) === String(customer.id))) {
-    properties.unshift(propertyPayload(customer));
+  // C4: a cancelled session lists ONLY the signed-in profile. Active
+  // siblings would render a property switcher that cannot work —
+  // /auth/select-property is not a cancelled read — and sibling churned
+  // profiles are equally unreachable from this session; an account with an
+  // active profile logs in AS that profile (activeCustomerByPhone prefers
+  // it). A richer multi-property cancelled view is deliberately out of C4.
+  if (customer.active !== true) {
+    return [propertyPayload(customer)];
   }
-  return properties;
+
+  const rows = await query;
+  return rows.map(propertyPayload);
 }
 
 function dateOnlyForApi(value) {
