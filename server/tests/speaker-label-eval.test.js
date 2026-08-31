@@ -116,6 +116,23 @@ describe('speaker label eval', () => {
       .toEqual({ status: 'word_sequence_mismatch' });
   });
 
+  test('tokenless segments leave both numerator and denominator; an all-tokenless case is unscorable', () => {
+    const renders = ['Speaker 1: hello there', 'Speaker 2: ...', 'Speaker 1: [*]', 'Speaker 2: yes'];
+    const gold = goldWordStream(renders, ['agent', 'caller', 'agent', 'caller']);
+    // Model flips the last real segment; the two symbol-only segments carry no evidence.
+    const score = scoreLabeling(gold, modelWordStream('Agent: hello there\nCaller: ...\nAgent: [*]\nAgent: yes'), 4);
+    expect(score).toMatchObject({
+      status: 'scored',
+      segments: 2,
+      tokenlessSegments: [1, 2],
+      correctSegments: 1,
+      segmentAccuracy: 0.5,
+      misSegments: [3],
+    });
+    const empty = goldWordStream(['Speaker 1: ...'], ['agent']);
+    expect(scoreLabeling(empty, modelWordStream('Agent: ...'), 1)).toEqual({ status: 'no_scorable_segments' });
+  });
+
   test('a 50/50 word split on a segment is a miss, never credit', () => {
     const gold = goldWordStream(['Speaker 1: hello world'], ['caller']);
     const score = scoreLabeling(gold, modelWordStream('Caller: hello\nAgent: world'), 1);
@@ -257,7 +274,8 @@ describe('speaker label eval', () => {
     expect(scoreRunFailed(summary(0.50, 0.50), null)).toBe(false); // no floor -> report only
     expect(scoreRunFailed(summary(1, 1, [{ caseId: 'x', status: 'transcript_drift' }]), null)).toBe(true);
     expect(scoreRunFailed(summary(null, null), 0.95)).toBe(true); // nothing scored cannot claim the floor
-    expect(scoreRunFailed({ status: 'no_cases' }, 0.95)).toBe(false);
+    expect(scoreRunFailed({ status: 'no_cases' }, 0.95)).toBe(true); // empty fixture cannot clear a requested floor
+    expect(scoreRunFailed({ status: 'no_cases' }, null)).toBe(false);
 
     expect(parseArgs(['--floor=0.9']).floor).toBe(0.9);
     expect(() => parseArgs(['--floor=bad'])).toThrow(/--floor must be a number between 0 and 1/);

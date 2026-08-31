@@ -187,20 +187,31 @@ function scoreLabeling(goldWords, modelWords, segmentCount) {
     if (hit) perSegment[gold.segment].correct += 1;
   });
   const misSegments = [];
+  const tokenlessSegments = [];
   perSegment.forEach((seg, i) => {
+    // A segment with no tokenizer-recognized words (punctuation, a symbols-only
+    // marker) carries no evidence either way: it leaves BOTH numerator and
+    // denominator rather than being credited as correct.
+    if (!seg.total) {
+      tokenlessSegments.push(i);
+      return;
+    }
     // Majority credit: a 50/50 split is a MISS — crediting ties would inflate
     // segment accuracy and could mis-rank label models.
-    if (seg.total && seg.correct / seg.total <= 0.5) misSegments.push(i);
+    if (seg.correct / seg.total <= 0.5) misSegments.push(i);
   });
+  const scorableSegments = segmentCount - tokenlessSegments.length;
+  if (!goldWords.length || !scorableSegments) return { status: 'no_scorable_segments' };
   const ratio = (num, den) => (den ? Number((num / den).toFixed(4)) : null);
   return {
     status: 'scored',
     words: goldWords.length,
     correctWords: correct,
     wordAccuracy: ratio(correct, goldWords.length),
-    segments: segmentCount,
-    correctSegments: segmentCount - misSegments.length,
-    segmentAccuracy: ratio(segmentCount - misSegments.length, segmentCount),
+    segments: scorableSegments,
+    tokenlessSegments,
+    correctSegments: scorableSegments - misSegments.length,
+    segmentAccuracy: ratio(scorableSegments - misSegments.length, scorableSegments),
     misSegments,
   };
 }
@@ -427,9 +438,13 @@ async function runSheet(opts, deps) {
 // set BOTH advertised metrics must clear it — a model can ace one long
 // segment (high word accuracy) while flipping many short turns.
 function scoreRunFailed(summary, floor) {
+  const floorRequested = floor !== null && floor !== undefined;
+  // An empty fixture cannot clear a requested floor — that would be a
+  // vacuous green model gate. Without a floor it is just "nothing to report".
+  if (summary.status === 'no_cases') return floorRequested;
   if (summary.status !== 'scored') return false;
   if (summary.unscored.length > 0) return true;
-  if (floor === null || floor === undefined) return false;
+  if (!floorRequested) return false;
   if (summary.wordAccuracy === null || summary.segmentAccuracy === null) return true; // nothing scored -> cannot claim the floor
   return summary.wordAccuracy < floor || summary.segmentAccuracy < floor;
 }
