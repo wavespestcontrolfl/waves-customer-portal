@@ -114,7 +114,7 @@ router.post('/scan', async (req, res, next) => {
       responded = true;
       res.status(status).json(body);
     };
-    runExclusive('price-scan-weekly', async () => {
+    void runExclusive('price-scan-weekly', async () => {
       respond(202, { ok: true, started: true });
       const result = await runWeeklyScan();
       logger.info(`[price-match] manual scan run by ${req.technicianId}: ${JSON.stringify(result)}`);
