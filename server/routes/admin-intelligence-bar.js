@@ -2352,7 +2352,6 @@ router.post('/confirm-action', async (req, res, next) => {
       // _appointment_fingerprint also stays: rescheduleAppointment asserts
       // it against the row its own CAS is based on.
       const pinnedAppointment = execParams._appointment_fingerprint;
-      delete execParams._pinned_email;
       let drifted = false;
       if (pinnedPhone) {
         const r = action.tool_name === 'reply_via_sms'
