@@ -258,3 +258,31 @@ describe('account-level channel routing', () => {
     ]);
   });
 });
+
+describe('account-level email capability for the channel select (#1995 E)', () => {
+  const { accountEmailAvailable } = notificationsRoute._private;
+
+  function mockCustomers(rows, { fail = false } = {}) {
+    db.mockImplementation((table) => {
+      if (table !== 'customers') throw new Error(`unexpected table ${table}`);
+      return { whereIn: (col, ids) => ({ select: async () => { if (fail) throw new Error('boom'); return rows.filter((r) => ids.includes(String(r.id))); } }) };
+    });
+  }
+
+  test('true when the account primary has an email even though the selected property has none', async () => {
+    mockCustomers([{ id: 'prop-2', email: null }, { id: 'prop-1', email: 'lana@example.com' }]);
+    expect(await accountEmailAvailable('prop-2', 'prop-1')).toBe(true);
+  });
+
+  test('false when neither row carries a deliverable-looking address', async () => {
+    mockCustomers([{ id: 'prop-2', email: '' }, { id: 'prop-1', email: 'not-an-email' }]);
+    expect(await accountEmailAvailable('prop-2', 'prop-1')).toBe(false);
+  });
+
+  test('single-property account checks only its own row; a read failure fails closed', async () => {
+    mockCustomers([{ id: 'prop-1', email: 'lana@example.com' }]);
+    expect(await accountEmailAvailable('prop-1', 'prop-1')).toBe(true);
+    mockCustomers([{ id: 'prop-1', email: 'lana@example.com' }], { fail: true });
+    expect(await accountEmailAvailable('prop-1', 'prop-1')).toBe(false);
+  });
+});

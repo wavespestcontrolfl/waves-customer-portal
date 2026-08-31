@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('./customer-contact');
+const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE, withAccountPrimaryContact } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -82,10 +82,12 @@ async function stampedPropertyLabel(scheduledServiceId) {
 
 async function loadCustomer(customerId) {
   if (!customerId) return null;
-  return db('customers')
+  const row = await db('customers')
     .where({ id: customerId })
     .select(
       'id',
+      'account_id',
+      'is_primary_profile',
       'first_name',
       'last_name',
       'company_name',
@@ -105,6 +107,10 @@ async function loadCustomer(customerId) {
       'service_contacts_consent_at',
     )
     .first();
+  // Secondary-property row with no email of its own: the account owner's
+  // address (#1995 A/D) — the row IS the owner, minted from their estimate.
+  // Only blank fields fill; a row-level email always wins.
+  return row ? withAccountPrimaryContact(row) : row;
 }
 
 // Resolve the email recipients for an appointment notice. Mirrors the SMS

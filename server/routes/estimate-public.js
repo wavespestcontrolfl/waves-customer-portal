@@ -12650,7 +12650,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         purpose: 'estimate_accept_booking',
       });
     }
-    if (estimate.customer_phone && !billByInvoice && treatAsOneTime) {
+    // Accept-SMS recipient: the estimate's own phone; when the estimate has
+    // none but the linked customer row does — or, for a secondary-property
+    // row without one, the account primary (same person; #1995) — that
+    // number. Fail-open to "no phone" (today's behavior), never a guess.
+    let acceptSmsPhone = String(estimate.customer_phone || '').trim();
+    if (!acceptSmsPhone && customerId) {
+      try {
+        const { withAccountPrimaryContact } = require('../services/customer-contact');
+        const contactRow = await db('customers').where({ id: customerId }).first('id', 'phone', 'account_id', 'is_primary_profile');
+        const resolved = contactRow ? await withAccountPrimaryContact(contactRow) : null;
+        acceptSmsPhone = String(resolved?.phone || '').trim();
+      } catch (phoneErr) {
+        logger.warn(`[estimate-accept] accept SMS phone resolution failed for customer ${customerId}: ${phoneErr.message}`);
+      }
+    }
+    if (acceptSmsPhone && !billByInvoice && treatAsOneTime) {
       try {
         if (treatAsOneTime) {
           const primarySvc = oneTimeBookingService || bookingServiceFor(acceptedOneTimeServiceLabel || oneTimeList[0]?.name || '');
@@ -12666,7 +12681,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               logger.warn(`[estimate-accept] estimate_accepted_onetime template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
             } else {
               const sendResult = await sendCustomerMessage({
-                to: estimate.customer_phone,
+                to: acceptSmsPhone,
                 body: customerBody,
                 channel: 'sms',
                 audience: customerId ? 'customer' : 'lead',
@@ -12768,7 +12783,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   return false;
                 }
                 const sendResult = await sendCustomerMessage({
-                  to: estimate.customer_phone,
+                  to: acceptSmsPhone,
                   body: customerBody,
                   channel: 'sms',
                   audience: 'customer',
@@ -12821,66 +12836,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               },
             });
           }
-        } else if (annualPrepaySelected && !['paid', 'processing', 'ambiguous', 'deferred'].includes(prepayAutoCharge?.status)) {
-          // Auto-charged (or ACH-initiated) accepts skip this SMS (pre-push
-          // Codex P1): the template promises an invoice to pay, which
-          // contradicts a year already collected/collecting — the charge
-          // path's receipt is the customer's confirmation. Declined/skipped
-          // charges keep the invoice-coming copy, which is then accurate.
-          // Quote the invoice's live amount DUE (Codex r27 P2):
-          // annualPrepayQuotedAmount is invoice.total, but account credit
-          // applied in the accept trx sits in credit_applied — the pay
-          // link this SMS promises collects total - credit_applied, so the
-          // gross figure would contradict the lower amount the customer
-          // just acknowledged. (Live read also picks up a payer-reroute
-          // reversal, where gross is once again the true due.)
-          let prepayFallbackAmount = annualPrepayQuotedAmount;
-          try {
-            const dueRow = invoiceId ? await db('invoices').where({ id: invoiceId }).first('total', 'credit_applied') : null;
-            if (dueRow) prepayFallbackAmount = require('../services/invoice-helpers').invoiceAmountDue(dueRow);
-          } catch { /* keep the minted figure */ }
-          const amountText = prepayFallbackAmount != null ? ` for ${fmtMoney(prepayFallbackAmount)}` : '';
-          const customerBody = await renderEditableSmsTemplate(
-            'estimate_accepted_annual_prepay',
-            {
-              first_name: firstName,
-              waveguard_tier: estimate.waveguard_tier || 'Bronze',
-              amount_text: amountText,
-            },
-            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
-          );
-          if (!customerBody) {
-            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
-          } else {
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: customerId ? 'customer' : 'lead',
-              purpose: 'estimate_followup',
-              customerId: customerId || undefined,
-              estimateId: estimate.id,
-              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-              consentBasis: customerId ? undefined : {
-                status: 'transactional_allowed',
-                source: 'estimate_token_acceptance',
-                capturedAt: new Date().toISOString(),
-              },
-              entryPoint: 'estimate_accept_annual_prepay',
-              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
-            });
-            // No quiet-hours requeue: estimate_accept_annual_prepay is a
-            // customer-action entry point (owner ruling 2026-08-29) — the
-            // acceptance text answers the customer's own web acceptance
-            // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
-            // here.
-            if (sendResult.blocked || sendResult.sent === false) {
-              throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            } else {
-              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
-            }
-          }
         }
+        // Annual prepay accepts send NO separate acceptance SMS. The
+        // estimate_accepted_annual_prepay branch that used to sit here was
+        // unreachable since #1520 (2026-06-03) narrowed this block to
+        // treatAsOneTime, and the customer already gets two receipts for the
+        // year: the onboarding email above and the prepay invoice's own
+        // SMS + email (InvoiceService.sendViaSMSAndEmail below) — a third
+        // "invoice coming" text would land seconds before the invoice text.
         // Standard recurring accepts no longer send a separate acceptance SMS;
         // the onboarding handoff text was retired with the onboarding flow.
         // Customers continue through the invoice/pay-link path below.

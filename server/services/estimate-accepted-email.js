@@ -21,6 +21,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { withAccountPrimaryContact } = require('./customer-contact');
 
 function clean(value) {
   return String(value == null ? '' : value).trim();
@@ -116,13 +117,20 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
     // phoneless one-time accept commits without a customer row, and a linked
     // customer row can carry no usable email while the estimate does.
     const customer = customerId
-      ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email')
+      ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email', 'account_id', 'is_primary_profile')
       : null;
     let email = clean(customer?.email);
     const estimateContact = usableEmail(email)
       ? null
       : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
     if (estimateContact) email = clean(estimateContact.customer_email);
+    // Secondary-property accept with no email on the row OR the estimate:
+    // the account owner's address (#1995) — same person, minted from their
+    // own estimate. Checked last so a row/estimate address always wins.
+    if (!usableEmail(email) && customer) {
+      const withPrimary = await withAccountPrimaryContact({ ...customer, email: '' });
+      if (usableEmail(withPrimary.email)) email = clean(withPrimary.email);
+    }
     if (!usableEmail(email)) {
       logger.info(`[estimate-accepted-email] no usable email for ${customerId ? `customer ${customerId}` : `estimate ${estimateId}`}; skipping onboarding email`);
       // Distinct from a failure: nothing to retry until an address exists.
