@@ -878,11 +878,15 @@ function hasServiceCtaBefore(prefix: string): boolean {
   // link test.
   const p2 = maskMarkdownImages(prefix)
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
-  if (SERVICE_CTA_LINK_RE.test(p2)) return true;
+  // Link-shaped text inside a JSX attribute (title="[quote](/quote/)")
+  // renders no anchor — mask attr quotes for the Markdown scans only
+  // (hasInlineCtaService reads quoted ctaHref values, so it gets p2).
+  const p3 = maskJsxAttrQuotes(p2);
+  if (SERVICE_CTA_LINK_RE.test(p3)) return true;
   // An absolute-URL markdown link on a hub host counts like its path form.
   const absLink = /\]\(\s*(https:\/\/[^)\s]+)\s*\)/gi;
   let am: RegExpExecArray | null;
-  while ((am = absLink.exec(p2)) !== null) if (isServiceCtaHref(am[1])) return true;
+  while ((am = absLink.exec(p3)) !== null) if (isServiceCtaHref(am[1])) return true;
   return hasInlineCtaService(p2);
 }
 
@@ -891,10 +895,50 @@ function hasServiceCtaBefore(prefix: string): boolean {
 // any tag carrying one can never be validated (fail closed).
 const JSX_SPREAD_RE = /\{\s*\.\.\./;
 
+// Quoted attribute VALUES may contain anything ("Use {...props} notation",
+// "hidden") without it being markup — blank their contents (quotes kept,
+// length-preserving) before any structural test of raw attribute text.
+function stripQuotedAttrValues(attrs: string): string {
+  return attrs.replace(/(["'`])(?:(?!\1)[\s\S])*\1/g, (m) => m[0] + ' '.repeat(m.length - 2) + m[m.length - 1]);
+}
+function hasJsxSpread(attrs: string): boolean {
+  return JSX_SPREAD_RE.test(stripQuotedAttrValues(attrs));
+}
+
+// Length-preserving mask of every quoted span inside JSX opening tags:
+// title="[quote](/quote/)" renders no anchor, so attribute text must never
+// satisfy a Markdown-link scan. Walks tags with tagAttrsAt's quote/brace
+// rules; an unterminated tag masks the quoted spans seen up to EOF.
+function maskJsxAttrQuotes(src: string): string {
+  const out = src.split('');
+  const re = /<[A-Za-z][\w.]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    let j = m.index + m[0].length; let q: string | null = null; let qStart = -1; let depth = 0;
+    for (; j < src.length; j += 1) {
+      const c = src[j];
+      if (q) {
+        if (c === '\\') { j += 1; continue; }
+        if (c === q) {
+          for (let t = qStart + 1; t < j; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          q = null;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { q = c; qStart = j; continue; }
+      if (c === '{') depth += 1;
+      else if (c === '}') depth -= 1;
+      else if (c === '>' && depth === 0) break;
+    }
+    re.lastIndex = j;
+  }
+  return out.join('');
+}
+
 function hasInlineCtaService(prefix: string): boolean {
   for (const { attrs } of tagsNamed(prefix, 'InlineCTA')) {
     if (attrs === null) continue; // unterminated — never counts
-    if (JSX_SPREAD_RE.test(attrs)) continue; // spread can override the destination
+    if (hasJsxSpread(attrs)) continue; // spread can override the destination
     if (!/\bctaHref\s*=/.test(attrs)) return true;
     const href = literalAttr(attrs, 'ctaHref'); // duplicated/dynamic → null → not counted
     if (href && isServiceCtaHref(href)) return true;
@@ -944,11 +988,17 @@ export function validateAffiliateUsage(
   // on the structural view only.
   structural = blankBalancedElements(structural, (attrs) => {
     // display:none in a CSS string OR a JSX style object ({display:'none'})
-    // hides regardless of the hidden attribute's value.
+    // hides regardless of the hidden attribute's value — the value lives
+    // inside quotes/braces, so test the FULL attribute text.
     if (/display\s*['"]?\s*:\s*['"]?\s*none/i.test(attrs)) return true;
+    // A wrapper spread ({...props}) can inject hidden/style at render time
+    // — visibility cannot be determined, so fail closed (blank it). Quote-
+    // stripped, so a string prop mentioning {...} is not a spread.
+    const bare = stripQuotedAttrValues(attrs);
+    if (JSX_SPREAD_RE.test(bare)) return true;
     // hidden={false} disables only the hidden-attribute test.
-    if (/(?:^|\s)hidden\s*=\s*\{\s*false\s*\}/i.test(attrs)) return false;
-    return /(?:^|\s)hidden(?=[\s>/=]|$)/i.test(attrs);
+    if (/(?:^|\s)hidden\s*=\s*\{\s*false\s*\}/i.test(bare)) return false;
+    return /(?:^|\s)hidden(?=[\s>/=]|$)/i.test(bare);
   }, unmasked);
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
@@ -970,7 +1020,7 @@ export function validateAffiliateUsage(
   // rule, so it is a blocker in EVERY post, affiliate or not.
   for (const { attrs } of tagsNamed(unmasked, 'InlineCTA')) {
     if (attrs === null) continue;
-    if (JSX_SPREAD_RE.test(attrs)) {
+    if (hasJsxSpread(attrs)) {
       blockers.push('<InlineCTA> may not carry a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated');
       break;
     }
@@ -1008,7 +1058,7 @@ export function validateAffiliateUsage(
   // value the gate never validated.
   const checked = new Set<string>();
   for (const { attrs } of tagsNamed(unmasked, 'AffiliateLink')) {
-    if (attrs !== null && JSX_SPREAD_RE.test(attrs)) {
+    if (attrs !== null && hasJsxSpread(attrs)) {
       blockers.push('<AffiliateLink> may not carry a JSX spread ({...}) — a spread can override product/placement at render time, so the invocation cannot be validated against the registry');
       continue;
     }

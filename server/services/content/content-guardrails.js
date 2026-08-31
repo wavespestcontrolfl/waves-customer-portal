@@ -1691,6 +1691,21 @@ function affiliateTagCountsByProduct(text) {
   return counts;
 }
 
+// A Markdown IMAGE renders an <img>, never a link — blank each image span
+// (length-preserving) via THE balanced walker: a flat /!\[[^\]]*\]/ regex
+// stops at a nested label's inner `]` (![Request [a quote]](/quote/)) and
+// leaves `](/quote/)` residue for the destination collector to
+// false-match. A malformed image blanks to where scanning stopped — an
+// image can never be the CTA, so over-blanking is the safe direction.
+function blankMarkdownImages(text) {
+  const out = String(text || '').split('');
+  for (const span of eachMarkdownLink(text)) {
+    if (!span.isImage) continue;
+    for (let t = span.start; t <= span.end && t < out.length; t += 1) if (out[t] !== '\n') out[t] = ' ';
+  }
+  return out.join('');
+}
+
 // True when the body already carries a Waves service CTA — an allowlisted
 // CTA route or a real /{service}-{city}-fl/ page (validated against the
 // published-city set, same as internalRouteFinding).
@@ -1711,8 +1726,7 @@ function hasServiceCtaLink(body) {
   // MDX expressions are blanked from the structural view too (parity with
   // the astro validator): {true && <InlineCTA/>} can only render a
   // component, never a Markdown CTA, and must not satisfy the rule.
-  const rendered = blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(prefix)))))
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => ' '.repeat(m.length))
+  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(prefix))))))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   const isServiceRoute = (norm) => {
     if (SERVICE_CTA_ROUTES.has(norm)) return true;
@@ -1734,6 +1748,41 @@ function hasServiceCtaLink(body) {
     if (isServiceRoute(norm)) return true;
   }
   return false;
+}
+
+// InlineCTA writes ctaHref straight into an anchor and is allowlisted for
+// EVERY blog draft, affiliate or not — an invalid destination would only
+// surface at the astro publish gate AFTER a full generation spend (and a
+// javascript: destination is a link-safety issue besides). Mirrors the
+// vendored component contract (packages/blog-schema/schema.ts InlineCTA):
+// optional ctaHref must be a single quoted literal that is a well-formed
+// root-relative path (no dot segments) or an https URL; a spread can
+// override the destination at render time, so it never validates.
+// Code and comments never render; expressions CAN render a component, so
+// they stay visible (parity with the astro validator's unmasked view).
+const INLINE_CTA_ROOT_RELATIVE_RE = /^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-9._~\-/?#=&%+]*)?$/;
+function inlineCtaHrefValid(v) {
+  if (INLINE_CTA_ROOT_RELATIVE_RE.test(v) && !/(^|\/)\.\.(\/|$)/.test(v)) return true;
+  if (!/^https:\/\//i.test(v)) return false;
+  try { const u = new URL(v); return u.protocol === 'https:' && !!u.hostname && !/[\s"'<>]/.test(v); } catch { return false; }
+}
+function inlineCtaContractFinding(body) {
+  const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  for (const tag of eachTag(text)) {
+    if (tag.isClose || tag.name !== 'inlinecta') continue;
+    if (hasAttrSpreadAfter(tag.attrs)) {
+      return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
+    }
+    if (!/\bctaHref\s*=/.test(maskAttrRegions(tag.attrs))) continue; // no ctaHref: the component defaults to the quote page
+    const href = literalAttribute(tag.attrs, 'ctaHref');
+    if (href === null) {
+      return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA ctaHref> that is not a single quoted literal — expression-valued or duplicated destinations cannot be validated.');
+    }
+    if (!inlineCtaHrefValid(href)) {
+      return finding('P0', 'INVALID_INLINECTA_DESTINATION', `Draft contains an <InlineCTA ctaHref="${href}"> that is not a well-formed root-relative path (no dot segments) or https URL — the astro publish gate rejects it (and executable schemes never ship).`);
+    }
+  }
+  return null;
 }
 
 // All affiliate policy findings for a draft — an ARRAY (several can apply,
@@ -5467,6 +5516,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // risk-class/label-review, page-class eligibility, disclosure,
     // density/CTA placement, and the refresh no-additions rule.
     ...affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsBlog, isRefresh, priorBody }),
+    // InlineCTA's destination contract holds for EVERY draft (the component
+    // is allowlisted outside affiliate posts too) — a javascript: or
+    // expression-valued ctaHref must park here, not at the astro gate after
+    // a full generation spend.
+    inlineCtaContractFinding(body),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -5627,5 +5681,5 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
 };

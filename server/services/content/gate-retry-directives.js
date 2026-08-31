@@ -49,6 +49,7 @@ const GATE_RETRY_INSTRUCTIONS = {
   AFFILIATE_PLACEMENT_NOT_ALLOWED: 'Every <AffiliateLink> needs a quoted literal placement="…" id that the product allows (your brief names the allowed placements; use primary-rec unless told otherwise) — never omit, compute, or invent a placement.',
   SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE: 'Add a Waves service CTA link (e.g. /pest-control-calculator/, /quote/, or the relevant city-service page) BEFORE any product recommendation — affiliate links are fallback monetization; the service CTA stays primary.',
   EXCESSIVE_AFFILIATE_LINK_DENSITY: 'Cap affiliate links at 3 per post and keep the opening section product-free — answer the reader\'s question first, then recommend at most one primary product and one alternative later in the piece.',
+  INVALID_INLINECTA_DESTINATION: 'Every <InlineCTA ctaHref> must be a single quoted literal that is a root-relative path (no dot segments) or an https URL — never a spread, expression, duplicate, or any other scheme; omit ctaHref entirely to use the default quote page.',
 };
 
 // The header defaults to the RUN-LEVEL framing (one feedback-informed

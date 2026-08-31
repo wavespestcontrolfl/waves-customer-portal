@@ -582,7 +582,35 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       const cityCta = `Intro copy.\n\n## Measuring\n\nSee [lawn care](/lawn-care-bradenton-fl/). Use ${link('rain-gauge')}.`;
       const r2 = guardrails.evaluate({ body: cityCta, frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r2)).toEqual([]);
+      // A nested-label image leaves no `](/quote/)` residue for the
+      // destination collector — balanced image masking (Codex #3646 r9 P1).
+      const nestedImg = `Intro copy.\n\n## Measuring\n\n![Request [a quote]](/quote/)\n\nUse ${link('rain-gauge')}.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: nestedImg, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
     });
+  });
+
+  test('InlineCTA destination contract holds for EVERY draft, affiliate or not (Codex #3646 r9 P1)', () => {
+    const ctaCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_DESTINATION').map((f) => f.severity);
+    const wrap = (tag) => `Intro copy.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    for (const bad of [
+      '<InlineCTA ctaHref="javascript:alert(1)" />',
+      '<InlineCTA ctaHref="http://example.com/x" />',
+      '<InlineCTA ctaHref="/a/../b/" />',
+      '<InlineCTA ctaHref={href} />',
+      '<InlineCTA ctaHref="/quote/" ctaHref="/x/" />',
+      '<InlineCTA {...props} />',
+    ]) {
+      expect(ctaCodes(guardrails.evaluate({ body: wrap(bad) }, { targetIsBlog: true }))).toEqual(['P0']);
+    }
+    for (const ok of [
+      '<InlineCTA />',
+      '<InlineCTA ctaHref="/quote/" />',
+      '<InlineCTA ctaHref="https://wavespestcontrol.com/quote/" />',
+      '<InlineCTA headline="Use {...props} notation" />',
+      '```\n<InlineCTA ctaHref="javascript:alert(1)" />\n```',
+    ]) {
+      expect(ctaCodes(guardrails.evaluate({ body: wrap(ok) }, { targetIsBlog: true }))).toEqual([]);
+    }
   });
 
   test('refresh preserves but never adds (per product id, count-compared), fail closed without the prior body', () => {
