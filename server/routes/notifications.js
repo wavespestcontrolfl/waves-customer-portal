@@ -461,14 +461,35 @@ async function loadPreferencePayload(req) {
   const prefs = await ensurePrefs(req.customerId);
   const primaryId = await resolvePrimaryProfileId(req);
   const channelPrefs = String(primaryId) === String(req.customerId) ? prefs : await ensurePrefs(primaryId);
-  return preferencePayload({
-    ...prefs,
-    appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
-    service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
-    service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
-    en_route_channel: channelPrefs.en_route_channel,
-    tech_arrived_channel: channelPrefs.tech_arrived_channel,
-  });
+  return {
+    ...preferencePayload({
+      ...prefs,
+      appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
+      service_reminder_72h_channel: channelPrefs.service_reminder_72h_channel,
+      service_reminder_24h_channel: channelPrefs.service_reminder_24h_channel,
+      en_route_channel: channelPrefs.en_route_channel,
+      tech_arrived_channel: channelPrefs.tech_arrived_channel,
+    }),
+    // Channels are account-level and the senders fall back to the account
+    // primary's email on a secondary property (#1995 E), so the portal's
+    // Email/Both offer keys on the ACCOUNT having an address — not on the
+    // currently-selected property row alone.
+    channelEmailAvailable: await accountEmailAvailable(req.customerId, primaryId),
+  };
+}
+
+// True when the current profile OR the account primary carries a
+// deliverable-looking email. Fail closed (false) on a read error — a false
+// here only narrows the select to SMS; it never changes a stored channel.
+async function accountEmailAvailable(customerId, primaryId) {
+  const ids = [...new Set([customerId, primaryId].filter(Boolean).map(String))];
+  if (!ids.length) return false;
+  try {
+    const rows = await db('customers').whereIn('id', ids).select('id', 'email');
+    return rows.some((r) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(r.email || '').trim()));
+  } catch {
+    return false;
+  }
 }
 
 // =========================================================================
@@ -851,6 +872,8 @@ router._private = {
   serviceContactsRequireConsent,
   normalizeContactInput,
   resolvePrimaryProfileId,
+  loadPreferencePayload,
+  accountEmailAvailable,
   CHANNEL_DB_COLUMNS,
   SERVICE_CONTACT_CONSENT_VERSION,
 };

@@ -278,6 +278,67 @@ function getRecipientsForPurpose(customer, prefs = {}, purpose, channel = 'sms')
   return [getPrimaryContact(customer)].filter((contact) => clean(contact.phone) || clean(contact.email));
 }
 
+// ---------------------------------------------------------------------------
+// Multi-property (frozen sibling-row model, customer_accounts /
+// customers.is_primary_profile): a secondary "Additional property" row is the
+// SAME person as the account's primary profile — the accept flow mints it
+// from the owner's own estimate (phone copied, email copied when present).
+// Senders that resolve recipients from that property row alone (appointment
+// email, accept onboarding email, accept SMS) reach nobody when the row
+// carries no address, even though the account primary does (#1995 A/D).
+//
+// withAccountPrimaryFallback fills ONLY the blank contact fields
+// (phone / email / first_name) from the primary row — a value the property
+// row carries always wins, so a genuinely different tenant/buyer contact on
+// the row is never overridden. Pure; the loader below does the one DB read.
+// Fails open to the row as-is: a lookup failure restores today's behavior,
+// never an extra address.
+function isSecondaryProfile(row) {
+  return !!row && row.is_primary_profile !== true && !!row.account_id;
+}
+
+function withAccountPrimaryFallback(row, primaryRow) {
+  if (!row || !primaryRow || !isSecondaryProfile(row)) return row;
+  if (String(primaryRow.id || '') && String(primaryRow.id) === String(row.id)) return row;
+  const out = { ...row };
+  const filled = [];
+  for (const col of ['phone', 'email', 'first_name']) {
+    if (!clean(row[col]) && clean(primaryRow[col])) {
+      out[col] = clean(primaryRow[col]);
+      filled.push(col);
+    }
+  }
+  if (filled.length) {
+    out.account_primary_fallback = { customer_id: primaryRow.id, fields: filled };
+  }
+  return out;
+}
+
+// Loads the account's primary profile (id / first_name / phone / email) for a
+// secondary-profile row; null when the row is primary, unlinked, or the read
+// fails. The db handle is injectable for tests; the default is the shared knex.
+async function loadAccountPrimaryRow(row, { db = null } = {}) {
+  if (!isSecondaryProfile(row)) return null;
+  try {
+    const knex = db || require('../models/db');
+    const primary = await knex('customers')
+      .where({ account_id: row.account_id, is_primary_profile: true })
+      .whereNull('deleted_at')
+      .first('id', 'first_name', 'phone', 'email');
+    return primary && String(primary.id) !== String(row.id) ? primary : null;
+  } catch {
+    return null;
+  }
+}
+
+// One-call form: the row with the primary's contact fields filled in where
+// the row's own are blank. Requires the row to carry account_id and
+// is_primary_profile (callers add them to their select).
+async function withAccountPrimaryContact(row, opts = {}) {
+  const primary = await loadAccountPrimaryRow(row, opts);
+  return withAccountPrimaryFallback(row, primary);
+}
+
 // True if this customer has a distinct service contact configured (any slot).
 // Used by audit tools + the admin UI to surface a "Service contact: …" chip.
 function hasDistinctServiceContact(customer) {
@@ -310,4 +371,8 @@ module.exports = {
   getServiceReportEmailRecipients,
   getRecipientsForPurpose,
   hasDistinctServiceContact,
+  isSecondaryProfile,
+  withAccountPrimaryFallback,
+  loadAccountPrimaryRow,
+  withAccountPrimaryContact,
 };
