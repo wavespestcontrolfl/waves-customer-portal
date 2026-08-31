@@ -241,7 +241,7 @@ export default function ContentRegistryPage({ embedded = false } = {}) {
     >
       {!embedded && (
         <AdminCommandHeader
-          title="Content Registry"
+          title="Content registry"
           icon={Database}
           actions={[
             { key: "sync", label: "Sync", icon: RefreshCw, onClick: runSync, disabled: loading || syncing, variant: "primary" },

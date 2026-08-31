@@ -310,14 +310,14 @@ describe("DashboardPageV2 sections", () => {
       screen.getByText("Today's Completion"),
     );
     expect(document.getElementById("today")).toContainElement(
-      screen.getByText("Action Inbox"),
+      screen.getByText("Action inbox"),
     );
     // GROWTH
     expect(document.getElementById("growth")).toContainElement(
-      screen.getByText("Sales Capture"),
+      screen.getByText("Sales capture"),
     );
     expect(document.getElementById("growth")).toContainElement(
-      screen.getByText("Marketing Attribution"),
+      screen.getByText("Marketing attribution"),
     );
     // Estimate funnel: pending row + per-requested-service outcomes
     expect(document.getElementById("growth")).toContainElement(
@@ -325,7 +325,7 @@ describe("DashboardPageV2 sections", () => {
     );
     // Lead funnel by source: card + a source row with visible low-sample pill
     expect(document.getElementById("growth")).toContainElement(
-      screen.getByText("Lead Funnel by Source"),
+      screen.getByText("Lead funnel by source"),
     );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Low sample · n=3"),
@@ -347,25 +347,25 @@ describe("DashboardPageV2 sections", () => {
     // PROFIT — the adjusted-EBITDA bridge is its own card NEXT TO the margin
     // tiles (company-level vs job-level; never combined).
     expect(document.getElementById("profit")).toContainElement(
-      screen.getByText("Service Mix"),
+      screen.getByText("Service mix"),
     );
     expect(document.getElementById("profit")).toContainElement(
-      screen.getByText("Adjusted EBITDA Bridge"),
+      screen.getByText("Adjusted EBITDA bridge"),
     );
     expect(document.getElementById("profit")).toContainElement(
       screen.getByText("Adjusted EBITDA"),
     );
     // RETENTION
     expect(document.getElementById("retention")).toContainElement(
-      screen.getByText("MRR Trend"),
+      screen.getByText("MRR trend"),
     );
     // Net-MRR bridge: month strip + waterfall rows + in-progress flag
     expect(document.getElementById("retention")).toContainElement(
-      screen.getByText("MRR Bridge"),
+      screen.getByText("MRR bridge"),
     );
     // Churn Pareto card + always-visible unclassified share
     expect(document.getElementById("retention")).toContainElement(
-      screen.getByText("Why Customers Leave"),
+      screen.getByText("Why customers leave"),
     );
     expect(document.getElementById("retention")).toContainElement(
       screen.getByText("42.9% unclassified"),
@@ -377,14 +377,14 @@ describe("DashboardPageV2 sections", () => {
       screen.getByText("in progress"),
     );
     expect(document.getElementById("retention")).toContainElement(
-      screen.getByText("Retention by Cohort"),
+      screen.getByText("Retention by cohort"),
     );
     // CASH
     expect(document.getElementById("cash")).toContainElement(
-      screen.getByText("Accounts Receivable Aging"),
+      screen.getByText("Accounts receivable aging"),
     );
     expect(document.getElementById("cash")).toContainElement(
-      screen.getByText("Billing Health"),
+      screen.getByText("Billing health"),
     );
   });
 

@@ -197,7 +197,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
       <AdminCommandHeader
-        title="Knowledge Base"
+        title="Knowledge base"
         icon={Brain}
         sections={tabs}
         activeKey={tab}

@@ -116,7 +116,7 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1100px] mx-auto p-6 space-y-4">
       <div>
         {!embedded && (
-          <h1 className="text-18 font-medium text-zinc-900">Price Change Notices</h1>
+          <h1 className="text-18 font-medium text-zinc-900">Price change notices</h1>
         )}
         <p className="text-12 text-ink-secondary mt-0.5 max-w-2xl">
           Formal advance notice for recurring-service price changes — a short email + text per

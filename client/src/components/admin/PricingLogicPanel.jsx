@@ -160,7 +160,7 @@ function ChangelogTab() {
             letterSpacing: "0.02em",
           }}
         >
-          Pricing Changelog
+          Pricing changelog
         </h2>{" "}
         <label style={{ fontSize: 12, color: D.muted }}>
           Filter
@@ -657,7 +657,7 @@ function ProposalsTab() {
             letterSpacing: "0.02em",
           }}
         >
-          Pricing Proposals
+          Pricing proposals
         </h2>{" "}
         <div style={{ display: "flex", gap: 6 }}>
           {statusOptions.map((s) => (
@@ -1957,7 +1957,7 @@ function DiscountRulesTab() {
           letterSpacing: "0.02em",
         }}
       >
-        Service Discount Rules
+        Service discount rules
       </h2>{" "}
       <div style={{ overflowX: "auto" }}>
         {" "}
@@ -2212,7 +2212,7 @@ function ProductsTab() {
           letterSpacing: "0.02em",
         }}
       >
-        Product Cost Reference
+        Product cost reference
       </h2>{" "}
       <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
         {products.length} products loaded. Full catalog available under
@@ -2493,7 +2493,7 @@ export default function PricingLogicPanel() {
                   letterSpacing: "0.02em",
                 }}
               >
-                Monthly Price Brackets
+                Monthly price brackets
               </h2>{" "}
               <LawnBracketsTab />{" "}
             </div>
@@ -2547,7 +2547,7 @@ export default function PricingLogicPanel() {
                       letterSpacing: "0.02em",
                     }}
                   >
-                    Tier Configuration
+                    Tier configuration
                   </h2>
                 )}
                 {activeTab === "lawn" && (
@@ -2561,7 +2561,7 @@ export default function PricingLogicPanel() {
                       letterSpacing: "0.02em",
                     }}
                   >
-                    Lawn Pricing Config
+                    Lawn pricing config
                   </h2>
                 )}
                 {filteredConfigs.map((c) => (

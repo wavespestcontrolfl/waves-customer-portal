@@ -405,7 +405,7 @@ export default function AgentOpsPage({ embedded = false, setRefreshHandler } = {
 
       {!embedded && (
         <AdminCommandHeader
-          title="Agent Ops"
+          title="Agent ops"
           icon={Bot}
           actions={[
             { key: "refresh", label: loading ? "Refreshing" : "Refresh", icon: RefreshCw, onClick: load, disabled: loading, variant: "secondary" },

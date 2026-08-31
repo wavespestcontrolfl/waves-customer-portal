@@ -131,7 +131,7 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
     <Card className="mb-5 max-md:border-0 max-md:shadow-sm max-md:rounded-xl">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
-          <CardTitle>Billing Health</CardTitle>
+          <CardTitle>Billing health</CardTitle>
           {verdict}
         </div>
         <Badge>{billable} billable</Badge>
