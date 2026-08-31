@@ -6061,6 +6061,10 @@ const CallRecordingProcessor = {
     // hands the lock to a peer, the peer's claim overwrites the token and
     // our catch-block UPDATE matches 0 rows — we leave the peer alone.
     const procToken = crypto.randomBytes(16).toString('hex');
+    // Liveness heartbeat for this claim (see the reclaim predicates): bumped
+    // every 60s while the pass runs, token-fenced so a pass that lost its
+    // claim beats into 0 rows. Cleared in the outer finally on every exit.
+    let heartbeatTimer = null;
     // This pass's MONOTONIC generation — assigned by the claim write below
     // (processing_generation + 1). The token is the claim MUTEX; the
     // generation is the pass IDENTITY that survives finalization: a cleared
@@ -6102,7 +6106,7 @@ const CallRecordingProcessor = {
           .whereRaw("processing_status IS DISTINCT FROM 'processed'")
           .where(function () {
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+              .orWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
           })
           // Retryable-failure guard: the sweep's cap/backoff filter only
           // protects sweep-originated runs — direct callers (the
@@ -6131,6 +6135,7 @@ const CallRecordingProcessor = {
             // In-flight state is carried by processing_token/status alone;
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
+            processing_heartbeat_at: new Date(),
             updated_at: new Date(),
           }, ['processing_generation']);
         // PG returns the updated rows ([] = claim lost); count-shaped results
@@ -6161,8 +6166,17 @@ const CallRecordingProcessor = {
         const claimed = await trx('call_log')
           .where({ twilio_call_sid: callSid })
           .where(function () {
+            // 3 minutes here vs the automatic paths' 10, measured against
+            // the LIVENESS HEARTBEAT (bumped every 60s by the owning pass),
+            // not the pass's start time: a healthy peer mid-way through a
+            // five-minute transcription keeps beating and stays protected
+            // indefinitely, while a wedged pass stops beating and a human
+            // force click recovers it in minutes instead of the 10 the
+            // 2026-08-31 wedge cost. Force is an operator explicitly asking
+            // after looking at the row; the automatic paths keep the
+            // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+              .orWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '3 minutes'");
           })
           .update({
             processing_status: 'processing',
@@ -6176,6 +6190,7 @@ const CallRecordingProcessor = {
             // In-flight state is carried by processing_token/status alone;
             // every reader COALESCEs behind a status guard.
             processing_started_at: new Date(),
+            processing_heartbeat_at: new Date(),
             updated_at: new Date(),
           }, ['processing_generation']);
         // Same both-shapes tolerance as the non-force claim above.
@@ -6189,9 +6204,25 @@ const CallRecordingProcessor = {
           ? Number(claimedRows[0].processing_generation) : null;
       }
     });
-    if (claimBlocked) return { success: true, skipped: true, reason: 'already_processing' };
+    // A blocked claim did NO work — success: false so no caller can mistake
+    // it for a completed run. The owner hit exactly that on 2026-08-31: his
+    // manual Process tap during a wedged claim returned success and the UI
+    // said processed while the call sat unprocessed for 18 minutes.
+    if (claimBlocked) return { success: false, skipped: true, reason: 'already_processing' };
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
+    // The claim is ours from here. Beat while we work: transcription of a
+    // long recording is one multi-minute await with no natural checkpoints,
+    // and without a beat the reclaim predicates cannot tell that pass from a
+    // wedged one. unref() so a draining process never lingers for the timer.
+    heartbeatTimer = setInterval(() => {
+      db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({ processing_heartbeat_at: new Date() })
+        .catch((e) => logger.warn(`[call-proc] heartbeat skipped for ${maskSid(callSid)}: ${e.message}`));
+    }, 60 * 1000);
+    if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 
     // Outer guard: any unhandled throw between the claim above and the
     // terminal-status writes below would otherwise wedge the row in
@@ -6564,11 +6595,18 @@ const CallRecordingProcessor = {
 
     if (!transcription) {
       logger.warn(`[call-proc] No transcription available for ${callSid}`);
-      await db('call_log').where({ id: call.id }).update({
-        processing_status: 'no_transcription',
-        processing_token: null,
-        updated_at: new Date(),
-      });
+      // Token-fenced like every other terminal write: a zombie pass that
+      // lost its claim to the stale reclaim must not clobber the peer that
+      // now owns the row (the peer may be mid-transcription and about to
+      // succeed where this pass found nothing).
+      const released = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'no_transcription',
+          processing_token: null,
+          updated_at: new Date(),
+        });
+      if (!released) logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
       return { success: false, error: 'No transcription available' };
     }
 
@@ -6612,14 +6650,23 @@ const CallRecordingProcessor = {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       // Increment in SQL, not from the in-memory row: the stale-reclaim path
       // means `call` can predate another run's failed attempt.
-      const [failedRow] = await db('call_log').where({ id: call.id }).update({
-        processing_status: 'extraction_failed',
-        extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
-        processing_token: null,
-        updated_at: new Date(),
-      }).returning(['extraction_attempts']);
-      const attempts = Number(failedRow?.extraction_attempts) || 0;
-      await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
+      // Token-fenced: a zombie pass whose claim was reclaimed must neither
+      // burn the peer's retry budget nor knock its live 'processing' status
+      // to a terminal one. 0 rows -> the peer owns the row; leave it alone.
+      const [failedRow] = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'extraction_failed',
+          extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
+          processing_token: null,
+          updated_at: new Date(),
+        }).returning(['extraction_attempts']);
+      if (failedRow) {
+        const attempts = Number(failedRow?.extraction_attempts) || 0;
+        await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
+      } else {
+        logger.warn(`[call-proc] extraction_failed release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+      }
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
 
@@ -14755,6 +14802,8 @@ const CallRecordingProcessor = {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
       }
       throw procErr;
+    } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
     }
   },
 
@@ -14799,7 +14848,7 @@ const CallRecordingProcessor = {
                 // the backstop too (round-12 P1).
                 .orWhere(function () {
                   this.where('processing_status', 'processing')
-                    .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                    .andWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
                 })
                 // A transient extraction failure on a quarantined row must
                 // keep its normal retry budget (round-13 P1): the outer
@@ -14839,7 +14888,7 @@ const CallRecordingProcessor = {
         })
         .orWhere(function () {
           this.where('processing_status', 'processing')
-            .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+            .andWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         });
       })
       .where(function () {
@@ -14860,7 +14909,11 @@ const CallRecordingProcessor = {
         results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
       }
     }
-    return { processed: results.length, results };
+    // Distinct counts: a skipped claim and a failure are not processed work,
+    // and the bulk toast used to report all three as one inflated number.
+    const skipped = results.filter((r) => r.skipped).length;
+    const failed = results.filter((r) => !r.success && !r.skipped).length;
+    return { processed: results.length - skipped - failed, skipped, failed, attempted: results.length, results };
   },
 
   /**

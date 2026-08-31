@@ -134,6 +134,17 @@ router.post('/process/:callSid', async (req, res, next) => {
   try {
     const force = req.query.force === 'true' || req.body?.force === true;
     const result = await CallRecordingProcessor.processRecording(req.params.callSid, { force });
+    // A blocked claim is not a completed run — surface it as a conflict so
+    // no client can render it as success (the owner's manual Process tap
+    // during the 2026-08-31 wedge got a 200 and a success toast while the
+    // call sat unprocessed). Other skip reasons (e.g. a rejected
+    // transcription) completed real work and stay 200.
+    if (result?.skipped && result?.reason === 'already_processing') {
+      return res.status(409).json({
+        ...result,
+        error: 'This call is already being processed (or a recent claim is still winding down). Try again in a few minutes.',
+      });
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

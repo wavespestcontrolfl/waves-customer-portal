@@ -84,8 +84,17 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Surface the server's message (e.g. the 409 already-processing
+      // explanation) instead of a bare status code.
+      let message = `HTTP ${r.status}`;
+      try {
+        const body = await r.json();
+        message = body?.error || body?.message || message;
+      } catch { /* non-JSON error body */ }
+      throw new Error(message);
+    }
     return r.json();
   });
 }
@@ -238,7 +247,10 @@ export default function CallRecordingsPanel() {
       const result = await adminFetch("/admin/call-recordings/process-all", {
         method: "POST",
       });
-      showToast(`Processed ${result.processed} recording(s)`);
+      const parts = [`Processed ${result.processed ?? 0}`];
+      if (result.skipped) parts.push(`skipped ${result.skipped}`);
+      if (result.failed) parts.push(`failed ${result.failed}`);
+      showToast(`${parts.join(" · ")} recording(s)`);
       loadData();
     } catch (e) {
       showToast(`Failed: ${e.message}`, "failed");
