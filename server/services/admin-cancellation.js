@@ -224,6 +224,62 @@ function resolvePrepay(input, term, wholeAccount) {
   };
 }
 
+// One commit per customer at a time (codex C3 r2 P1): the duplicate-cancel
+// latch below is read-then-act, so two overlapping commits could both pass
+// it, open two requests, run the processor twice and text the customer
+// twice. A session-scoped advisory try-lock (same pattern as the content
+// engine's publish lock) serializes the WHOLE commit — held across the
+// processor and the case write, released in the caller's finally. Busy or
+// unacquirable = refuse, never proceed unlocked (money path fails closed).
+const CANCEL_LOCK_NS = 'admin-cancel-plan';
+async function acquireCancelCommitLock(customerId) {
+  let conn = null;
+  let locked = false;
+  try {
+    conn = await db.client.acquireConnection();
+    const res = await conn.query(
+      'SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked',
+      [CANCEL_LOCK_NS, String(customerId)]
+    );
+    locked = res && res.rows && res.rows[0] && res.rows[0].locked === true;
+  } catch (err) {
+    if (conn) { try { await db.client.releaseConnection(conn); } catch { /* pool reaps */ } }
+    logger.error(`[admin-cancellation] cancel lock unavailable for ${customerId}: ${err.message}`);
+    throw new CancelPlanError(503, 'cancel_lock_unavailable',
+      'Could not serialize this cancellation against concurrent attempts. Try again in a moment.');
+  }
+  if (!locked) {
+    try { await db.client.releaseConnection(conn); } catch { /* pool reaps */ }
+    throw new CancelPlanError(409, 'cancel_in_progress',
+      'Another cancellation for this customer is already being processed. Wait for it to finish, then refresh.');
+  }
+  return async function release() {
+    try {
+      await conn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [CANCEL_LOCK_NS, String(customerId)]);
+    } catch (err) {
+      logger.warn(`[admin-cancellation] cancel lock release failed for ${customerId} (session end clears it): ${err.message}`);
+    }
+    try { await db.client.releaseConnection(conn); } catch { /* pool reaps */ }
+  };
+}
+
+// Decide the term 'cancel' through move 8 and VERIFY the outcome (codex C3
+// r2 P1): the guarded recordDecision returns null both when the decision was
+// already 'cancel' AND when a racing renew/switch_plan decision landed after
+// our read — only a re-read separates "already recorded" from a conflict
+// that must fail the disposition (and, for end_now_refund, must not promise
+// a refund on a term that is renewing).
+async function decideTermCancel(term, actorUserId, notes) {
+  const { recordDecision } = require('./annual-prepay-renewals');
+  const decided = term.renewal_decision === 'cancel'
+    ? null
+    : await recordDecision({ termId: term.id, action: 'cancel', adminUserId: actorUserId, notes });
+  if (decided) return { verified: true, fresh: true };
+  const reread = await db('annual_prepay_terms').where({ id: term.id }).first('renewal_decision');
+  if (reread && reread.renewal_decision === 'cancel') return { verified: true, fresh: false };
+  return { verified: false, fresh: false, conflictingDecision: reread ? reread.renewal_decision || null : null };
+}
+
 function customerSummary(customer) {
   return {
     id: customer.id,
@@ -319,6 +375,15 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
     throw new CancelPlanError(404, 'cancel_flow_v2_off', 'Cancel flow V2 is not enabled');
   }
   if (!customerId) throw new CancelPlanError(400, 'customer_id_required', 'customerId is required');
+  const release = await acquireCancelCommitLock(customerId);
+  try {
+    return await commitCancelPlanLocked({ customerId, actor, ...raw });
+  } finally {
+    await release();
+  }
+}
+
+async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {}) {
   const input = normalizeInput(raw);
   const actorType = actor && actor.type === 'ib' ? 'ib' : 'admin';
   const actorUserId = actor && actor.userId ? String(actor.userId) : null;
@@ -343,9 +408,11 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
   // Idempotency latch: an end-of-coverage cancel leaves the account with
   // cancellable work (the kept covered visits), so a retry or double-click
   // sails past the eligibility gate. The durable proof a prior run finished
-  // is the term's decided-'cancel' state PLUS its recorded case — reuse that
-  // outcome; never open a second request, run the processor again, or text
-  // the customer twice for the same cancellation.
+  // is the term's decided-'cancel' state PLUS its recorded case FOR THE SAME
+  // DISPOSITION — an earlier end_at_term case must not swallow a new
+  // end_now_refund request (which still has paid visits to pull and a refund
+  // to record). Reuse a matching outcome; never open a second request, run
+  // the processor again, or text the customer twice for the same cancel.
   if (term && term.renewal_decision === 'cancel') {
     let prior = null;
     try {
@@ -356,7 +423,8 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
         .select('id', 'service_request_id', 'status', 'snapshot');
       prior = (recent || []).find((c) => {
         const snap = typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {});
-        return String(snap.prepayTermId || '') === String(term.id);
+        return String(snap.prepayTermId || '') === String(term.id)
+          && String(snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '');
       }) || null;
     } catch (dupErr) {
       logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
@@ -448,14 +516,15 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
   if (term && prepayPlan.prepayDisposition && processed) {
     try {
       if (prepayPlan.prepayDisposition === 'end_at_term') {
-        const { recordDecision } = require('./annual-prepay-renewals');
-        const decided = await recordDecision({
-          termId: term.id,
-          action: 'cancel',
-          adminUserId: actorUserId,
-          notes: `Cancel plan (${actorLabel}) — coverage kept through ${dateOnly(term.term_end)}; no renewal.`,
-        });
-        termOutcome = decided ? 'ends_at_term' : 'decision_already_recorded';
+        const decision = await decideTermCancel(term, actorUserId,
+          `Cancel plan (${actorLabel}) — coverage kept through ${dateOnly(term.term_end)}; no renewal.`);
+        if (!decision.verified) {
+          termOutcome = 'decision_conflict';
+          errors.push('prepay_term_decision_conflict');
+          logger.error(`[admin-cancellation] term ${term.id} carries a conflicting decision "${decision.conflictingDecision}" — cancel not recorded (request ${request.id})`);
+        } else {
+          termOutcome = decision.fresh ? 'ends_at_term' : 'decision_already_recorded';
+        }
       } else {
         // end_now_refund: decide the term 'cancel' through the SAME move-8
         // guard the renewals module owns — this file must never write
@@ -466,15 +535,20 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
         // move 9 (syncTermForRefundedPayment), which revokes coverage and
         // clears the prepaid stamps. Until then the decided term rides out
         // with no visits left — the processor pulled them above.
-        const { recordDecision } = require('./annual-prepay-renewals');
-        const decided = term.renewal_decision === 'cancel' ? null : await recordDecision({
-          termId: term.id,
-          action: 'cancel',
-          adminUserId: actorUserId,
-          notes: `Cancel plan (${actorLabel}) — ended now; unused-value refund recorded on the cancellation case.`,
-        });
-        termOutcome = decided ? 'ended_now' : 'decision_already_recorded';
-        await raisePrepayRefundTask({ customer, request, term, refund, actorLabel });
+        const decision = await decideTermCancel(term, actorUserId,
+          `Cancel plan (${actorLabel}) — ended now; unused-value refund recorded on the cancellation case.`);
+        if (!decision.verified) {
+          // A racing renew/switch_plan decision means the term is NOT
+          // cancelled — recording a refund task for it would promise money
+          // on a plan that stands. Fail the disposition; the bell below
+          // hands it to the office.
+          termOutcome = 'decision_conflict';
+          errors.push('prepay_term_decision_conflict');
+          logger.error(`[admin-cancellation] term ${term.id} carries a conflicting decision "${decision.conflictingDecision}" — refund NOT recorded (request ${request.id})`);
+        } else {
+          termOutcome = decision.fresh ? 'ended_now' : 'decision_already_recorded';
+          await raisePrepayRefundTask({ customer, request, term, refund, actorLabel });
+        }
       }
     } catch (err) {
       errors.push('prepay_term_disposition');
@@ -514,13 +588,21 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
     logger.warn(`[admin-cancellation] case write failed for request ${request.id}: ${caseErr.message}`);
   }
 
+  // Confirmation verdict (codex C3 r2 P1): the customer hears "done" only
+  // when the wind-down AND every durable follow-up landed. A lost term
+  // decision, refund task, or case row means the office is still finishing
+  // this by hand (the review bell below) — the end_at_term copy would even
+  // claim "will not renew" with the decision unpersisted. Any accumulated
+  // error downgrades to the manual-review wording; the API response keeps
+  // the honest processor verdict + errors for the operator.
+  const confirmationVerdict = processed && errors.length === 0;
   let confirmations = { smsSent: false, emailSent: false, channels: [] };
   if (input.sendConfirmation) {
     confirmations = await sendCancellationConfirmations({
       customer,
       request,
       result,
-      processed,
+      processed: confirmationVerdict,
       effectiveAt: prepayPlan.keepThrough ? `${prepayPlan.keepThrough}T12:00:00-04:00` : request.created_at,
       // End-of-coverage keeps paid visits on the calendar — the generic
       // "upcoming visits are off the calendar" copy would be false, so the

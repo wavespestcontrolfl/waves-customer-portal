@@ -118,6 +118,20 @@ describe('CancelPlanDialog', () => {
     expect(screen.queryByRole('button', { name: /^Cancel the whole plan/ })).not.toBeInTheDocument();
   });
 
+  it('shows only the confirmation channels that can actually send', async () => {
+    stubFetch((path) => {
+      if (path.endsWith('/cancel-plan/preview')) {
+        return response(previewBody({ confirmationChannels: { sms: false, email: true } }));
+      }
+      return response({});
+    });
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText('the whole plan');
+    // Never promise "text + email" when there is no phone on file.
+    expect(screen.queryByText('text + email')).not.toBeInTheDocument();
+    expect(screen.getByText('email')).toBeInTheDocument();
+  });
+
   it('scoped selection re-previews with the families and an unattributable scope disables the commit', async () => {
     stubFetch((path, body) => {
       if (path.endsWith('/cancel-plan/preview')) {

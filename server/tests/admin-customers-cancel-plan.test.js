@@ -78,6 +78,19 @@ jest.mock('../models/db', () => {
   db.schema = { hasTable: jest.fn(async () => true), hasColumn: jest.fn(async () => true) };
   db.raw = jest.fn((sql) => sql);
   db.transaction = jest.fn(async (fn) => fn(db));
+  // Advisory commit lock (per-customer serialization). Tests flip
+  // db.client.locked to simulate a concurrent commit holding it.
+  const lockConn = {
+    query: jest.fn(async (sql) => (/pg_try_advisory_lock/.test(String(sql))
+      ? { rows: [{ locked: db.client.locked }] }
+      : { rows: [] })),
+  };
+  db.client = {
+    locked: true,
+    lockConn,
+    acquireConnection: jest.fn(async () => lockConn),
+    releaseConnection: jest.fn(async () => {}),
+  };
   return db;
 });
 
@@ -165,6 +178,10 @@ beforeEach(() => {
     annual_prepay_terms: [],
   };
   db.mockImplementation((table) => builderFor(table));
+  db.client.locked = true;
+  db.client.acquireConnection.mockClear();
+  db.client.releaseConnection.mockClear();
+  db.client.lockConn.query.mockClear();
   mockProcess.mockReset().mockResolvedValue({ ...PROCESSED });
   mockPlan.mockReset().mockResolvedValue({ ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze' });
   hasCancellableWork.mockResolvedValue(true);
@@ -448,7 +465,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.annual_prepay_terms[0].status = 'cancelled';
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
-        snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage' }),
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' }),
       }];
       const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
       expect(res.status).toBe(200);
@@ -459,6 +476,47 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockRecordDecision).not.toHaveBeenCalled();
       expect(sendCancellationConfirmations).not.toHaveBeenCalled();
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    }));
+
+    test('a prior end_at_term case does NOT swallow a new end-now-refund request (disposition must match)', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' }),
+      }];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.duplicate).toBeUndefined();
+      expect(body.processed).toBe(true);
+      expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+      expect(mockProcess).toHaveBeenCalledTimes(1);
+      // The refund task for the newly requested end-now disposition is raised.
+      expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('billing');
+    }));
+
+    test('a racing renew decision fails the disposition — no refund task, manual-review confirmation', () => withServer(async (baseUrl) => {
+      // recordDecision's guard misses (returns null) and the direct re-read
+      // shows a conflicting decision landed after resolveLiveTerm's read —
+      // never "already recorded", never a refund.
+      mockRecordDecision.mockResolvedValueOnce(null);
+      db.mockImplementation((table) => {
+        if (table === 'annual_prepay_terms') {
+          const b = builderFor(table);
+          b.first = jest.fn(async () => ({ ...mockState.annual_prepay_terms[0], renewal_decision: 'renew' }));
+          return b;
+        }
+        return builderFor(table);
+      });
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      expect(body.processed).toBe(true);
+      expect(body.prepayTermOutcome).toBe('decision_conflict');
+      expect(body.errors).toContain('prepay_term_decision_conflict');
+      // Only the review bell — the refund task must NOT be raised for a term
+      // that is renewing.
+      const categories = NotificationService.notifyAdmin.mock.calls.map((c) => c[0]);
+      expect(categories).toEqual(['service']);
+      // The customer gets the manual-review wording, not "will not renew".
+      expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
     }));
 
     test('a pre-existing decided-cancel term with NO recorded case still runs; the decision write is skipped', () => withServer(async (baseUrl) => {
@@ -502,6 +560,30 @@ describe('POST /:id/cancel-plan', () => {
     expect(title).toMatch(/needs review/);
     expect(text).toContain('a follow-up step failed');
     expect(text).toContain('case_write');
+    // The customer hears the manual-review wording, not a green "done" —
+    // the confirmation verdict reflects follow-up failures.
+    expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));
+  }));
+
+  test('a concurrent commit holding the customer lock → 409 cancel_in_progress, nothing written', () => withServer(async (baseUrl) => {
+    db.client.locked = false;
+    const res = await post(baseUrl, '/cancel-plan');
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('cancel_in_progress');
+    expect(mockState.inserted).toBeUndefined();
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(db.client.releaseConnection).toHaveBeenCalled();
+  }));
+
+  test('the commit lock is released after a successful run (and the preview never takes it)', () => withServer(async (baseUrl) => {
+    await post(baseUrl, '/cancel-plan/preview');
+    expect(db.client.acquireConnection).not.toHaveBeenCalled();
+    const res = await post(baseUrl, '/cancel-plan');
+    expect(res.status).toBe(200);
+    const sqls = db.client.lockConn.query.mock.calls.map((c) => String(c[0]));
+    expect(sqls.some((s) => s.includes('pg_try_advisory_lock'))).toBe(true);
+    expect(sqls.some((s) => s.includes('pg_advisory_unlock'))).toBe(true);
+    expect(db.client.releaseConnection).toHaveBeenCalled();
   }));
 
   test('a body customerId cannot re-point the cancel: the path id is authoritative', () => withServer(async (baseUrl) => {

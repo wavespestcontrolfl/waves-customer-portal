@@ -850,6 +850,32 @@ describe('processCancellationRequest', () => {
       expect(db.__tables.customer_interactions[0].body).toContain('Scheduled-visit fee waived');
     });
 
+    test('a waive that lost the row to a concurrent fee worker is unresolved money — flagged, never a clean cancel', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const ApptCardRequests = require('../services/appointment-card-request');
+      ApptCardRequests.handleAppointmentCardCancellation
+        .mockResolvedValueOnce({ handled: false, released: false, reason: 'waive_race_lost' });
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r5', requestId: 'r5', waiveLateFee: true });
+      expect(result.errors).toEqual(['appt_card_fee:s1']);
+      expect(result.ok).toBe(false);
+    });
+
+    test('ANY non-released appt-fee outcome is flagged even if its reason is not in the review set', async () => {
+      seedActive();
+      db.__tables.scheduled_services = [
+        { id: 's1', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      ];
+      const ApptCardRequests = require('../services/appointment-card-request');
+      ApptCardRequests.handleAppointmentCardCancellation
+        .mockResolvedValueOnce({ handled: true, released: false, reason: 'charge_in_progress' });
+      const result = await processCancellationRequest({ customerId: 'c1', reason: 'Portal cancellation request r6', requestId: 'r6' });
+      expect(result.errors).toEqual(['appt_card_fee:s1']);
+      expect(result.ok).toBe(false);
+    });
+
     test('the default (customer-initiated) call is byte-identical: no waive args, no actor suffix, Portal note', async () => {
       seedActive();
       db.__tables.scheduled_services = [

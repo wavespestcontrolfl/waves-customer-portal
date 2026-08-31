@@ -15,7 +15,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
-const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
+const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('../cancellation-eligibility');
 const { familyLabel } = require('./templates');
 
 const labelOf = (key) => familyLabel(key) || String(key || '').replace(/_/g, ' ');
@@ -58,7 +58,13 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
       // before it are KEPT by the processor's sweep floor, so they are not
       // "pulled". An undated/rescheduled row has no date to keep it.
       const kept = after && row.status !== 'rescheduled' && d <= String(after);
-      if (!kept) {
+      // Live/done on the track layer: the processor's sweep excludes rows
+      // whose track_state is complete / en_route / on_property (null-safe —
+      // legacy rows have no track_state) and parks them for manual review,
+      // so "visits pulled" must not count them either.
+      const trackExcluded = row.track_state != null
+        && (row.track_state === 'complete' || LIVE_TRACK_STATES.includes(row.track_state));
+      if (!kept && !trackExcluded) {
         slot.pulled += 1;
         if (!slot.nextPulledDate || d < slot.nextPulledDate) slot.nextPulledDate = d;
       }

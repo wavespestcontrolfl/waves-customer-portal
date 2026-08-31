@@ -14,7 +14,10 @@ const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('./cancellation-elig
 // Card-hold outcomes that leave money unresolved: the fee path never throws
 // into the host flow — a decline / ambiguous Stripe outcome / post-charge
 // write failure comes back as a reason code with the hold parked for review.
-const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'charge_review_write_failed']);
+// waive_race_lost (codex C3 r2 P1): an office-initiated waive that lost the
+// row to a concurrent fee worker is NOT a clean waive — a charge may still
+// land while the cancellation reports the fee waived.
+const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'charge_review_write_failed', 'waive_race_lost']);
 
 /**
  * Process an accepted customer cancellation request, in an order chosen so the
@@ -802,7 +805,10 @@ async function processCancellationRequest({
           scheduledServiceId: svc.id,
           ...(lateFeeWaived ? { waiveFee: true } : {}),
         });
-        if (apptResult && CARD_HOLD_REVIEW_REASONS.has(apptResult.reason)) {
+        // Any non-released outcome from the appt-fee rail is unresolved
+        // money (the rail reserves released:false for exactly that), so the
+        // reason-set check is belt-and-braces on top of it.
+        if (apptResult && (CARD_HOLD_REVIEW_REASONS.has(apptResult.reason) || apptResult.released === false)) {
           errors.push(`appt_card_fee:${svc.id}`);
           logger.error(`[cancellation-processor] appointment-card fee for ${svc.id} needs review: ${apptResult.reason}`);
         }

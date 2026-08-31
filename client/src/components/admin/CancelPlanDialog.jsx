@@ -322,7 +322,12 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                   )}
                   {impact.autopayOn && wholeAccount && <Fact label="Autopay">on → off</Fact>}
                   {impact.termiteRental && <Fact label="Termite stations">retrieval task will be raised</Fact>}
-                  <Fact label="Customer told">{sendConfirmation ? "text + email" : "nothing"}</Fact>
+                  {/* Only the channels that CAN send — a missing phone or
+                      email must not be promised as "text + email". */}
+                  <Fact label="Customer told">{sendConfirmation
+                    ? ([preview.confirmationChannels?.sms && "text", preview.confirmationChannels?.email && "email"]
+                        .filter(Boolean).join(" + ") || "nothing (no phone or email on file)")
+                    : "nothing"}</Fact>
                 </div>
               )}
             </div>
