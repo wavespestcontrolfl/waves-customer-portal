@@ -188,6 +188,26 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       before: params?.current_status, after: params?.new_status,
     });
   }
+  if (toolName === 'cancel_appointment' && preview?.cancellation) {
+    // The follow-through's money effects, from the rails' own previews.
+    const c = preview.cancellation;
+    const a = c.appointment || {};
+    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.customer_name ? ` for ${a.customer_name}` : ''}`, {
+      before: a.status || null, after: 'cancelled',
+    });
+    if (c.fee?.applies) {
+      const amt = c.fee.amount != null ? `$${Number(c.fee.amount).toFixed(2)}` : 'the agreed';
+      push('billing', c.fee.unresolved
+        ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified)`
+        : `Late-cancel fee of ${amt} WILL be charged to the card on file`);
+    } else if (c.fee?.rail && c.fee.rail !== 'none') {
+      push('billing', 'No late-cancel fee (outside the fee window) — card hold released');
+    }
+    for (const inv of c.invoices || []) {
+      const total = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : '';
+      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''}) — applied credits/deposits restored`);
+    }
+  }
 
   // Every curated display line is an effect the operator is approving —
   // one level of plain-object params flattens to its own lines (so an
@@ -211,9 +231,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // customer-contact-fanout): an email/name/phone change syncs to other
   // surfaces. These are mandatory disclosures — encoded as effects, not
   // left in the free-text summary.
-  if (toolName === 'update_customer' && params?.updates?.email) {
-    push('customer', require('../customer-email-fanout').EMAIL_FANOUT_DISCLOSURE);
+  const isCustomerUpdate = toolName === 'update_customer' || toolName === 'bulk_update_customers';
+  if (isCustomerUpdate && params?.updates?.email) {
+    const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
+    push('customer', `${n > 1 ? `For each of ${n} customers: ` : ''}${require('../customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`);
   }
+  // Name/phone fan-out runs on the single-customer path only (the bulk
+  // executor propagates email alone) — disclose exactly what runs.
   if (toolName === 'update_customer'
     && (params?.updates?.first_name !== undefined || params?.updates?.last_name !== undefined || params?.updates?.phone !== undefined)) {
     push('customer', require('../customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);

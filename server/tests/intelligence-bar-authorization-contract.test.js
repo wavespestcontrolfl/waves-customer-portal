@@ -105,6 +105,52 @@ test('update_customer email/name/phone changes carry the mandatory fan-out discl
   expect(only.effects.map((e) => e.label)).not.toContainEqual(EMAIL_FANOUT_DISCLOSURE);
 });
 
+test('cancel_appointment discloses the late-cancel fee and invoice voids from the cancellation preview', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment',
+    params: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: 'x' },
+    displayParams: { appointment_id: 'ap1', reason: 'rain', _cancellation_fingerprint: 'x' },
+    preview: {
+      cancellation: {
+        appointment: { id: 'ap1', scheduled_date: '2026-09-02', service_type: 'Quarterly Pest', status: 'scheduled', customer_name: 'acct-3001' },
+        fee: { rail: 'card_hold', applies: true, amount: 49, unresolved: false },
+        invoices: [{ id: 'inv1', invoice_number: 'INV-1001', status: 'sent', total: 120, amount_paid: 0 }],
+      },
+    },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual('Late-cancel fee of $49.00 WILL be charged to the card on file');
+  expect(labels).toContainEqual('Void invoice INV-1001 (sent, $120.00) — applied credits/deposits restored');
+  expect(c.effects.find((e) => e.label.startsWith('Cancel Quarterly Pest'))).toMatchObject({ kind: 'operational', before: 'scheduled', after: 'cancelled' });
+  expect(labels.some((l) => l.includes('fingerprint'))).toBe(false);
+  expect(c.effects.filter((e) => e.kind === 'billing').length).toBe(2);
+
+  const unresolved = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { appointment: {}, fee: { rail: 'appointment_card', applies: true, amount: null, unresolved: true }, invoices: [] } },
+  });
+  expect(unresolved.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/MAY be charged/));
+
+  const free = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { appointment: {}, fee: { rail: 'card_hold', applies: false, amount: null, unresolved: false }, invoices: [] } },
+  });
+  expect(free.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/No late-cancel fee/));
+});
+
+test('bulk_update_customers with an email change discloses the per-customer email fan-out (email only)', () => {
+  const { EMAIL_FANOUT_DISCLOSURE } = require('../services/customer-email-fanout');
+  const { CONTACT_FANOUT_DISCLOSURE } = require('../services/customer-contact-fanout');
+  const c = buildContract({
+    toolName: 'bulk_update_customers',
+    params: { customer_ids: ['a', 'b', 'c'], updates: { email: 'x@example.test', phone: '9415550000' } },
+    displayParams: { customer_ids: ['a', 'b', 'c'], updates: { email: 'x@example.test', phone: '9415550000' } },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual(`For each of 3 customers: ${EMAIL_FANOUT_DISCLOSURE}`);
+  expect(labels.some((l) => l.includes(CONTACT_FANOUT_DISCLOSURE))).toBe(false);
+});
+
 test('hash is order-independent and sensitive to any effect change', () => {
   const a = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { appointment_id: 'ap1', reason: 'rain' } });
   const b = buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: { reason: 'rain', appointment_id: 'ap1' } });

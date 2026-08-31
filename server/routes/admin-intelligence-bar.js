@@ -652,6 +652,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params.technician_name = tech.name;
       preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
     }
+    if (toolUse.name === 'cancel_appointment' && params.appointment_id) {
+      // Cancelling runs the shared follow-through after commit: a late-
+      // cancel fee may CHARGE the customer's card and open invoices get
+      // voided/credited. The contract must disclose those effects (W0B P0),
+      // so preview them now (read-only, the rails' own previews) and pin a
+      // fingerprint that /confirm-action re-checks — money posture drift
+      // during the pending window refuses the commit.
+      const { previewCancellationEffects, cancellationFingerprint } = require('../services/intelligence-bar/cancellation-preview');
+      const cancellation = await previewCancellationEffects(String(params.appointment_id));
+      if (cancellation?.error) return { failed: true, modelResult: { error: cancellation.error } };
+      params._cancellation_fingerprint = cancellationFingerprint(cancellation);
+      preview = { ...preview, cancellation };
+    }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);
       if (!lead) return { failed: true, modelResult: { error: 'No active lead matches that name.' } };
@@ -760,7 +773,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // behind the pending-action id/hash; do not make a road user scroll
       // through raw engine JSON, evidence quotes, and property ledgers just
       // to find the dollars and review flags they are approving.
-      params: displayParams,
+      // `_`-prefixed pins (phone-match, expected status, fingerprints) are
+      // server-side execution guards, not disclosures — never on the card.
+      params: Object.fromEntries(Object.entries(displayParams || {}).filter(([k]) => !String(k).startsWith('_'))),
       // The authorization contract the card renders, and the hash the card
       // must echo on Confirm (exact-effect approval — owner ruling 8).
       contract,
@@ -2075,6 +2090,25 @@ router.post('/confirm-action', async (req, res, next) => {
         };
         await PendingActions.recordResult(action.id, result);
         return res.status(409).json(result);
+      }
+    }
+    if (action.tool_name === 'cancel_appointment') {
+      // Re-validate the frozen money posture (W0B): the fee rail outcome
+      // and the voidable-invoice set must still match what the card
+      // disclosed, or the operator approved a different effect set.
+      const approved = execParams._cancellation_fingerprint;
+      delete execParams._cancellation_fingerprint;
+      if (approved) {
+        const { previewCancellationEffects, cancellationFingerprint } = require('../services/intelligence-bar/cancellation-preview');
+        const live = await previewCancellationEffects(String(execParams.appointment_id));
+        if (live?.error || cancellationFingerprint(live) !== approved) {
+          const result = {
+            error: 'The fee or invoice effects of this cancellation changed after the card was shown. Ask again for a fresh confirmation card.',
+            preview_changed: true,
+          };
+          await PendingActions.recordResult(action.id, result);
+          return res.status(409).json(result);
+        }
       }
     }
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
