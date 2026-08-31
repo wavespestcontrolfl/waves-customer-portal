@@ -241,6 +241,20 @@ describe('mintRestartEstimate', () => {
     expect(tables.customer_interactions[0].subject).toMatch(/^Restart estimate requested from portal/);
   });
 
+  test('a failed audit note fails the mint (aborted pg transaction must never resolve with a URL)', async () => {
+    const failingDb = {
+      transaction: async (fn) => fn((table) => {
+        const b = builder(table);
+        if (table === 'customer_interactions') {
+          b.insert = () => Promise.reject(new Error('note insert boom'));
+        }
+        return b;
+      }),
+    };
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps({ db: failingDb }) }))
+      .rejects.toThrow('note insert boom');
+  });
+
   test('a second tap reuses the live restart estimate instead of minting beside it', async () => {
     tables.estimates.push({ id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null });
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });

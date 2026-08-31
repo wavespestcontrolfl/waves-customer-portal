@@ -272,16 +272,16 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     });
 
     // Audit trail on the customer's timeline — no bell, no customer send.
-    try {
-      await trx('customer_interactions').insert({
-        customer_id: fresh.id,
-        interaction_type: 'note',
-        subject: `Restart estimate requested from portal — ${families.map((f) => FAMILY_LABELS[f] || f).join(', ')}`,
-        body: `Customer opened a restart estimate (${created.id}) priced at today's rates. Accepting it restarts the plan.`,
-      });
-    } catch (noteErr) {
-      logger.warn(`[plan-restart] audit note failed for ${fresh.id}: ${noteErr.message}`);
-    }
+    // NOT swallowed: a failed statement aborts the whole Postgres
+    // transaction, so "tolerating" it would turn the COMMIT into a silent
+    // ROLLBACK while we still hand back a URL for an estimate that no
+    // longer exists. The mint fails atomically instead.
+    await trx('customer_interactions').insert({
+      customer_id: fresh.id,
+      interaction_type: 'note',
+      subject: `Restart estimate requested from portal — ${families.map((f) => FAMILY_LABELS[f] || f).join(', ')}`,
+      body: `Customer opened a restart estimate (${created.id}) priced at today's rates. Accepting it restarts the plan.`,
+    });
 
     logger.info(`[plan-restart] minted estimate ${created.id} for customer ${fresh.id} (${families.join(',')} via ${source})`);
     return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };

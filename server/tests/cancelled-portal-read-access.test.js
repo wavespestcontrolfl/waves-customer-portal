@@ -60,22 +60,37 @@ function builder(table) {
     }
     return b;
   };
-  b.orderBy = (col, dir) => {
-    const list = tables[table] || [];
-    list.sort((x, y) => {
-      const a = x[norm(col)]; const c = y[norm(col)];
-      if (a === c) return 0;
-      const asc = (a === true ? 1 : a === false ? 0 : a) > (c === true ? 1 : c === false ? 0 : c) ? 1 : -1;
-      return dir === 'desc' ? -asc : asc;
+  // Multi-key sort, applied over the filtered rows like SQL — NOT one
+  // in-place sort per call (last key would win) and with a TOTAL comparator:
+  // undefined/NULL sorts last on asc / first on desc (Postgres), so a
+  // missing created_at cannot flip the order between environments.
+  const orders = [];
+  b.orderBy = (col, dir) => { orders.push([norm(col), dir === 'desc' ? 'desc' : 'asc']); return b; };
+  const sorted = () => {
+    const list = rows();
+    if (!orders.length) return list;
+    const rank = (v) => (v === true ? 1 : v === false ? 0 : v);
+    return [...list].sort((x, y) => {
+      for (const [col, dir] of orders) {
+        const a = rank(x[col]); const c = rank(y[col]);
+        const aNull = a === undefined || a === null;
+        const cNull = c === undefined || c === null;
+        let cmp = 0;
+        if (aNull && cNull) cmp = 0;
+        else if (aNull) cmp = 1; // NULLS LAST on asc
+        else if (cNull) cmp = -1;
+        else cmp = a > c ? 1 : a < c ? -1 : 0;
+        if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
+      }
+      return 0;
     });
-    return b;
   };
   b.orderByRaw = () => b;
   b.leftJoin = () => b;
   b.select = () => b;
   b.limit = () => b;
   b.forUpdate = () => b;
-  b.first = async () => rows()[0] || null;
+  b.first = async () => sorted()[0] || null;
   b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
   b.insert = (row) => {
     const list = (tables[table] ||= []);
@@ -84,7 +99,7 @@ function builder(table) {
     const ret = { returning: async () => [inserted] };
     return Object.assign(Promise.resolve([inserted]), ret, { onConflict: () => ({ ignore: () => ret }) });
   };
-  b.then = (resolve, reject) => Promise.resolve(rows()).then(resolve, reject);
+  b.then = (resolve, reject) => Promise.resolve(sorted()).then(resolve, reject);
   return b;
 }
 function installDb() {
