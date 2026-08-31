@@ -61,7 +61,7 @@ test('move_stops_to_day: customer contact only when notify_customers is true', (
   expect(loud.effects.some((e) => e.label === 'Customer will be contacted')).toBe(true);
 });
 
-test('nested display params flatten one level; arrays join; nulls dropped', () => {
+test('nested display params flatten one level; arrays join; undefined dropped; null in updates renders as a clear', () => {
   const c = buildContract({
     toolName: 'update_customer',
     params: {},
@@ -69,7 +69,7 @@ test('nested display params flatten one level; arrays join; nulls dropped', () =
   });
   const labels = c.effects.map((e) => e.label);
   // Canonical order: comms → billing → customer → operational, then label.
-  expect(labels).toEqual(['email: x@example.test', 'customer id: c9', 'tags: a, b']);
+  expect(labels).toEqual(['email: x@example.test', 'customer id: c9', 'notes: (cleared)', 'tags: a, b']);
   expect(c.effects.find((e) => e.label.startsWith('email'))?.kind).toBe('comms');
 });
 
@@ -237,6 +237,28 @@ test('email change on update_customer discloses the DOI re-send and marks contac
 test('bulk_update_customers card states skipped customers surface as a warning', () => {
   const c = buildContract({ toolName: 'bulk_update_customers', params: { customer_ids: ['a', 'b'], updates: { city: 'Venice' } }, displayParams: { customer_ids: ['a', 'b'], updates: { city: 'Venice' } } });
   expect(c.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/skipped customer is reported as a warning/));
+});
+
+test('customer updates disclose address ripples and stage lifecycle stamps; bulk email change is customer contact', () => {
+  const addr = buildContract({ toolName: 'update_customer', params: { updates: { city: 'Venice' } }, displayParams: { updates: { city: 'Venice' } } });
+  expect(addr.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Address change also clears saved coordinates/));
+  const stage = buildContract({ toolName: 'bulk_update_customers', params: { customer_ids: ['a'], updates: { pipeline_stage: 'won' } }, displayParams: { customer_ids: ['a'], updates: { pipeline_stage: 'won' } } });
+  expect(stage.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^Stage → won also stamps lifecycle fields/));
+  const bulkEmail = buildContract({ toolName: 'bulk_update_customers', params: { customer_ids: ['a', 'b'], updates: { email: 'x@example.test' } }, displayParams: { customer_ids: ['a', 'b'], updates: { email: 'x@example.test' } } });
+  expect(bulkEmail.notifies_customer).toBe(true);
+  expect(bulkEmail.irreversible).toBe(true);
+  const plain = buildContract({ toolName: 'update_customer', params: { updates: { notes: 'x' } }, displayParams: { updates: { notes: 'x' } } });
+  expect(plain.effects.some((e) => /Address change|lifecycle fields/.test(e.label))).toBe(false);
+});
+
+test('preview fingerprint hashes arrays as sets (SQL row order) but ordered plans still bind via position', () => {
+  const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+  const a = previewFingerprint({ stops: [{ id: 's1', service: 'Pest' }, { id: 's2', service: 'Lawn' }] });
+  const b = previewFingerprint({ stops: [{ id: 's2', service: 'Lawn' }, { id: 's1', service: 'Pest' }] });
+  expect(a).toBe(b);
+  const p1 = previewFingerprint({ ordered_stops: [{ position: 1, id: 's1' }, { position: 2, id: 's2' }] });
+  const p2 = previewFingerprint({ ordered_stops: [{ position: 1, id: 's2' }, { position: 2, id: 's1' }] });
+  expect(p1).not.toBe(p2);
 });
 
 test('irreversibility is derived from outbound effects, not only the allowlist', () => {

@@ -428,7 +428,14 @@ async function triggerReviewRequest(input) {
     .where({ customer_id: customer.id })
     .where('created_at', '>=', new Date(Date.now() - 30 * 86400000).toISOString())
     .first();
-  if (recent) return { already_sent: true, status: recent.status, sent_at: recent.created_at, note: 'Already sent a review request in the last 30 days' };
+  if (recent) {
+    // A card-confirmed run promised a send: suppression here is a failed
+    // effect, never a silent Done (the route also re-checks before commit).
+    if (input._pinned_phone) {
+      return { error: 'A review request was already sent to this customer in the last 30 days — nothing was sent. Ask again after the cooldown.', preview_changed: true, already_sent: true };
+    }
+    return { already_sent: true, status: recent.status, sent_at: recent.created_at, note: 'Already sent a review request in the last 30 days' };
+  }
 
   // Create request
   try {

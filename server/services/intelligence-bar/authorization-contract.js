@@ -188,6 +188,9 @@ function kindFor(toolName, key) {
  *    pinned identities by name, never `_`-prefixed internals)
  *  - preview: the proposal-time preview (pins, before/after where known)
  */
+const CUSTOMER_UPDATE_TOOL_NAMES = new Set(['update_customer', 'bulk_update_customers']);
+const ADDRESS_UPDATE_KEYS = ['address_line1', 'city', 'state', 'zip'];
+
 function buildContract({ toolName, params, displayParams, preview, summary }) {
   const effects = [];
   const seen = new Set();
@@ -197,6 +200,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     seen.add(key);
     effects.push({ kind, label, ...extra });
   };
+  // A null in a customer `updates` map is a WRITE (the field is cleared) —
+  // it must render as an effect, never vanish like an absent value.
+  if (CUSTOMER_UPDATE_TOOL_NAMES.has(toolName) && displayParams?.updates && typeof displayParams.updates === 'object') {
+    displayParams = {
+      ...displayParams,
+      updates: Object.fromEntries(Object.entries(displayParams.updates).map(([k, v]) => [k, v === null ? '(cleared)' : v])),
+    };
+  }
 
   // Before/after pins the proposal already resolved deterministically.
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
@@ -368,6 +379,18 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     const n = toolName === 'bulk_update_customers' ? (params?.customer_ids || []).length : 1;
     push('customer', `${n > 1 ? `For each of ${n} customers: ` : ''}${require('../customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`);
   }
+  // Deterministic ripples of a customer update the executors always run —
+  // disclosed so the card is the complete effect set. The open-artifact set
+  // an address rewrite touches is resolved at commit (see Known limit).
+  if (CUSTOMER_UPDATE_TOOL_NAMES.has(toolName)) {
+    const upd = params?.updates && typeof params.updates === 'object' ? params.updates : {};
+    if (ADDRESS_UPDATE_KEYS.some((k) => upd[k] !== undefined)) {
+      push('customer', 'Address change also clears saved coordinates (re-geocoded afterwards), updates the primary property record, and rewrites the address on open leads/estimates that still match the OLD address (that set is resolved at commit)');
+    }
+    if (upd.pipeline_stage) {
+      push('customer', `Stage → ${upd.pipeline_stage} also stamps lifecycle fields (active, member_since, churned_at/churn_reason, pipeline_stage_changed_at) derived from the customer's stage at commit`);
+    }
+  }
   // Billing-lane stamp (#3140): the executors stamp billing_mode
   // 'monthly_membership' on any affected row the update leaves with a
   // membership tier + positive monthly rate and no billing lane, and notify
@@ -388,7 +411,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // An email change may immediately re-send the newsletter double-opt-in
   // confirmation to the customer (updateCustomer → resendPendingConfirmation
   // when the fan-out finds a pending confirmation) — a customer-facing send.
-  const emailChangeMayContact = toolName === 'update_customer' && !!params?.updates?.email;
+  const emailChangeMayContact = (toolName === 'update_customer' || toolName === 'bulk_update_customers') && !!params?.updates?.email;
   if (emailChangeMayContact) {
     push('comms', 'If a newsletter confirmation is pending for this customer, the double-opt-in email is re-sent to the NEW address immediately');
   }
@@ -453,7 +476,14 @@ function contractHash(contract) {
 // resolved effect set hash identically, and any real difference (target,
 // order, amount, before/after state) does not.
 function normalizePreview(value, depth = 0) {
-  if (Array.isArray(value)) return value.map((v) => normalizePreview(v, depth + 1));
+  // Arrays are hashed as SETS: target lists come from SQL without ORDER BY,
+  // so an unchanged set can arrive in a new order at confirm. Genuinely
+  // ordered plans (route optimization) carry an explicit `position` on each
+  // element, so order still binds through the element itself.
+  if (Array.isArray(value)) {
+    return value.map((v) => normalizePreview(v, depth + 1))
+      .sort((a, b) => (stableStringify(a) < stableStringify(b) ? -1 : 1));
+  }
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {

@@ -235,6 +235,10 @@ async function optimizeAllRoutes(input) {
     source: result.source, // 'google_routes' or 'nearest_neighbor'
     ordered_stops: (result.orderedStops || []).map((s, i) => ({
       position: i + 1,
+      // Immutable row id: the confirm fingerprint must bind WHICH visits get
+      // a new route_order, not just a name/service that another visit for
+      // the same customer could reproduce (W0B).
+      id: s.id,
       customer: s.customerName,
       service: s.serviceType,
     })),
@@ -336,6 +340,10 @@ async function optimizeTechRoute(input) {
     drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     ordered_stops: (result.orderedStops || []).map((s, i) => ({
       position: i + 1,
+      // Immutable row id: the confirm fingerprint must bind WHICH visits get
+      // a new route_order, not just a name/service that another visit for
+      // the same customer could reproduce (W0B).
+      id: s.id,
       customer: s.customerName,
       service: s.serviceType,
     })),

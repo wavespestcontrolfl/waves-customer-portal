@@ -2398,6 +2398,12 @@ router.post('/confirm-action', async (req, res, next) => {
             ? require('../services/customer-contact').getServiceContactSmsRecipient(r).phone
             : r.phone);
         drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
+        // The card promised a NEW review request: a request sent by any other
+        // route since the proposal makes that promise false — refuse.
+        if (!drifted && action.tool_name === 'trigger_review_request') {
+          const { hasRecentReviewRequest } = require('../services/intelligence-bar/review-tools');
+          drifted = await hasRecentReviewRequest(r.id);
+        }
       }
       if (!drifted && pinnedEmail) {
         const email = await db('emails').where('id', String(execParams.email_id || '')).first('id', 'from_address', 'subject', 'gmail_thread_id', 'customer_id');

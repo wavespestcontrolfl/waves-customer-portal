@@ -386,6 +386,25 @@ describe('W0B proposal-time pins for legacy-bare writes', () => {
     });
   });
 
+  test('trigger_review_request: a request sent by another route since the card → confirm refuses (409 preview_changed)', async () => {
+    const reviewTools = require('../services/intelligence-bar/review-tools');
+    reviewTools.hasRecentReviewRequest.mockResolvedValueOnce(true);
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'trigger_review_request', params: { customer_name: 'acct 1042', _pinned_phone: '+19415550000' } },
+    });
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'acct', last_name: '1042', phone: '+19415550000' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).preview_changed).toBe(true);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+    });
+  });
+
   test('trigger_review_request: unchanged recipient executes with the pin carried into the executor', async () => {
     mockClaimForConfirm.mockResolvedValue({
       // Name-pinned row (this suite's db stub has no query chain; the
