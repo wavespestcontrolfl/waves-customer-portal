@@ -27,6 +27,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp, nativePlatform } from '../native/platform';
+import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -15259,6 +15260,26 @@ export default function PortalPage() {
     { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
     { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
   ];
+  // Rate-the-app: inside the native shell an https store URL is a webview
+  // navigation that strands the SPA (same trap as window.open — F-017), so
+  // hand off to the OS through the store URL schemes, which Capacitor routes
+  // externally exactly like the tel:/sms: links above. In a browser, open
+  // the matching store page in a new tab.
+  const openStoreReview = () => {
+    const platform = isNativeApp() ? nativePlatform() : null;
+    const writeReviewUrl = `${APP_STORE_URL}${APP_STORE_URL.includes('?') ? '&' : '?'}action=write-review`;
+    if (platform === 'ios') {
+      window.location.href = writeReviewUrl.replace(/^https:\/\//, 'itms-apps://');
+      return;
+    }
+    if (platform === 'android') {
+      let packageId = null;
+      try { packageId = new URL(PLAY_STORE_URL).searchParams.get('id'); } catch { /* https fallback below */ }
+      window.location.href = packageId ? `market://details?id=${packageId}` : PLAY_STORE_URL;
+      return;
+    }
+    window.open(/Android/i.test(navigator.userAgent || '') ? PLAY_STORE_URL : writeReviewUrl, '_blank', 'noopener,noreferrer');
+  };
   const shellMaxWidth = 1040;
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
@@ -15584,6 +15605,41 @@ export default function PortalPage() {
                       </button>
                     );
                   })}
+                  <button
+                    type="button"
+                    onClick={() => { openStoreReview(); setShowMenu(false); }}
+                    style={{
+                      width: '100%',
+                      border: 'none',
+                      background: 'transparent',
+                      borderRadius: 8,
+                      padding: '10px 8px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      textAlign: 'left',
+                      fontFamily: FONTS.body,
+                    }}
+                  >
+                    <span style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: 8,
+                      background: PORTAL_SHELL.soft,
+                      color: PORTAL_SHELL.text,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <Icon name="star" size={16} strokeWidth={2} />
+                    </span>
+                    <span style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>Rate the Waves App</span>
+                      <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Love the app? Leave a quick review</span>
+                    </span>
+                  </button>
                   <button
                     type="button"
                     onClick={async () => {
