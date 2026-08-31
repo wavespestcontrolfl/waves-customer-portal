@@ -1773,12 +1773,17 @@ router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
         .then(async (outcome) => {
           // A resolved lock skip is not a rejection. lease_held means the
           // original holder is still working the run — fine. no_connection
-          // (no holder slot under the cron herd) means NOBODY ran it: the
-          // row just created as 'running' would sit there and block every
-          // new experiment through the one-running index until an operator
-          // or the nightly recovery noticed. Retire it so the UI's retry
-          // (resumeRunId) reopens it cleanly.
-          if (outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
+          // (no holder slot under the cron herd) means THIS pod ran nothing:
+          // for a row this request just created as 'running', nobody else
+          // can be working it, and it would sit there blocking every new
+          // experiment through the one-running index until an operator or
+          // the nightly recovery noticed — retire it so the UI's retry
+          // (resumeRunId) reopens it cleanly. A RESUMED row is left alone:
+          // the process-local cap fires before the fleet-wide advisory
+          // lease is consulted, so another deploy-overlap pod may still own
+          // that run, and retiring it would let a second experiment start
+          // while the first is executing.
+          if (!resumeRunId && outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
             logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start: ${outcome.reason}`);
             await db('sms_sealed_eval_runs')
               .where({ id: runId, status: 'running' })

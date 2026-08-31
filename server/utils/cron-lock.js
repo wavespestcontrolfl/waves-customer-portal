@@ -59,6 +59,18 @@ function sanitizeJobError(message) {
 // lock connection is pinned recreates the herd self-deadlock described in
 // the header. Standalone callers (scheduler.js skip records) pass nothing
 // and use the pool as before.
+// pg surfaces a dead session with no SQLSTATE at all (socket-level errors)
+// or class 08 (connection exception) / 57 (operator intervention: admin
+// shutdown, crash recovery) / 53 (insufficient resources). Ledger problems
+// carry their own classes (42 undefined table/column, 22/23 data) and stay
+// best-effort. On the HELD lock connection the distinction is load-bearing:
+// a dead session has already dropped its advisory lock, so the body must
+// not run — another instance can take the lease and run the same sweep.
+function isSessionFatal(err) {
+  const code = String((err && err.code) || '');
+  return !code || /^(08|57|53)/.test(code);
+}
+
 async function recordJobStart(jobName, conn) {
   try {
     const now = new Date();
@@ -79,7 +91,41 @@ async function recordJobStart(jobName, conn) {
       .onConflict('job_name')
       .merge({ last_started_at: now, last_status: 'running', updated_at: now });
   } catch (err) {
+    if (conn && isSessionFatal(err)) throw err; // the lock session is gone — caller aborts
     logger.warn(`[cron-lock] ${jobName}: job_health start record failed (${err.message})`);
+  }
+}
+
+// A tick that never ran (no slot before its deadline, or a lease won too
+// late) must show as a FAILED run — but only if no other replica has
+// started or succeeded this job since the tick began: during a deploy
+// overlap the other pod may have completed the very sweep this pod lost,
+// and overwriting its success would tell the health surface a lie.
+async function recordMissedTick(jobName, tickStartedAtMs, message, conn) {
+  const startedAt = new Date(tickStartedAtMs);
+  const finishedAt = new Date();
+  const values = [jobName, startedAt, finishedAt, Math.max(0, finishedAt - startedAt), sanitizeJobError(message)];
+  const sql = `INSERT INTO job_health
+                 (job_name, last_started_at, last_finished_at, last_duration_ms, last_status, last_error, consecutive_failures, updated_at)
+               VALUES (?, ?, ?, ?, 'failed', ?, 1, CURRENT_TIMESTAMP)
+               ON CONFLICT (job_name) DO UPDATE SET
+                 last_finished_at = EXCLUDED.last_finished_at,
+                 last_duration_ms = EXCLUDED.last_duration_ms,
+                 last_status = 'failed',
+                 last_error = EXCLUDED.last_error,
+                 consecutive_failures = job_health.consecutive_failures + 1,
+                 updated_at = EXCLUDED.updated_at
+               WHERE (job_health.last_started_at IS NULL OR job_health.last_started_at < EXCLUDED.last_started_at)
+                 AND (job_health.last_success_at IS NULL OR job_health.last_success_at < EXCLUDED.last_started_at)`;
+  try {
+    if (conn) {
+      let n = 0;
+      await conn.query({ text: sql.replace(/\?/g, () => `$${++n}`), values });
+    } else {
+      await db.raw(sql, values);
+    }
+  } catch (err) {
+    logger.warn(`[cron-lock] ${jobName}: job_health missed-tick record failed (${err.message})`);
   }
 }
 
@@ -161,9 +207,10 @@ function lockHolderCap() {
 }
 let activeLockHolders = 0;
 const lockSlotWaiters = []; // FIFO of { resolve, timer }
-// jobName → never-rejecting promise of the in-flight run's machinery
-// outcome. Present from before the slot wait until the run settles, so it
-// covers waiting AND running ticks of a job.
+// jobName → promise of the in-flight run's LEASE decision ({ held } or
+// { held: false, reason }). Present from before the slot wait until the
+// run settles, so it covers waiting AND running ticks of a job; it resolves
+// as soon as the lease outcome is known, never waits for the body.
 const activeRuns = new Map();
 // A queued tick must not run arbitrarily late: date-sensitive callbacks
 // recompute their target date at execution time (billing-monthly derives
@@ -257,35 +304,40 @@ async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = re
 
 async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt) {
   // Coalesce behind an in-flight (waiting or running) tick of this job
-  // rather than queueing a replay — but inherit its outcome: if that run
-  // never actually held the lease (its connection acquire failed, its
-  // slot wait timed out, or its try-lock query threw), its work was NOT
-  // done and this tick must do it — under ITS OWN original deadline — not
-  // report lease_held over a run that ran nothing (both deploy-overlap
-  // invocations of a once-daily job would silently drop).
+  // rather than queueing a replay — but only until that run's LEASE
+  // outcome is known, never until it finishes: a hung body would otherwise
+  // retain every later tick of a minutely job behind one never-settling
+  // promise. Once the prior run holds the lease this tick is covered
+  // (lease_held, immediately). If the prior run settled WITHOUT the lease
+  // (no slot, acquire failure, try-lock throw, session lost, deadline) its
+  // work was NOT done and this tick must do it — under ITS OWN original
+  // deadline — or both deploy-overlap invocations of a once-daily job
+  // would silently drop.
   const prior = activeRuns.get(jobName);
   if (prior) {
-    const priorOutcome = await prior;
-    if (priorOutcome && priorOutcome.skipped === true && priorOutcome.reason === 'no_connection') {
+    const decision = await prior;
+    if (!decision.held && decision.reason === 'no_connection') {
       return runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt);
     }
     logger.info(`[cron-lock] ${jobName}: covered by a concurrent run — skipping tick`);
     return { skipped: true, reason: 'lease_held' };
   }
   const tickStartedAtMs = Date.now();
-  const lease = { held: false, deadlineAt, tickStartedAtMs };
+  let decideLease;
+  const leaseDecided = new Promise((resolve) => { decideLease = resolve; });
+  const lease = {
+    held: false,
+    deadlineAt,
+    tickStartedAtMs,
+    onHeld: () => { lease.held = true; decideLease({ held: true }); },
+  };
   const runPromise = (async () => {
     const granted = await acquireLockSlot(jobName, deadlineAt);
     if (!granted) {
-      // The tick is lost, and for a date-scoped job that is a missed
-      // cohort — it must show as a FAILED run, not leave job_health on the
-      // previous success. No connection is held here, so the recorders use
-      // the pool (best-effort, like every job_health write).
       logger.error(`[cron-lock] ${jobName}: no lock slot within ${SLOT_WAIT_MAX_MS}ms — tick failed`);
-      if (recordHealth) {
-        await recordJobStart(jobName);
-        await recordJobEnd(jobName, tickStartedAtMs, new Error(`no lock slot within ${SLOT_WAIT_MAX_MS}ms — tick failed`));
-      }
+      // No connection is held here, so the recorder uses the pool
+      // (best-effort, like every job_health write).
+      if (recordHealth) await recordMissedTick(jobName, tickStartedAtMs, `no lock slot within ${SLOT_WAIT_MAX_MS}ms — tick failed`);
       return { skipped: true, reason: 'no_connection' };
     }
     try {
@@ -294,13 +346,14 @@ async function runScheduled(jobName, lockKey, fn, recordHealth, deadlineAt) {
       releaseLockSlot();
     }
   })();
-  // The stored promise never rejects. A throw AFTER the lease was held
-  // means the body ran (covered); a throw BEFORE it (the try-lock query
-  // itself failed) means no work was done, so coalesced ticks must retry.
-  activeRuns.set(jobName, runPromise.then(
-    (r) => r,
-    () => (lease.held ? { bodyThrew: true } : { skipped: true, reason: 'no_connection' }),
-  ));
+  // Anything that settles without onHeld having fired decided "no lease":
+  // carry the machinery reason (lease_held from another instance stays
+  // lease_held; everything else is a retryable no_connection).
+  runPromise.then(
+    (r) => decideLease(lease.held ? { held: true } : { held: false, reason: (r && r.skipped === true && r.reason) || 'no_connection' }),
+    () => decideLease(lease.held ? { held: true } : { held: false, reason: 'no_connection' }),
+  );
+  activeRuns.set(jobName, leaseDecided);
   try {
     return await runPromise;
   } finally {
@@ -339,15 +392,24 @@ async function runExclusiveLocked(jobName, lockKey, fn, recordHealth, heldConn, 
     // fails on its own passed deadline.
     if (lease && Date.now() >= lease.deadlineAt) {
       logger.error(`[cron-lock] ${jobName}: lease acquired after the tick's deadline — not running`);
-      if (recordHealth) {
-        await recordJobStart(jobName, conn);
-        await recordJobEnd(jobName, lease.tickStartedAtMs, new Error('lease acquired after tick deadline — tick failed'), conn);
-      }
+      if (recordHealth) await recordMissedTick(jobName, lease.tickStartedAtMs, 'lease acquired after tick deadline — tick failed', conn);
       return { skipped: true, reason: 'no_connection' };
     }
-    if (lease) lease.held = true;
     const startedAtMs = Date.now();
-    if (recordHealth) await recordJobStart(jobName, conn);
+    if (recordHealth) {
+      try {
+        await recordJobStart(jobName, conn);
+      } catch (err) {
+        // The session (and with it the advisory lock) is gone. Running the
+        // body now would race another instance that can take the lease.
+        conn.__knex__disposed = `cron-lock session lost before body: ${err.message}`;
+        logger.error(`[cron-lock] ${jobName}: lock session lost before the body ran (${err.message}) — skipping tick, connection flagged for destruction`);
+        return { skipped: true, reason: 'no_connection' };
+      }
+    }
+    // Lease confirmed usable: tell coalesced ticks of this job they are
+    // covered (see runScheduled).
+    if (lease) lease.onHeld();
     try {
       // The held connection rides the async context so nested runExclusive
       // calls (any depth) reuse this session instead of pinning another.

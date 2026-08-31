@@ -609,7 +609,7 @@ function initScheduledJobs() {
       logger.error(`[sms-draft-canary] tick failed: ${err.message}`);
     }
   };
-  setTimeout(smsDraftCanaryTick, 60 * 1000);
+  cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
 
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
@@ -625,7 +625,7 @@ function initScheduledJobs() {
       logger.error(`[booking-funnel-canary] tick failed: ${err.message}`);
     }
   };
-  setTimeout(bookingFunnelCanaryTick, 90 * 1000);
+  cron.scheduleTimeout(bookingFunnelCanaryTick, 90 * 1000);
   cron.schedule('37 */6 * * *', bookingFunnelCanaryTick, { timezone: 'America/New_York' });
 
   // BOOT (+120s, then EVERY 6H at :49) — payment-method guard "firsts" watch
@@ -642,7 +642,7 @@ function initScheduledJobs() {
       logger.error(`[pm-guard-firsts] tick failed: ${err.message}`);
     }
   };
-  setTimeout(pmGuardFirstsTick, 120 * 1000);
+  cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
 
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.

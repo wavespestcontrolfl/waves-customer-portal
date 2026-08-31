@@ -176,11 +176,13 @@ describe('cron-lock runExclusive', () => {
     // sweep — a queued replay right after the first run releases the
     // advisory lock risks duplicate sends.
     const replayBody = jest.fn();
-    const second = runExclusive('sms-sweep', replayBody, { recordHealth: false, waitForSlot: true });
+    // Resolves as soon as the first run's LEASE is known, not when its body
+    // finishes — a hung body must not retain every later tick behind it.
+    const second = await runExclusive('sms-sweep', replayBody, { recordHealth: false, waitForSlot: true });
+    expect(second).toEqual({ skipped: true, reason: 'lease_held' });
 
     release('swept');
     await expect(first).resolves.toBe('swept');
-    await expect(second).resolves.toEqual({ skipped: true, reason: 'lease_held' });
     expect(replayBody).not.toHaveBeenCalled();
   });
 
@@ -309,11 +311,11 @@ describe('cron-lock runExclusive', () => {
       await jest.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
       await expect(late).resolves.toEqual({ skipped: true, reason: 'no_connection' });
 
-      expect(db).toHaveBeenCalledWith('job_health');
-      expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
-        last_status: 'failed',
-        last_error: expect.stringContaining('no lock slot'),
-      }));
+      const [sql, bindings] = db.raw.mock.calls.find(([q]) => typeof q === 'string' && q.includes('job_health'));
+      expect(sql).toContain("last_status = 'failed'");
+      expect(sql).toMatch(/last_started_at < EXCLUDED\.last_started_at/);
+      expect(bindings[0]).toBe('billing-monthly');
+      expect(bindings.at(-1)).toContain('no lock slot');
 
       release('swept');
       await Promise.all(herd);
@@ -444,7 +446,10 @@ describe('cron-lock runExclusive', () => {
       expect(texts.some((x) => x.includes('pg_try_advisory_lock'))).toBe(true);
       expect(texts.some((x) => x.includes('pg_advisory_unlock'))).toBe(true); // lease released
       const fail = healthCalls(conn).find((c) => c.text.includes("last_status = 'failed'"));
-      expect(fail.values[3]).toContain('after tick deadline');
+      expect(fail.values.at(-1)).toContain('after tick deadline');
+      // Conditional: never overwrite a newer start/success by another replica.
+      expect(fail.text).toMatch(/last_started_at < EXCLUDED\.last_started_at/);
+      expect(fail.text).toMatch(/last_success_at < EXCLUDED\.last_started_at/);
       expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
     } finally {
       jest.useRealTimers();
@@ -466,6 +471,53 @@ describe('cron-lock runExclusive', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('a dead lock session detected by the start record aborts the body (lease is gone)', async () => {
+    const conn = {
+      query: jest.fn(async ({ text }) => {
+        if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+        if (text.includes('INSERT INTO job_health')) throw new Error('Connection terminated unexpectedly');
+        return { rows: [] };
+      }),
+    };
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    const body = jest.fn(async () => 'sent');
+    const result = await runExclusive('sms-sweep', body);
+    expect(result).toEqual({ skipped: true, reason: 'no_connection' });
+    expect(body).not.toHaveBeenCalled();
+    expect(conn.__knex__disposed).toMatch(/session lost/);
+  });
+
+  test('a ledger-only start-record error (undefined table) stays best-effort — the body runs', async () => {
+    const conn = {
+      query: jest.fn(async ({ text }) => {
+        if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+        if (text.includes('INSERT INTO job_health')) {
+          const err = new Error('relation "job_health" does not exist');
+          err.code = '42P01';
+          throw err;
+        }
+        return { rows: [] };
+      }),
+    };
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    const body = jest.fn(async () => 'sent');
+    await expect(runExclusive('sms-sweep', body)).resolves.toBe('sent');
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(conn.__knex__disposed).toBeUndefined();
+  });
+
+  test('coalesced ticks behind a run that lost the lease to ANOTHER instance skip as lease_held', async () => {
+    const conn = mockConnection(false); // other pod holds the advisory lock
+    db.client.acquireConnection.mockResolvedValue(conn);
+    const a = runExclusive('sms-sweep', jest.fn(), { recordHealth: false, waitForSlot: true });
+    const b = runExclusive('sms-sweep', jest.fn(), { recordHealth: false, waitForSlot: true });
+    await expect(a).resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    await expect(b).resolves.toEqual({ skipped: true, reason: 'lease_held' });
+    expect(db.client.acquireConnection).toHaveBeenCalledTimes(1); // b never retried
   });
 
   test('nested runExclusive is reentrant — no self-deadlock at the minimum cap', async () => {
@@ -624,7 +676,13 @@ describe('cron-lock job-health recorder', () => {
     db.client.acquireConnection.mockResolvedValue(conn);
     conn.query.mockImplementation(async ({ text }) => {
       if (text.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
-      if (text.includes('job_health')) throw new Error('relation "job_health" does not exist');
+      if (text.includes('job_health')) {
+        // A real pg schema error carries its SQLSTATE — that is what marks
+        // it as a ledger problem rather than a dead session.
+        const err = new Error('relation "job_health" does not exist');
+        err.code = '42P01';
+        throw err;
+      }
       return { rows: [] };
     });
 
