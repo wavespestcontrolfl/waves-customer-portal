@@ -28,12 +28,14 @@ const memo = new Map();
 // never mask a later delivery failure on the same visit (admin-alerts dedupes
 // on type + source identity and preserves dismissed status on merge).
 const CLOSEOUT_ALERT_TYPES = Object.freeze({
+  completion: 'completion_not_committed',
   report: 'missing_required_service_report',
   reportDelivery: 'report_delivery_incomplete',
   application: 'missing_required_material_log',
   photos: 'missing_required_photos',
 });
 const CLOSEOUT_ALERT_LABELS = Object.freeze({
+  completion_not_committed: 'Completion not committed',
   missing_required_service_report: 'Missing required service report',
   report_delivery_incomplete: 'Report delivery incomplete',
   missing_required_material_log: 'Missing required material log',
@@ -101,8 +103,10 @@ function closeoutIssuesForVisit(status) {
     || completionReason === 'completion_resumable'
     || completionReason === 'completion_side_effects_resumable';
   if (completionStuck) {
+    // Own lifecycle key: a dismissed stuck-completion card must not hide a
+    // later missing-report card once the completion lands.
     return [{
-      type: CLOSEOUT_ALERT_TYPES.report,
+      type: CLOSEOUT_ALERT_TYPES.completion,
       fact: 'completion',
       reason: completionReason,
       summary: completionReason.includes('resumable')

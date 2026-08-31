@@ -34,7 +34,7 @@ describe('closeoutIssuesForVisit', () => {
     for (const c of [fact('pending', 'completed_visit_without_record'), fact('failed', 'completion_attempt_failed'), fact('pending', 'completion_side_effects_resumable')]) {
       const issues = closeoutIssuesForVisit(base({ completion: c, report: fact('pending', 'awaiting_completion'), application: fact('pending', 'awaiting_completion') }));
       expect(issues).toHaveLength(1);
-      expect(issues[0].type).toBe(CLOSEOUT_ALERT_TYPES.report);
+      expect(issues[0].type).toBe('completion_not_committed'); // own lifecycle key (GH r2)
     }
     expect(closeoutIssuesForVisit(base({ completion: fact('pending', 'completion_side_effects_resumable') }))[0].summary).toMatch(/stuck mid-commit/);
   });

@@ -432,6 +432,7 @@ async function computeDashboardAlertsUncached() {
       const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id));
       const carry = closeoutCarryFor(today);
       const gapIds = [];
+      const gapIdentities = []; // `visitId:issueType` — new work on a listed visit must re-surface
       const unreadableIds = [];
       let issueCount = 0;
       for (const row of completedToday) {
@@ -439,11 +440,15 @@ async function computeDashboardAlertsUncached() {
         const unreadable = !status || !status.found || Boolean(status.unavailable && status.unavailable.length);
         const issues = closeoutIssuesForVisit(status);
         if (issues.length) {
-          // A gap seen in a full OR partial read counts, and is remembered.
-          gapIds.push(row.id); issueCount += issues.length; carry.set(row.id, issues.length);
+          // A gap seen in a full OR partial read counts, and is remembered
+          // (count + identities) for the outage carry.
+          const identities = issues.map((i) => `${row.id}:${i.type}`);
+          gapIds.push(row.id); issueCount += issues.length; gapIdentities.push(...identities);
+          carry.set(row.id, { count: issues.length, identities });
         } else if (unreadable && carry.has(row.id)) {
           // Outage: hold the last-known gap so the alert cannot clear and re-fire.
-          gapIds.push(row.id); issueCount += carry.get(row.id);
+          const prev = carry.get(row.id);
+          gapIds.push(row.id); issueCount += prev.count; gapIdentities.push(...prev.identities);
         } else if (unreadable) {
           unreadableIds.push(row.id);
         } else {
@@ -472,9 +477,10 @@ async function computeDashboardAlertsUncached() {
           kind: 'action',
           severity: 'warn',
           count: gapIds.length,
-          // Queue membership so a dismissal re-surfaces when a NEW visit
-          // joins the gap set, not just when the count changes.
-          members: queueMembers(gapIds),
+          // Queue membership as visit:issue identities so a dismissal
+          // re-surfaces when a NEW visit joins OR a listed visit grows a new
+          // issue (report published → delivery fails), not just on count.
+          members: queueMembers(gapIdentities),
           label: `${gapIds.length} completed visit${gapIds.length === 1 ? '' : 's'} today not closed out (${issueCount} open item${issueCount === 1 ? '' : 's'})`,
           href: '/admin/dispatch',
         });

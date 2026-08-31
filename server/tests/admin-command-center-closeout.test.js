@@ -152,9 +152,9 @@ test('completed visit with no completion record is ONE accurate card, not three'
       photos: fact('pending', 'awaiting_completion'),
     },
   }));
-  const alerts = (await run()).filter((a) => String(a.type).startsWith('missing_required'));
+  const alerts = (await run()).filter((a) => ['completion_not_committed', 'missing_required_service_report', 'missing_required_material_log', 'missing_required_photos'].includes(a.type));
   expect(alerts).toHaveLength(1);
-  expect(alerts[0]).toMatchObject({ type: 'missing_required_service_report', summary: expect.stringMatching(/no completion record/) });
+  expect(alerts[0]).toMatchObject({ type: 'completion_not_committed', id: 'svc-1_completion_not_committed', label: 'Completion not committed', summary: expect.stringMatching(/no completion record/) });
 });
 
 test('stuck resumable completion is the single closeout card (codex r1)', async () => {
@@ -166,7 +166,7 @@ test('stuck resumable completion is the single closeout card (codex r1)', async 
       application: fact('pending', 'awaiting_completion'),
     },
   }));
-  const alerts = (await run()).filter((a) => String(a.type).startsWith('missing_required'));
+  const alerts = (await run()).filter((a) => a.type === 'completion_not_committed');
   expect(alerts).toHaveLength(1);
   expect(alerts[0].summary).toMatch(/stuck mid-commit/);
   // A RUNNING completion stays silent — transient, not a gap.

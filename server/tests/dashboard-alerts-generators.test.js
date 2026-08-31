@@ -319,7 +319,8 @@ describe('Action Inbox generators', () => {
     ]));
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'closeout_gaps_today');
-    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: '/admin/dispatch', members: ['svc-b'] });
+    // Members are visit:issue identities so a new issue on a listed visit re-surfaces a dismissal (GH r2).
+    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 1, href: '/admin/dispatch', members: ['svc-b:missing_required_photos', 'svc-b:missing_required_service_report'] });
     expect(item.label).toBe('1 completed visit today not closed out (2 open items)');
     expect(loadCloseoutStatuses).toHaveBeenCalledWith(['svc-a', 'svc-b', 'svc-c', 'svc-d']);
   });
@@ -337,7 +338,7 @@ describe('Action Inbox generators', () => {
     // Load failed → still present.
     primeDb({ scheduled_services: [{ id: 'svc-a' }] });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', null]]));
-    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1, members: ['svc-a'] });
+    expect((await computeDashboardAlertsUncached()).alerts.find((a) => a.id === 'closeout_gaps_today')).toMatchObject({ count: 1, members: ['svc-a:missing_required_service_report'] });
     // Partial read with no readable issue → still present.
     primeDb({ scheduled_services: [{ id: 'svc-a' }] });
     loadCloseoutStatuses.mockResolvedValueOnce(new Map([['svc-a', partialNoIssue]]));
