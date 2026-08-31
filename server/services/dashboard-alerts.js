@@ -490,9 +490,12 @@ async function computeDashboardAlertsUncached() {
           if (!window.has(id)) { gapIds.push(id); issueCount += entry.identities.length; gapIdentities.push(...entry.identities); }
         }
       }
-      // On a truncated read with nothing else holding the alert (e.g. an
-      // empty post-restart carry), the persisted row is the remaining floor.
-      const persisted = (unreadableIds.length || (sweepTruncated && !gapIds.length))
+      // EVERY truncated read reconciles against the persisted row (pre-push
+      // r16 P1): a truncated sweep is incomplete even when in-window gaps
+      // were found — after a restart the carry is empty, so one in-window
+      // gap would otherwise emit an exact count 1 and let the cron overwrite
+      // a larger durable count representing unchecked over-cap visits.
+      const persisted = (unreadableIds.length || sweepTruncated)
         ? await persistedCloseoutAlertForDay(today) : { row: null, error: null };
       const held = persisted.row;
       if (held || (persisted.error && (gapIds.length || carry.size))) {
