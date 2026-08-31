@@ -1,5 +1,6 @@
 const { AsyncLocalStorage } = require('async_hooks');
 const db = require('../models/db');
+const { isScheduledTick } = require('./scheduled-cron');
 const logger = require('../services/logger');
 
 /**
@@ -214,21 +215,22 @@ function releaseLockSlot() {
   else activeLockHolders -= 1;
 }
 
-// waitForSlot defaults to recordHealth: scheduled jobs (recordHealth on)
-// wait — a dropped once-a-day tick is unrecoverable — while dynamic
-// per-entity locks (recordHealth off: review-send:${customerId}, manual
-// attribution from admin routes) are request-scoped and fail fast, so an
-// HTTP request is never parked behind the cron herd to mutate after the
-// client gave up. HTTP handlers that trigger a SCHEDULED job by name
-// (manual auto-dispatch, price-scan, engagement sync) must pass
-// waitForSlot: false explicitly — they share the job's lock and health row
-// but are still request-scoped.
+// waitForSlot defaults to "this is a health-recorded job running inside
+// a scheduled cron tick" (see scheduled-cron.js). Only that shape waits —
+// a dropped once-a-day tick is unrecoverable. Everything else fails fast:
+// dynamic per-entity locks (recordHealth off: review-send:${customerId}),
+// and every HTTP path — including handlers that trigger a scheduled job
+// by name (manual auto-dispatch, price-scan, engagement sync) and shared
+// service entry points reached from admin routes. An HTTP request parked
+// behind the cron herd would mutate after the client gave up. The
+// context-based default means no request-vs-scheduled flag has to be
+// threaded through shared entry points.
 //
 // Non-waiting callers still take a holder slot: bypassing the cap would
 // let a burst of request locks pin the half of the pool reserved for job
 // bodies and web routes. No slot → no_connection, the same skip every
 // caller already maps to "retry in a moment".
-async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = recordHealth } = {}) {
+async function runExclusive(jobName, fn, { recordHealth = true, waitForSlot = recordHealth && isScheduledTick() } = {}) {
   const lockKey = `cron:${jobName}`;
   // Reentrant path: already inside a held slot (nested runExclusive) —
   // no second slot AND no second connection. The nested advisory lock is

@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
   fn.__builder = builder;
   return fn;
 });
+jest.mock('node-cron', () => ({ schedule: jest.fn() }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -304,7 +305,7 @@ describe('cron-lock runExclusive', () => {
 
       // recordHealth on (a real scheduled job): the lost tick must not
       // leave job_health showing the previous success.
-      const late = runExclusive('billing-monthly', jest.fn());
+      const late = runExclusive('billing-monthly', jest.fn(), { waitForSlot: true });
       await jest.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
       await expect(late).resolves.toEqual({ skipped: true, reason: 'no_connection' });
 
@@ -382,6 +383,45 @@ describe('cron-lock runExclusive', () => {
     } finally {
       delete db.client.pool;
     }
+  });
+
+  test('waiting is the default ONLY inside a scheduled cron tick; HTTP paths fail fast', async () => {
+    const nodeCron = require('node-cron');
+    const scheduledCron = require('../utils/scheduled-cron');
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const herd = Array.from({ length: 10 }, (_, i) =>
+      runExclusive(`herd-${i}`, () => gate, { recordHealth: false, waitForSlot: true }));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Same shared entry point, no options — reached from an admin route:
+    // must NOT park behind the herd.
+    const httpBody = jest.fn(async () => 'ran');
+    const fromHttp = await runExclusive('billing-monthly', httpBody);
+    expect(fromHttp).toEqual({ skipped: true, reason: 'no_connection' });
+    expect(httpBody).not.toHaveBeenCalled();
+    expect(scheduledCron.isScheduledTick()).toBe(false);
+
+    // Reached from a cron tick registered through scheduled-cron: waits.
+    const tickBody = jest.fn(async () => 'billed');
+    let fromTick;
+    scheduledCron.schedule('0 8 * * *', async () => {
+      expect(scheduledCron.isScheduledTick()).toBe(true);
+      fromTick = runExclusive('billing-monthly', tickBody);
+    }, { timezone: 'America/New_York' });
+    const [expr, wrappedTick, opts] = nodeCron.schedule.mock.calls.at(-1);
+    expect(expr).toBe('0 8 * * *');
+    expect(opts).toEqual({ timezone: 'America/New_York' });
+    await wrappedTick();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(tickBody).not.toHaveBeenCalled(); // waiting, not failed
+
+    release('swept');
+    await Promise.all(herd);
+    await expect(fromTick).resolves.toBe('billed');
   });
 
   test('nested runExclusive is reentrant — no self-deadlock at the minimum cap', async () => {

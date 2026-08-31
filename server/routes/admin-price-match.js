@@ -104,13 +104,30 @@ router.post('/scan', async (req, res, next) => {
       const result = await runWeeklyScan({ selectOnly: true });
       return res.json(result);
     }
-    res.status(202).json({ ok: true, started: true });
-    // Manual trigger: shares the cron's lock + health row but is request-
-    // scoped — fail fast rather than queue behind the cron herd.
+    // 202 only once the lock body is actually running: a lock skip (the
+    // cron's tick holds the lease, or no holder slot is free) must answer
+    // 409, not claim a scan that never started. The scan itself outlives
+    // the request, so the response is sent from inside the body.
+    let responded = false;
+    const respond = (status, body) => {
+      if (responded) return;
+      responded = true;
+      res.status(status).json(body);
+    };
     runExclusive('price-scan-weekly', async () => {
+      respond(202, { ok: true, started: true });
       const result = await runWeeklyScan();
       logger.info(`[price-match] manual scan run by ${req.technicianId}: ${JSON.stringify(result)}`);
-    }, { waitForSlot: false }).catch((err) => logger.error(`[price-match] manual scan failed: ${err.message}`));
+    })
+      .then((outcome) => {
+        if (outcome && outcome.skipped === true) {
+          respond(409, { ok: false, started: false, reason: outcome.reason });
+        }
+      })
+      .catch((err) => {
+        logger.error(`[price-match] manual scan failed: ${err.message}`);
+        respond(500, { ok: false, started: false, error: 'scan failed' });
+      });
     return undefined;
   } catch (err) { return next(err); }
 });

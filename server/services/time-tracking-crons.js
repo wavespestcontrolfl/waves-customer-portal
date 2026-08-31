@@ -1,4 +1,4 @@
-const cron = require('node-cron');
+const cron = require('../utils/scheduled-cron');
 const db = require('../models/db');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');

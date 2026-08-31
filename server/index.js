@@ -1278,7 +1278,7 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
     {
       const { runExclusive } = require('./utils/cron-lock');
       if (config.nodeEnv !== 'test') {
-        require('node-cron').schedule('*/15 * * * *', async () => {
+        require('./utils/scheduled-cron').schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('series-move-effects-reconcile', async () => {
               const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
@@ -1301,7 +1301,7 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
     {
       const { isEnabled } = require('./config/feature-gates');
       if (config.nodeEnv !== 'test' && isEnabled('cronJobs')) {
-        const cron = require('node-cron');
+        const cron = require('./utils/scheduled-cron');
         const { runExclusive } = require('./utils/cron-lock');
         // Recipient double opt-in recovery sweep (gated inside the service;
         // no-op while GATE_RECIPIENT_DOUBLE_OPTIN is off): re-dispatches

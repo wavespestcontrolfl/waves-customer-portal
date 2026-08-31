@@ -1,4 +1,4 @@
-const cron = require('node-cron');
+const cron = require('../utils/scheduled-cron');
 const db = require('../models/db');
 // Boundary-rotation generation guard (codex #3233 r37/r38): captured at
 // process startup, NOT at query-build time — a marker stamped after this

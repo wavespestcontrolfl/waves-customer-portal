@@ -353,7 +353,7 @@ router.post('/engagement/sync', async (req, res, next) => {
     runExclusive('social-engagement-ingest', () => syncRecentEngagement({
       lookbackDays,
       onStart: () => markStarted({ ok: true }),
-    }), { waitForSlot: false })
+    }))
       .then((result) => {
         if (result?.skipped) markStarted({ ok: false, reason: result.reason });
         else logger.info(`[social-engagement] manual sweep done: ${JSON.stringify(result)}`);
