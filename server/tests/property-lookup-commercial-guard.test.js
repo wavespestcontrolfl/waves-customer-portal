@@ -555,6 +555,26 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
+  test('an UNFLAGGED web-sourced unit count cannot exempt the flag either (unitCount plumbing follow-up)', () => {
+    // trustedUnitCount passes an unflagged non-authoritative count through,
+    // so the exemption additionally requires authoritative provenance — a
+    // scraped "48 units" on a condo folio must not suppress the wrong-scope
+    // flag now that the AI path reports counts.
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '16 Example Condo Way Unit 7, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 48,
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Condominium', sourceType: 'county' },
+        unitCount: { value: 48, sourceType: 'web_listing' },
+      },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
   test('a web-sourced unit count on an authoritative-type hybrid cannot exempt the flag (codex P1 r8)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '15 Example Condo Way Unit 5, Testville, FL 00000',

@@ -3243,8 +3243,19 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // trustedUnitCount, not the raw record count: commercialSignalRecord
   // returns the whole record when the TYPE is authoritative, so a hybrid
   // county-condo record with a web-sourced development unit count could
-  // otherwise exempt itself from the flag (codex P1 r6).
-  const unitLotTrustedUnitCount = unitLotSignalRc ? Number(trustedUnitCount(unitLotSignalRc)) : NaN;
+  // otherwise exempt itself from the flag (codex P1 r6). Stricter still now
+  // that the AI web-search path REPORTS unit counts (unitCount plumbing):
+  // the exemption requires AUTHORITATIVE provenance — county/cadastral
+  // record, or authoritative unitCount field evidence — because
+  // trustedUnitCount passes an UNFLAGGED web count through, and a scraped
+  // "48 units" on a condo folio must not suppress the wrong-scope flag.
+  const unitLotCountEvidence = rc?._fieldEvidence?.unitCount;
+  const unitLotCountAuthoritative = unitLotCountEvidence
+    ? AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(String(unitLotCountEvidence.sourceType || '').toLowerCase())
+    : (rc?._source === 'county' || rc?._source === 'cadastral');
+  const unitLotTrustedUnitCount = unitLotSignalRc && unitLotCountAuthoritative
+    ? Number(trustedUnitCount(unitLotSignalRc))
+    : NaN;
   const smallSharedParcel = (Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
     || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2);
   // Condo identity via the estimator's OWN predicate (isCondoRecord —

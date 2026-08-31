@@ -156,6 +156,10 @@ const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao',
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
+  // Total units on the record's parcel/building — evidence provenance is
+  // what separates a REAL count from shapeAsPropertyRecord's truthy-1 seed
+  // (trustedUnitCount / countyAttestedSmallResidential key on it).
+  'unitCount',
   // Tri-state: true/false only when a county extra-features table was actually
   // parsed (pools are assessed improvements, so absence on a parsed roll is
   // meaningful); null = no signal, and isMissingPropertyValue(null) keeps
@@ -4253,6 +4257,7 @@ Output rules:
 - Commercial/industrial properties: also search loopnet.com, crexi.com, and commercialcafe.com listings. "squareFootage" is the building square footage (these run larger than homes — report the true figure). When the address includes a unit/suite number, prefer THAT unit's square footage from the leasing listing over the whole building's.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
+- "unitCount" = the TOTAL number of dwelling/commercial units the record's parcel or building holds. 1 for a single-family home OR for one condo/apartment unit's own record; the building/complex total ONLY when the record describes the whole building or complex (an apartment community page, a whole-building listing). null when unknown — do NOT guess.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
 - Do NOT use generic city/category pages such as apartment directories, short-term-rental lists, or broad "homes for sale in city" pages as the source.
 - Use null for any field you can't verify — DO NOT guess. A null is more useful than a wrong number.
@@ -4266,6 +4271,7 @@ Respond with ONLY a JSON object — no preamble, no explanation, no markdown fen
   "bathrooms": <number 0.5-15 or null>,
   "stories": <int 1-4 or null>,
   "propertyType": <string or null>,
+  "unitCount": <int 1-2000 or null>,
   "constructionMaterial": <string or null>,
   "source": "<URL of primary source>",
   "confidence": "high" | "medium" | "low"
@@ -4315,6 +4321,10 @@ function parsePropertyJSON(text) {
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
       stories: coerceInt(raw.stories, 1, 4),
       propertyType: parsedType,
+      // Total units on the record's parcel/building (estimator-engine audit
+      // 2026-08-30 follow-up: the AI path hardcoded 1, blinding every
+      // downstream multi-unit signal). Bounded like the parcel-layer count.
+      unitCount: coerceInt(raw.unitCount ?? raw.unit_count ?? raw.numberOfUnits, 1, 2000),
       constructionMaterial: coerceEnum(raw.constructionMaterial, ['CBS', 'WOOD_FRAME', 'BRICK', 'METAL']),
       source: typeof raw.source === 'string' ? raw.source : null,
       confidence: typeof raw.confidence === 'string' ? raw.confidence.toLowerCase() : null,
@@ -4725,7 +4735,10 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     hasDetachedGarage: p.hasDetachedGarage ?? null,
     detachedGarageSqft: p.detachedGarageSqft || null,
     hasDock: p.hasDock ?? null,
-    unitCount: 1,
+    // A parsed unit count rides in with evidence (PROPERTY_EVIDENCE_FIELDS);
+    // absent one, the historical truthy-1 seed stands — consumers treat an
+    // evidence-less 1 as "no multi-unit signal", never as an attest.
+    unitCount: coerceInt(p.unitCount, 1, 2000) || 1,
     ownerType: null,
     ownerNames: [],
     lastSaleDate: null,
