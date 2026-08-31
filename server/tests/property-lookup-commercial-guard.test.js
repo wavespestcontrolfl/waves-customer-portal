@@ -257,6 +257,27 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
     }
   });
 
+  test('a verify-flagged web count on a TRUSTED-type record cannot reclassify it COMMERCIAL (codex P1 r4)', () => {
+    // Type trust is not count trust: an authoritative county 'Single
+    // Family' returns the whole record from commercialSignalRecord, but a
+    // verify-first web count of 6 must not flip the >4-unit vote.
+    const rc = {
+      formattedAddress: '9 Example Ln, Testville, FL 00000',
+      propertyType: 'Single Family',
+      unitCount: 6,
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Single Family', sourceType: 'county' },
+        unitCount: { value: 6, sourceType: 'unknown', fieldVerify: true },
+      },
+    };
+    expect(detectCategory(rc, {})).toBe('RESIDENTIAL');
+    // An UNFLAGGED listing count keeps its vote — suppressing those would
+    // reopen the Gateway Ave hole in the other direction.
+    rc._fieldEvidence.unitCount = { value: 6, sourceType: 'web_listing', fieldVerify: false };
+    expect(detectCategory(rc, {})).toBe('COMMERCIAL');
+  });
+
   test('a county Multifamily with NO unit data keeps the conservative COMMERCIAL vote', () => {
     expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
   });

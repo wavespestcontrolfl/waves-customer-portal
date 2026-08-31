@@ -2735,7 +2735,17 @@ function trustedUnitCount(rc) {
 // count, and keep the county signals. An AI-only merge has nothing
 // authoritative to keep.
 function commercialSignalRecord(rc) {
-  if (recordCommercialSignalTrusted(rc)) return rc;
+  if (recordCommercialSignalTrusted(rc)) {
+    // Type trust is not count trust (codex P1 r4): a hybrid with an
+    // authoritative county TYPE returns whole, but its only unitCount may
+    // be verify-flagged web evidence — now that the AI path reports counts,
+    // that >4 would reclassify a known-residential parcel COMMERCIAL in
+    // detectCategory. Sanitize the count on ITS OWN provenance; unflagged
+    // web counts still vote (Gateway-hole direction unchanged).
+    if (!rc) return rc;
+    const trusted = trustedUnitCount(rc);
+    return trusted === rc.unitCount ? rc : { ...rc, unitCount: trusted };
+  }
   if (rc?._source !== 'hybrid') return null;
   return {
     ...rc,
