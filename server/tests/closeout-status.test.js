@@ -543,6 +543,28 @@ describe('closeout-status: comms + follow-up', () => {
     expect(inactive.facts.completion).toMatchObject({ state: 'not_required', reason: 'visit_cancelled', attemptState: 'failed' });
   });
 
+  test('an older sibling report\'s sent delivery does not deliver the newer report (codex r19)', () => {
+    const newRec = { ...closedOutInputs().record, id: 'rec-new' };
+    const oldRec = { ...closedOutInputs().record, id: 'rec-old' };
+    const { facts } = deriveCloseoutFacts(closedOutInputs({
+      record: newRec, records: [newRec, oldRec], delivery: null,
+      deliveries: [
+        { service_record_id: 'rec-new', channel: 'email', status: 'failed', attempts: 5, max_attempts: 5, last_error: 'bounce' },
+        { service_record_id: 'rec-old', channel: 'email', status: 'sent', attempts: 1, max_attempts: 5, sent_at: '2026-08-29T18:00:00Z' },
+      ],
+    }));
+    expect(facts.reportDelivery).toMatchObject({ state: 'failed', reason: 'delivery_exhausted' });
+    // And within the SAME record, sent still beats a newer failure.
+    const same = deriveCloseoutFacts(closedOutInputs({
+      record: newRec, records: [newRec], delivery: null,
+      deliveries: [
+        { service_record_id: 'rec-new', channel: 'sms', status: 'failed', attempts: 5, max_attempts: 5 },
+        { service_record_id: 'rec-new', channel: 'email', status: 'sent', attempts: 1, max_attempts: 5, sent_at: '2026-08-30T18:06:00Z' },
+      ],
+    }));
+    expect(same.facts.reportDelivery.state).toBe('done');
+  });
+
   test('license without a recorded expiry stays done (applicator-picker semantics) with expiryUnrecorded surfaced', () => {
     const req = baseRequirements({ requiresLicense: true, licenseCategory: null });
     const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: req, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: { id: 'tech-1', fl_applicator_license: 'JE362022', license_expiry: null, license_categories: null } }));

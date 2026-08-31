@@ -328,10 +328,9 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
         : { n: 0 };
     }),
     probe('service_report_deliveries', unavailable, async () => {
-      if (!recordIds.length) return null;
+      if (!recordIds.length) return [];
       const rows = await knex('service_report_deliveries').whereIn('service_record_id', recordIds).orderBy('created_at', 'desc').select();
-      // Best row wins: a sent delivery on ANY record beats a newer failure.
-      return (Array.isArray(rows) && (rows.find((r) => String(r.status) === 'sent') || rows[0])) || null;
+      return Array.isArray(rows) ? rows : [];
     }),
     probe('invoices (live)', unavailable, () => completionNewestLiveInvoiceLookup(knex, {
       serviceRecordId: recordId, scheduledServiceId: serviceId,
@@ -363,7 +362,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.retractedApplicationCount = retractedAppsProbe.value ? toNumber(retractedAppsProbe.value.n) : null;
   inputs.photoCount = photosProbe.value ? toNumber(photosProbe.value.n) : null;
   inputs.photoSource = projectId ? 'project_photos' : 'service_photos';
-  inputs.delivery = deliveryProbe.value || null;
+  inputs.deliveries = deliveryProbe.error ? null : (deliveryProbe.value || []);
   inputs.deliveryLookupFailed = Boolean(deliveryProbe.error);
   inputs.liveInvoice = liveInvoiceProbe.value || null;
   inputs.liveInvoiceLookupFailed = Boolean(liveInvoiceProbe.error);
@@ -651,7 +650,12 @@ function deriveCloseoutFacts(inputs) {
 
   // ---- 5. report delivery ---------------------------------------------------------
   let reportDelivery;
-  const delivery = inputs.delivery || null;
+  // Delivery evidence must belong to the SAME record as the report artifact
+  // — an older sibling report's sent row must not deliver a newer one.
+  const deliveryRows = Array.isArray(inputs.deliveries)
+    ? inputs.deliveries.filter((r) => !tokenRecord?.id || r.service_record_id === tokenRecord.id)
+    : (inputs.delivery ? [inputs.delivery] : []);
+  const delivery = deliveryRows.find((r) => String(r.status) === 'sent') || deliveryRows[0] || null;
   const notesEmailStatus = notes.serviceReportV1EmailStatus ? String(notes.serviceReportV1EmailStatus).toLowerCase() : null;
   const recapSentAt = isoOrNull(record?.recap_sms_sent_at);
   // recap_sms_sent_at is an at-most-once CLAIM stamped before the provider
