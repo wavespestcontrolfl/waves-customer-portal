@@ -144,14 +144,30 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
   const memberlessIds = dismissalRows.filter((r) => r.dismissed_members === null).map((r) => r.alert_id);
   if (memberlessIds.length) {
     try {
+      // Bounded to the CURRENT alert incarnation (pre-push P1): alert ids
+      // recur (closeout_gaps_today reuses its id daily), so an unbounded
+      // lookup could copy YESTERDAY'S membership into today's dismissal and
+      // make today's recovered exact membership read as new work right after
+      // the click. dashboard_alert_state.first_seen_at marks when this
+      // incarnation began; a memberful dismissal from before it belongs to a
+      // previous incarnation and must not be carried. No state row = no
+      // active incarnation to protect → keep NULL (count-only semantics).
+      const stateRows = await db('dashboard_alert_state')
+        .whereIn('alert_id', memberlessIds)
+        .select('alert_id', 'first_seen_at');
+      const firstSeenByAlert = new Map(stateRows.map((s) => [s.alert_id, new Date(s.first_seen_at).getTime()]));
       const prior = await db('dashboard_alert_dismissed')
         .where({ admin_user_id: adminUserId })
         .whereIn('alert_id', memberlessIds)
         .whereNotNull('dismissed_members')
         .orderBy('dismissed_at', 'desc')
-        .select('alert_id', 'dismissed_members');
+        .select('alert_id', 'dismissed_members', 'dismissed_at');
       const latestByAlert = new Map();
-      for (const p of prior) if (!latestByAlert.has(p.alert_id)) latestByAlert.set(p.alert_id, p.dismissed_members);
+      for (const p of prior) {
+        const incarnationStart = firstSeenByAlert.get(p.alert_id);
+        if (incarnationStart == null || new Date(p.dismissed_at).getTime() < incarnationStart) continue;
+        if (!latestByAlert.has(p.alert_id)) latestByAlert.set(p.alert_id, p.dismissed_members);
+      }
       for (const r of dismissalRows) {
         if (r.dismissed_members === null && latestByAlert.has(r.alert_id)) r.dismissed_members = latestByAlert.get(r.alert_id);
       }
