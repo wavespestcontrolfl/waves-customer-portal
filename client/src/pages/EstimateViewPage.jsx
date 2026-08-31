@@ -429,7 +429,7 @@ export function reportShowcaseVariantForServices(services = []) {
     : 'pest';
 }
 
-export function estimateAddServiceOffer(services = [], serviceMode = 'recurring', membership = null) {
+export function estimateAddServiceOffer(services = [], serviceMode = 'recurring', membership = null, suppressKeys = []) {
   if (serviceMode !== 'recurring') return null;
   const currentKeys = new Set();
   services
@@ -437,6 +437,14 @@ export function estimateAddServiceOffer(services = [], serviceMode = 'recurring'
     .forEach((section) => {
       serviceKeysForEstimateSection(section).forEach((key) => currentKeys.add(key));
     });
+  // Services the customer just opted OUT of. The ladder below is derived from
+  // what is MISSING from the rendered sections, so without this the page
+  // answers "remove lawn care" with "Add Lawn Care and save more" — in three
+  // places, and the reset effect keyed on the offer's serviceKey re-presents it
+  // as freshly actionable. Folded into currentKeys rather than filtered at the
+  // end so the ladder simply moves on to the next service instead of going
+  // silent.
+  (Array.isArray(suppressKeys) ? suppressKeys : []).forEach((key) => currentKeys.add(key));
 
   // Existing customers: never offer a service already on the account.
   // Cross-sell ladder is seasonal mosquito → termite bait stations,
@@ -3721,6 +3729,10 @@ export function ServiceSection({
   bondBusy = false,
   onToggleInteriorService = null,
   interiorBusy = false,
+  // "I don't want this service" — wired only for sections the server stamped
+  // removable (gate on, estimate still active, more than one recurring line).
+  // { phase, quote, onPreview, onConfirm, onCancel }
+  serviceOptOut = null,
   // Opens the "Does the lawn size look off?" sheet. Wired only when the
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
@@ -4055,6 +4067,92 @@ export function ServiceSection({
             >
               Buying vs. renting your bait stations — see both side by side (PDF)
             </a>
+          </div>
+        ) : null}
+
+        {/* Service opt-out. Quiet text action, never a destructive-red button:
+            red on this page is reserved for error banners, and a red control
+            here would be a new visual precedent on a customer surface. The
+            confirm panel shows the REAL post-removal numbers from the server's
+            dryRun — a removal can raise the price of the services they keep,
+            and that must never happen silently. */}
+        {serviceOptOut ? (
+          <div style={{ marginTop: 12 }}>
+            {/* 'submitting' keeps the panel up: dropping back to the plain
+                link mid-commit would flash the price the customer is in the
+                middle of changing. */}
+            {(serviceOptOut.phase === 'preview' || serviceOptOut.phase === 'submitting') && serviceOptOut.quote ? (
+              <div style={estimateInnerBox({ padding: '14px 16px' })}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+                  Remove {section.label}?
+                </div>
+                <div style={{ fontSize: 14, color: ESTIMATE_TEXT, lineHeight: 1.55 }}>
+                  Your plan becomes{' '}
+                  <strong>${Number(serviceOptOut.quote.next?.monthlyTotal || 0).toFixed(2)}/mo</strong>
+                  {Number(serviceOptOut.quote.previous?.monthlyTotal || 0) > 0 ? (
+                    <> (was ${Number(serviceOptOut.quote.previous.monthlyTotal).toFixed(2)}/mo)</>
+                  ) : null}.
+                  {Number(serviceOptOut.quote.next?.onetimeTotal || 0)
+                    !== Number(serviceOptOut.quote.previous?.onetimeTotal || 0) ? (
+                      <> Your first visit becomes{' '}
+                        <strong>${Number(serviceOptOut.quote.next?.onetimeTotal || 0).toFixed(2)}</strong>
+                        {' '}(was ${Number(serviceOptOut.quote.previous?.onetimeTotal || 0).toFixed(2)}).
+                      </>
+                    ) : null}
+                </div>
+                {(serviceOptOut.quote.disclosures || []).length ? (
+                  <ul style={{ margin: '10px 0 0', paddingLeft: 18, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+                    {serviceOptOut.quote.disclosures.map((d, i) => (
+                      <li key={d.code ? `${d.code}-${i}` : i} style={{ marginBottom: 4 }}>{d.message}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={serviceOptOut.onConfirm}
+                    disabled={serviceOptOut.phase === 'submitting'}
+                    style={{
+                      ...estimateCtaStyle,
+                      padding: '10px 18px', fontSize: 14,
+                      opacity: serviceOptOut.phase === 'submitting' ? 0.6 : 1,
+                      cursor: serviceOptOut.phase === 'submitting' ? 'default' : 'pointer',
+                    }}
+                  >
+                    {serviceOptOut.phase === 'submitting' ? 'Updating…' : `Yes, remove ${section.label}`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={serviceOptOut.onCancel}
+                    disabled={serviceOptOut.phase === 'submitting'}
+                    style={{
+                      ...estimateSecondaryCtaStyle,
+                      padding: '10px 18px', fontSize: 14,
+                      cursor: serviceOptOut.phase === 'submitting' ? 'default' : 'pointer',
+                    }}
+                  >
+                    Keep it
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center' }}>
+                <button
+                  type="button"
+                  onClick={serviceOptOut.onPreview}
+                  disabled={serviceOptOut.phase === 'previewing'}
+                  style={{
+                    background: 'none', border: 'none', padding: 0,
+                    fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY,
+                    textDecoration: 'underline', cursor: 'pointer',
+                  }}
+                >
+                  {serviceOptOut.phase === 'previewing'
+                    ? 'Checking your new price…'
+                    : `I don't want ${section.label}`}
+                </button>
+              </div>
+            )}
           </div>
         ) : null}
 
@@ -4433,8 +4531,9 @@ function EstimateViewPageInner() {
       services,
       data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
       data?.estimate?.membership,
+      data?.serviceOptOut?.removedKeys,
     ),
-    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership]
+    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership, data?.serviceOptOut?.removedKeys]
   );
   // Download PDF / Share / Print / Portal Login at the top of every estimate
   // render (owner ask 2026-07-09, live review screen) — the same shared bar
@@ -4769,6 +4868,100 @@ function EstimateViewPageInner() {
       method: 'DELETE',
     }).catch(() => {});
   }, [token]);
+
+  // ── Service opt-out (owner 2026-08-31) ────────────────────────────────
+  // Same handler anatomy as onToggleInteriorService above — inert under draft
+  // preview with an explaining error, serialized on the shared mutation chain,
+  // repriceEpochRef bumped in finally so an in-flight accept aborts, and every
+  // error path resyncs to server truth.
+  //
+  // Two-step by design: the preview call is a dryRun that writes nothing and
+  // returns the real post-removal numbers, so a price that goes UP is a
+  // disclosed number rather than a surprise on the next screen.
+  const [optOut, setOptOut] = useState({ sectionKey: null, phase: 'idle', quote: null, message: '' });
+
+  const submitOptOut = useCallback(async (sectionKey, included, dryRun) => {
+    const r = await fetch(`${API_BASE}/estimates/${token}/service-opt-out`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serviceKey: sectionKey, included, ...(dryRun ? { dryRun: true } : {}) }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const err = new Error(
+        body?.error === 'bundled_item_would_be_charged'
+          // Owner ruling: this one goes to the office rather than becoming a
+          // self-serve charge on the first invoice.
+          ? 'Removing this would end an included item on your plan. Give us a call at (941) 234-8929 and we\'ll sort it out with you.'
+          : body?.error === 'service_not_removable'
+            ? 'This service can\'t be removed online. Give us a call and we\'ll take care of it.'
+            : 'We couldn\'t update your estimate just now. Please try again.',
+      );
+      err.code = body?.error;
+      throw err;
+    }
+    return body;
+  }, [token]);
+
+  const onPreviewRemoveService = useCallback(async (sectionKey) => {
+    if (ctaPhaseRef.current === 'submitting') return;
+    if (adminDraftPreview) {
+      setError('Draft preview — removing a service is the customer\'s choice once the estimate is sent.');
+      return;
+    }
+    setOptOut({ sectionKey, phase: 'previewing', quote: null, message: '' });
+    try {
+      const quote = await submitOptOut(sectionKey, false, true);
+      setOptOut({ sectionKey, phase: 'preview', quote, message: '' });
+    } catch (err) {
+      setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
+      setError(err.message);
+    }
+  }, [adminDraftPreview, submitOptOut]);
+
+  const cancelRemoveService = useCallback(() => {
+    setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
+  }, []);
+
+  const commitOptOut = useCallback(async (sectionKey, included) => {
+    if (ctaPhaseRef.current === 'submitting') return;
+    if (adminDraftPreview) {
+      setError('Draft preview — removing a service is the customer\'s choice once the estimate is sent.');
+      return;
+    }
+    const run = async () => {
+      setOptOut((prev) => ({ ...prev, sectionKey, phase: 'submitting' }));
+      try {
+        await submitOptOut(sectionKey, included, false);
+        // The plan changed shape, so everything chosen against the old shape
+        // goes: the slot was sized from the old service mix, and a payment
+        // preference was made against the old amount.
+        releaseHeldReservation(reservation?.scheduledServiceId);
+        setSelectedSlotId(null);
+        setSelectedSlotMeta(null);
+        setPaymentPreference(null);
+        setReservation(null);
+        setAcceptResult(null);
+        setError(null);
+        setCtaPhase('configure');
+        setSlotsRefreshSignal((v) => v + 1);
+        setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
+        await loadEstimate({ preserveSelection: true });
+        scrollToPriceSection();
+      } catch (err) {
+        setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
+        setError(err.message);
+        // Resync to server truth — the PUT may have landed despite the error
+        // surfacing here (same rationale as the bond/interior/add-on paths).
+        await loadEstimate({ preserveSelection: true }).catch(() => {});
+      } finally {
+        repriceEpochRef.current += 1;
+      }
+    };
+    const chained = addOnMutationChainRef.current.then(run, run);
+    addOnMutationChainRef.current = chained;
+    await chained;
+  }, [adminDraftPreview, submitOptOut, loadEstimate, scrollToPriceSection, releaseHeldReservation, reservation]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
     // Staff draft preview: every booking path starts here — keep it inert
@@ -5939,6 +6132,20 @@ function EstimateViewPageInner() {
                     || (Array.isArray(section.memberKeys) && section.memberKeys.includes('termite_bait')))
                   ? { token, preview: adminDraftPreview }
                   : null}
+                // Service opt-out. Server-stamped `removable` is the single
+                // source of eligibility — the same resolver the PUT uses, so
+                // the control can never offer what the write refuses. Never on
+                // the read-only accepted recap (an accepted plan's price is
+                // frozen), and never while the cards are locked mid-submit.
+                serviceOptOut={section.removable === true && !readOnly && !cardsDisabled
+                  ? {
+                    phase: optOut.sectionKey === section.key ? optOut.phase : 'idle',
+                    quote: optOut.sectionKey === section.key ? optOut.quote : null,
+                    onPreview: () => onPreviewRemoveService(section.key),
+                    onConfirm: () => commitOptOut(section.key, false),
+                    onCancel: cancelRemoveService,
+                  }
+                  : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
                 // Glass removes the customize section everywhere — including
@@ -5949,6 +6156,38 @@ function EstimateViewPageInner() {
             );
           })}
           </div>
+
+          {/* Services this customer removed, with the way back. Sits directly
+              under the remaining service boxes so the reversal is where the
+              removal happened. */}
+          {!readOnly && (data?.serviceOptOut?.removedKeys || []).length ? (
+            <div style={{ marginTop: 12 }}>
+              {data.serviceOptOut.removedKeys.map((key, i) => (
+                <div
+                  key={key}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    gap: 10, flexWrap: 'wrap', padding: '10px 14px',
+                    fontSize: 14, color: ESTIMATE_BODY,
+                  }}
+                >
+                  <span>{data.serviceOptOut.removedLabels?.[i] || key} removed</span>
+                  <button
+                    type="button"
+                    onClick={() => commitOptOut(key, true)}
+                    disabled={optOut.sectionKey === key && optOut.phase === 'submitting'}
+                    style={{
+                      background: 'none', border: 'none', padding: 0,
+                      fontSize: 14, fontWeight: 600, color: ESTIMATE_TEXT,
+                      textDecoration: 'underline', cursor: 'pointer',
+                    }}
+                  >
+                    {optOut.sectionKey === key && optOut.phase === 'submitting' ? 'Adding it back…' : 'Add it back'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           {/* Existing services at the combined tier (owner 2026-08-10) —
               after the quoted boxes, before the plan-level summaries: the

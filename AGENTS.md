@@ -1517,6 +1517,34 @@ violations at the severity noted.
   keeps us clear of automated-employment-decision law) and an owner
   bell/push. Treat the gate, the limiters, the no-customer/no-lead rule,
   and the no-comms contract as security-critical.)
+  `/api/estimates/:token/service-opt-out` (PUT; the customer drops ONE
+  recurring service line from a sent estimate. Unlike the bond and interior
+  switchers this route re-prices the WHOLE estimate through the canonical
+  engine — `serverRecomputeFromEstimateData` with `replaySavedPricingKnobs`,
+  never delta arithmetic — and PERSISTS the result, so it is the first public
+  route to write that recompute's output. `dryRun: true` runs every
+  precondition and the full replay and returns before/after WITHOUT writing;
+  the customer confirms against real numbers, because a removal can RAISE the
+  price of the services they keep (tier collapse, the solo setup fee, the
+  prepay rate) and must never do so silently. Guards:
+  `GATE_ESTIMATE_SERVICE_OPT_OUT` STRICT opt-in in every environment (dev
+  included), dark = generic 404 indistinguishable from an unknown token, with
+  a gate-aware limiter skip so a probe cannot spot the route by a 429;
+  estimate token format gate; 40/hr on the shared IPv6-safe key; the durable
+  call-side linkage verdict; `isEstimateAcceptActive` + an explicit
+  `price_locked_at` refusal; removability from ONE resolver shared with the
+  `/data` projection, which refuses an itemized proposal on ITEMIZATION
+  PRESENCE (not `proposal.enabled`), the last remaining recurring line,
+  `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+  recompute cannot run; and a 400 refusal when the removal would turn a
+  bundled-free one-time item into a charge (owner ruling — that one goes to
+  the office). Membership identity is loaded EXPLICITLY, never defaulted, or
+  an existing member reprices as a brand-new customer. The write carries the
+  same six-predicate rails + ms-truncated CAS as the bond/interior writes.
+  NOTHING is sent to the customer and no bell rings: one `activity_log` row is
+  the whole audit surface. Treat the gate, the generic-404
+  indistinguishability, the fail-closed reprice, the explicit membership
+  identity, and the no-comms contract as security-critical.)
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

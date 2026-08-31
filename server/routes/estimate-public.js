@@ -103,6 +103,12 @@ const {
 const {
   createEstimateAddServiceRequest,
 } = require('../services/estimate-add-service-request');
+const {
+  rawEngineInputs,
+  estimateLawnFloorArmed,
+  lawnRowsShowFloorEnforcement,
+  savedFloorReplaySignals,
+} = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
 const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
@@ -136,6 +142,29 @@ const commercialInteriorSwitchLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   skip: () => !commercialInteriorOptionGateOn(),
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
+// Customer service opt-out (PUT /:token/service-opt-out). 40/hr rather than
+// the 30 the two switchers above use, for two reasons: every removal is TWO
+// calls (dryRun preflight, then commit) and every restore two more, so 30
+// leaves a real customer ~7 round trips before being locked out of their own
+// estimate mid-decision; and rateLimitKey collapses unauthenticated traffic to
+// a /64 IP, so a NAT'd household or a shared office shares one bucket. The
+// budget also bounds compute — each dryRun runs syncConstantsFromDB plus a
+// full generateEstimate on an unauthenticated public route.
+//
+// The skip is REQUIRED, not stylistic (same lesson as the add-service limiter
+// below): this limiter runs BEFORE the handler's gate check, so without it a
+// probe distinguishes the dark route by a 429 on the 41st request instead of
+// the promised generic 404.
+const serviceOptOutLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  skip: () => !serviceOptOutGateOn(),
   message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
 });
 
@@ -13203,6 +13232,25 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
 
     const previousTier = estimate.waveguard_tier || 'Bronze';
 
+    // Eligibility clamp for opted-out estimates. This route applies a FLAT tier
+    // percentage with no eligibility check of its own — harmless while the tier
+    // on the row is the one the engine wrote, but PUT /:token/service-opt-out
+    // makes a lower tier reachable on demand: remove a qualifying line (engine
+    // writes Silver), then call this with Gold and accept bills from the
+    // persisted totals. Scoped deliberately to estimates carrying an opt-out
+    // record — every other estimate keeps this route's existing behaviour.
+    if (parseEstimateDataSafe(estimate)?.serviceOptOut) {
+      const engineTier = String(estimate.waveguard_tier || 'Bronze');
+      const engineRank = ALLOWED_TIERS.findIndex((t) => t.toLowerCase() === engineTier.toLowerCase());
+      const requestedRank = ALLOWED_TIERS.indexOf(selectedTier);
+      if (engineRank >= 0 && requestedRank > engineRank) {
+        return res.status(400).json({
+          error: 'tier_not_available_for_current_services',
+          maxTier: ALLOWED_TIERS[engineRank],
+        });
+      }
+    }
+
     // Server-side pricing — never trust client totals.
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
@@ -13858,6 +13906,358 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       interiorSelected: included,
       monthlyTotal,
       annualTotal,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── Customer service opt-out (owner 2026-08-31) ────────────────────────────
+// The customer drops ONE recurring service line from a sent estimate. Unlike
+// the bond and interior switchers above — which rewrite stored rows from a
+// QUOTE-TIME variant snapshot — a removal changes the service MIX, and the mix
+// drives WaveGuard tier, the solo setup fee, the prepay rate and the bundled
+// one-time items. No snapshot can express that, so this route re-runs the sole
+// dollar authority (serverRecomputeFromEstimateData → generateEstimate +
+// mapV1ToLegacyShape) on the pruned inputs. Delta arithmetic is NOT an option:
+// readV1Shape serves stored per-line dollars verbatim and never re-derives the
+// tier, so a subtraction helper would leave survivors at the old tier's
+// discount and accept would bill a Gold price on a Silver plan.
+//
+// dryRun runs every precondition and the full replay, then returns before/after
+// WITHOUT writing — the customer sees the real number before committing, which
+// is what makes a disclosed price INCREASE defensible (owner ruling: a removal
+// may raise the survivors; it must never do so silently).
+
+function optOutOneTimeRows(result) {
+  const oneTime = result?.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+  return [
+    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+    ...(Array.isArray(result?.specItems) ? result.specItems : []),
+  ].filter((row) => row && typeof row === 'object');
+}
+const optOutRowKey = (row) => String(row.service || row.name || row.label || '').trim().toLowerCase();
+const optOutRowPrice = (row) => Number(row.price ?? row.estimatedPrice ?? row.baseEstimatePrice ?? 0) || 0;
+// The mapper writes includedOnProgram through as onProg on the mapped one-time
+// rows (v1-legacy-mapper), so both spellings are the same fact.
+const optOutRowBundledFree = (row) => row.onProg === true || row.includedOnProgram === true;
+
+function optOutPrepayRate(result, estData) {
+  try {
+    const recurringServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+    return require('../services/estimate-converter')
+      .annualPrepayDiscountComponents({ recurringServices, estimateData: estData }).discountRate;
+  } catch (_) { return null; }
+}
+
+// What the removal does to money the customer did not touch. Returns the
+// disclosures the confirm panel renders, plus the one case the owner ruled must
+// never be self-serve.
+function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label }) {
+  const disclosures = [];
+  const beforeRows = optOutOneTimeRows(beforeResult);
+  const afterRows = optOutOneTimeRows(afterResult);
+  const afterByKey = new Map(afterRows.map((r) => [optOutRowKey(r), r]));
+
+  // Owner ruling 2026-08-31: a one-time job that is free BECAUSE of a recurring
+  // line (priceStingingInsect's includedOnProgram — a tier-≤1 paper wasp or mud
+  // dauber on recurring pest) must not become a charge through a self-serve tap.
+  // It is the largest single move this feature can produce and it lands on the
+  // FIRST invoice. Route it to the office instead.
+  const wouldChargeBundled = [];
+  for (const row of beforeRows) {
+    if (!optOutRowBundledFree(row)) continue;
+    const after = afterByKey.get(optOutRowKey(row));
+    if (after && !optOutRowBundledFree(after) && optOutRowPrice(after) > 0) {
+      wouldChargeBundled.push({ name: row.name || row.service, price: optOutRowPrice(after) });
+    }
+  }
+
+  const beforeTier = beforeResult?.recurring?.waveGuardTier || beforeResult?.recurring?.tier || null;
+  const afterTier = afterResult?.recurring?.waveGuardTier || afterResult?.recurring?.tier || null;
+  if (beforeTier && afterTier && beforeTier !== afterTier) {
+    disclosures.push({
+      code: 'waveguard_tier_change',
+      message: `Dropping ${label} moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so the services you keep are priced at the ${afterTier} rate.`,
+    });
+  }
+
+  const beforeFee = Number(beforeResult?.oneTime?.membershipFee || 0) || 0;
+  const afterFee = Number(afterResult?.oneTime?.membershipFee || 0) || 0;
+  if (afterFee > beforeFee) {
+    disclosures.push({
+      code: 'membership_setup_fee',
+      message: `A single-service plan includes the $${afterFee.toFixed(2)} WaveGuard setup fee, which the combined plan did not.`,
+    });
+  }
+
+  const beforeRate = optOutPrepayRate(beforeResult, beforeData);
+  const afterRate = optOutPrepayRate(afterResult, afterData);
+  if (beforeRate != null && afterRate != null && afterRate < beforeRate) {
+    disclosures.push({
+      code: 'annual_prepay_rate',
+      message: afterRate > 0
+        ? `The pay-in-full discount changes from ${Math.round(beforeRate * 100)}% to ${Math.round(afterRate * 100)}%.`
+        : 'The 5% pay-in-full-for-the-year discount does not apply to a single-service plan.',
+    });
+  }
+
+  // Every other one-time line whose price moved as a side effect (e.g. top
+  // dressing re-prices on a 65% area basis without a recurring lawn program —
+  // it moves in the customer's favour, and it is still disclosed).
+  for (const row of beforeRows) {
+    const after = afterByKey.get(optOutRowKey(row));
+    if (!after) continue;
+    const wasFree = optOutRowBundledFree(row);
+    const beforePrice = optOutRowPrice(row);
+    const afterPrice = optOutRowPrice(after);
+    if (wasFree || beforePrice === afterPrice) continue;
+    disclosures.push({
+      code: 'one_time_reprice',
+      message: `${row.name || row.service} changes from $${beforePrice.toFixed(2)} to $${afterPrice.toFixed(2)}.`,
+    });
+  }
+
+  return { disclosures, wouldChargeBundled };
+}
+
+router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, next) => {
+  try {
+    // Dark posture is the GENERIC 404, not the bond/interior uniform 403: a
+    // dark removal advertises nothing, so the payload must stay byte-identical
+    // to an unknown token. The check is first, before any DB read.
+    if (!serviceOptOutGateOn()) return res.status(404).json({ error: 'Estimate not found' });
+    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!estimate || !isEstimateAcceptActive(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
+    // and price_locked_at is never cleared.
+    if (estimate.price_locked_at) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    // Reconcile a stale "existing customer" classification BEFORE this handler
+    // reprices and persists, exactly as select-tier and preferences do. This
+    // route replays the engine with priorQualifyingServices, so a lapsed
+    // member's frozen snapshot would otherwise re-grant the combined tier —
+    // and unlike those routes this one WRITES the repriced result back.
+    // In-memory only; the write below persists whatever it corrected.
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const serviceKey = String(req.body?.serviceKey || '');
+    if (!serviceKey) return res.status(400).json({ error: 'serviceKey is required' });
+    if (typeof req.body?.included !== 'boolean') {
+      return res.status(400).json({ error: 'included is required' });
+    }
+    const included = req.body.included;
+    const dryRun = req.body?.dryRun === true;
+
+    let parsedData = {};
+    try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { parsedData = {}; }
+
+    const OptOut = require('../services/estimate-service-opt-out');
+    const optOutState = parsedData.serviceOptOut || null;
+    const alreadyOut = OptOut.currentlyOptedOutKeys(parsedData);
+
+    if (included === false) {
+      // ONE resolver for the /data stamp and this write, so the payload can
+      // never advertise an action the write refuses.
+      const bundle = await buildPricingBundle(estimate).catch(() => null);
+      const removable = OptOut.serviceOptOutRemovableKeys(parsedData, bundle?.services || []);
+      if (!removable.has(serviceKey)) {
+        return res.status(400).json({ error: 'service_not_removable' });
+      }
+    } else if (!alreadyOut.includes(serviceKey)) {
+      return res.status(400).json({ error: 'service_not_removed' });
+    }
+
+    const label = OptOut.serviceOptOutLabel(serviceKey);
+    const beforeResult = parsedData.result || null;
+    const beforeData = JSON.parse(JSON.stringify(parsedData));
+
+    // Provenance the prune would erase (the pest curve stamp above all) —
+    // captured BEFORE the inputs change, re-planted on restore.
+    const provenance = included === false
+      ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
+      : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
+    const restoreInputs = included === true
+      ? ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.removedInputs || null)
+      : null;
+
+    const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
+      serviceKey, included, removedInputs: restoreInputs, provenance,
+    });
+    if (!applied.ok) return res.status(400).json({ error: applied.reason });
+
+    // SERVER-AUTHORITATIVE identity, loaded explicitly. serverRecompute sets
+    // priorQualifyingServices UNCONDITIONALLY, defaulting to [] — the membership
+    // reconciler passes nothing on purpose, so a lapsed member reprices as a
+    // non-member. Copying that here would reprice an EXISTING member as a brand
+    // new customer on every removal: combined tier stripped, $99 re-added,
+    // prepay restored — a large wrong price change with no removal-related cause.
+    const priors = Array.isArray(parsedData.priorQualifyingServices) ? parsedData.priorQualifyingServices : [];
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const reprice = await serverRecomputeFromEstimateData(parsedData, {
+      replaySavedPricingKnobs: true,
+      priorQualifyingServices: priors,
+      recurringCustomer: !!parsedData.membershipSnapshot || priors.length > 0,
+    });
+    // Fail CLOSED. Nothing is written and nothing is shown — never fall back to
+    // arithmetic or to the stale totals.
+    if (!reprice.recomputed) {
+      return res.status(409).json({ error: 'reprice_unavailable' });
+    }
+
+    const afterResult = reprice.serverResult;
+    const impact = optOutImpact({
+      beforeResult, afterResult, beforeData, afterData: parsedData, label,
+    });
+    if (included === false && impact.wouldChargeBundled.length) {
+      return res.status(400).json({
+        error: 'bundled_item_would_be_charged',
+        items: impact.wouldChargeBundled,
+      });
+    }
+
+    const previous = {
+      monthlyTotal: Number(estimate.monthly_total || 0),
+      annualTotal: Number(estimate.annual_total || 0),
+      onetimeTotal: Number(estimate.onetime_total || 0),
+      waveGuardTier: estimate.waveguard_tier || null,
+    };
+    const next = {
+      monthlyTotal: reprice.serverTotals.monthlyTotal ?? 0,
+      annualTotal: reprice.serverTotals.annualTotal ?? 0,
+      onetimeTotal: reprice.serverTotals.onetimeTotal ?? 0,
+      waveGuardTier: afterResult?.recurring?.waveGuardTier || afterResult?.recurring?.tier || null,
+    };
+
+    if (dryRun) {
+      return res.json({
+        success: true, dryRun: true, serviceKey, label, included,
+        previous, next, disclosures: impact.disclosures,
+      });
+    }
+
+    // ── commit ──────────────────────────────────────────────────────────
+    parsedData.result = afterResult;
+    // The recompute returns the curve it actually priced pest with SPECIFICALLY
+    // so the caller stamps it at the source; skipping this leaves the next
+    // replay to re-derive it from a result this write just rewrote.
+    if (reprice.pestPricingVersion) {
+      for (const carrier of [parsedData.engineInputs, parsedData.inputs]) {
+        if (carrier && typeof carrier === 'object' && carrier.services?.pest
+          && typeof carrier.services.pest === 'object') {
+          carrier.services.pest.version = reprice.pestPricingVersion;
+        }
+      }
+    }
+    // Frozen per-tier discount RATES: accept-time tier math prefers these over
+    // live rates, so a repriced mix must not keep the old mix's snapshot (the
+    // membership reconciler deletes both for the same reason).
+    if (parsedData.sendSnapshot && typeof parsedData.sendSnapshot === 'object') {
+      delete parsedData.sendSnapshot.tierDiscounts;
+    }
+    if (parsedData.pricingContext && typeof parsedData.pricingContext === 'object') {
+      delete parsedData.pricingContext.tierDiscounts;
+    }
+    invalidateSendSnapshotPricingBundle(parsedData);
+
+    OptOut.recordServiceOptOutEvent(parsedData, {
+      serviceKey,
+      label,
+      included,
+      at: new Date().toISOString(),
+      removedInputs: included === false ? applied.removedInputs : null,
+      provenance: provenance && Object.keys(provenance).length ? provenance : null,
+      previous,
+      next,
+      engineSource: reprice.source || null,
+    }, beforeData);
+
+    // service_interest is the service_summary in every delivery and follow-up
+    // email, the per-application line NAME on the proposal PDF, and a pest
+    // identity tiebreak — it must not keep naming a service that is gone.
+    // Force re-inference by NOT passing the persisted column, and strip
+    // engineResult: inferEstimateServiceLines reads engineResult.lineItems
+    // concatenated with result.lineItems, and the write-back deliberately
+    // replaces `result` only, leaving engineResult stale. Without the strip the
+    // removed service survives in the summary on every IB-sourced and
+    // agent-drafted quote.
+    const serviceInterest = require('../services/estimate-service-lines')
+      .inferEstimateServiceInterest({ estimate_data: { ...parsedData, engineResult: undefined } });
+
+    const updateCount = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+      .whereNull('price_locked_at')
+      .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+      // Same ms-truncated CAS as the bond/interior writes: any concurrent write
+      // — an accept, a preference toggle, another opt-out — makes this a
+      // zero-row update and the caller reloads server truth.
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
+      .update({
+        estimate_data: JSON.stringify(parsedData),
+        monthly_total: next.monthlyTotal,
+        annual_total: next.annualTotal,
+        onetime_total: next.onetimeTotal,
+        waveguard_tier: next.waveGuardTier,
+        service_interest: serviceInterest,
+        // The margin audit only reads an unmatched engineResult row as
+        // removed-or-repriced when the row carries this stamp; without it the
+        // dropped line is costed in every future audit forever.
+        pricing_authority: 'SERVER',
+        server_computed_price: next.annualTotal,
+        updated_at: db.fn.now(),
+      });
+    if (!updateCount) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+
+    clearEstimatePricingCache(estimate.id);
+    // The visit profile is cached per estimate id and SIZED from the service
+    // mix, so a stale profile would offer slots shaped for the old plan.
+    try {
+      require('../services/estimate-slot-availability').invalidateEstimate(estimate.id);
+    } catch (_) { /* cache invalidation is best-effort */ }
+
+    // Rule 14: a deterministic green check auto-applies with an audit trail and
+    // NO bell. This row is the blob-independent copy and surfaces in the admin
+    // dashboard's Recent activity feed. Fire-and-forget, like the add-service
+    // request's own audit write.
+    db('activity_log').insert({
+      customer_id: estimate.customer_id || null,
+      estimate_id: estimate.id,
+      action: included === false ? 'estimate_service_removed' : 'estimate_service_restored',
+      description: included === false
+        ? `Customer removed ${label} from their estimate.`
+        : `Customer added ${label} back to their estimate.`,
+      metadata: JSON.stringify({ serviceKey, label, previous, next }),
+    }).catch((err) => logger.warn(`[estimate] activity_log opt-out write failed: ${err.message}`));
+
+    logger.info(`[estimate] ${estimate.id}: service ${included === false ? 'removed' : 'restored'} ${serviceKey} ($${next.monthlyTotal}/mo, $${next.annualTotal}/yr, tier ${next.waveGuardTier || 'none'})`);
+    return res.json({
+      success: true, serviceKey, label, included,
+      previous, next, disclosures: impact.disclosures,
     });
   } catch (err) {
     return next(err);
@@ -14604,18 +15004,9 @@ function isAdminIp(ip) {
 // Derive engine inputs from stored estimate_data. Admin-UI estimates
 // carry { inputs, result, ... } (v1 client-engine shape). IB-sourced
 // estimates carry { engineInputs, engineResult }. Either works.
-// Raw stored inputs, no replay injection — the signal readers
-// (estimateLawnFloorArmed) use this to avoid recursing through the
-// injection below, which itself consults those readers.
-function rawEngineInputs(estData) {
-  if (!estData || typeof estData !== 'object') return null;
-  return (estData.engineInputs && typeof estData.engineInputs === 'object')
-    ? estData.engineInputs
-    : (estData.inputs && typeof estData.inputs === 'object')
-      ? estData.inputs
-      : null;
-}
-
+// rawEngineInputs (raw stored inputs, no replay injection) now lives in
+// estimate-floor-signal-replay alongside the signal readers that use it —
+// they must not recurse through the injection below, which consults them.
 function extractEngineInputs(estData) {
   const base = rawEngineInputs(estData);
   if (!base) return null;
@@ -14694,14 +15085,10 @@ function extractEngineInputs(estData) {
 // Input-level floor overrides for an engine replay of this stored estimate.
 // Only keys with an actual saved signal are set (absence = replay live).
 function savedFloorReplayOverrides(estData) {
-  const overrides = {};
-  const lawnArm = estimateLawnFloorArmed(estData);
-  if (typeof lawnArm === 'boolean') overrides.useLawnCostFloor = lawnArm;
-  const minSignal = require('../services/estimate-converter').estimateLawnProgramMinimumSignal(estData);
-  if (minSignal != null) overrides.lawnProgramMinimumMonthly = minSignal;
-  const pest = estimatePestFloorSignal(estData);
-  if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
-  if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
+  // Lawn cost floor, lawn program minimum and pest program floor — the same
+  // reader serverRecomputeFromEstimateData's replaySavedPricingKnobs branch
+  // uses, so the authoritative recompute resolves what this read resolves.
+  const overrides = { ...savedFloorReplaySignals(estData) };
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
@@ -14719,62 +15106,8 @@ function savedFloorReplayOverrides(estData) {
 }
 
 
-// Saved pest post-discount floor state: pricingMetadata stamps first, then
-// legacy row evidence — armed-era rows carry the floor metadata itself
-// (server tiers: programFloorPerVisit/programFloorAnnual; client-fallback
-// rows: floorPa/floorAnn, per-visit derived through the cadence discount).
-// armed stays null (inject nothing) when the estimate is silent.
-const CLIENT_PEST_CADENCE_DISC = { 4: 1.0, 6: 0.85, 12: 0.7 };
-function estimatePestFloorSignal(estData = {}) {
-  const armStamp = estData?.result?.pricingMetadata?.pestProgramFloorArmed
-    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorArmed
-    ?? estData?.pricingMetadata?.pestProgramFloorArmed
-    ?? estData?.result?.routingMetadata?.pestProgramFloorArmed;
-  const perVisitStamp = estData?.result?.pricingMetadata?.pestProgramFloorPerVisit
-    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorPerVisit
-    ?? estData?.pricingMetadata?.pestProgramFloorPerVisit
-    ?? estData?.result?.routingMetadata?.pestProgramFloorPerVisit;
-  if (typeof armStamp === 'boolean') {
-    const stampedPerVisit = Number(perVisitStamp);
-    return {
-      armed: armStamp,
-      perVisit: Number.isFinite(stampedPerVisit) && stampedPerVisit > 0 ? stampedPerVisit : null,
-    };
-  }
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
-  const rows = [];
-  if (Array.isArray(result?.results?.pestTiers)) rows.push(...result.results.pestTiers);
-  if (result?.results?.pest && typeof result.results.pest === 'object') rows.push(result.results.pest);
-  const lineItemSources = [
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-  ];
-  for (const li of lineItemSources) {
-    if ((li?.service || '') !== 'pest_control') continue;
-    rows.push(li);
-    if (Array.isArray(li.tiers)) rows.push(...li.tiers);
-  }
-  let armed = null;
-  let perVisit = null;
-  for (const row of rows) {
-    if (!row || typeof row !== 'object') continue;
-    const direct = Number(row.programFloorPerVisit);
-    if (Number.isFinite(direct) && direct > 0) {
-      armed = true;
-      perVisit = Math.max(perVisit ?? 0, direct);
-      continue;
-    }
-    const floorPa = Number(row.floorPa);
-    if (Number.isFinite(floorPa) && floorPa > 0) {
-      armed = true;
-      const disc = CLIENT_PEST_CADENCE_DISC[Number(row.apps)] ?? null;
-      if (disc) perVisit = Math.max(perVisit ?? 0, Math.round((floorPa / disc) * 100) / 100);
-    } else if (Number(row.programFloorAnnual) > 0 || Number(row.floorAnn) > 0) {
-      armed = true;
-    }
-  }
-  return { armed, perVisit };
-}
+// estimatePestFloorSignal moved to estimate-floor-signal-replay (shared
+// with the authoritative recompute); reached here via savedFloorReplaySignals.
 
 function canVaryPestFrequency(engineInputs) {
   return !!engineInputs?.services?.pest;
@@ -17749,66 +18082,10 @@ function estimateManualDiscountFloorBreached(estData = {}) {
   return require('../services/estimate-converter').estimateManualDiscountFloorBreachAcknowledged(estData);
 }
 
-function estimateLawnFloorArmed(estData = {}) {
-  // Highest priority: the engine stamps its RESOLVED arm state into
-  // pricingMetadata on every post-#2827 pricing run — the authoritative
-  // record of what actually priced the saved result, covering estimates the
-  // GLOBAL switch armed without any explicit per-request flag (a later
-  // global flip must not change how a sent quote replays).
-  const stamped = estData?.result?.pricingMetadata?.lawnCostFloorArmed
-    ?? estData?.engineResult?.pricingMetadata?.lawnCostFloorArmed
-    ?? estData?.pricingMetadata?.lawnCostFloorArmed
-    ?? estData?.result?.routingMetadata?.lawnCostFloorArmed;
-  if (typeof stamped === 'boolean') return stamped;
-  // Admin V2 saves persist the exact /calculate-estimate payload under
-  // engineRequest ({ profile, selectedServices, options }); the adapter maps
-  // options.useLawnCostFloor into services.lawn.useLawnCostFloor at replay,
-  // so the raw option is that shape's arm signal.
-  const reqOptions = estData?.engineRequest?.options;
-  if (reqOptions && typeof reqOptions === 'object' && reqOptions.useLawnCostFloor != null) {
-    return !!reqOptions.useLawnCostFloor;
-  }
-  const engineInputs = rawEngineInputs(estData) || {};
-  const stored = engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor;
-  if (stored != null) return !!stored;
-  // Legacy engine-backed saves ({ engineInputs, engineResult }, pre-stamp,
-  // no explicit flag): the stored engine rows are the only evidence the
-  // quote was cost-floor priced — same enforcement-stamp rule as the v1
-  // ladder path (lawnRowsShowFloorEnforcement: reporting fields are NOT
-  // evidence). Without this, extractEngineInputs replays an already-sent
-  // floor-priced estimate under the current disarmed default and lowers
-  // view/accept (codex P2 round 11 on #2827). Evidence only arms — its
-  // absence stays null (tri-state preserved; caller falls to the global).
-  const engineRows = [];
-  for (const li of [
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-    ...(Array.isArray(estData?.result?.lineItems) ? estData.result.lineItems : []),
-  ]) {
-    if ((li?.service || '') !== 'lawn_care') continue;
-    engineRows.push(li);
-    if (Array.isArray(li.tiers)) engineRows.push(...li.tiers);
-  }
-  if (engineRows.length && lawnRowsShowFloorEnforcement(engineRows)) return true;
-  return null;
-}
+// estimateLawnFloorArmed + lawnRowsShowFloorEnforcement moved to
+// estimate-floor-signal-replay and imported at the top of this file.
 
-// Legacy pre-disarm estimates (engine armed the cost floor by default, so
-// builder payloads never needed to persist the flag): the floor evidence
-// lives on the stored rows as ENFORCEMENT stamps. Only stamps the armed
-// machinery writes count — costFloorApplied, marginFloorGuardApplied, a
-// COST_FLOOR pricing source. The reporting fields
-// (minimumCollectedAnnualPrice / costFloorAnnual) ride every post-disarm
-// quote too and are deliberately NOT evidence, or every new estimate would
-// silently re-arm (the exact trap this branch closes).
-function lawnRowsShowFloorEnforcement(rows) {
-  return (Array.isArray(rows) ? rows : []).some((row) => (
-    row?.costFloorApplied === true
-    || row?.marginFloorGuardApplied === true
-    || row?.pricingSource === 'COST_FLOOR'
-    || row?.prov?.costFloorApplied === true
-    || row?.prov?.pricingSource === 'COST_FLOOR'
-  ));
-}
+
 
 // Clamp a customer-facing lawn ladder entry to the program minimum AFTER
 // discounts. Annual re-derives from the clamped monthly so monthly/annual/
@@ -19688,6 +19965,13 @@ function termiteBondOptionGateOn() {
 // written — unset never rewrites a quoted price.
 function commercialInteriorOptionGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_COMMERCIAL_INTERIOR_OPTION || '').toLowerCase());
+}
+
+// Customer service opt-out kill switch (dark-ship, owner flips). Parsed at
+// CALL time like the two above so the revoke needs no redeploy and the route
+// tests can arm and disarm it around a request.
+function serviceOptOutGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_ESTIMATE_SERVICE_OPT_OUT || '').toLowerCase());
 }
 
 // Commercial interior-service selector payload (owner 2026-08-17): the
@@ -23626,6 +23910,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Services this customer has opted out of. Present only when there is
+      // something to report, so a gate-off (or never-used) response stays
+      // byte-identical to today. The page renders the "Add it back" row from
+      // this AND suppresses the mirror add-service offer with it — without the
+      // suppression the page answers "remove lawn" with "Add Lawn Care and save
+      // more" in three places.
+      ...((() => {
+        if (!serviceOptOutGateOn()) return {};
+        const { currentlyOptedOutKeys, serviceOptOutLabel } = require('../services/estimate-service-opt-out');
+        const removedKeys = currentlyOptedOutKeys(parseEstimateDataSafe(estimate));
+        if (!removedKeys.length) return {};
+        return {
+          serviceOptOut: {
+            removedKeys,
+            removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
+          },
+        };
+      })()),
       // Acceptance terms (GATE_ESTIMATE_ACCEPTANCE_TERMS): the line + drawer
       // the page renders above Accept, served by the SERVER so the copy the
       // customer sees is the copy the accept route records. Absent when the
@@ -23777,6 +24079,33 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         ...(pricingBundle.oneTimeBreakdown
           ? { oneTimeBreakdown: sanitizePublicOneTimeBreakdown(stripInternalMarginFieldsDeep(pricingBundle.oneTimeBreakdown)) }
           : {}),
+        // Per-section opt-out eligibility, from the SAME resolver the write
+        // handler uses so the payload can never advertise an action the PUT
+        // refuses. Stamped in the projection rather than inside the bundle
+        // because the bundle is cached for 10 minutes and send-snapshotted,
+        // while removability is gate- and row-state-dependent.
+        // Include-when-TRUE only, never false: an explicit false would
+        // distinguish a real-but-ineligible token from an unknown one and break
+        // the generic-404 contract. A draft preview never offers it — the write
+        // 404s a draft, and a control that can only fail is worse than none.
+        ...((() => {
+          if (!serviceOptOutGateOn() || adminDraftPreview) return {};
+          if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at) return {};
+          const sections = Array.isArray(pricingBundle.services) ? pricingBundle.services : [];
+          if (!sections.length) return {};
+          const { serviceOptOutRemovableKeys } = require('../services/estimate-service-opt-out');
+          const removable = serviceOptOutRemovableKeys(parseEstimateDataSafe(estimate), sections);
+          if (!removable.size) return {};
+          // depth 1 — the same depth the services array sits at inside the
+          // bundle spread above, so this override strips exactly what that
+          // strip would have, no more and no less.
+          return {
+            services: stripInternalMarginFieldsDeep(sections, 1)
+              .map((section) => (removable.has(section?.key)
+                ? { ...section, removable: true }
+                : section)),
+          };
+        })()),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
