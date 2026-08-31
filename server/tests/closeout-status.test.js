@@ -491,12 +491,31 @@ describe('closeout-status: comms + follow-up', () => {
     expect(deriveCloseoutFacts(closedOutInputs({ record: rec('failed') })).facts.comms.state).toBe('failed');
   });
 
-  test('recap lane stamp counts as comms done', () => {
-    const { facts } = deriveCloseoutFacts(closedOutInputs({
+  test('recap claim: aged -> done; fresh (< 10 min) -> pending in-flight (codex r17)', () => {
+    const aged = deriveCloseoutFacts(closedOutInputs({
       record: { ...closedOutInputs().record, structured_notes: {}, recap_sms_sent_at: '2026-08-30T18:10:00Z', field_flags: { recap: true } },
     }));
-    expect(facts.comms).toMatchObject({ state: 'done', reason: 'recap_sms_sent' });
-    expect(facts.completion.recapLane).toBe(true);
+    expect(aged.facts.comms).toMatchObject({ state: 'done', reason: 'recap_sms_sent' });
+    expect(aged.facts.completion.recapLane).toBe(true);
+    const fresh = deriveCloseoutFacts(closedOutInputs({
+      record: { ...closedOutInputs().record, structured_notes: {}, recap_sms_sent_at: new Date(NOW.getTime() - 60 * 1000).toISOString() },
+      delivery: null,
+    }));
+    expect(fresh.facts.comms).toMatchObject({ state: 'pending', reason: 'recap_sms_in_flight' });
+    expect(fresh.facts.reportDelivery).toMatchObject({ state: 'pending', reason: 'recap_sms_in_flight' });
+  });
+
+  test('evidence on a sibling service_records row counts: token on the older record (codex r17)', () => {
+    const rec1 = { ...closedOutInputs().record, id: 'rec-new', report_view_token: null, report_generated_at: null };
+    const rec2 = { ...closedOutInputs().record, id: 'rec-old', report_view_token: 't'.repeat(32), report_generated_at: '2026-08-30T18:05:00Z' };
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2] }));
+    expect(facts.report).toMatchObject({ state: 'done', reason: 'report_published', hasToken: true });
+  });
+
+  test('license without a recorded expiry stays done (applicator-picker semantics) with expiryUnrecorded surfaced', () => {
+    const req = baseRequirements({ requiresLicense: true, licenseCategory: null });
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ requirements: req, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: { id: 'tech-1', fl_applicator_license: 'JE362022', license_expiry: null, license_categories: null } }));
+    expect(facts.license).toMatchObject({ state: 'done', expiryUnrecorded: true });
   });
 
   test('no comms marker: delivered report email counts; otherwise UNKNOWN, never pending; explicit catalog no-notice → not_required', () => {

@@ -244,7 +244,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     probe('service_records', unavailable, () => knex('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
-      .first()),
+      .select()),
     probe('service_completion_attempts', unavailable, () => completionStatusForService({ serviceId }, knex)),
     probe('services (closeout requirements)', unavailable, async () => {
       const map = await resolveCloseoutRequirementsForJobs([{
@@ -272,10 +272,16 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
 
   inputs.customer = customerProbe.value || null;
   inputs.customerLookupFailed = Boolean(customerProbe.error);
-  inputs.record = recordProbe.value || null;
-  inputs.recordLookupFailed = Boolean(recordProbe.error);
   inputs.attempt = attemptProbe.value || null;
   inputs.attemptLookupFailed = Boolean(attemptProbe.error);
+  // scheduled_service_id is NOT unique on service_records (completion,
+  // project, and recap rails can each leave a row). Evidence aggregates
+  // across all of them; the PRIMARY record is the attempt's committed one
+  // when known, else the newest.
+  const records = Array.isArray(recordProbe.value) ? recordProbe.value : [];
+  inputs.records = recordProbe.error ? null : records;
+  inputs.record = (inputs.attempt?.serviceRecordId && records.find((r) => r.id === inputs.attempt.serviceRecordId)) || records[0] || null;
+  inputs.recordLookupFailed = Boolean(recordProbe.error);
   inputs.requirements = requirementsProbe.value || null;
   inputs.completedFormCount = formsProbe.value ? toNumber(formsProbe.value.n) : (formsProbe.error ? null : 0);
   inputs.packets = Array.isArray(packetProbe.value) ? packetProbe.value : (packetProbe.error ? null : []);
@@ -287,6 +293,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
 
   const record = inputs.record;
   const recordId = record?.id || null;
+  const recordIds = (inputs.records || []).map((r) => r.id).filter(Boolean);
 
   // Project/WDO link: projects.scheduled_service_id (or service_record_id) —
   // never a column on the visit. Newest wins if a visit was ever re-linked.
@@ -305,23 +312,26 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     activeAppsProbe, retractedAppsProbe, photosProbe, deliveryProbe, liveInvoiceProbe, terminalInvoiceProbe,
     autopayProbe, followupProbe, childProbe, dispositionProbe,
   ] = await Promise.all([
-    probe('property_application_history (active)', unavailable, () => (recordId
-      ? knex('property_application_history').where({ service_record_id: recordId }).whereNull('retracted_at').count('* as n').first()
+    probe('property_application_history (active)', unavailable, () => (recordIds.length
+      ? knex('property_application_history').whereIn('service_record_id', recordIds).whereNull('retracted_at').count('* as n').first()
       : { n: 0 })),
-    probe('property_application_history (retracted)', unavailable, () => (recordId
-      ? knex('property_application_history').where({ service_record_id: recordId }).whereNotNull('retracted_at').count('* as n').first()
+    probe('property_application_history (retracted)', unavailable, () => (recordIds.length
+      ? knex('property_application_history').whereIn('service_record_id', recordIds).whereNotNull('retracted_at').count('* as n').first()
       : { n: 0 })),
     probe(projectId ? 'project_photos' : 'service_photos', unavailable, () => {
       // Project completions store their evidence on the project, not the
       // service record (routes/admin-projects.js counts project_photos).
       if (projectId) return knex('project_photos').where({ project_id: projectId }).count('* as n').first();
-      return recordId
-        ? knex('service_photos').where({ service_record_id: recordId }).count('* as n').first()
+      return recordIds.length
+        ? knex('service_photos').whereIn('service_record_id', recordIds).count('* as n').first()
         : { n: 0 };
     }),
-    probe('service_report_deliveries', unavailable, () => (recordId
-      ? knex('service_report_deliveries').where({ service_record_id: recordId }).orderBy('created_at', 'desc').first()
-      : null)),
+    probe('service_report_deliveries', unavailable, async () => {
+      if (!recordIds.length) return null;
+      const rows = await knex('service_report_deliveries').whereIn('service_record_id', recordIds).orderBy('created_at', 'desc').select();
+      // Best row wins: a sent delivery on ANY record beats a newer failure.
+      return (Array.isArray(rows) && (rows.find((r) => String(r.status) === 'sent') || rows[0])) || null;
+    }),
     probe('invoices (live)', unavailable, () => completionNewestLiveInvoiceLookup(knex, {
       serviceRecordId: recordId, scheduledServiceId: serviceId,
     })),
@@ -595,8 +605,9 @@ function deriveCloseoutFacts(inputs) {
 
   // ---- 4. report (artifact exists / published) ---------------------------------
   let report;
-  const reportPublishedAt = isoOrNull(record?.report_generated_at) || isoOrNull(notes.reportPublishedAt) || isoOrNull(notes.report_published_at);
-  const hasReportToken = Boolean(record?.report_view_token);
+  const tokenRecord = (inputs.records || []).find((r) => r.report_view_token || r.report_generated_at) || record;
+  const reportPublishedAt = isoOrNull(tokenRecord?.report_generated_at) || isoOrNull(notes.reportPublishedAt) || isoOrNull(notes.report_published_at);
+  const hasReportToken = Boolean(tokenRecord?.report_view_token);
   const reportRequiredByCatalog = requirements ? requirements.requiresServiceReport !== false : null;
   if (!completed) report = awaiting();
   else if (projectBacked) {
@@ -634,6 +645,12 @@ function deriveCloseoutFacts(inputs) {
   const delivery = inputs.delivery || null;
   const notesEmailStatus = notes.serviceReportV1EmailStatus ? String(notes.serviceReportV1EmailStatus).toLowerCase() : null;
   const recapSentAt = isoOrNull(record?.recap_sms_sent_at);
+  // recap_sms_sent_at is an at-most-once CLAIM stamped before the provider
+  // call (pest-recap clears it on a failed send) - a fresh claim is a send
+  // in flight, not delivery evidence.
+  const recapClaimAt = record?.recap_sms_sent_at ? new Date(record.recap_sms_sent_at) : null;
+  const recapClaimSettled = recapClaimAt && (now.getTime() - recapClaimAt.getTime()) > 10 * 60 * 1000;
+  const recapClaimFresh = recapClaimAt && !recapClaimSettled;
   if (!completed) reportDelivery = awaiting();
   else if (projectBacked) {
     const ds = project ? String(project.delivery_status || 'not_sent').toLowerCase() : null;
@@ -690,7 +707,8 @@ function deriveCloseoutFacts(inputs) {
   }
   else if (notesEmailStatus === 'queued' || notesEmailStatus === 'sending') reportDelivery = fact('pending', `delivery_${notesEmailStatus}`, { posture });
   else if (isBackfill) reportDelivery = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record', posture });
-  else if (recapSentAt) reportDelivery = fact('done', 'recap_sms_delivered', { channel: 'sms', recapSentAt });
+  else if (recapSentAt && recapClaimSettled) reportDelivery = fact('done', 'recap_sms_delivered', { channel: 'sms', recapSentAt });
+  else if (recapClaimFresh) reportDelivery = fact('pending', 'recap_sms_in_flight', { channel: 'sms', recapSentAt });
   else if (record?.report_template_version && record.report_template_version !== 'service_report_v1') {
     reportDelivery = fact('unknown', 'no_delivery_row_for_template', { posture, templateVersion: record.report_template_version });
   } else reportDelivery = fact('pending', 'not_enqueued', { posture });
@@ -853,7 +871,8 @@ function deriveCloseoutFacts(inputs) {
   // dispatch-completion-deferred.js): sending | sent | deferred | failed |
   // blocked (opt-out / no consent) | skipped_recap_sms_already_sent.
   else if (smsStatus === 'sent') comms = fact('done', 'completion_sms_sent', { completionSmsStatus: smsStatus, deliveredAt: isoOrNull(notes.completionSmsDeferredDeliveredAt) || isoOrNull(notes.sentSmsAt) });
-  else if (smsStatus === 'skipped_recap_sms_already_sent' || recapSentAt) comms = fact('done', 'recap_sms_sent', { recapSentAt, completionSmsStatus: smsStatus });
+  else if (smsStatus === 'skipped_recap_sms_already_sent' || (recapSentAt && recapClaimSettled)) comms = fact('done', 'recap_sms_sent', { recapSentAt, completionSmsStatus: smsStatus });
+  else if (recapClaimFresh) comms = fact('pending', 'recap_sms_in_flight', { recapSentAt });
   else if (smsStatus === 'deferred') comms = fact('pending', 'deferred_send_window', { completionSmsStatus: smsStatus });
   else if (smsStatus === 'sending') comms = fact('pending', 'completion_sms_sending', { completionSmsStatus: smsStatus });
   else if (smsStatus === 'failed') comms = fact('failed', 'completion_sms_failed', { completionSmsStatus: smsStatus });
@@ -915,6 +934,10 @@ function deriveCloseoutFacts(inputs) {
       categories, judgedAt: visitDay, asOf: 'current_technician_row',
     };
     if (!tech.fl_applicator_license) license = fact('pending', 'technician_license_missing', evidence);
+    // A missing expiry is ACTIVE by design - the certificate applicator
+    // picker treats a blank license_expiry as active until the owner records
+    // one (seed 20260703000004); surfaced, not failed.
+    else if (!expiry) license = fact('done', 'technician_licensed', { ...evidence, expiryUnrecorded: true });
     else if (expiry && visitDay && expiry < visitDay) license = fact('failed', 'technician_license_expired_at_visit', evidence);
     else if (required && categories.length && !categories.includes(required)) license = fact('failed', 'technician_license_category_mismatch', evidence);
     else if (required && !categories.length) license = fact('unknown', 'technician_license_categories_unrecorded', evidence);
