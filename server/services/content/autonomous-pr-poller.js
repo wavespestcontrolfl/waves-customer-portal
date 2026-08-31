@@ -299,6 +299,21 @@ async function recheckTopicTargeting(run, pr, gh) {
 // without it (or whose file gained the component on the branch) is
 // withheld, never merged. Pure: the head content comes from the topic
 // recheck's fetch. An unreadable head (no content) fails closed.
+// Head blog file content for lanes that don't run the topic recheck
+// (refresh PRs): same candidate-path probe as recheckTopicTargeting, null
+// when unreadable (the belt then fails closed).
+async function headBlogFileContent(run, pr, gh) {
+  let brief = {};
+  try { brief = await briefCategorySignalsForRun(run); } catch (_) { return null; }
+  const candidates = blogFileCandidatesForRun(run, brief);
+  if (!candidates) return null;
+  for (const path of candidates.paths) {
+    const found = await gh.getFile(path, pr.head?.ref);
+    if (found && typeof found.content === 'string') return found.content;
+  }
+  return null;
+}
+
 function affiliateBeltVerdict(run, headContent) {
   if (typeof headContent !== 'string') return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
   if (!/<AffiliateLink\b/.test(headContent)) return { ok: true };
@@ -1461,6 +1476,15 @@ async function maybeAutoMerge(run, pr) {
         return withheld;
       }
     } else {
+      // Refresh PRs skip the topic recheck but not the affiliate belt: a
+      // refresh that PRESERVES affiliate links also parks at affiliate_review
+      // (every affiliate-bearing draft does during the pilot), so the same
+      // approval stamp is required before auto-merge (Codex PR3 r3 P1).
+      const aff = affiliateBeltVerdict(run, await headBlogFileContent(run, pr, gh));
+      if (!aff.ok) {
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
+        return { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+      }
       mergeRes = await doMerge();
     }
   } catch (err) {
