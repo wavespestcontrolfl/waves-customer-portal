@@ -4,7 +4,7 @@
 
 ## §5.1 Our editorial mission
 
-Waves publishes educational content because our customers deserve better than a sales funnel dressed as a blog. If you're trying to figure out what's eating your St. Augustine, or whether your termite bond is actually worth renewing, you shouldn't have to wade through three affiliate pitches to get to a straight answer.
+Waves publishes educational content because our customers deserve better than a sales funnel dressed as a blog. If you're trying to figure out what's eating your St. Augustine, or whether your termite bond is actually worth renewing, you shouldn't have to wade through three sales pitches to get to a straight answer. Where a product link earns us a commission, we say so on the post and it never changes the advice — see §5.9.
 
 Our mission is simple: write the kind of content we'd want to read if we were the customer. That means specificity over generality — "Southern chinch bugs feed at the base of the blade, so yellowing starts at ground level" beats "chinch bugs damage lawns." It means being honest about when a problem is small enough to DIY and when it really isn't. And it means staying local — the pest pressure, lawn types, and weather patterns in Bradenton are not the ones in Phoenix or Pittsburgh, and generic advice will steer you wrong.
 
@@ -120,3 +120,15 @@ We use AI to help draft content. We're telling you that up front because we thin
 Every post on this site, regardless of how it was drafted, is read in full by a named human reviewer before publishing — an FDACS-licensed reviewer for posts making pesticide, pest-biology, or safety claims, and a fact-checker for all posts. The reviewer puts their name on the post. If a claim is wrong, the human is accountable for it — not the tool that drafted it.
 
 AI helps us cover more ground, faster. Human expertise is what makes the coverage trustworthy.
+
+---
+
+## §5.9 Affiliate links
+
+Some posts recommend specific products for readers who want to handle a job themselves. Where we link to a retailer for one of those products, the link may be an affiliate link — if you buy through it, Waves earns a small commission at no extra cost to you.
+
+Three rules govern every affiliate link on this site:
+
+- **The recommendation comes first.** We only link products we would name anyway, and product recommendations go through the same review tracks as everything else — an FDACS-licensed reviewer signs off on any pesticide recommendation, affiliate or not. No program, payout, or partner ever decides what we recommend.
+- **Every post that carries one says so.** A post containing affiliate links carries a clear disclosure of the commission relationship. No disclosure, no link — our publishing system enforces this the same way it enforces our other claims.
+- **The advice doesn't move.** If the honest answer is "your grass just needs water" or "this one is too big to DIY," that stays the answer. Whether a post recommends DIY or professional service is decided before, and independent of, any product link.

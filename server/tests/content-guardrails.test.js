@@ -342,6 +342,76 @@ describe('outbound-link gate (DISALLOWED_EXTERNAL_LINK)', () => {
   });
 });
 
+describe('affiliate-link gate (owner monetization pilot 2026-08-31)', () => {
+  const AFF = 'https://www.domyown.com/x-product-p-123.html?aff=waves';
+  const withEnv = (value, fn) => {
+    const prev = process.env.CONTENT_AFFILIATE_LINKS;
+    if (value === undefined) delete process.env.CONTENT_AFFILIATE_LINKS;
+    else process.env.CONTENT_AFFILIATE_LINKS = value;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.CONTENT_AFFILIATE_LINKS;
+      else process.env.CONTENT_AFFILIATE_LINKS = prev;
+    }
+  };
+  const affiliateBody = `If you want to DIY, [the product pros use](${AFF}) works.`;
+  const affiliateDisclosure = { type: 'regulatory', text: 'Some product links on this post earn Waves a commission at no extra cost to you.' };
+
+  test('unregistered (empty env, the default): affiliate URL is a plain DISALLOWED_EXTERNAL_LINK — dark by default', () => {
+    withEnv(undefined, () => {
+      const r = guardrails.evaluate({ body: affiliateBody, frontmatter: { disclosure: affiliateDisclosure } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    });
+  });
+  test('registered + disclosed on a blog target passes both gates', () => {
+    withEnv(AFF, () => {
+      const r = guardrails.evaluate({ body: affiliateBody, frontmatter: { disclosure: affiliateDisclosure } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code.startsWith('AFFILIATE_LINK') || f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    });
+  });
+  test('registration is EXACT-URL, never host-wide — a sibling path on the partner host stays blocked', () => {
+    withEnv(AFF, () => {
+      const r = guardrails.evaluate({ body: 'See [this](https://www.domyown.com/other-page.html?aff=waves).', frontmatter: { disclosure: affiliateDisclosure } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    });
+  });
+  test('the tracking tag is part of the identity — the same path without it stays blocked', () => {
+    withEnv(AFF, () => {
+      const r = guardrails.evaluate({ body: 'See [this](https://www.domyown.com/x-product-p-123.html).', frontmatter: { disclosure: affiliateDisclosure } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    });
+  });
+  test('registered but undisclosed is P0 AFFILIATE_LINK_WITHOUT_DISCLOSURE', () => {
+    withEnv(AFF, () => {
+      const r = guardrails.evaluate({ body: affiliateBody, frontmatter: {} }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'AFFILIATE_LINK_WITHOUT_DISCLOSURE' && f.severity === 'P0')).toBe(true);
+      const typed = guardrails.evaluate({ body: affiliateBody, frontmatter: { disclosure: { type: 'affiliate' } } }, { targetIsBlog: true });
+      expect(typed.findings.some((f) => f.code === 'AFFILIATE_LINK_WITHOUT_DISCLOSURE')).toBe(false);
+    });
+  });
+  test('non-blog targets never get the affiliate set — registered URL still P0s on a service page', () => {
+    withEnv(AFF, () => {
+      const r = guardrails.evaluate({ body: affiliateBody, frontmatter: { disclosure: affiliateDisclosure } }, { targetIsBlog: false });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    });
+  });
+  test('a registered affiliate URL in editable meta is P0 AFFILIATE_LINK_IN_META', () => {
+    withEnv(AFF, () => {
+      const r = guardrails.evaluate({ body: 'Clean copy.', frontmatter: { meta_description: `Deals at ${AFF} today.`, disclosure: affiliateDisclosure } }, { targetIsBlog: true });
+      expect(r.findings.some((f) => f.code === 'AFFILIATE_LINK_IN_META' && f.severity === 'P0')).toBe(true);
+    });
+  });
+  test('refresh may preserve a live affiliate link but never add one (count-compared), and fails closed without the prior body', () => {
+    withEnv(AFF, () => {
+      const preserved = guardrails.evaluate({ body: affiliateBody }, { targetIsBlog: true, isRefresh: true, priorBody: affiliateBody });
+      expect(preserved.findings.some((f) => f.code.startsWith('AFFILIATE_LINK'))).toBe(false);
+      const doubled = guardrails.evaluate({ body: `${affiliateBody}\n\nAlso [again](${AFF}).` }, { targetIsBlog: true, isRefresh: true, priorBody: affiliateBody });
+      expect(doubled.findings.some((f) => f.code === 'AFFILIATE_LINK_ADDED_ON_REFRESH' && f.severity === 'P0')).toBe(true);
+      const noPrior = guardrails.evaluate({ body: affiliateBody }, { targetIsBlog: true, isRefresh: true, priorBody: null });
+      expect(noPrior.findings.some((f) => f.code === 'AFFILIATE_LINK_ADDED_ON_REFRESH' && f.severity === 'P0')).toBe(true);
+    });
+  });
+});
+
 describe('outbound-link gate: operator-intercept citation exceptions (Codex round 1)', () => {
   test('required_sources hosts are allowed for that draft (binding must-link citations)', () => {
     const r = guardrails.evaluate(

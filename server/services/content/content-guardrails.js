@@ -15,6 +15,11 @@
  *                                 policy-blocked (bed bug, cockroach, rodent, …)
  *   P0 DISALLOWED_EXTERNAL_LINK — a link/URL pointing off the hub/spoke fleet
  *                                 (spam/injection guard — drafts link internally)
+ *   P0 AFFILIATE_LINK_WITHOUT_DISCLOSURE / AFFILIATE_LINK_IN_META /
+ *      AFFILIATE_LINK_ADDED_ON_REFRESH — registered affiliate links (owner
+ *                                 monetization pilot) publish only in blog
+ *                                 BODIES, only with an affiliate disclosure,
+ *                                 and refreshes never add one
  *   P2 KEYWORD_STUFFING         — primary keyword density above threshold
  *
  * Phone-number injection is NOT re-checked here — content-quality-gate's
@@ -1589,6 +1594,86 @@ function allowedExactSourceUrls(requiredSourceUrls = []) {
   return urls;
 }
 
+// ── affiliate-link allowlist (owner monetization pilot, 2026-08-31) ─────
+// Registered affiliate links follow the same exact-URL discipline as brief-
+// named sources: CONTENT_AFFILIATE_LINKS is a comma-separated list of the
+// EXACT partner URLs the owner registered — query string included, because
+// the tracking tag (?tag=…, Awin click refs) is part of the link's identity
+// — never a hostname. Host-allowlisting a retailer would let a draft link
+// anything that store serves, tag-less and unattributed. Empty (the
+// default) means no affiliate URL publishes anywhere: the env var is the
+// lane's kill switch. evaluate() supplies the set ONLY for blog targets
+// (affiliate links live in the informational lane; a service/city page
+// never carries one) and the disclosure gate below owns the frontmatter
+// and refresh rules.
+function allowedAffiliateUrls() {
+  const urls = new Set();
+  for (const u of String(process.env.CONTENT_AFFILIATE_LINKS || '').split(',')) {
+    const norm = normalizeSourceUrl(u);
+    if (norm) urls.add(norm);
+  }
+  return urls;
+}
+
+// Registered-affiliate-URL occurrences in a text, counted per URL — the
+// refresh grandfather needs COUNTS, not membership (preserving one legacy
+// link must not license adding a second copy of it).
+function affiliateUrlCounts(text, affiliateUrls) {
+  const counts = new Map();
+  if (!affiliateUrls || affiliateUrls.size === 0) return counts;
+  const body = decodeEntitiesForScan(String(text || ''));
+  if (!body) return counts;
+  const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
+  let m;
+  while ((m = urlRe.exec(body)) !== null) {
+    const norm = normalizeSourceUrl(m[0].replace(/[.,;:!?]+$/, ''));
+    if (norm && affiliateUrls.has(norm)) counts.set(norm, (counts.get(norm) || 0) + 1);
+  }
+  return counts;
+}
+
+// Placement + disclosure rules for registered affiliate links. FTC §255.5
+// requires a clear, conspicuous disclosure of the commission relationship,
+// and the pipeline publishes autonomously, so the requirement is enforced
+// here deterministically — never as a writer-prompt instruction:
+//   - meta fields never carry an affiliate URL (the blog meta contract is
+//     informational copy; a tagged link there is pure spam shape);
+//   - a NEW draft carrying one must declare it in frontmatter.disclosure —
+//     type 'affiliate' (schema enum pending in the astro repo) or text
+//     that names the affiliate/commission relationship;
+//   - a REFRESH may preserve the affiliate links the live body already
+//     carries (frontmatter is frozen on refresh, so its live disclosure
+//     ships unchanged) but may never ADD one — count-compared per URL, and
+//     fail closed when the prior body is unavailable.
+function affiliateLinkFinding(body, editableMeta, frontmatter, { affiliateUrls = null, isRefresh = false, priorBody = null } = {}) {
+  if (!affiliateUrls || affiliateUrls.size === 0) return null;
+  const metaCounts = affiliateUrlCounts(editableMeta, affiliateUrls);
+  if (metaCounts.size > 0) {
+    return finding('P0', 'AFFILIATE_LINK_IN_META', 'Draft carries a registered affiliate URL in an editable meta field — affiliate links are body-only; metas stay informational.');
+  }
+  const counts = affiliateUrlCounts(body, affiliateUrls);
+  if (counts.size === 0) return null;
+  if (isRefresh) {
+    if (typeof priorBody !== 'string' || !priorBody.trim()) {
+      return finding('P0', 'AFFILIATE_LINK_ADDED_ON_REFRESH', 'Refresh draft carries a registered affiliate URL but the live prior body is unavailable, so preserved-vs-added cannot be separated — fail closed.');
+    }
+    const prior = affiliateUrlCounts(priorBody, affiliateUrls);
+    for (const [url, n] of counts) {
+      if ((prior.get(url) || 0) < n) {
+        return finding('P0', 'AFFILIATE_LINK_ADDED_ON_REFRESH', `Refresh draft adds the registered affiliate URL "${url.slice(0, 80)}" that the live body does not carry (or carries fewer times) — refreshes preserve affiliate links, only the manual lane adds them (frontmatter is frozen on refresh, so an added link would ship without its disclosure).`);
+      }
+    }
+    return null;
+  }
+  const disclosure = frontmatter && typeof frontmatter.disclosure === 'object' && !Array.isArray(frontmatter.disclosure) ? frontmatter.disclosure : {};
+  const type = String(disclosure.type || '').trim().toLowerCase();
+  const text = String(disclosure.text || '');
+  if (type !== 'affiliate' && !/\b(affiliate|commission)\b/i.test(text)) {
+    return finding('P0', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', 'Draft carries a registered affiliate URL without an affiliate disclosure — frontmatter.disclosure must be type "affiliate" or its text must name the affiliate/commission relationship (FTC material-connection rule).');
+  }
+  return null;
+}
+
 function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const hosts = new Set();
   for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
@@ -1838,7 +1923,7 @@ function isLiteralExpression(expr) {
   return true;
 }
 
-function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
+function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [], affiliateUrls = null } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
   // MDX ESM: an "import"/"export" statement at the start of a line is
@@ -1967,6 +2052,10 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
     if (exactUrls.has(normalizeSourceUrl(rawUrl) || '\u0000')) continue;
+    // Registered affiliate URLs pass the host gate by EXACT match only —
+    // the same whole-URL comparison as brief-named sources; the disclosure
+    // and placement rules for them are affiliateLinkFinding's job.
+    if (affiliateUrls && affiliateUrls.has(normalizeSourceUrl(rawUrl) || '\u0000')) continue;
     if (!hostAllowed(norm, allowed)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
@@ -5048,6 +5137,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     .join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
+  // Affiliate links are BLOG-lane-only (informational lane; owner
+  // monetization pilot 2026-08-31): only blog targets get the registered
+  // set, so an affiliate URL on a service/city page stays a plain
+  // DISALLOWED_EXTERNAL_LINK. affiliateLinkFinding below owns the
+  // disclosure, meta-placement, and refresh no-additions rules.
+  const affiliateUrls = targetIsBlog ? allowedAffiliateUrls() : null;
+
   // Refresh grandfathering surface: what the live prior body already
   // carried, by occurrence COUNT — preserving a legacy link/component must
   // not license adding more of it. Built once here; consumed by the two
@@ -5072,7 +5168,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, affiliateUrls }),
+    // Registered affiliate links: disclosure required on new drafts, never
+    // in meta, never added by a refresh (frozen frontmatter can't carry the
+    // disclosure an added link would need).
+    affiliateLinkFinding(body, editableMeta, frontmatter, { affiliateUrls, isRefresh, priorBody }),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).
@@ -5226,5 +5326,5 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, allowedAffiliateUrls, affiliateLinkFinding },
 };
