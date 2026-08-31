@@ -134,6 +134,51 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
       ? a.members.join(',')
       : null,
   }));
+  // A held/memberless snapshot (closeout outage form) must not blind the
+  // membership-aware re-show (GH codex r4 P2): the newest dismissal row wins
+  // in admin-unread, so recording NULL members here would replace an earlier
+  // membership-aware dismissal and suppress genuinely NEW work at
+  // same-or-lower count for the whole window. Carry the latest known
+  // membership forward instead; with no prior membership row, the
+  // documented count-only semantics apply as before.
+  const memberlessIds = dismissalRows.filter((r) => r.dismissed_members === null).map((r) => r.alert_id);
+  if (memberlessIds.length) {
+    try {
+      // Bounded to the CURRENT alert incarnation (pre-push P1): alert ids
+      // recur (closeout_gaps_today reuses its id daily), so an unbounded
+      // lookup could copy YESTERDAY'S membership into today's dismissal and
+      // make today's recovered exact membership read as new work right after
+      // the click. dashboard_alert_state.first_seen_at marks when this
+      // incarnation began; a memberful dismissal from before it belongs to a
+      // previous incarnation and must not be carried. No state row = no
+      // active incarnation to protect → keep NULL (count-only semantics).
+      const stateRows = await db('dashboard_alert_state')
+        .whereIn('alert_id', memberlessIds)
+        .select('alert_id', 'first_seen_at');
+      // first_seen_at survives an ET midnight while the alert stays active
+      // (the cron preserves it), but day-scoped memberships (closeout's
+      // visit ids) go stale at the rollover — bound the incarnation to
+      // whichever is later: first_seen_at or today's ET day start.
+      const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+      const etDayStart = parseETDateTime(`${etDateString()}T00:00`).getTime();
+      const firstSeenByAlert = new Map(stateRows.map((s) => [s.alert_id, Math.max(new Date(s.first_seen_at).getTime(), etDayStart)]));
+      const prior = await db('dashboard_alert_dismissed')
+        .where({ admin_user_id: adminUserId })
+        .whereIn('alert_id', memberlessIds)
+        .whereNotNull('dismissed_members')
+        .orderBy('dismissed_at', 'desc')
+        .select('alert_id', 'dismissed_members', 'dismissed_at');
+      const latestByAlert = new Map();
+      for (const p of prior) {
+        const incarnationStart = firstSeenByAlert.get(p.alert_id);
+        if (incarnationStart == null || new Date(p.dismissed_at).getTime() < incarnationStart) continue;
+        if (!latestByAlert.has(p.alert_id)) latestByAlert.set(p.alert_id, p.dismissed_members);
+      }
+      for (const r of dismissalRows) {
+        if (r.dismissed_members === null && latestByAlert.has(r.alert_id)) r.dismissed_members = latestByAlert.get(r.alert_id);
+      }
+    } catch { /* pre-migration tolerance: dismissed_members absent → keep null */ }
+  }
   try {
     await db('dashboard_alert_dismissed').insert(dismissalRows);
   } catch (err) {

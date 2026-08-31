@@ -21,6 +21,47 @@ const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
 const { whereLiveCustomer } = require('./customer-stages');
 const { autopayActivePredicate } = require('./autopay-eligibility');
+const { loadCloseoutStatuses, closeoutIssuesForVisit, factsFullyKnown } = require('./closeout-alerts');
+
+// Closeout sweep bound — the day view checks at most this many completed
+// visits (Waves runs one technician; a day is ~5-15).
+const CLOSEOUT_SWEEP_CAP = 50;
+// Last-known gap set for the current service date. dashboard-alerts-cron
+// deletes state for an ABSENT alert and re-notifies when it reappears, so a
+// transient lookup outage must not make closeout_gaps_today vanish: a visit
+// whose read is unreadable (load failed / found:false / partial with no
+// readable issue) keeps its last-known gap until a COMPLETE clean read.
+let closeoutGapCarry = { date: null, issueCounts: new Map() };
+function closeoutCarryFor(date) {
+  if (closeoutGapCarry.date !== date) closeoutGapCarry = { date, issueCounts: new Map() };
+  return closeoutGapCarry.issueCounts;
+}
+// Same-day persisted closeout alert (the cron GCs this row only on a genuine
+// absence) — the shared, restart-proof floor a held snapshot stands on.
+// Returns { row, error }: a failed read is NOT an absent row — callers hold a
+// snapshot on error rather than letting the cron clear an unverified alert.
+async function persistedCloseoutAlertForDay(today) {
+  try {
+    const row = await db('dashboard_alert_state')
+      .where({ alert_id: 'closeout_gaps_today' })
+      .first('current_count', 'last_label', 'last_seen_at');
+    return { row: row && row.last_seen_at && etDateString(new Date(row.last_seen_at)) === today ? row : null, error: null };
+  } catch (err) {
+    return { row: null, error: err };
+  }
+}
+function heldCloseoutAlert({ count, label }) {
+  return {
+    id: 'closeout_gaps_today',
+    kind: 'action',
+    severity: 'warn',
+    count: Math.max(Number(count || 0), 1),
+    // Deliberately NO members: a held snapshot knows a floor, not the set.
+    label,
+    href: `/admin/dispatch?tab=schedule&date=${etDateString()}`,
+    heldThroughOutage: true,
+  };
+}
 
 // A lead is "waiting" once it has gone this long with no first response.
 // Mirrors the Response Speed tile's alert threshold order-of-magnitude but
@@ -101,7 +142,7 @@ function excludeInternalLeads(qb) {
 // The notification bell adapter (toNotifications below) reshapes these
 // into notification-table-shaped objects with `id: 'live:<id>'`,
 // `read_at: null`, `created_at: now`.
-async function computeDashboardAlertsUncached() {
+async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   const today = etDateString();
   const alerts = [];
 
@@ -354,6 +395,162 @@ async function computeDashboardAlertsUncached() {
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }
+
+  // 6c. Completed visits TODAY that are not closed out — report, material
+  //     log, photos, report delivery, or a completion that never committed —
+  //     via the canonical closeout-status service (#3647) and the shared
+  //     fact→issue mapping (closeout-alerts.js). This is the feed the
+  //     dashboard and bell ACTUALLY read (the command-center root has no UI
+  //     caller). `unknown` facts (lookup outages) and legitimate not_required
+  //     rules never count as gaps; per-visit statuses are memoised 90s.
+  try {
+    const completedRows = (await db('scheduled_services')
+      .where({ scheduled_date: today, status: 'completed' })
+      .orderBy('window_start', 'asc')
+      .limit(CLOSEOUT_SWEEP_CAP + 1)
+      .select('id')) || [];
+    // cap+1 tells a full day from an overflowing one — overflow is surfaced,
+    // never a silent false-clean.
+    const sweepTruncated = completedRows.length > CLOSEOUT_SWEEP_CAP;
+    const completedToday = sweepTruncated ? completedRows.slice(0, CLOSEOUT_SWEEP_CAP) : completedRows;
+    if (sweepTruncated) {
+      // Exact overflow needs a count — cap+1 only proves "more".
+      const totalRow = await db('scheduled_services')
+        .where({ scheduled_date: today, status: 'completed' })
+        .count('* as n')
+        .first()
+        .catch(() => null);
+      const total = totalRow ? Number(totalRow.n || 0) : null;
+      const unchecked = total != null && total > CLOSEOUT_SWEEP_CAP ? total - CLOSEOUT_SWEEP_CAP : null;
+      alerts.push({
+        id: 'closeout_sweep_incomplete',
+        kind: 'alert',
+        severity: 'warn',
+        count: unchecked ?? 1,
+        label: unchecked != null
+          ? `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — ${unchecked} unchecked`
+          : `Closeout sweep checked only the first ${CLOSEOUT_SWEEP_CAP} completed visits today — an unknown number unchecked`,
+        // Same dated schedule-tab deep link as closeout_gaps_today (GH codex
+        // r5 P2): the Board default doesn't list the completed visits.
+        href: `/admin/dispatch?tab=schedule&date=${today}`,
+      });
+    }
+    // After a COMPLETE list read, a visit no longer in today's completed set
+    // owes nothing — drop it so a stale carry can't resurrect a held alert.
+    // Runs even when the set is now EMPTY (every gapped visit un-completed).
+    if (!sweepTruncated) {
+      const carry = closeoutCarryFor(today);
+      const current = new Set(completedToday.map((r) => r.id));
+      for (const id of [...carry.keys()]) if (!current.has(id)) carry.delete(id);
+    }
+    if (completedToday.length) {
+      // fresh (dismissals / the cron writing durable state) bypasses the
+      // 90s per-visit memo — a write-sensitive snapshot must not persist a
+      // stale count or membership (pre-push r20 P1).
+      const statuses = await loadCloseoutStatuses(completedToday.map((r) => r.id), { fresh });
+      const carry = closeoutCarryFor(today);
+      const gapIds = [];
+      const gapIdentities = []; // `visitId:issueType` — new work on a listed visit must re-surface
+      const unreadableIds = [];
+      let issueCount = 0;
+      for (const row of completedToday) {
+        const status = statuses.get(row.id);
+        // Unreadable = one of the five MAPPED facts is unknown. Probes
+        // outside them (billing, follow-up, license context) failing must
+        // not hold the alert floor forever (pre-push r14 P1).
+        const unreadable = !factsFullyKnown(status);
+        const issues = closeoutIssuesForVisit(status);
+        if (unreadable) {
+          // Any partial/failed read reconciles against the persisted row
+          // below (held, no-members snapshot). Its carry is the UNION of
+          // what was known and what is readable now — never a shrink.
+          unreadableIds.push(row.id);
+          const prev = carry.get(row.id) || { count: 0, identities: [] };
+          const merged = [...new Set([...prev.identities, ...issues.map((i) => `${row.id}:${i.identity || i.type}`)])];
+          if (merged.length) {
+            carry.set(row.id, { count: merged.length, identities: merged });
+            gapIds.push(row.id); issueCount += merged.length; gapIdentities.push(...merged);
+          }
+        } else if (issues.length) {
+          // identity (contradictions) carries the code so a NEW
+          // contradiction on a dismissed visit reads as new work.
+          const identities = issues.map((i) => `${row.id}:${i.identity || i.type}`);
+          gapIds.push(row.id); issueCount += issues.length; gapIdentities.push(...identities);
+          carry.set(row.id, { count: issues.length, identities });
+        } else {
+          carry.delete(row.id); // complete clean read → genuinely resolved
+        }
+      }
+      // The in-process carry is empty after a restart / on another replica.
+      // The DB-backed dashboard_alert_state row is the shared truth: the
+      // cron deletes it ONLY when the alert is genuinely absent. Whenever ANY
+      // visit is unreadable, reconcile against that row (same ET date only):
+      // hold count = max(readable, persisted) and omit members — an
+      // incomplete read knows a floor, not the set — so an outage can neither
+      // clear the alert nor make its recovery read as an escalation.
+      if (sweepTruncated) {
+        // A truncated sweep is an INCOMPLETE read: gapped visits beyond the
+        // cap were not checked this pass. Their carried identities stay
+        // counted so a clean in-window read can't clear the alert (r15).
+        const window = new Set(completedToday.map((r) => r.id));
+        for (const [id, entry] of carry) {
+          if (!window.has(id)) { gapIds.push(id); issueCount += entry.identities.length; gapIdentities.push(...entry.identities); }
+        }
+      }
+      // EVERY truncated read reconciles against the persisted row (pre-push
+      // r16 P1): a truncated sweep is incomplete even when in-window gaps
+      // were found — after a restart the carry is empty, so one in-window
+      // gap would otherwise emit an exact count 1 and let the cron overwrite
+      // a larger durable count representing unchecked over-cap visits.
+      const persisted = (unreadableIds.length || sweepTruncated)
+        ? await persistedCloseoutAlertForDay(today) : { row: null, error: null };
+      const held = persisted.row;
+      if (held || (persisted.error && (gapIds.length || carry.size))) {
+        // Active row, OR the row itself was unreadable while something is
+        // known open — hold a floor; never let an unverifiable read clear it.
+        const count = Math.max(gapIds.length, Number(held?.current_count || 0), 1);
+        alerts.push(heldCloseoutAlert({
+          count,
+          label: gapIds.length
+            ? `${count} completed visit${count === 1 ? '' : 's'} today not closed out (closeout lookup partially unavailable)`
+            : (held?.last_label || `${count} completed visit(s) today not closed out — closeout lookup temporarily unavailable`),
+        }));
+      } else if (gapIds.length) {
+        alerts.push({
+          id: 'closeout_gaps_today',
+          kind: 'action',
+          severity: 'warn',
+          count: gapIds.length,
+          // Queue membership as visit:issue identities so a dismissal
+          // re-surfaces when a NEW visit joins OR a listed visit grows a new
+          // issue (report published → delivery fails), not just on count.
+          members: queueMembers(gapIdentities),
+          label: `${gapIds.length} completed visit${gapIds.length === 1 ? '' : 's'} today not closed out (${issueCount} open item${issueCount === 1 ? '' : 's'})`,
+          // Schedule tab's day view lists today's visits (GH codex r4 P2:
+          // without tab=schedule the page defaults to the Board tab, which
+          // has no closeout facts). Per-visit facts: IB get_closeout_status
+          // / list_open_closeouts; a JobDrawer panel is a follow-up UI PR.
+          href: `/admin/dispatch?tab=schedule&date=${today}`,
+        });
+      }
+    }
+  } catch (err) {
+    logger.error(`[dashboard-alerts] closeout_gaps_today: ${err.message}`);
+    // A generator failure must not read as resolution: re-emit the alert
+    // as it last stood (same-day persisted row, else the in-process carry).
+    try {
+      if (!alerts.some((a) => a.id === 'closeout_gaps_today')) {
+        const { row: held } = await persistedCloseoutAlertForDay(today);
+        const carried = closeoutCarryFor(today).size;
+        if (held || carried) {
+          alerts.push(heldCloseoutAlert({
+            count: Math.max(Number(held?.current_count || 0), carried),
+            label: held?.last_label || `${Math.max(carried, 1)} completed visit(s) today not closed out — closeout check temporarily unavailable`,
+          }));
+        }
+      }
+    } catch (holdErr) { logger.error(`[dashboard-alerts] closeout_gaps_today hold: ${holdErr.message}`); }
+  }
 
   // 7. Persisted admin command-center alerts. These are event-backed
   // operating alerts created by domain workflows such as WaveGuard lawn
@@ -670,7 +867,7 @@ async function computeDashboardAlerts({ fresh = false } = {}) {
   if (!fresh && alertsMemo.promise && Date.now() - alertsMemo.at < ALERTS_MEMO_TTL_MS) {
     return alertsMemo.promise;
   }
-  const promise = computeDashboardAlertsUncached();
+  const promise = computeDashboardAlertsUncached({ fresh });
   alertsMemo = { at: Date.now(), promise };
   try {
     return await promise;
@@ -709,6 +906,7 @@ module.exports = {
   computeDashboardAlerts,
   computeDashboardAlertsUncached,
   toNotifications,
+  __private: { resetCloseoutCarry: () => { closeoutGapCarry = { date: null, issueCounts: new Map() }; } },
   // Shared with routes/admin-leads.js so the bell's builder-warranty count
   // and its ?builder_warranty=expiring drill list can never disagree.
   whereBuilderWarrantyExpiring,
