@@ -158,6 +158,26 @@ function mergeEntryFields(prior, next) {
   return out;
 }
 
+// A merge can end up holding the SAME unit twice — the stored entry keeps its
+// address_line2 while a later equivalent entry overwrites line 1 with the
+// inline form ("100 First St Apt 4"). Consumers that join both fields then
+// render "100 First St Apt 4 Apt 4" onto an estimate or a dispatch card. When
+// line 1's inline unit is the same unit line 2 already holds, the separated
+// form wins and the inline copy is peeled off. A DIFFERENT unit in the two
+// fields is bad data, not a duplicate, and is left exactly as captured.
+function canonicalizePropertyUnit(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  const line1 = String(entry.address_line1 || '').trim();
+  const line2 = String(entry.address_line2 || '').trim();
+  if (!line1 || !line2) return entry;
+  const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit } = require('./address-normalizer');
+  const { street, unit } = splitStreetLineUnit(line1);
+  if (!street || !unit) return entry;
+  const sameUnit = unitLineValueKey(normalizeUnitLine(unit))
+    === unitLineValueKey(normalizeUnitLine(line2));
+  return sameUnit ? { ...entry, address_line1: street } : entry;
+}
+
 // Union earlier and later property lists, earlier entries first. A later
 // mention of the SAME property merges into that entry; a property only an
 // earlier call captured is never dropped.
@@ -174,7 +194,7 @@ function unionAdditionalProperties(prior, next) {
     }
     const existing = out[at];
     out[at] = existing && typeof existing === 'object' && entry && typeof entry === 'object'
-      ? mergeEntryFields(existing, entry)
+      ? canonicalizePropertyUnit(mergeEntryFields(existing, entry))
       : entry;
   }
   return out;

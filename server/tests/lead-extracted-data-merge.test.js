@@ -388,6 +388,36 @@ describe('units are part of a property\'s identity', () => {
     expect(afterCall2.additional_properties[0].notes).toBe('gate code at the rear');
   });
 
+  it('a merged entry never carries the same unit twice', () => {
+    // The stored entry keeps address_line2 while the later equivalent entry
+    // overwrites line 1 with the inline form; joining both fields would
+    // render "100 First St Apt 4 Apt 4" onto an estimate or dispatch card.
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 4', zip: '34202' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St Apt 4', zip: '34202', property_type: 'condo' }],
+    }, RK);
+    expect(afterCall2.additional_properties).toHaveLength(1);
+    const entry = afterCall2.additional_properties[0];
+    expect(entry.address_line1).toBe('100 First St');
+    expect(entry.address_line2).toBe('Apt 4');
+    expect(entry.property_type).toBe('condo');
+  });
+
+  it('two DIFFERENT units across the two fields are left exactly as captured', () => {
+    // Bad data, not a duplicate — rewriting it would be guessing.
+    const afterCall1 = mergeLeadExtractedData({}, {
+      additional_properties: [{ address_line1: '100 First St', address_line2: 'Apt 4', zip: '34202' }],
+    }, RK);
+    const afterCall2 = mergeLeadExtractedData(afterCall1, {
+      additional_properties: [{ address_line1: '100 First St Apt 4', address_line2: 'Apt 9', zip: '34202' }],
+    }, RK);
+    const entries = afterCall2.additional_properties;
+    const mixed = entries.find((e) => e.address_line2 === 'Apt 9');
+    if (mixed) expect(mixed.address_line1).toBe('100 First St Apt 4');
+  });
+
   it('a unit on only one side is ambiguous and never merges', () => {
     // Same stance the function already takes on a one-sided zip or city: the
     // cost of guessing wrong is losing a service address.
