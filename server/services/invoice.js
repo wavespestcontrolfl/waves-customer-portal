@@ -5483,9 +5483,21 @@ const InvoiceService = {
           .whereNull("recurring_parent_id")
           .whereNotIn("status", ["cancelled", "canceled"])
           .select("id", "service_type", "service_id");
+        // EXACTLY ONE rodent root or refuse (codex #3591 r61 P1): with two
+        // live rodent roots linked to the same estimate, first-returned
+        // ordering would re-stamp an arbitrary series and consume the
+        // immutable claim record against it — the same unique-anchor rule
+        // the neighboring reversal/revival paths enforce. Ambiguity keeps
+        // the claim anchor-less and pages for reconciliation.
+        const estimateRodentRootIds = [];
         for (const root of roots || []) {
-          if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) { anchorId = root.id; break; }
+          if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) estimateRodentRootIds.push(root.id);
         }
+        if (estimateRodentRootIds.length > 1) {
+          logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} matches ${estimateRodentRootIds.length} live rodent roots on estimate ${sourceEstimateId} (${estimateRodentRootIds.join(", ")}) — pick the series that owes the $${amount.toFixed(2)} bait-station setup and restore it manually (record kept)`);
+          return null;
+        }
+        if (estimateRodentRootIds.length === 1) anchorId = estimateRodentRootIds[0];
       }
       // A Customer 360 prepay sold before any series existed (codex #3591
       // r41 P1): the term's coverage names the DIRECT series the renewals
@@ -5497,10 +5509,19 @@ const InvoiceService = {
           .whereNull("recurring_parent_id")
           .whereNotIn("status", ["cancelled", "canceled"])
           .select("id", "service_type", "service_id", "source_estimate_id");
+        // Same unique-anchor rule as the estimate path above (codex #3591
+        // r61 P1): coverage matching two live direct rodent roots must not
+        // restore onto whichever Postgres returned first.
+        const coverageRodentRootIds = [];
         for (const root of roots || []) {
           if (root.source_estimate_id || !serviceMatchesCoverage(root, coverageServiceType)) continue;
-          if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) { anchorId = root.id; break; }
+          if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) coverageRodentRootIds.push(root.id);
         }
+        if (coverageRodentRootIds.length > 1) {
+          logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} matches ${coverageRodentRootIds.length} live direct rodent roots for customer ${customerId} coverage "${coverageServiceType}" (${coverageRodentRootIds.join(", ")}) — pick the series that owes the $${amount.toFixed(2)} bait-station setup and restore it manually (record kept)`);
+          return null;
+        }
+        if (coverageRodentRootIds.length === 1) anchorId = coverageRodentRootIds[0];
       }
       if (!anchorId) {
         logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} (estimate ${sourceEstimateId || 'none'}, coverage ${coverageServiceType || 'n/a'}) has no rodent series root to restore onto — $${amount.toFixed(2)} bait-station setup is owed again; bill it manually or re-run once the series is booked (record kept)`);

@@ -746,6 +746,14 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(body).not.toContain('setExistingCustomerMatch(null);');
   });
 
+  test('legacy admin page clears the stale customer binding BEFORE each address lookup (codex #3591 r61 P1)', () => {
+    // A changed address whose lookup fails/non-2xx must not leave the prior
+    // customer's match standing — the binding is cleared up front (with a
+    // version bump so a racing generate cannot mount a result priced with
+    // the stale account) and only THIS lookup's success rebinds.
+    expect(legacyAdminSource).toMatch(/bindMatchedCustomer\(null\);\s+estimateVersionRef\.current \+= 1;\s+try \{\s+const addrSearch = address\.split\(","\)\[0\]\.trim\(\);/);
+  });
+
   test('legacy admin page ignores a superseded qualifying-services load (codex #3591 r30 P2)', () => {
     // A bind cleared/replaced before its fetch resolved must not repopulate
     // the former customer's families for an unmatched fallback quote.

@@ -1657,7 +1657,16 @@ function EstimateToolView() {
         return next;
       });
 
-      // Auto-detect existing customer by address
+      // Auto-detect existing customer by address. Clear the PREVIOUS
+      // binding first (codex #3591 r61 P1): a changed address whose lookup
+      // fails or returns non-2xx must not leave the prior customer's match
+      // standing — the persisted customerId would price the new property
+      // with that customer's qualifying services / setup waiver and attach
+      // the estimate to them. Only THIS lookup's success rebinds; the
+      // version bump keeps a generate racing the unbind from mounting a
+      // result priced with the stale account.
+      bindMatchedCustomer(null);
+      estimateVersionRef.current += 1;
       try {
         const addrSearch = address.split(",")[0].trim();
         const custR = await fetch(

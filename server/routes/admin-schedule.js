@@ -5341,7 +5341,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // failure rolls the booking back (retryable) rather than committing a
       // series whose first completion under-bills; the /secure page, if a
       // link is later sent, freezes/consumes this same stamp.
-      if (isRecurring) {
+      // ESTIMATE-ORIGIN bookings never stamp here (codex #3591 r61 P1): an
+      // accept-on-book series has its source_estimate_id deliberately
+      // deferred out of this transaction, so the resolver would misread it
+      // as a direct booking and stamp a setup the acceptance path (standard
+      // or annual-prepay) bills itself from the estimate's frozen
+      // disclosure — leaving a live stamp a post-coverage completion would
+      // collect AGAIN. The estimate made the setup decision at accept;
+      // only a truly direct series (no linked estimate) prices here.
+      if (isRecurring && !linkedEstimateId) {
         const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
         const owedSetup = await resolveDirectRodentSetupObligation(trx, { id: svc.id });
         if (owedSetup > 0) {

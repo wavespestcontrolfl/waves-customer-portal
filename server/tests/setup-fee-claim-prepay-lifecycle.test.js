@@ -231,6 +231,44 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
     expect(byCoverage.writes.map((w) => w.op)).toEqual(['update', 'delete']);
   });
 
+  test('AMBIGUOUS anchors refuse: two live rodent roots on the estimate (or matching the coverage) keep the record anchor-less and page (codex #3591 r61 P1)', async () => {
+    const anchorless = { id: 'claim-1', scheduled_service_id: null, amount: '99.00' };
+    // Two live rodent roots linked to the same estimate: first-returned
+    // ordering must not pick the anchor — nothing is written, record kept.
+    const twoEstimateRoots = conn({
+      claim: anchorless,
+      rootsForCoverage: [
+        { id: 'root-rb-1', service_type: 'Rodent Bait Stations', service_id: null },
+        { id: 'root-rb-2', service_type: 'Rodent Bait Stations', service_id: null },
+      ],
+    });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', twoEstimateRoots, { sourceEstimateId: 'est-1' })).toBeNull();
+    expect(twoEstimateRoots.writes).toEqual([]);
+    // Same rule on the coverage path — and the ambiguity refuses even
+    // though only one root would win a first-match scan.
+    const twoCoverageRoots = conn({
+      claim: anchorless,
+      rootsForCoverage: [
+        { id: 'root-rb-1', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null },
+        { id: 'root-rb-2', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null },
+      ],
+    });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', twoCoverageRoots, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+    expect(twoCoverageRoots.writes).toEqual([]);
+    // One rodent root among non-rodent siblings still restores (unchanged).
+    const oneAmongMany = conn({
+      claim: anchorless,
+      scheduledService: { id: 'root-rb', source_estimate_id: 'est-1', pending_setup_fee: null },
+      rootsForCoverage: [
+        { id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null },
+        { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null },
+        { id: 'root-lawn', service_type: 'Monthly Lawn Care', service_id: null },
+      ],
+    });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', oneAmongMany, { sourceEstimateId: 'est-1' }))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
+  });
+
   test('re-stamp and record consume run inside ONE transaction on a plain connection, with the record locked (codex #3591 r40 P1)', async () => {
     const inner = conn({ claim, scheduledService: { id: 'svc-parent', source_estimate_id: null, pending_setup_fee: null } });
     const outer = () => { throw new Error('the plain connection must not be used for the writes'); };
@@ -382,6 +420,12 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
 
 describe('source contracts — where the lifecycle is wired', () => {
   const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+
+  test('the admin booking stamp is gated to TRULY DIRECT series — an accept-on-book (deferred source_estimate_id) never stamps a setup the acceptance also bills (codex #3591 r61 P1)', () => {
+    const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(adminSchedule).toMatch(/if \(isRecurring && !linkedEstimateId\) \{\s+const \{ resolveDirectRodentSetupObligation \} = require\('\.\.\/services\/secure-appointment-plans'\);/);
+  });
+
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
   const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
 

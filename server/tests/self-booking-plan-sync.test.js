@@ -405,11 +405,17 @@ describe('self-booking plan sync helpers', () => {
     // Unlinked legacy rows still classify from the label alone.
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service' })).toBe(false);
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping' })).toBe(true);
-    // A non-rodent catalog identity leaves the label-based classification
-    // untouched (the catalog-family prune in detectWaveGuardPlanKeys owns
-    // that row's family).
+    // A NON-rodent catalog identity that resolves a qualifying family wins
+    // over the stale label outright (codex #3591 r61 P1): a row repointed
+    // to pest/lawn coverage while service_type still says "Rodent Trapping"
+    // is that family's real coverage — never excluded here.
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service', service_key: 'pest_general_quarterly' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'pest_general_quarterly' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_monthly', service_name: 'Monthly Lawn Care' })).toBe(false);
     expect(isNonBaitRodentServiceRow({ service_type: 'Pest & Rodent Control', service_key: 'rodent_trapping' })).toBe(true);
+    // A non-rodent catalog identity that resolves NO qualifying family
+    // (one-time/cleanout) still classifies from the label as before.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'pest_cleanout_one_time', service_name: 'One-Time Pest Cleanout' })).toBe(true);
   });
 
   test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {

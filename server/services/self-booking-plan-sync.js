@@ -1089,7 +1089,25 @@ function isNonBaitRodentServiceRow(row = {}) {
   // classify from every text field as before.
   const catalogText = catalogTextForServiceRow(row);
   if (catalogText && textIsRodentLed(catalogText)) return !textHasRodentBaitToken(catalogText);
+  // A NON-rodent catalog identity wins over a stale rodent label (codex
+  // #3591 r61 P1): a row repointed to an authoritative pest/lawn/etc.
+  // catalog service while service_type still says "Rodent Trapping" is that
+  // catalog family's coverage — letting the label-scan exclude it here
+  // would drop real qualifying coverage from tier and setup-waiver
+  // evidence, nightly alignment, and the portal plan payload before
+  // detectWaveGuardPlanKeys/qualifyingKeysForRow ever see the row.
+  if (catalogText && catalogResolvesNonRodentQualifyingFamily(catalogText)) return false;
   return !rodentRowTextFields(row).some(textHasRodentBaitToken);
+}
+
+function catalogResolvesNonRodentQualifyingFamily(catalogText) {
+  return [
+    resolveTermiteBaitRecurringPlan,
+    resolveMosquitoRecurringPlan,
+    resolveTreeShrubRecurringPlan,
+    resolveLawnCareRecurringPlan,
+    resolvePestControlRecurringPlan,
+  ].some((resolver) => resolver(catalogText));
 }
 
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
