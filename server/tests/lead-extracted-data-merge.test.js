@@ -504,6 +504,15 @@ describe('both lead writers share one contact-completeness gate', () => {
     }
   });
 
+  it('a quality-less capture still honours a standing human disqualification', () => {
+    // leadQualification only runs when the payload carries a quality, so
+    // without this arm a disqualified lead stayed qualified — and in the
+    // Google Ads upload — through every quality-less callback.
+    const source = require('fs').readFileSync(require.resolve('../services/lead-from-extraction'), 'utf8');
+    expect(source).toMatch(/current\?\.disqualification_reason \|\| ''\)\.trim\(\)/);
+    expect(source).toMatch(/leadUpdates\.is_qualified = false/);
+  });
+
   it('the voice-agent writer gates retention on that evidence, not the stored flag', () => {
     // Staff can clear an invalid email without touching is_qualified, and
     // reading the boolean alone kept the lead qualified — and eligible for

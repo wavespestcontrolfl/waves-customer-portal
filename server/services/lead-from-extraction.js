@@ -826,6 +826,16 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         priorQualified: current?.is_qualified,
         disqualificationReason: current?.disqualification_reason,
       });
+    } else if (current?.is_qualified === true
+      && String(current?.disqualification_reason || '').trim()) {
+      // A capture with no quality signal still cannot leave a lead the office
+      // DISQUALIFIED reading as qualified — that keeps it in the Google Ads
+      // qualified-lead upload against an explicit human decision (codex
+      // #3675). Deliberately narrower than re-judging everything: contact
+      // completeness is NOT re-tested here, because staff can qualify a lead
+      // by hand and demoting that on a payload carrying no new evidence would
+      // override the human act in the other direction.
+      leadUpdates.is_qualified = false;
     }
     if (language) leadUpdates.preferred_language = language;
     // Only (re)link a customer when one was unambiguously resolved — never
