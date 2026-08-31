@@ -52,6 +52,8 @@ describe("MobileEstimateRow accessibility", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Actions for Ada Lovelace" }));
 
-    expect(screen.getByRole("dialog")).toHaveClass("z-[100]");
+    // z-[120] is the modal stacking contract (see ui/Dialog.jsx) — above all
+    // shell chrome (90–100) and the C360 estimates panel (110).
+    expect(screen.getByRole("dialog")).toHaveClass("z-[120]");
   });
 });
