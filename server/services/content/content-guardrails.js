@@ -1669,7 +1669,8 @@ function collectAffiliateLinkTags(text) {
   for (const tag of eachTag(String(text || ''))) {
     if (tag.isClose || tag.name !== 'affiliatelink') continue;
     const productId = (literalAttribute(tag.attrs, 'product') || '').trim();
-    tags.push({ start: tag.start, productId: productId || null });
+    const placement = (literalAttribute(tag.attrs, 'placement') || '').trim();
+    tags.push({ start: tag.start, productId: productId || null, placement: placement || null });
   }
   return tags;
 }
@@ -1703,13 +1704,24 @@ function hasServiceCtaLink(body) {
   const firstAffiliate = collectAffiliateLinkTags(text)[0];
   const prefix = firstAffiliate ? text.slice(0, firstAffiliate.start) : text;
   const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(prefix)));
-  for (const tag of eachTag(rendered)) {
-    if (!tag.isClose && tag.name === 'inlinecta') return true;
-  }
-  for (const { norm } of collectInternalDestinations(rendered)) {
+  const isServiceRoute = (norm) => {
     if (SERVICE_CTA_ROUTES.has(norm)) return true;
     const m = CITY_SERVICE_LINK_RE.exec(norm);
-    if (m && PAGE_CITY_SLUGS.has(m[1])) return true;
+    return !!(m && PAGE_CITY_SLUGS.has(m[1]));
+  };
+  for (const tag of eachTag(rendered)) {
+    if (tag.isClose || tag.name !== 'inlinecta') continue;
+    // An InlineCTA counts only when it leads to a Waves service route: no
+    // ctaHref (the component defaults to the quote page) or a quoted
+    // literal service route. A dynamic or non-service destination is not
+    // the required CTA (fail closed).
+    if (!/\bctaHref\s*=/.test(tag.attrs)) return true;
+    const href = literalAttribute(tag.attrs, 'ctaHref');
+    const norm = href ? normalizeInternalPath(href) : null;
+    if (norm && isServiceRoute(norm)) return true;
+  }
+  for (const { norm } of collectInternalDestinations(rendered)) {
+    if (isServiceRoute(norm)) return true;
   }
   return false;
 }
@@ -1768,6 +1780,15 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     const allowed = Array.isArray(entry.row.allowed_post_types) ? entry.row.allowed_post_types : [];
     if (!isRefresh && (!postType || !allowed.includes(postType))) {
       push('P0', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', tag.productId, `Affiliate product "${tag.productId}" is not eligible on a "${postType || '(missing post_type)'}" post (its allowed_post_types: ${allowed.join(', ') || 'none'}) — pages that capture local service intent never carry affiliate links; fail closed when the post type is unknown.`);
+    }
+    // Placement mirrors the astro contract: a quoted literal placement id,
+    // inside the row's allowed_placements when the row declares any. The
+    // resolver would otherwise silently downgrade the link after the build.
+    const allowedPlacements = Array.isArray(entry.row.allowed_placements) ? entry.row.allowed_placements : [];
+    if (!tag.placement) {
+      push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:`, `<AffiliateLink product="${tag.productId}"> needs a quoted literal placement="…" id (e.g. primary-rec) — a missing or expression-valued placement cannot be validated.`);
+    } else if (allowedPlacements.length && !allowedPlacements.includes(tag.placement)) {
+      push('P0', 'AFFILIATE_PLACEMENT_NOT_ALLOWED', `${tag.productId}:${tag.placement}`, `Affiliate product "${tag.productId}" does not allow placement "${tag.placement}" (allowed: ${allowedPlacements.join(', ')}).`);
     }
   }
 

@@ -159,6 +159,12 @@ function paramValueCi(url, name) {
   return '';
 }
 
+const AFFILIATE_NETWORK_HOSTS = Object.freeze(['amzn.to', 'awin1.com', 'shareasale.com', 'anrdoezrs.net', 'jdoqocy.com', 'tkqlhce.com', 'dpbolvw.net', 'prf.hn', 'pxf.io', 'sjv.io', 'linksynergy.com', 'refersion.com', 'goaffpro.com']);
+function isAffiliateNetworkHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  return AFFILIATE_NETWORK_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
 function isAmazonHost(hostname) {
   const host = String(hostname || '').toLowerCase();
   return host === 'amzn.to' || /(^|\.)amazon\.[a-z.]+$/.test(host);
@@ -206,7 +212,12 @@ function validateProduct(row, { now = new Date() } = {}) {
   if (row.plain_url !== undefined && row.plain_url !== null) {
     const plain = parseHttpsUrl(row.plain_url);
     if (!plain) errors.push('plain_url, when present, must be an https URL');
-    else if (isAmazonHost(plain.hostname) || /\bamazon\b/i.test(String(row.merchant || ''))) {
+    // The UNTRACKED fallback for EVERY merchant: no query string at all (a
+    // paused/stale product must stop earning — "?ref=waves" on a vendor
+    // domain is still a tracking link), no network/shortlink host.
+    else if (plain.search) errors.push('plain_url must carry no query string (it is the untracked fallback)');
+    if (plain && isAffiliateNetworkHost(plain.hostname)) errors.push('plain_url must not be an affiliate-network or shortlink host');
+    if (plain && (isAmazonHost(plain.hostname) || /\bamazon\b/i.test(String(row.merchant || '')))) {
       // The UNTRACKED fallback: a direct amazon.com page with no associate
       // parameters (a tagged plain_url would monetize a paused product).
       const h = plain.hostname.toLowerCase();

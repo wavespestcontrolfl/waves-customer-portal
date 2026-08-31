@@ -313,9 +313,12 @@ async function headRefreshFileContent(run, pr) {
   try { publisher = require('../content-astro/astro-publisher'); } catch (_) { return null; }
   if (typeof publisher.resolveExistingAstroFileForTarget !== 'function') return null;
   const dp = parseJsonObject(run.draft_payload);
+  // publishRefresh's own precedence: explicit file_path, else
+  // brief.target_url, else draft.page_url (refreshTargetUrlForRun) — never
+  // the draft-first resolver, which can pick a stale canonical.
   let target = dp.file_path || null;
   if (!target) {
-    try { target = (await resolveTargetForRun(run)).url || null; } catch (_) { return null; }
+    try { target = (await refreshTargetUrlForRun(run)) || (await resolveTargetForRun(run)).url || null; } catch (_) { return null; }
   }
   if (!target) return null;
   try {

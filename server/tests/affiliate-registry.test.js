@@ -54,12 +54,17 @@ describe('validateProduct', () => {
     expect(registry.validateProduct(green({ merchant: 'Some Store', approved_affiliate_url: 'https://www.amazon.com/dp/B1' })).join(' ')).toMatch(/tag=/);
     expect(registry.validateProduct({ product_id: 'pro-x', status: 'prohibited', risk_class: 'red', merchant: 'x', plain_url: 'https://example.com/p' }).join(' ')).toMatch(/must not carry plain_url/);
   });
+  test('plain_url is untracked for EVERY merchant: no query string, no network host (astro #503 parity)', () => {
+    expect(registry.validateProduct(green({ merchant: 'vendor', approved_affiliate_url: 'https://vendor.example/p?aff=waves', plain_url: 'https://vendor.example/p?ref=waves' })).join(' ')).toMatch(/no query string/);
+    expect(registry.validateProduct(green({ merchant: 'vendor', approved_affiliate_url: 'https://vendor.example/p?aff=waves', plain_url: 'https://prf.hn/click/x' })).join(' ')).toMatch(/network/);
+    expect(registry.validateProduct(green({ merchant: 'vendor', approved_affiliate_url: 'https://vendor.example/p?aff=waves', plain_url: 'https://vendor.example/p' }))).toEqual([]);
+  });
   test('amazon plain_url is the UNTRACKED fallback: direct amazon.com, no tag/ascsubtag (Codex PR3 r4)', () => {
     expect(registry.validateProduct(green({ plain_url: 'https://amzn.to/x' })).join(' ')).toMatch(/plain_url must be a direct amazon\.com/);
-    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20' })).join(' ')).toMatch(/no tag=/);
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20' })).join(' ')).toMatch(/no query string|no tag=/);
     expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01' }))).toEqual([]);
     // parameter NAME is case-insensitive (Codex PR3 r8)
-    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?Tag=wavespest-20' })).join(' ')).toMatch(/no tag=/);
+    expect(registry.validateProduct(green({ plain_url: 'https://www.amazon.com/dp/B000TEST01?Tag=wavespest-20' })).join(' ')).toMatch(/no query string|no tag=/);
     expect(registry.validateProduct(green({ approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?TAG=wavespest-20' }))).toEqual([]);
     for (const empty of ['?tag=', '?TAG=', '?tag=%20']) {
       expect(registry.validateProduct(green({ approved_affiliate_url: `https://www.amazon.com/dp/B000TEST01${empty}` })).join(' ')).toMatch(/non-empty tag=/);

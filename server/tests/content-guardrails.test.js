@@ -353,7 +353,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     { product_id: 'rain-gauge', status: 'active', risk_class: 'green', merchant: 'amazon',
       approved_affiliate_url: 'https://www.amazon.com/dp/B000TEST01?tag=wavespest-20',
       plain_url: 'https://www.amazon.com/dp/B000TEST01',
-      allowed_post_types: ['protocol', 'seasonal'], owner_approved_at: iso(10) },
+      allowed_post_types: ['protocol', 'seasonal'], allowed_placements: ['primary-rec', 'alt-rec'], owner_approved_at: iso(10) },
     { product_id: 'ant-bait', status: 'active', risk_class: 'yellow', merchant: 'solutions',
       approved_affiliate_url: 'https://www.solutionsstores.com/test-bait?aff=waves',
       allowed_post_types: ['protocol'], owner_approved_at: iso(10),
@@ -523,6 +523,18 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('placement mirrors the astro contract: literal + inside the row allowlist (Codex #3646 r2)', () => {
+    withAffiliateEnv(() => {
+      const at = (placement) => `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="${placement}">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: at('primary-rec'), frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      expect(affiliateCodes(guardrails.evaluate({ body: at('sidebar'), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+      const expr = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement={p}>x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: expr, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+      const none = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: none, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:AFFILIATE_PLACEMENT_NOT_ALLOWED');
+    });
+  });
+
   test('density: more than 3 links, or a link before the first section heading, is P1', () => {
     withAffiliateEnv(() => {
       const four = `${goodBody()}\n\n${link('rain-gauge')} ${link('ant-bait')} ${link('rain-gauge')}`;
@@ -549,6 +561,13 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(affiliateCodes(guardrails.evaluate({ body: after, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
       const inline = `Intro copy.\n\n## Measuring\n\n<InlineCTA />\n\nUse ${link('rain-gauge')} for this.`;
       expect(affiliateCodes(guardrails.evaluate({ body: inline, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      // An InlineCTA counts only when it leads to a service route (Codex #3646 r2).
+      const inlineSvc = `Intro copy.\n\n## Measuring\n\n<InlineCTA ctaHref="/pest-control-calculator/" />\n\nUse ${link('rain-gauge')} for this.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: inlineSvc, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+      for (const bad of ['<InlineCTA ctaHref="/pest-library/fleas/" />', '<InlineCTA ctaHref={href} />', '<InlineCTA ctaHref="https://example.com/x" />']) {
+        const b = `Intro copy.\n\n## Measuring\n\n${bad}\n\nUse ${link('rain-gauge')} for this.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
       // A real city-service page satisfies it too.
       const cityCta = `Intro copy.\n\n## Measuring\n\nSee [lawn care](/lawn-care-bradenton-fl/). Use ${link('rain-gauge')}.`;
       const r2 = guardrails.evaluate({ body: cityCta, frontmatter: fm() }, { targetIsBlog: true });
@@ -643,7 +662,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'UNREGISTERED_AFFILIATE_LINK', 'AFFILIATE_LINK_WITHOUT_DISCLOSURE', 'AFFILIATE_LINK_IN_META',
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
-      'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY',
+      'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }

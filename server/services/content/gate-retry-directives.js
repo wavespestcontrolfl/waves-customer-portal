@@ -46,6 +46,7 @@ const GATE_RETRY_INSTRUCTIONS = {
   PROHIBITED_AFFILIATE_PRODUCT: 'This product is prohibited (restricted-use/professional class or an explicit owner denial) — remove the recommendation entirely; do not substitute another product unless the brief names one.',
   INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT: 'This affiliate product is not currently active — remove the <AffiliateLink> (a plain unlinked product mention is fine if the prose needs it) or use an active product id your brief supplies.',
   PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW: 'This consumer-pesticide product\'s manual label review is missing or stale, so it cannot be linked — remove the <AffiliateLink>; the product may be discussed in prose under the normal product-claim rules but not linked until the owner re-verifies its registry row.',
+  AFFILIATE_PLACEMENT_NOT_ALLOWED: 'Every <AffiliateLink> needs a quoted literal placement="…" id that the product allows (your brief names the allowed placements; use primary-rec unless told otherwise) — never omit, compute, or invent a placement.',
   SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE: 'Add a Waves service CTA link (e.g. /pest-control-calculator/, /quote/, or the relevant city-service page) BEFORE any product recommendation — affiliate links are fallback monetization; the service CTA stays primary.',
   EXCESSIVE_AFFILIATE_LINK_DENSITY: 'Cap affiliate links at 3 per post and keep the opening section product-free — answer the reader\'s question first, then recommend at most one primary product and one alternative later in the piece.',
 };
