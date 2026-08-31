@@ -3,9 +3,11 @@
  * annual-prepay acceptance SMS sends AFTER the invoice delivery, so its body
  * must not promise the invoice in the future tense. Pins:
  *  - up() rewrites ONLY the exact seeded body (admin edits preserved);
- *  - the new body is past-tense about the invoice, says "WaveGuard <Tier>"
- *    (ruling 2026-08-30), keeps every placeholder, and renders as ONE GSM-7
- *    segment with a long name + amount (customer SMS ≤ 2 rendered segments);
+ *  - the new body no longer promises a future review/send, is channel-neutral
+ *    about delivery (invoiceLinkDelivered = SMS OR email went out; quiet hours
+ *    queue the text — GH Codex P2 r4), says "WaveGuard <Tier>" (ruling
+ *    2026-08-30), keeps every placeholder, and renders as ONE GSM-7 segment
+ *    with a long name + amount (customer SMS ≤ 2 rendered segments);
  *  - is_active is never touched; down() restores the prior body verbatim.
  */
 const migration = require('../models/migrations/20260831000070_prepay_acceptance_sms_post_delivery_copy');

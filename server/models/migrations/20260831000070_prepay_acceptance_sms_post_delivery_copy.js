@@ -22,7 +22,10 @@ const PREVIOUS_BODY = "Hello {first_name}! Your {waveguard_tier} WaveGuard plan 
 
 // {amount_text} renders as " for $X" (or empty) — the amount is the FINAL due
 // re-read after credit application. One GSM-7 segment with a long name.
-const NEXT_BODY = 'Hello {first_name}! Your WaveGuard {waveguard_tier} annual plan is approved. Your invoice{amount_text} was just sent by text and email.';
+// Channel-neutral on purpose (GH Codex P2 r4): invoiceLinkDelivered is true
+// when EITHER the invoice SMS or the email went out (quiet hours queue the
+// text until 8 AM), so the copy must not claim both channels delivered.
+const NEXT_BODY = 'Hello {first_name}! Your WaveGuard {waveguard_tier} annual plan is approved. Your invoice{amount_text} is on the way.';
 
 async function rewrite(knex, { from, to }) {
   if (!(await knex.schema.hasTable('sms_templates'))) return 0;
