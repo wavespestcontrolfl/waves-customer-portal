@@ -245,6 +245,8 @@ const READ_ONLY = [
   'get_apify_status', 'get_social_channel_status', 'get_managed_agent_runs',
   'get_scheduled_job_health',
   'search_call_research',
+  // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
+  'get_closeout_status', 'list_open_closeouts',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
