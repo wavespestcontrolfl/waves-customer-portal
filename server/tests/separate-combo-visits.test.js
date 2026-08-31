@@ -77,6 +77,33 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining).toHaveLength(2);
   });
 
+  test('an INELIGIBLE bond (mismatched cadence) no longer suppresses the bait rewrite', () => {
+    // audit P0: pest + count-less bait + monthly bond — the bond cannot
+    // combine, so the bait must still reach the standalone pipeline.
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System' },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr', frequency: 'monthly' },
+    ]);
+    expect(combos).toEqual([]);
+    expect(standalone).toEqual([{
+      catalogServiceKey: 'termite_bait',
+      service: { name: 'Termite Bait Station Service', frequency: 'quarterly', visitsPerYear: 4 },
+    }]);
+    expect(remaining.map((l) => recurringServiceKey(l)).sort()).toEqual(['pest_control', 'termite_bond_5yr']);
+  });
+
+  test('the reserved branch promotes the pest program when the BAIT owns the reservation (source guard)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    expect(src).toContain('promotedRetiredPestUnits');
+    expect(src).toContain('...promotedRetiredPestUnits]');
+    expect(src.match(/PEST_CADENCE_CATALOG_KEYS\[/g)).toHaveLength(2); // promotion + lock pre-pass
+    expect(src).toContain('prePassRetiredPestPair');
+  });
+
   test('pest + bait + BOND: pest separates, and the bond RIDES the bait visit (v1 never could)', () => {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     const { remaining, combos, standalone } = combineRecurringServicesForScheduling([

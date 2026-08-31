@@ -537,54 +537,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
   // rider on one visit, not two programs, and keep combining either way.
   const separateComboVisits = process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
   for (const route of COMBINED_SERVICE_ROUTES) {
-    if (route.retiredBySeparateVisits && separateComboVisits) {
-      // The pest+termite route's companion could combine WITHOUT explicit
-      // counts (companionDefaultPattern carried quarterly), and standalone
-      // termite seeding requires exactly 4 visits — so a sparse bait line
-      // left in `remaining` would schedule a lone visit with no series
-      // (and, on a reserved accept, nothing at all). Route it through the
-      // STANDALONE pipeline instead (the rodent-bait precedent): both
-      // accept branches schedule and seed standalone units, anchored
-      // same-trip on reserved accepts. Only a clean quarterly-or-count-less
-      // bait line rewrites; conflicted/invalid/mismatched lines keep their
-      // pre-existing per-line semantics. Lawn+T&S needs no rewrite: a T&S
-      // line seeds per-line via the allowlist (explicit visits), and the
-      // reserved branch promotes it like lawn/palm below.
-      if (route.companionKey === 'termite_bait') {
-        // With a BOND line beside it, the bait must stay in `remaining` so
-        // the (kept) bait+bond rider routes below can claim it — under the
-        // retired pest route the bond now rides the bait visit, which v1
-        // never managed (pest used to consume the bait first and the bond
-        // scheduled standalone, the documented limitation).
-        const hasBondLine = remaining.some(
-          (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond'),
-        );
-        const companionIdx = hasBondLine
-          ? -1
-          : remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
-        const hasPrimary = remaining.some((svc) => recurringServiceKey(svc) === route.primaryKey);
-        if (companionIdx !== -1 && hasPrimary) {
-          const companion = remaining[companionIdx];
-          const visits = visitsPerYearForRecurringService(companion);
-          const cadence = explicitServiceCadence(companion);
-          const clean = !visitCountFieldsConflict(companion) && !visitCountFieldsInvalid(companion)
-            && (visits == null || visits === 4)
-            && (!cadence || cadence === route.companionDefaultPattern);
-          if (clean) {
-            remaining.splice(companionIdx, 1);
-            standaloneRewrites.push({
-              catalogServiceKey: 'termite_bait',
-              service: {
-                name: 'Termite Bait Station Service',
-                frequency: cadence || route.companionDefaultPattern,
-                visitsPerYear: 4,
-              },
-            });
-          }
-        }
-      }
-      continue;
-    }
+    if (route.retiredBySeparateVisits && separateComboVisits) continue;
     const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
     if (primaryIdx === -1) continue;
     // Companion may live in recurring.services OR ride as a supplement.
@@ -700,6 +653,43 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       },
     });
   }
+  // Retired-route companion rewrite (GATE_SEPARATE_COMBO_VISITS) — runs
+  // AFTER the route loop so an ELIGIBLE bait+bond rider route has already
+  // claimed the bait (audit P0: a bond line that cannot combine — invalid
+  // or mismatched — must not suppress this). A bait line still here beside
+  // a pest primary is the retired pest+bait pair: standalone termite
+  // seeding requires exactly 4 visits, and companionDefaultPattern used to
+  // carry the count-less shape, so route it through the STANDALONE
+  // pipeline (the rodent-bait precedent — both accept branches schedule
+  // and seed standalone units, same-trip anchored on reserved accepts).
+  // Conflicted/invalid/mismatched lines keep their per-line semantics.
+  // Lawn+T&S needs no rewrite: a T&S line seeds per-line via the
+  // allowlist, and the reserved branch promotes it like lawn/palm.
+  if (separateComboVisits) {
+    for (const route of COMBINED_SERVICE_ROUTES) {
+      if (!route.retiredBySeparateVisits || route.companionKey !== 'termite_bait') continue;
+      const companionIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
+      const hasPrimary = remaining.some((svc) => recurringServiceKey(svc) === route.primaryKey);
+      if (companionIdx === -1 || !hasPrimary) continue;
+      const companion = remaining[companionIdx];
+      const visits = visitsPerYearForRecurringService(companion);
+      const cadence = explicitServiceCadence(companion);
+      const clean = !visitCountFieldsConflict(companion) && !visitCountFieldsInvalid(companion)
+        && (visits == null || visits === 4)
+        && (!cadence || cadence === route.companionDefaultPattern);
+      if (!clean) continue;
+      remaining.splice(companionIdx, 1);
+      standaloneRewrites.push({
+        catalogServiceKey: 'termite_bait',
+        service: {
+          name: 'Termite Bait Station Service',
+          frequency: cadence || route.companionDefaultPattern,
+          visitsPerYear: 4,
+        },
+      });
+    }
+  }
+
   // Standalone rewrites (owner decision 2026-07-12): sold rodent bait that
   // no route consumed schedules as its own catalog visit — both when it is
   // a recurring.services line (in `remaining`) and when it rides only as a
@@ -2777,6 +2767,18 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
 // Tree & Shrub cadence → catalog key (reserved-accept promotion under
 // GATE_SEPARATE_COMBO_VISITS; mirrors supportsConverterFollowUpSeeding's
 // T&S visit rules).
+// Pest cadence → catalog key (reserved-accept promotion under
+// GATE_SEPARATE_COMBO_VISITS: with the pest+bait route retired, a
+// reservation OWNED BY THE BAIT line leaves the pest program in
+// `remaining` — pre-gate, reservedRowComboRewrites rewrote that reserved
+// bait row to the combined service, which covered pest).
+const PEST_CADENCE_CATALOG_KEYS = {
+  quarterly: 'pest_general_quarterly',
+  bimonthly: 'pest_general_bimonthly',
+  monthly: 'pest_general_monthly',
+  semiannual: 'pest_general_semiannual',
+};
+
 const TREE_SHRUB_CADENCE_CATALOG_KEYS = {
   every_6_weeks: 'tree_shrub_6week',
   bimonthly: 'tree_shrub_program',
@@ -4416,8 +4418,23 @@ const EstimateConverter = {
             // family lock order and deadlock (codex r17 P2: one reserves
             // termite and promotes mosquito while the other does the
             // reverse). Mirrors the loop's own name/key derivations.
+            const prePassRetiredPestPair = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+              && standalone.some((unit) => unit.catalogServiceKey === 'termite_bait');
             for (const svc of remaining) {
               const key = String(recurringServiceKey(svc) || '');
+              // Mirrors promotedRetiredPestUnits below (audit P0): the
+              // promoted pest program takes its series lock in the sorted
+              // pre-pass union like every other promotion.
+              if (key === 'pest_control' && prePassRetiredPestPair) {
+                const svcName = svc.name || svc.serviceName || svc.service_name || 'Pest Control';
+                const pestPattern = converterFollowUpSeedingPattern(
+                  svc, { service_type: svcName }, inferredFrequencyKey,
+                );
+                if (pestPattern) {
+                  await addUnit(svcName, PEST_CADENCE_CATALOG_KEYS[pestPattern] || null);
+                }
+                continue;
+              }
               if ((key === 'termite_bait' || key.startsWith('termite_bond'))
                 && visitsPerYearForRecurringService(svc) === 4) {
                 const isBond = key.startsWith('termite_bond');
@@ -4604,6 +4621,29 @@ const EstimateConverter = {
         // billed program must schedule. The pattern gate reuses the
         // allowlist end-to-end, so a legacy line that would not seed does
         // not promote either (office scheduling keeps its semantics).
+        // Pest promotes ONLY under GATE_SEPARATE_COMBO_VISITS and only in
+        // the retired pest+bait pair shape (a standalone bait unit exists):
+        // when the reservation is owned by the BAIT line, alreadyReserved
+        // suppresses the bait insert and nothing else would schedule the
+        // billed pest program (audit P0). A pest-owned reservation dedups
+        // via alreadyReserved exactly like every other promotion.
+        const retiredPestPairPresent = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+          && (reservedStandalone || []).some((unit) => unit.catalogServiceKey === 'termite_bait');
+        const promotedRetiredPestUnits = !retiredPestPairPresent ? [] : (remaining || [])
+          .filter((line) => {
+            if (String(recurringServiceKey(line) || '') !== 'pest_control') return false;
+            const lineName = line.name || line.serviceName || line.service_name || 'Pest Control';
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+          })
+          .map((line) => {
+            const lineName = line.name || line.serviceName || line.service_name || 'Pest Control';
+            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            return {
+              service: { ...line, name: lineName, frequency: line.frequency || pattern },
+              catalogServiceKey: PEST_CADENCE_CATALOG_KEYS[pattern] || null,
+              noteKind: 'pest program',
+            };
+          });
         // Tree & Shrub promotes ONLY under GATE_SEPARATE_COMBO_VISITS
         // (codex P0 on the route retirement): with the lawn+T&S combined
         // route retired, a reserved lawn accept leaves the sold T&S line in
@@ -4683,7 +4723,7 @@ const EstimateConverter = {
             throw abort;
           }
         }
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
+        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to
           // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
