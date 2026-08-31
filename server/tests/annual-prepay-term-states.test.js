@@ -185,8 +185,12 @@ function statusWriteSites(src) {
     out.push({ expr: `<unclassifiable write args: ${a.slice(0, 40)}>`, guards });
   };
   const scanChain = (chain, declIndex, guards = chainGuards(chain)) => {
-    for (const w of chain.matchAll(/\.(?:update|insert)\s*\(/g)) {
-      classifyWriteArgs(argSpan(chain, w.index + w[0].length - 1), guards, declIndex);
+    for (const w of chain.matchAll(/\.(?:update|insert|merge)\s*\(/g)) {
+      const args = argSpan(chain, w.index + w[0].length - 1);
+      // `.onConflict().merge()` with no args re-uses the insert values, which
+      // the insert scan already classified.
+      if (!args.trim()) continue;
+      classifyWriteArgs(args, guards, declIndex);
     }
   };
   for (const m of src.matchAll(chainRe)) {
@@ -267,6 +271,9 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
       .toEqual([]); // two-arg form on a non-status column is not a status write
     expect(statusWriteExpressions("await db('annual_prepay_terms').update(buildPayload(term));"))
       .toEqual(['<unclassifiable write args: buildPayload(term)>']);
+    // Upsert merge carrying a status.
+    expect(statusWriteExpressions("await db('annual_prepay_terms').insert({ id }).onConflict('id').merge({ status: 'refunded' });"))
+      .toEqual(["'refunded'"]);
   });
 
   test('shorthand, computed-key, and spread write objects fail closed instead of slipping through', () => {
@@ -310,7 +317,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       if (new RegExp(`\\.table\\(\\s*['"]${TABLE}`).test(src)) {
         unscannable.push(`${rel}: .table('${TABLE}') builder form`);
       }
-      if (/\bTABLE\s*=|ANNUAL_PREPAY_TERMS_TABLE/.test(src) && new RegExp(`=\\s*['"]${TABLE}['"]`).test(src)) {
+      if (new RegExp(`(?:const|let|var)\\s+[\\w$]+\\s*=\\s*['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]`).test(src)) {
+        // db(SOME_CONST) indirection would make every chain invisible.
         unscannable.push(`${rel}: table name behind a constant`);
       }
     }
@@ -380,6 +388,13 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // Moves 6–8: decisions.
       { expr: 'statusAfterDecision(action)', guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
     ]);
+    // Move 11's third predicate lives on the upstream revival SELECT, not the
+    // conditional UPDATE — pin it there: only dispute-marked, undecided
+    // cancelled terms are even considered for revival.
+    expect(read('server/services/annual-prepay-renewals.js')).toMatch(
+      /\.where\(\{ prepay_invoice_id: invoice\.id, status: 'cancelled' \}\)\s*\.whereNull\('renewal_decision'\)\s*\.whereNotNull\('dispute_suspended_at'\)/,
+    );
+
     expect(statusWriteSites(read('server/routes/admin-invoices.js'))).toEqual([
       // Move 13: DELETE /:id/annual-prepay — deliberately unguarded (documented residue).
       { expr: "'cancelled'", guards: ['where({ id: termId })'] },
