@@ -79,6 +79,13 @@ describe('social sanitizeShareContent (publishToAll strip point)', () => {
     expect(allBad.customContent).toBeNull();
   });
 
+  test('validateContent — the last check on every FINAL platform text — rejects affiliate material generated after input sanitization (Codex r6 P1)', () => {
+    const { validateContent } = social._internals || {};
+    const check = validateContent || social.validateContent;
+    expect(check(`New guide! Grab the gauge at amzn.to/abc`, 'facebook').valid).toBe(false);
+    expect(check(`New guide! Read it at ${BLOG_URL}`, 'facebook').issues.some((i) => /AFFILIATE/.test(i))).toBe(false);
+  });
+
   test('postToSingle (admin publish-single + tech-social path) applies the same guard', async () => {
     process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
     try {

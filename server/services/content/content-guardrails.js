@@ -1683,7 +1683,11 @@ function affiliateTagCountsByProduct(text) {
 // CTA route or a real /{service}-{city}-fl/ page (validated against the
 // published-city set, same as internalRouteFinding).
 function hasServiceCtaLink(body) {
-  for (const { norm } of collectInternalDestinations(body)) {
+  // Only a RENDERED link counts: comments, code, and definitely-hidden
+  // spans are masked first so `{/* [quote](/quote/) */}` cannot satisfy
+  // the requirement (Codex r6 P1).
+  const rendered = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(String(body || ''))));
+  for (const { norm } of collectInternalDestinations(rendered)) {
     if (SERVICE_CTA_ROUTES.has(norm)) return true;
     const m = CITY_SERVICE_LINK_RE.exec(norm);
     if (m && PAGE_CITY_SLUGS.has(m[1])) return true;
@@ -1833,33 +1837,46 @@ function affiliateUrlIdentity(rawUrl) {
   } catch { return null; }
 }
 
+// One URL → affiliate verdict. `u` is a parsed URL; registryIdentities is
+// the host+path set of every registered product URL.
+function urlIsAffiliate(u, registryIdentities) {
+  const identity = affiliateUrlIdentity(u.href);
+  if (identity && registryIdentities.has(identity)) return true;
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
+  if ((host === 'amazon.com' || host.endsWith('.amazon.com')) && (u.searchParams.has('tag') || u.searchParams.has('ascsubtag'))) return true;
+  if (hasAffiliateQueryParam(u)) return true;
+  return false;
+}
+
+// Scheme-less link shapes that autolink or that a reader copies verbatim
+// ("amzn.to/abc", "www.amazon.com/dp/X?tag=…", "//amzn.to/abc") — the
+// absolute-URL scanner never sees them (Codex r6 P1). Candidate = a
+// dotted host token followed by an optional path/query; each is parsed as
+// https and judged by the same predicate as absolute URLs.
+const SCHEMELESS_URL_RE = /(?:^|[\s(<\[>"'`])(?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(\/[^\s)>\]"'`]*|\?[^\s)>\]"'`]*)?/gi;
+
 function containsAffiliateMaterial(text) {
   const raw = String(text || '');
   if (!raw) return false;
   const decoded = decodeEntitiesForScan(raw);
+  const registryIdentities = new Set(
+    affiliateRegistryModule().registryUrls().map(affiliateUrlIdentity).filter(Boolean),
+  );
   for (const scan of decoded && decoded !== raw ? [raw, decoded] : [raw]) {
     for (const tag of eachTag(scan)) {
       if (!tag.isClose && tag.name === 'affiliatelink') return true;
     }
-    // Registry URLs match on their PRODUCT identity (host + path), not the
-    // exact string: a reordered/extra query parameter or a fragment still
-    // lands on the same registered product page.
-    const registryIdentities = new Set(
-      affiliateRegistryModule().registryUrls().map(affiliateUrlIdentity).filter(Boolean),
-    );
     const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
     let m;
     while ((m = urlRe.exec(scan)) !== null) {
       const rawUrl = m[0].replace(/[.,;:!?]+$/, '');
-      const identity = affiliateUrlIdentity(rawUrl);
-      if (identity && registryIdentities.has(identity)) return true;
-      try {
-        const u = new URL(rawUrl);
-        const host = u.hostname.toLowerCase().replace(/^www\./, '');
-        if (AFFILIATE_NETWORK_HOST_SUFFIXES.some((sfx) => host === sfx || host.endsWith(`.${sfx}`))) return true;
-        if ((host === 'amazon.com' || host.endsWith('.amazon.com')) && (u.searchParams.has('tag') || u.searchParams.has('ascsubtag'))) return true;
-        if (hasAffiliateQueryParam(u)) return true;
-      } catch { /* malformed URL — not a match */ }
+      try { if (urlIsAffiliate(new URL(rawUrl), registryIdentities)) return true; } catch { /* malformed — not a match */ }
+    }
+    const bareRe = new RegExp(SCHEMELESS_URL_RE.source, 'gi');
+    while ((m = bareRe.exec(scan)) !== null) {
+      const candidate = `https://${m[1]}${(m[2] || '').replace(/[.,;:!?]+$/, '')}`;
+      try { if (urlIsAffiliate(new URL(candidate), registryIdentities)) return true; } catch { /* not a URL */ }
     }
   }
   return false;

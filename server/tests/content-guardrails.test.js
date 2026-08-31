@@ -539,6 +539,10 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       const noCta = `Intro copy.\n\n## Measuring\n\nUse ${link('rain-gauge')} for this.`;
       const r = guardrails.evaluate({ body: noCta, frontmatter: fm() }, { targetIsBlog: true });
       expect(affiliateCodes(r)).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      // A CTA hidden in a comment or code does not count (Codex r6 P1).
+      const hidden = `Intro copy.\n\n## Measuring\n\n{/* [quote](/quote/) */}\n\n\`[quote](/quote/)\`\n\nUse ${link('rain-gauge')} for this.`;
+      const r3 = guardrails.evaluate({ body: hidden, frontmatter: fm() }, { targetIsBlog: true });
+      expect(affiliateCodes(r3)).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
       // A real city-service page satisfies it too.
       const cityCta = `Intro copy.\n\n## Measuring\n\nSee [lawn care](/lawn-care-bradenton-fl/). Use ${link('rain-gauge')}.`;
       const r2 = guardrails.evaluate({ body: cityCta, frontmatter: fm() }, { targetIsBlog: true });
@@ -606,6 +610,13 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       expect(guardrails.containsAffiliateMaterial('see https://www.thermacell.com/x?irclickid=abc')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://example.com/x?utm_medium=affiliate')).toBe(true);
       expect(guardrails.containsAffiliateMaterial('see https://www.solutionsstores.com/other-product?utm_source=newsletter')).toBe(false);
+      // Scheme-less / scheme-relative shapes (Codex r6 P1).
+      expect(guardrails.containsAffiliateMaterial('grab it at amzn.to/abc today')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see www.amazon.com/dp/B000TEST01?tag=wavespest-20')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see //amzn.to/abc')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('see solutionsstores.com/test-bait?aff=waves')).toBe(true);
+      expect(guardrails.containsAffiliateMaterial('visit wavespestcontrol.com/blog/ or epa.gov/pesticides')).toBe(false);
+      expect(guardrails.containsAffiliateMaterial('call 941.599.3489 e.g. today')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('per https://www.epa.gov/pesticide-labels guidance')).toBe(false);
       expect(guardrails.containsAffiliateMaterial('')).toBe(false);
     }, { gate: '' }); // gate OFF — stripping still detects

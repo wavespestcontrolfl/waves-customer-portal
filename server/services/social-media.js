@@ -728,6 +728,13 @@ function validateContent(text, platform) {
     issues.push('Contains pricing claim — link to /pest-control-calculator/ instead');
   }
   issues.push(...complianceLanguageIssues(text));
+  // Affiliate links are web-only: validateContent is the last check on
+  // every FINAL platform text (generated or custom), so generated copy that
+  // introduces an affiliate/tracking URL after input sanitization still
+  // cannot post (Codex r6 P1).
+  if (require('./content/content-guardrails').containsAffiliateMaterial(text)) {
+    issues.push('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: contains affiliate material — affiliate links publish on the blog only');
+  }
 
   const phones = text.match(PHONE_PATTERN) || [];
   for (const phone of phones) {
