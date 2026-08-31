@@ -42,10 +42,13 @@ function poolSize(envName, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-// min > max makes tarn throw at startup ("opt.max is smaller than opt.min")
-// — a mis-set env var must degrade the pool, never prevent boot.
+// A mis-set env var must degrade the pool, never break the app: min > max
+// makes tarn throw at startup ("opt.max is smaller than opt.min"), and a
+// pool of 1 deadlocks every cron-lock job (the advisory-lock connection is
+// pinned while the job body queries the pool for a second one) — so the
+// floor for max is 2, and min clamps to max.
 function poolConfig(defaultMax) {
-  const max = poolSize('DB_POOL_MAX', defaultMax);
+  const max = Math.max(2, poolSize('DB_POOL_MAX', defaultMax));
   return { min: Math.min(poolSize('DB_POOL_MIN', 2), max), max };
 }
 

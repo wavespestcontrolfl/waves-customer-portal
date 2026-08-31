@@ -105,7 +105,7 @@ describe('cron-lock runExclusive', () => {
     expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
   });
 
-  test('caps concurrent lock holders and frees the slots when jobs finish', async () => {
+  test('over-cap jobs WAIT for a slot without a connection — and never drop the tick', async () => {
     const conn = mockConnection(true);
     db.client.acquireConnection.mockResolvedValue(conn);
 
@@ -114,13 +114,21 @@ describe('cron-lock runExclusive', () => {
     const herd = Array.from({ length: 10 }, (_, i) =>
       runExclusive(`herd-${i}`, () => gate, { recordHealth: false }));
 
-    // 11th distinct job while 10 lock connections are pinned: skip, don't
-    // queue — queuing is what let a cron herd starve the pool.
-    const overflow = await runExclusive('herd-overflow', jest.fn(), { recordHealth: false });
-    expect(overflow).toEqual({ skipped: true, reason: 'lock_capacity' });
+    // 11th distinct job while 10 lock connections are pinned: it must wait
+    // (holding no connection), not skip — date-scoped once-a-day jobs like
+    // monthly billing cannot recover a dropped tick tomorrow.
+    const overflowBody = jest.fn(async () => 'billed');
+    const overflow = runExclusive('billing-monthly', overflowBody, { recordHealth: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(overflowBody).not.toHaveBeenCalled();
+    // No 11th pool connection was checked out while waiting.
+    expect(db.client.acquireConnection).toHaveBeenCalledTimes(10);
 
     release('swept');
     await expect(Promise.all(herd)).resolves.toEqual(Array(10).fill('swept'));
+    // The waiter gets the freed slot and runs to completion.
+    await expect(overflow).resolves.toBe('billed');
+    expect(overflowBody).toHaveBeenCalledTimes(1);
 
     // Slots are returned: the next tick runs normally.
     const after = await runExclusive('after-herd', async () => 'ran', { recordHealth: false });
@@ -140,11 +148,15 @@ describe('cron-lock runExclusive', () => {
       const herd = Array.from({ length: 5 }, (_, i) =>
         runExclusive(`small-${i}`, () => gate, { recordHealth: false }));
 
-      const overflow = await runExclusive('small-overflow', jest.fn(), { recordHealth: false });
-      expect(overflow).toEqual({ skipped: true, reason: 'lock_capacity' });
+      const overflowBody = jest.fn(async () => 'ran');
+      const overflow = runExclusive('small-overflow', overflowBody, { recordHealth: false });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(overflowBody).not.toHaveBeenCalled();
+      expect(db.client.acquireConnection).toHaveBeenCalledTimes(5);
 
       release('swept');
       await expect(Promise.all(herd)).resolves.toEqual(Array(5).fill('swept'));
+      await expect(overflow).resolves.toBe('ran');
     } finally {
       delete db.client.pool;
     }

@@ -135,15 +135,22 @@ async function recordJobEnd(jobName, startedAtMs, error, conn) {
 // job_health by one row per customer/run and leave one-off failures listed
 // as "failing" forever. Bounded-enum names (per-conversion-type upload
 // syncs) stay recorded — they ARE the scheduled jobs.
-// Hard cap on concurrently HELD lock connections. A job's body still runs
-// its queries through the shared pool while its lock connection is pinned,
-// so without a ceiling a big-enough herd of distinct jobs could pin every
-// pool connection and leave their own callbacks (and web routes) nothing to
-// run on. Half the ACTIVE pool maximum (read at tick time — DB_POOL_MAX is
-// tunable now, and dev/test pools are only 10) guarantees the other half
-// stays free; jobs over the cap skip the tick exactly like a lease_held
-// skip — every wrapped job is sweep-style, so the next tick picks the work
-// up.
+// Cap on concurrently HELD lock connections. A job's body still runs its
+// queries through the shared pool while its lock connection is pinned, so
+// without a ceiling a big-enough herd of distinct jobs could pin every
+// pool connection and leave their own callbacks (and web routes) nothing
+// to run on. Half the ACTIVE pool maximum (read at tick time — DB_POOL_MAX
+// is tunable now, and dev/test pools are only 10) guarantees the other
+// half stays free.
+//
+// Jobs over the cap WAIT for a slot — they must not skip. A waiter holds
+// NO connection (the semaphore sits before the pool acquire), so waiting
+// is free for the pool; skipping is not free for the business: date-scoped
+// once-a-day jobs (monthly billing charges customers whose billing_day is
+// today) cannot recover a dropped tick tomorrow. A late tick beats a lost
+// one. The advisory try-lock still governs same-job overlap: if a prior
+// tick of the SAME job is still running once the slot arrives, the tick
+// skips as lease_held exactly as before.
 function lockHolderCap() {
   const poolMax = Number(db.client?.pool?.max)
     || Number(db.client?.config?.pool?.max)
@@ -151,19 +158,32 @@ function lockHolderCap() {
   return Math.max(1, Math.floor(poolMax / 2));
 }
 let activeLockHolders = 0;
+const lockSlotWaiters = [];
+
+async function acquireLockSlot(jobName) {
+  if (activeLockHolders < lockHolderCap()) {
+    activeLockHolders += 1;
+    return;
+  }
+  logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${lockHolderCap()}) — waiting for a slot`);
+  // The releaser hands its slot over without decrementing, so the counter
+  // already accounts for this waiter when the promise resolves.
+  await new Promise((resolve) => lockSlotWaiters.push(resolve));
+}
+
+function releaseLockSlot() {
+  const next = lockSlotWaiters.shift();
+  if (next) next(); // slot handed to the waiter; counter unchanged
+  else activeLockHolders -= 1;
+}
 
 async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
-  const cap = lockHolderCap();
-  if (activeLockHolders >= cap) {
-    logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${cap}) — skipping tick to keep pool headroom`);
-    return { skipped: true, reason: 'lock_capacity' };
-  }
-  activeLockHolders += 1;
+  await acquireLockSlot(jobName);
   try {
     return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
   } finally {
-    activeLockHolders -= 1;
+    releaseLockSlot();
   }
 }
 
@@ -272,9 +292,9 @@ async function isLocked(jobName) {
 // opposed to a `skipped: true` shape the job BODY returned, which flows
 // through untouched. Callers that must distinguish "the lock machinery
 // never ran my body" from their own body-level skips use this predicate
-// instead of enumerating reasons (an enumeration went stale when
-// lock_capacity was added and made a capacity skip look like success).
-const LOCK_SKIP_REASONS = new Set(['lease_held', 'no_connection', 'lock_capacity']);
+// instead of enumerating reasons, so adding a reason here can never make
+// a machinery skip look like a caller-level success again.
+const LOCK_SKIP_REASONS = new Set(['lease_held', 'no_connection']);
 function wasLockSkipped(result) {
   return !!(result && result.skipped === true && LOCK_SKIP_REASONS.has(result.reason));
 }
