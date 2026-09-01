@@ -349,16 +349,20 @@ describe('lead identity corpus — verdicts through the call-path primitives', (
     }
   });
 
-  test('checks.sameStreet — unit-suffixed and bare addresses split to one normalized street line', () => {
-    const annotated = CASES.filter((c) => c.checks && c.checks.sameStreet);
+  test('checks.sameStreet — the annotation matches the computed street equality, true OR false', () => {
+    const annotated = CASES.filter((c) => c.checks && typeof c.checks.sameStreet === 'boolean');
     expect(annotated.length).toBeGreaterThan(0);
     for (const c of annotated) {
       const a = splitStreetLineUnit(c.a.address);
       const b = splitStreetLineUnit(c.b.address);
-      expect({ id: c.id, street: normalizeStreetLine(a.street) })
-        .toEqual({ id: c.id, street: normalizeStreetLine(b.street) });
-      // At least one side actually carried a unit, or the check is vacuous.
-      expect({ id: c.id, unitSeen: Boolean(a.unit || b.unit) }).toEqual({ id: c.id, unitSeen: true });
+      // Evaluated for BOTH values — a false annotation asserts the streets
+      // genuinely differ, it is not silently skipped.
+      const same = normalizeStreetLine(a.street) === normalizeStreetLine(b.street);
+      expect({ id: c.id, same }).toEqual({ id: c.id, same: c.checks.sameStreet });
+      if (c.checks.sameStreet) {
+        // At least one side actually carried a unit, or the check is vacuous.
+        expect({ id: c.id, unitSeen: Boolean(a.unit || b.unit) }).toEqual({ id: c.id, unitSeen: true });
+      }
     }
   });
 });

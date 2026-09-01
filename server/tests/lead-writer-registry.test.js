@@ -147,8 +147,10 @@ function blankCommentsAndStrings(code) {
 // argument blanks to whitespace (skipped — the literal scan owns it), while
 // an identifier, member, call (`resolveTable(kind)` — one nesting level),
 // conditional, or concatenation survives blanking and is treated as dynamic.
-// No top-level comma (a two-argument call is not a knex builder head).
-const DYN_EXPR = String.raw`((?:[^(),]|\([^()]*\))+)`;
+// No top-level comma (a two-argument call is not a knex builder head); two
+// nesting levels, matching CHAIN, so `resolveTable(config.get('kind'))`
+// reads as one argument.
+const DYN_EXPR = String.raw`((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)`;
 const DYNAMIC_INSERT_PATTERNS = [
   new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
   new RegExp(String.raw`\.\s*table\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
@@ -210,9 +212,11 @@ function scanSourceForDynamicTableInserts(src) {
   const RAW_DYNAMIC_RES = [
     /\binsert\s+into\s+(?:only\s+)?\$\{([^}]+)\}/gi,
     /\binsert\s+into\s+(?:only\s+)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
-    // Knex identifier binding at the table position — the bound value is
-    // runtime data, so it is dynamic by definition (never resolvable).
+    // Knex identifier bindings at the table position — positional (??) or
+    // named (:table:) — the bound value is runtime data, so it is dynamic
+    // by definition (never resolvable).
     /\binsert\s+into\s+(?:only\s+)?(\?\?)/gi,
+    /\binsert\s+into\s+(?:only\s+)?(:[\w$]+:)/gi,
   ];
   for (const re of RAW_DYNAMIC_RES) {
     re.lastIndex = 0;
@@ -412,6 +416,15 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     );
     expect(rawBound).toHaveLength(1);
     expect(rawBound[0].expr).toBe('??');
+    const rawNamedBound = scanSourceForDynamicTableInserts(
+      "await db.raw('INSERT INTO :table: (a) VALUES (:a)', { table, a });"
+    );
+    expect(rawNamedBound).toHaveLength(1);
+    expect(rawNamedBound[0].expr).toBe(':table:');
+    const nestedComputed = scanSourceForDynamicTableInserts(
+      "await db(resolveTable(config.get('kind'))).insert(row);"
+    );
+    expect(nestedComputed).toHaveLength(1);
     // A literal raw table with interpolated VALUES stays with the literal scan.
     const rawLiteralTable = scanSourceForDynamicTableInserts(
       'await db.raw(`INSERT INTO other_things (a) VALUES (${a})`);'
@@ -526,7 +539,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       const ind = indentOf(l);
       if (ind >= threshold) continue;
       threshold = ind;
-      if (FUNCTION_HEADER_RE.test(l) || ind === 0) { start = i; break; }
+      // A block-opening continuation line (`) {`, `}) {`) is a MULTILINE
+      // signature's closer: start the span there, so a nested function with
+      // a multiline header keeps its own scope instead of expanding to the
+      // outer function. `} else {` / `} catch {` continue the SAME scope and
+      // are not headers.
+      const isSignatureCloser = /^[)\]}].*\{\s*$/.test(l.trim())
+        && !/\b(?:else|catch|finally)\b/.test(l.trim());
+      if (FUNCTION_HEADER_RE.test(l) || isSignatureCloser || ind === 0) { start = i; break; }
     }
     const startIndent = indentOf(lines[start]);
     let end = lines.length - 1;
