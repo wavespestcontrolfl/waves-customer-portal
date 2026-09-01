@@ -36,7 +36,7 @@ const {
 // different db('leads') generators (waiting vs unattributed) get distinct rows.
 const CHAIN_METHODS = [
   'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'whereNotIn',
-  'orWhereRaw', 'orWhereNull', 'orWhere', 'orWhereIn', 'leftJoin', 'join', 'select', 'count',
+  'orWhereRaw', 'orWhereNull', 'orWhere', 'orWhereNot', 'orWhereIn', 'leftJoin', 'join', 'select', 'count',
   'countDistinct', 'orderBy', 'modify', 'limit',
 ];
 
@@ -186,6 +186,15 @@ describe('Action Inbox generators', () => {
         && c.args[1] === INTERNAL_TEST_CUSTOMERS,
     );
     expect(exclusions).toHaveLength(2);
+
+    // Undelivered plan_restart quotes never become a "call before it
+    // expires" prompt (C4 zero-follow-up contract, codex #3671 r28 P1):
+    // source-NULL legacy rows and operator-delivered restart quotes stay.
+    const est = capture.filter((c) => c.table === 'estimates as e');
+    expect(est.some((c) => c.method === 'whereNull' && c.args[0] === 'e.source')).toBe(true);
+    expect(est.some((c) => c.method === 'orWhereNot' && c.args[0] === 'e.source' && c.args[1] === 'plan_restart')).toBe(true);
+    expect(est.some((c) => c.method === 'orWhereRaw'
+      && String(c.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(c.args[0]).includes('IS NOT NULL'))).toBe(true);
   });
 
   test('builder_warranty_expiring: warn action on open leads inside the ET window; absent when empty', async () => {

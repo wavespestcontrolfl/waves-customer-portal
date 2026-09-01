@@ -9113,6 +9113,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    // Restart accepts take the STORED offer verbatim (pre-push P0 after GH
+    // r21): the mint prices deterministic defaults and the accept-time
+    // revalidation compares attempt identity + families, not price mix —
+    // honoring body option selections here would let a crafted PUT accept
+    // a one-time mode the mint never offered. Same 409 code as the
+    // mutation-route guard so the portal messages it identically.
+    // selectedFrequency and serviceCadences are validated after bundle
+    // resolution instead (GH r22 P1 + its pre-push follow-on): the
+    // estimate page ALWAYS serializes both — defaults included — so bare
+    // nonempty checks bricked every normal restart accept.
+    if (String(estimate.source || '') === 'plan_restart' && requestedOneTime) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Billing choices are only meaningful for recurring accepts: the
     // converter creates the matching invoice after the slot is confirmed.
     // Reject up front rather than fulfill the request half-way.
@@ -9589,6 +9605,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
     }
+    // Frozen-restart cadence rule (GH r22 P1, relaxing the r21 guard): the
+    // estimate page ALWAYS serializes selectedFrequency — it falls back to
+    // the first offered frequency — so the submitted key is allowed only
+    // when it IS the stored offer's deterministic default; any other key
+    // would accept a cadence/price the mint never offered.
+    if (String(estimate.source || '') === 'plan_restart' && selectedFrequencyKey
+        && selectedFrequencyKey !== String(defaultFrequencyFromList(pricingFrequencies)?.key || '')) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
     // entries carry their own annualPrepayEligible (finalizePricingBundle);
     // that flag decides for the SELECTED tier — the stored-mix rule remains
@@ -9651,6 +9679,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // selected one must not carry prepay past this point.
       if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
+      // Frozen-restart combo rule (pre-push P1 after GH r22): the page
+      // always sends the cadence map for bundled offers — defaults
+      // included — so the map itself can't be rejected. The matched combo
+      // must BE the deterministic default: every non-pest axis key must
+      // equal its section's own default (the same derivation the page's
+      // defaultSelectedForServices uses for the initial selection; the
+      // pest axis rides selectedFrequencyKey, bound to the primary
+      // default above), and — belt on top of identity — the combo's
+      // server-stamped totals must equal the minted row's stored totals.
+      // Totals alone were not enough: equal-priced combos can differ in
+      // composition, and conversion schedules the combo.
+      if (String(estimate.source || '') === 'plan_restart') {
+        const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+        const defaultKeyFor = (axis) => {
+          const section = sections.find((s) => s && s.key === axis);
+          const freqs = Array.isArray(section?.frequencies) ? section.frequencies : [];
+          return String(section?.defaultFrequencyKey || freqs[0]?.key || '');
+        };
+        const comboSelection = selectedCombo.selection || {};
+        const nonDefaultAxis = Object.entries(comboSelection)
+          .some(([axis, key]) => axis !== 'pest_control' && String(key) !== defaultKeyFor(axis));
+        const centsOf = (v) => Math.round(Number(v || 0) * 100);
+        if (nonDefaultAxis
+          || centsOf(selectedCombo.monthly) !== centsOf(estimate.monthly_total)
+          || centsOf(selectedCombo.annual) !== centsOf(estimate.annual_total)) {
+          return res.status(409).json({
+            error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+            code: 'restart_quote_frozen',
+          });
+        }
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the
@@ -10394,6 +10453,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.status = 409;
           throw err;
         }
+      }
+      // Plan-restart accept revalidation (C4 codex GH r4 P1): the restart
+      // mint excludes families with residual live rows, but the published
+      // estimate stays acceptable until expiry — staff restoring a family
+      // or reactivating the account after the mint would let this token
+      // accept a quote containing a now-live recurring rate. Re-run the
+      // churn-stamp + residual-ownership checks under the estimate row lock
+      // taken just above; drifted or unreadable state refuses the accept
+      // (fail closed, 409 with a message the portal renders).
+      if (estimate.source === 'plan_restart') {
+        const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
+        await assertRestartAcceptEligible(trx, estimate);
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
@@ -13613,6 +13684,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -13990,6 +14062,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     const term = req.body?.term;
     if (typeof term !== 'string' || !term) {
       return res.status(400).json({ error: 'term is required' });
@@ -14561,6 +14634,7 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
     // and price_locked_at is never cleared.
     if (estimate.price_locked_at) {
@@ -14984,6 +15058,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -17390,6 +17465,22 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
     && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
 }
 
+// Restart quotes are FROZEN offers (PR #3671, codex GH r21 P1): the mint
+// prices the cancelled composition at today's list and acceptance
+// revalidates that exact stored offer — the public reprice/mix routes
+// (the tier switch's flat tiered discounts included) would let the
+// customer rewrite the price before accepting it. One honorable price:
+// mutations 409 with a code the portal can message on; the customer
+// re-taps "Restart my plan" for a fresh mint instead.
+function refuseFrozenRestartMutation(estimate, res) {
+  if (String(estimate?.source || '') !== 'plan_restart') return false;
+  res.status(409).json({
+    error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+    code: 'restart_quote_frozen',
+  });
+  return true;
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   // A pending or full linkage invalidation kills acceptance the moment the
@@ -17456,6 +17547,12 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
+  // ruling requires every restart price to be a CURRENT recompute — the
+  // customer's path back is the Restart button, which re-prices; an
+  // auto-extension would revive the expired token's frozen dollars with no
+  // recompute in the loop.
+  if (String(estimate.source || '') === 'plan_restart') return false;
   if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
@@ -24816,6 +24913,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
+        // C4 restart quote (codex GH #3671 r27 P2): the offer is FROZEN —
+        // cadence, add-ons, bond, interior, and opt-out mutations all 409
+        // restart_quote_frozen, and accept refuses a non-default selection —
+        // so the page renders the deterministic default as fixed instead of
+        // offering controls that can only fail. Present only on restart rows
+        // so every other response stays byte-identical.
+        ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
         // What the customer booked (set at accept). Null for legacy accepts +
         // any non-accepted estimate; the accepted recap falls back to the
         // derived mode/frequency when null.
@@ -25002,6 +25106,7 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")

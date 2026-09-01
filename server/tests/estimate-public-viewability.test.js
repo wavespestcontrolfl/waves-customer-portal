@@ -122,6 +122,11 @@ describe('adminDraftPreviewEligible (staff draft preview — cheap half of the /
 });
 
 describe('isEstimateExtensionRequestEligible (expired-page "Request an extension")', () => {
+  it('never extends a plan_restart quote — the Restart button re-prices; the expired token stays dead (codex GH #3671 r9 P1)', () => {
+    expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: PAST, source: 'plan_restart' })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: PAST, source: 'plan_restart' })).toBe(false);
+  });
+
   it('qualifies published (sent_at/viewed_at) estimates that died of expiry — by date or by the sweep', () => {
     expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: PAST })).toBe(true);
     expect(isEstimateExtensionRequestEligible({ status: 'viewed', sent_at: PAST, viewed_at: PAST, expires_at: PAST })).toBe(true);

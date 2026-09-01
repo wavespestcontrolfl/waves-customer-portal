@@ -17,6 +17,7 @@
  */
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => { req.customerId = 'cust-1'; next(); },
+  isCancelledCustomerRow: (c) => !!c && c.active === false && c.pipeline_stage === 'churned',
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/payment-router', () => ({}));

@@ -330,3 +330,37 @@ describe('resolveStoredPestPricingVersion opt-out fallback (r1 P1 — curve prov
     expect(resolveStoredPestPricingVersion(data)).toBeNull();
   });
 });
+
+describe('refuseFrozenRestartMutation (PR #3671 GH r21 P1 — restart quotes are frozen offers)', () => {
+  const { refuseFrozenRestartMutation } = require('../routes/estimate-public');
+  const resStub = () => {
+    const r = { statusCode: null, body: null };
+    r.status = (c) => { r.statusCode = c; return r; };
+    r.json = (b) => { r.body = b; return r; };
+    return r;
+  };
+
+  it('409s a plan_restart row with the frozen code and reports handled', () => {
+    const res = resStub();
+    expect(refuseFrozenRestartMutation({ source: 'plan_restart' }, res)).toBe(true);
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('restart_quote_frozen');
+  });
+
+  it('passes every other source through untouched (NULL included)', () => {
+    const res = resStub();
+    expect(refuseFrozenRestartMutation({ source: null }, res)).toBe(false);
+    expect(refuseFrozenRestartMutation({ source: 'manual' }, res)).toBe(false);
+    expect(refuseFrozenRestartMutation(undefined, res)).toBe(false);
+    expect(res.statusCode).toBe(null);
+  });
+
+  it('is wired into every public reprice route (select-tier, bond, service-opt-out, preferences)', () => {
+    // Source-level wiring assertion: the guard only protects routes that
+    // actually call it, and a refactor that drops a call site must fail
+    // loudly here rather than silently reopen public repricing.
+    const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    const count = (src.match(/refuseFrozenRestartMutation\(estimate, res\)/g) || []).length;
+    expect(count).toBeGreaterThanOrEqual(4);
+  });
+});
