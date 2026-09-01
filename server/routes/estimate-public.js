@@ -8923,6 +8923,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    // Restart accepts take the STORED offer verbatim (pre-push P0 after GH
+    // r21): the mint prices deterministic defaults and the accept-time
+    // revalidation compares attempt identity + families, not price mix —
+    // honoring body option selections here would let a crafted PUT accept
+    // a cadence, one-time mode, or per-service mix the mint never offered.
+    // The restart page sends none of these fields; same 409 code as the
+    // mutation-route guard so the portal messages it identically.
+    if (String(estimate.source || '') === 'plan_restart'
+        && (requestedOneTime
+          || String(req.body?.selectedFrequency || '').trim()
+          || (req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
+            && Object.keys(req.body.serviceCadences).length))) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Billing choices are only meaningful for recurring accepts: the
     // converter creates the matching invoice after the slot is confirmed.
     // Reject up front rather than fulfill the request half-way.
@@ -13335,6 +13352,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -13712,6 +13730,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     const term = req.body?.term;
     if (typeof term !== 'string' || !term) {
       return res.status(400).json({ error: 'term is required' });
@@ -14283,6 +14302,7 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
     // and price_locked_at is never cleared.
     if (estimate.price_locked_at) {
@@ -14706,6 +14726,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -17081,6 +17102,22 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
     && !!estimate
     && !estimate.archived_at
     && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+}
+
+// Restart quotes are FROZEN offers (PR #3671, codex GH r21 P1): the mint
+// prices the cancelled composition at today's list and acceptance
+// revalidates that exact stored offer — the public reprice/mix routes
+// (the tier switch's flat tiered discounts included) would let the
+// customer rewrite the price before accepting it. One honorable price:
+// mutations 409 with a code the portal can message on; the customer
+// re-taps "Restart my plan" for a fresh mint instead.
+function refuseFrozenRestartMutation(estimate, res) {
+  if (String(estimate?.source || '') !== 'plan_restart') return false;
+  res.status(409).json({
+    error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+    code: 'restart_quote_frozen',
+  });
+  return true;
 }
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
@@ -24683,6 +24720,7 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")

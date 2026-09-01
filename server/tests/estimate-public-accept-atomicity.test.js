@@ -1431,4 +1431,19 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(res.status).toBe(200);
     expect(storedEstimate().status).toBe('accepted');
   });
+
+  test('a restart accept carrying option selections 409s frozen — the stored offer is the only acceptable one (pre-push P0 after GH r21)', async () => {
+    for (const body of [
+      { selectedFrequency: 'monthly' },
+      { serviceCadences: { pest_control: 'bimonthly' } },
+      { serviceMode: 'one_time' },
+    ]) {
+      resetStore(restartEstimate({ id: 'est-restart-frozen', token: 'tok-restart-f-x0123456789' }));
+      db.__state.tables.customers = [churnedCustomer()];
+      const res = await putAccept('tok-restart-f-x0123456789', body);
+      expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 409]);
+      expect(res.data.code).toBe('restart_quote_frozen');
+      expect(storedEstimate().status).toBe('sent');
+    }
+  });
 });
