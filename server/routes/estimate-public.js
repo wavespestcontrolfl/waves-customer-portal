@@ -9773,7 +9773,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(acceptResolvedCustomerId, {})
       : 0;
     const annualPrepayDisplayAmount = annualPrepaySelected && annualPrepayInvoiceAmount != null
-      ? (() => {
+      ? await (async () => {
         const converter = require('../services/estimate-converter');
         const resolved = converter.resolveAnnualPrepayInvoiceTotal({
           baseAnnual: annualPrepayInvoiceAmount,
@@ -9786,7 +9786,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
         // #3591 r16 P1). Same frozen resolver the converter bills from.
         const acknowledgedRodentSetup = converter.frozenRodentBaitSetupAmount(estData);
-        const base = Math.round((resolved.amount + acknowledgedRodentSetup) * 100) / 100;
+        // The UNIFIED fee rides the prepay invoice too (audit r15 P0) — the
+        // acknowledged total must carry the same figure the converter will
+        // bill: the frozen amount, or the pre-lock live decision for
+        // no-freeze staff/AI/call estimates (a rare cross-accept race here
+        // resolves as a retryable PREPAY_QUOTE_STALE, never a silent
+        // mismatch). Unified quotes are never commercial, so the tax blend
+        // stays rodent-only.
+        const acknowledgedUnifiedSetup = await (async () => {
+          const dec = await converter.acceptTimeUnifiedSetupFeeDecision(db, {
+            customerId: acceptResolvedCustomerId,
+            recurringServices: recurringSvcList,
+            estimateData: estData,
+          });
+          return dec === true ? converter.unifiedAcceptSetupFeeAmount(estData) : 0;
+        })();
+        const base = Math.round((resolved.amount + acknowledgedRodentSetup + acknowledgedUnifiedSetup) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
         // + PaymentIntent the converter creates (uses the same blended rate +
