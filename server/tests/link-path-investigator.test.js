@@ -1477,6 +1477,74 @@ describe('full run', () => {
     expect(v.verification.currency_evidence).toBe('jsonld_offer_not_bound_to_verified_quote');
   });
 
+  test('AggregateOffer lowPrice binds currency; an undeclared-currency offer never does (Codex PR r9 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const text = `Directory listing page with membership details. Join for $95 / year. ${'Copy. '.repeat(10)}`;
+    const page = (ld) => [{ url: 'https://example.com/join', excerpt: text, text, html: `<html><script type="application/ld+json">${ld}</script><body>${text}</body></html>` }];
+    const claim = (pages) => verifyPriceEvidence(pages, modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } }));
+    // the shared price-scan collector handles AggregateOffer.lowPrice
+    expect(claim(page('{"@type":"AggregateOffer","lowPrice":"95","priceCurrency":"USD"}')).currency_evidence).not.toBeNull();
+    // …but its USD DEFAULT for currency-less markup is not evidence
+    expect(claim(page('{"@type":"Offer","price":"95"}')).currency_evidence).toBeNull();
+  });
+
+  test('a canonical http→https redirect covers BOTH URL aliases; a soft-redirect covers neither claim (Codex PR r9 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const httpPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'http://example.com/join',
+      path_key: 'paid_listing:http://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: null, investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [httpPath] });
+    const upgraded = async (url) => (url.startsWith('http://example.com/join')
+      ? okFetch(url.replace('http://', 'https://')) // canonical scheme redirect
+      : okFetch(url));
+    const reported = modelPath({ submission_url: 'https://example.com/join', price_page_url: 'https://example.com/join', renewal_price_page_url: 'https://example.com/join' });
+    await investigatePaths(db, runOpts(db, { fetchPage: upgraded, llmDispatch: async () => ({ ok: true, json: verdictOf([reported]) }) }));
+    const old = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === httpPath.id);
+    // the followed canonical redirect covered the http alias: the original
+    // path is stamped (no eternal re-selection) and, being omitted from the
+    // verdict, retired — never a live duplicate beside the https row
+    expect(old.last_investigated_at).not.toBeNull();
+    expect(Number(old.confidence)).toBe(0);
+  });
+
+  test('the terms budget rotates: an un-hashed third legal path is not starved forever (Codex PR r9 P1)', async () => {
+    const termsFetches = [];
+    const agreement = `<html><body>Membership agreement. ${'By joining you agree to the listing terms and renewal policy. '.repeat(8)}</body></html>`;
+    const fetcher = async (url) => {
+      if (url.includes('/terms-')) { termsFetches.push(url); return { status: 200, finalUrl: url, contentType: 'text/html', html: agreement, blocked: false, truncated: false }; }
+      return okFetch(url);
+    };
+    const legal = (n) => modelPath({ submission_url: `https://example.com/join-${n}`, legal_attestation: true, legal_terms_url: `https://example.com/terms-${n}` });
+    const verdict = async () => ({ ok: true, json: verdictOf([legal('a'), legal('b'), legal('c')]) });
+    const run = async (now) => {
+      const d = domainRow();
+      const db = makeDb({ seo_link_domains: [d] });
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: verdict }), now });
+    };
+    await run(NOW);
+    await run(new Date(NOW.getTime() + 60 * 60 * 1000)); // one sweep later
+    await run(new Date(NOW.getTime() + 2 * 60 * 60 * 1000));
+    const attempted = new Set(termsFetches.map((u) => u.slice(-1)));
+    expect([...attempted].sort()).toEqual(['a', 'b', 'c']); // every terms URL got its attempt across passes
+  });
+
+  test('truncated range and qualifier price claims never verify (Codex PR r9 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const mk = (body) => {
+      const text = `Directory listing page with membership details and vendor information. ${body}. Applications are reviewed within five business days.`;
+      return [{ url: 'https://example.com/join', excerpt: text, text, html: '' }];
+    };
+    const claim = (pages) => verifyPriceEvidence(pages, modelPath({ renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null }));
+    expect(claim(mk('Listings cost USD 95\u2013150 per year')).price_text).toBeNull(); // en-dash range
+    expect(claim(mk('Listings cost USD 95-150 per year')).price_text).toBeNull(); // hyphen range
+    expect(claim(mk('Listings from USD 95 per year')).price_text).toBeNull(); // starting price
+    expect(claim(mk('Listings starting at USD 95 per year')).price_text).toBeNull();
+    expect(claim(mk('Listings cost USD 95 / year')).price_text).toBe('USD 95 / year'); // the plain quote still verifies
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {

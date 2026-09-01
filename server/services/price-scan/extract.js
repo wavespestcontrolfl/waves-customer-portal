@@ -204,6 +204,10 @@ function collectJsonLdOffers(jsonLdStrings) {
           // AggregateOffer.lowPrice is a cheapest-variant price, not proof of any
           // one pack size — flagged so a size-specific scan won't accept it.
           aggregate: o['@type'] === 'AggregateOffer' || (o.price == null && o.lowPrice != null),
+          // Whether the markup DECLARED the currency (vs the USD default
+          // above) — a consumer proving a currency claim must not accept the
+          // default as evidence.
+          explicitCurrency: !!(o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency)),
         });
       }
     }
@@ -704,6 +708,7 @@ module.exports = {
   parsePriceText,
   parsePriceTextCents,
   offerPrice,
+  collectJsonLdOffers,
   extractJsonLdOffer,
   extractDomPrice,
   pickVariantOffer,

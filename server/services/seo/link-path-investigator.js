@@ -34,7 +34,7 @@ const { isEnabled } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { fetchPage } = require('./contact-finder');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
-const { parsePriceTextCents } = require('../price-scan/extract');
+const { parsePriceTextCents, collectJsonLdOffers } = require('../price-scan/extract');
 const { WAVES_CONTEXT } = require('./prospect-scorer');
 const { validateInvestigation, INVESTIGATION_SCHEMA, URL_REQUIRED_ACQUISITION_TYPES } = require('./link-path-investigation-schema');
 const registry = require('./link-registry');
@@ -541,7 +541,13 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // …and a digit-final quote followed by a spelled-out multiplier is the
     // same truncation: "USD 95 million" never verifies "USD 95"
     const multiplierNext = /\d$/.test(q) && /^\s+(k|m|mm|bn|hundred|thousand|million|billion)\b/.test(t.slice(idx + q.length));
-    if (!contBefore && !contAfter && !multiplierNext) return true;
+    // A digit-final quote continued by a RANGE separator is a truncated
+    // range: "USD 95–150" (or "95-150", "95 – 150") never verifies "USD 95"
+    const rangeNext = /\d$/.test(q) && /^\s*[-–—]\s*\d/.test(t.slice(idx + q.length));
+    // …and a quote directly preceded by a pricing qualifier is a starting/
+    // promo price, not the price — the same tokens the price parser rejects
+    const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));
+    if (!contBefore && !contAfter && !multiplierNext && !rangeNext && !qualifierBefore) return true;
     idx = t.indexOf(q, idx + 1);
   }
   return false;
@@ -554,26 +560,22 @@ const markerInText = (text, marker) => {
   return !!esc && new RegExp(`(^|[^A-Za-z0-9])${esc}($|[^A-Za-z0-9])`).test(text);
 };
 
-/** Every {priceCurrency, priceCents} pair in a page's ld+json blocks. */
+/**
+ * Every {priceCurrency, priceCents} pair in a page's ld+json blocks — via
+ * the price-scan collector (the one parser that already handles lowPrice,
+ * priceSpecification, AggregateOffer expansion, @graph nesting, and
+ * tolerant JSON). priceCurrency is null when the markup did not DECLARE a
+ * currency: the collector's USD default is not evidence of anything.
+ */
 function jsonLdOffers(html) {
-  const out = [];
+  const scripts = [];
   const re = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let m;
-  while ((m = re.exec(String(html || ''))) !== null) {
-    let data;
-    try { data = JSON.parse(m[1]); } catch { continue; }
-    const walk = (node) => {
-      if (!node || typeof node !== 'object') return;
-      if (Array.isArray(node)) { node.forEach(walk); return; }
-      if (node.priceCurrency != null) {
-        const n = Number(node.price);
-        out.push({ priceCurrency: String(node.priceCurrency), priceCents: Number.isFinite(n) ? Math.round(n * 100) : null });
-      }
-      Object.values(node).forEach(walk);
-    };
-    walk(data);
-  }
-  return out;
+  while ((m = re.exec(String(html || ''))) !== null) scripts.push(m[1]);
+  return collectJsonLdOffers(scripts).map((o) => ({
+    priceCurrency: o.explicitCurrency ? String(o.currency) : null,
+    priceCents: o.price != null && Number.isFinite(Number(o.price)) ? Math.round(Number(o.price) * 100) : null,
+  }));
 }
 
 /**
@@ -766,7 +768,10 @@ async function investigatePaths(db, {
             // never persisted, never prompted beyond the excerpt. `truncated`
             // rides along: a byte-capped page is positive evidence but never
             // COVERAGE (the model didn't see past the cut).
-            pages.push({ url: finalUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
+            // requestedUrl rides along: a followed canonical redirect
+            // (http→https, slash) covers BOTH aliases — the original path's
+            // URL must not stay "never covered" and re-select forever
+            pages.push({ url: finalUrl, requestedUrl: url, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
           } else if (page && page.html && !page.blocked && !page.error) {
             // the request was host-bound but a redirect left the domain —
             // an off-site page must never become model input or evidence
@@ -848,7 +853,16 @@ async function investigatePaths(db, {
         // submission URL executable) vs CONTENT COVERAGE (a complete,
         // untruncated page the model fully saw — the only basis for stamping
         // a path investigated or disproving an omitted one).
-        const fetchedKeys = new Set(pages.map((pg) => registry.normalizeSubmissionUrl(pg.url)));
+        // A page covers its requested URL too, but ONLY across a canonical
+        // (scheme/slash) redirect — a soft-redirect to a different page must
+        // not mark the original path observed or disprove it.
+        const schemelessKey = (u) => registry.normalizeSubmissionUrl(u).replace(/^https?:\/\//, '');
+        const pageKeys = (pg) => {
+          const keys = [registry.normalizeSubmissionUrl(pg.url)];
+          if (pg.requestedUrl && schemelessKey(pg.requestedUrl) === schemelessKey(pg.url)) keys.push(registry.normalizeSubmissionUrl(pg.requestedUrl));
+          return keys;
+        };
+        const fetchedKeys = new Set(pages.flatMap(pageKeys));
         // Coverage additionally requires SUBSTANTIVE canonical text — a
         // client-rendered script shell proves the URL exists but the model
         // observed nothing on it, so its omissions disprove nothing.
@@ -857,7 +871,7 @@ async function investigatePaths(db, {
         // partially observed — existence, not coverage.
         const coverageKeys = new Set(pages
           .filter((pg) => !pg.truncated && pg.text.length >= MIN_COVERAGE_TEXT_CHARS && pg.text.length <= PAGE_EXCERPT_CHARS)
-          .map((pg) => registry.normalizeSubmissionUrl(pg.url)));
+          .flatMap(pageKeys));
         let verifyAttempts = 0;
         for (const p of writable) {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
@@ -887,8 +901,20 @@ async function investigatePaths(db, {
         // §6.3, so sharing one budget would starve every legal path.
         const termsHashByUrl = new Map();
         const termsAttempted = new Set(); // the budget caps ATTEMPTS — a failed or off-site fetch spends it too
-        for (const p of writable) {
-          if (!p.legal_attestation || !p.legal_terms_url || termsAttempted.has(p.legal_terms_url)) continue;
+        // The budget must not starve the same tail forever: paths whose
+        // active row still lacks a verified hash go FIRST, and ties rotate
+        // with the hourly pass offset — a third legal path is not stuck
+        // behind the same two on every retry.
+        const hashOnFile = (p) => existingPaths.some((e) => e.path_key === registry.pathKey(p.acquisition_type, p.submission_url) && e.legal_terms_hash);
+        const legalOrder = (() => {
+          const legal = writable.filter((p) => p.legal_attestation && p.legal_terms_url);
+          const unhashed = legal.filter((p) => !hashOnFile(p));
+          const hashed = legal.filter(hashOnFile);
+          const start = unhashed.length ? Math.floor(now.getTime() / (60 * 60 * 1000)) % unhashed.length : 0;
+          return [...unhashed.slice(start), ...unhashed.slice(0, start), ...hashed];
+        })();
+        for (const p of legalOrder) {
+          if (termsAttempted.has(p.legal_terms_url)) continue;
           if (termsAttempted.size >= TERMS_FETCH_BUDGET) {
             // An UNATTEMPTED hash is not a verdict on the agreement: mark the
             // path so the write phase leaves it unstamped (rotated retry) and
