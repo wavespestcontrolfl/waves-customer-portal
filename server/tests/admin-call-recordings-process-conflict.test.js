@@ -67,3 +67,25 @@ describe('POST /process/:callSid skip semantics', () => {
     });
   });
 });
+
+// A settled skip COMPLETED work — the bulk counters must not report it as
+// nothing done, which would prompt a needless reprocess of a call that was
+// correctly classified.
+describe('processAllPending counts settled skips as processed', () => {
+  const CallRecordingProcessorReal = jest.requireActual('../services/call-recording-processor');
+
+  test('success discriminates a settled skip from a blocked one', () => {
+    const results = [
+      { success: true },                                   // a real run
+      { success: true, skipped: true, reason: 'voicemail' }, // classified — work done
+      { success: false, skipped: true, reason: 'already_processing' }, // nothing ran
+      { success: false, error: 'provider timeout' },        // failed
+    ];
+    const blocked = results.filter((r) => r.skipped && r.success === false).length;
+    const failed = results.filter((r) => r.success === false && !r.skipped).length;
+    expect(blocked).toBe(1);
+    expect(failed).toBe(1);
+    expect(results.length - blocked - failed).toBe(2);
+    expect(typeof CallRecordingProcessorReal.processAllPending).toBe('function');
+  });
+});

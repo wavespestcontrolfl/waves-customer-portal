@@ -257,7 +257,11 @@ export default function CallRecordingsPanel() {
       const parts = [`Processed ${result.processed ?? 0}`];
       if (result.skipped) parts.push(`skipped ${result.skipped}`);
       if (result.failed) parts.push(`failed ${result.failed}`);
-      showToast(`${parts.join(" · ")} recording(s)`);
+      // A batch that failed outright came back 200 — per-record failures are
+      // counted, not thrown — so without a severity an entirely failed run
+      // rendered in the green success style (pre-push audit P1).
+      const severity = result.failed ? "failed" : (result.skipped ? "blocked" : "ok");
+      showToast(`${parts.join(" · ")} recording(s)`, severity);
       loadData();
     } catch (e) {
       showToast(`Failed: ${e.message}`, "failed");

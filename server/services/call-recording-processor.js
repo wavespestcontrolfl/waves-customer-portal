@@ -14926,11 +14926,26 @@ const CallRecordingProcessor = {
         results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
       }
     }
-    // Distinct counts: a skipped claim and a failure are not processed work,
+    // Distinct counts: a blocked claim and a failure are not processed work,
     // and the bulk toast used to report all three as one inflated number.
-    const skipped = results.filter((r) => r.skipped).length;
-    const failed = results.filter((r) => !r.success && !r.skipped).length;
-    return { processed: results.length - skipped - failed, skipped, failed, attempted: results.length, results };
+    //
+    // `skipped` alone does NOT mean nothing happened — spam, voicemail, a
+    // policy hold and a rejected transcript are all skips that COMPLETED
+    // real work and persisted a terminal status. The discriminator is
+    // `success`, which this pass made honest: a blocked or not-ready run
+    // returns success:false, every settled outcome returns success:true. So
+    // a batch that classified a voicemail reports it as processed, not as
+    // "Processed 0 · skipped 1" prompting a needless reprocess (pre-push
+    // audit P1) — the same settled-vs-blocked line the admin UI draws.
+    const blocked = results.filter((r) => r.skipped && r.success === false).length;
+    const failed = results.filter((r) => r.success === false && !r.skipped).length;
+    return {
+      processed: results.length - blocked - failed,
+      skipped: blocked,
+      failed,
+      attempted: results.length,
+      results,
+    };
   },
 
   /**
