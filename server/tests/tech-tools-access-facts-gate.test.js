@@ -115,7 +115,7 @@ describe('get_stop_details access-facts gate', () => {
     expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
   });
 
-  test('tech caller: reassignment during the facts read withholds the codes (post-facts recheck)', async () => {
+  test('tech caller: reassignment during the facts read withholds the WHOLE answer (post-facts recheck)', async () => {
     mockVisitFactsGateEnabled.mockReturnValue(true);
     state.scheduled_services[0].technician_id = 'tech-1';
     mockDeterministicVisitFacts.mockImplementation(async () => {
@@ -123,7 +123,7 @@ describe('get_stop_details access-facts gate', () => {
       return { access: ACCESS_BLOCK, last_visit: null };
     });
     const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
-    expect(r.property).toBeNull();
+    expect(r).toEqual({ error: 'Customer not found' });
   });
 
   test('tech caller still assigned: shared access block served', async () => {
@@ -148,7 +148,7 @@ describe('get_stop_details access-facts gate', () => {
     },
   );
 
-  test('date-move race: a live row moved off today mid-read withholds the codes', async () => {
+  test('date-move race: a live row moved off today mid-read withholds the WHOLE answer', async () => {
     mockVisitFactsGateEnabled.mockReturnValue(true);
     state.scheduled_services[0].technician_id = 'tech-1';
     mockDeterministicVisitFacts.mockImplementation(async () => {
@@ -156,10 +156,10 @@ describe('get_stop_details access-facts gate', () => {
       return { access: ACCESS_BLOCK, last_visit: null };
     });
     const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
-    expect(r.property).toBeNull();
+    expect(r).toEqual({ error: 'Customer not found' });
   });
 
-  test('reassignment race: a row going dead mid-read also withholds the codes', async () => {
+  test('reassignment race: a row going dead mid-read withholds the WHOLE answer', async () => {
     mockVisitFactsGateEnabled.mockReturnValue(true);
     state.scheduled_services[0].technician_id = 'tech-1';
     mockDeterministicVisitFacts.mockImplementation(async () => {
@@ -167,6 +167,18 @@ describe('get_stop_details access-facts gate', () => {
       return { access: ACCESS_BLOCK, last_visit: null };
     });
     const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
-    expect(r.property).toBeNull();
+    expect(r).toEqual({ error: 'Customer not found' });
+    expect(r.customer).toBeUndefined();
+  });
+
+  test('a supplied service_id selects THAT stop, not an arbitrary sibling', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services = [
+      { id: 's1', customer_id: 'c1', scheduled_date: etDateString(new Date()), status: 'confirmed', service_type: 'Pest Control', window_start: '09:00' },
+      { id: 's2', customer_id: 'c1', scheduled_date: etDateString(new Date()), status: 'confirmed', service_type: 'Lawn Care', window_start: '13:00' },
+    ];
+    const r = await executeTechTool('get_stop_details', { service_id: 's2' }, {});
+    expect(r.todays_service).toMatchObject({ id: 's2', service_type: 'Lawn Care' });
+    expect(mockDeterministicVisitFacts).toHaveBeenCalledWith(expect.objectContaining({ id: 's2' }));
   });
 });

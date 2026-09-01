@@ -278,6 +278,10 @@ async function getStopDetails(input, techId = null) {
     .where({ customer_id: customer.id, scheduled_date: today })
     .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES);
   if (techId) todayQuery.where('technician_id', techId);
+  // A caller asking about a SPECIFIC stop gets that stop — with several
+  // live services today an unordered .first() could ground the answer
+  // (facts, notes, alerts) in a sibling service.
+  if (input.service_id) todayQuery.where('id', input.service_id);
   const todayService = await todayQuery.first();
 
   // Access/property facts follow the same GATE_VISIT_FACTS policy as the
@@ -289,27 +293,32 @@ async function getStopDetails(input, techId = null) {
   const PrevisitBrief = require('../previsit-brief');
   if (PrevisitBrief.visitFactsGateEnabled()) {
     if (todayService) {
+      let facts = null;
       try {
-        const facts = await PrevisitBrief.deterministicVisitFacts(todayService);
-        // Re-verify the assignment AFTER the facts queries (same race the
-        // visit-brief route closes, Codex P1 on #3638): they run outside
-        // the scoped fetch above, so a dispatch reassignment during them
-        // would otherwise hand gate/garage/lockbox codes to the former
-        // technician. Admin callers (no techId) skip the recheck.
-        let stillOwned = true;
-        if (techId) {
-          stillOwned = !!(await db('scheduled_services')
-            .where({
-              id: todayService.id,
-              technician_id: techId,
-              customer_id: customer.id,
-              scheduled_date: today,
-            })
-            .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
-            .first('id'));
-        }
-        property = stillOwned ? facts.access : null;
-      } catch { property = null; }
+        facts = await PrevisitBrief.deterministicVisitFacts(todayService);
+      } catch { facts = null; }
+      // Re-verify the assignment AFTER the facts queries (same race the
+      // visit-brief route closes, Codex P1 on #3638): they run outside
+      // the scoped fetch above, so a dispatch reassignment during them
+      // would otherwise hand gate/garage/lockbox codes to the former
+      // technician. Ownership KNOWN lost mid-request → withhold the WHOLE
+      // answer (customer, notes, history), not just the codes — same as
+      // the visit-brief route's post-facts recheck. A facts FAILURE is
+      // different: fail-soft to property:null, rest of the answer intact.
+      // Admin callers (no techId) skip the recheck.
+      if (facts && techId) {
+        const stillOwned = !!(await db('scheduled_services')
+          .where({
+            id: todayService.id,
+            technician_id: techId,
+            customer_id: customer.id,
+            scheduled_date: today,
+          })
+          .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
+          .first('id'));
+        if (!stillOwned) return { error: 'Customer not found' };
+      }
+      property = facts ? facts.access : null;
     }
   } else {
     const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
