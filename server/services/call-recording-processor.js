@@ -13730,7 +13730,23 @@ const CallRecordingProcessor = {
               // send; email/both also emails the confirmation.
               const AppointmentReminders = require('./appointment-reminders');
               let smsRan = false;
+              // Ownership loss INSIDE the dispatch closures cannot leave
+              // processRecording: a `return abandonToPeer(...)` there only
+              // left the closure, and the helper read the abandon object as
+              // a delivered text — then sent the 'both' email and let the
+              // pass carry on (codex #3677 P1). The closures FLAG the loss
+              // and answer "not reached"; the helper gates every leg on the
+              // same predicate so nothing later goes out; the pass abandons
+              // the moment the helper returns.
+              let ownershipLostInDispatch = false;
+              const claimStillOwned = async () => {
+                if (ownershipLostInDispatch) return false;
+                if (await stillOwnsClaim()) return true;
+                ownershipLostInDispatch = true;
+                return false;
+              };
               const confirmationReached = await AppointmentReminders.deliverConfirmationByChannel({
+                stillOwnsClaim: claimStillOwned,
                 customerId,
                 scheduledServiceId,
                 serviceLabel: serviceType,
@@ -13757,7 +13773,7 @@ const CallRecordingProcessor = {
                   // Roughly two thousand lines of scheduling work separate
                   // this from the Step 5 gate, and this is a TEXT TO A
                   // CUSTOMER. Re-check immediately before it (codex P1).
-                  if (!(await stillOwnsClaim())) return abandonToPeer('the appointment confirmation text');
+                  if (!(await claimStillOwned())) return false;
                   const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
                     ? {
                       sent: false,
@@ -13923,7 +13939,7 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
-                        if (!(await stillOwnsClaim())) return abandonToPeer('the confirmation fan-out text');
+                        if (!(await claimStillOwned())) return false;
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
@@ -14034,7 +14050,7 @@ const CallRecordingProcessor = {
                       const emailOnlySlots = (confirmationOptedOut || v2EmailBlocked) ? [] : getServiceContactSlots(freshCustomer || {})
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
-                        if (!(await stillOwnsClaim())) return abandonToPeer('the appointment confirmation email');
+                        if (!(await claimStillOwned())) return false;
                         const AppointmentEmail = require('./appointment-email');
                         const emailRes = await AppointmentEmail.sendAppointmentConfirmationEmail({
                           customerId,
@@ -14116,6 +14132,7 @@ const CallRecordingProcessor = {
                   return primaryOk;
                 },
               });
+              if (ownershipLostInDispatch) return abandonToPeer('the appointment confirmation dispatch');
               if (smsRan && confirmationReached && appointmentResult && appointmentResult.smsBlocked) {
                 // The blocked text was rescued by an email leg (the TCPA
                 // fallback above, or a 'both' channel's email) — record it so

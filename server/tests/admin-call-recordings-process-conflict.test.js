@@ -347,6 +347,23 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(write).toContain("if (!synopsisRows) return abandonToPeer(");
   });
 
+  test('the confirmation dispatch closures flag ownership loss instead of returning an abandon', () => {
+    // `return abandonToPeer(...)` inside smsAttempt only leaves the closure,
+    // and the helper read the truthy object as a delivered text. The
+    // closures answer false and set a flag; the helper receives the same
+    // predicate; the pass abandons right after the helper returns.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const start = source.indexOf('const confirmationReached = await AppointmentReminders.deliverConfirmationByChannel({');
+    const end = source.indexOf("if (ownershipLostInDispatch) return abandonToPeer('the appointment confirmation dispatch');", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const dispatch = source.slice(start, end);
+    expect(dispatch).toContain('stillOwnsClaim: claimStillOwned,');
+    expect(dispatch).not.toContain('abandonToPeer(');
+    expect(dispatch).not.toMatch(/await stillOwnsClaim\(\)/);
+    expect((dispatch.match(/if \(!\(await claimStillOwned\(\)\)\) return false;/g) || []).length).toBe(3);
+  });
+
   test('an ownership loss reported by CSR scoring abandons the pass', () => {
     // scoreCall returns { skipped, reason: 'ownership_lost' } from its own
     // post-await check; reading that as "no score" and carrying on reached
