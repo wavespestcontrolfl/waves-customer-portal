@@ -808,10 +808,18 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
+      if (Object.keys(update).length) {
+        [serviceRecord] = await trx('service_records')
+          .where({ id: serviceRecord.id })
+          .update(update)
+          .returning('*');
+      }
       // Merge-if-absent requirement freeze: a pre-freeze record completed
       // again through this path gains a snapshot (frozenAt = now, honest
-      // about its own stamp); an existing freeze — e.g. from /complete —
-      // is NEVER overwritten (first-freeze-wins).
+      // about its own stamp). ATOMIC guarded jsonb merge on the CURRENT
+      // row value — never a serialization of a pre-lock read — so a
+      // concurrent /complete freeze wins and is never overwritten
+      // (first-freeze-wins; pre-push codex P1).
       if (serviceRecordCols.structured_notes
         && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {
         const lockedVisit = await trx('scheduled_services')
@@ -826,17 +834,18 @@ async function completeProjectBackedService({
           serviceType: (lockedVisit || scheduledService).service_type || null,
         });
         if (closeoutSnap) {
-          update.structured_notes = serializeJsonb({
-            ...parseJsonObject(update.structured_notes ?? serviceRecord.structured_notes),
-            closeoutRequirements: closeoutSnap,
-          });
+          const [refreshed] = await trx('service_records')
+            .where({ id: serviceRecord.id })
+            .whereRaw(`(structured_notes -> 'closeoutRequirements') IS NULL`)
+            .update({
+              structured_notes: trx.raw(
+                `COALESCE(structured_notes, '{}'::jsonb) || jsonb_build_object('closeoutRequirements', ?::jsonb)`,
+                [JSON.stringify(closeoutSnap)],
+              ),
+            })
+            .returning('*');
+          if (refreshed) serviceRecord = refreshed;
         }
-      }
-      if (Object.keys(update).length) {
-        [serviceRecord] = await trx('service_records')
-          .where({ id: serviceRecord.id })
-          .update(update)
-          .returning('*');
       }
     }
 
