@@ -115,7 +115,7 @@ describe('noteSharedPhoneSibling', () => {
     expect(db._inserts[0].rows[1].lead_id).toBe('lead-conflict');
   });
 
-  test('a deleted known sibling falls back to the newest open lead', async () => {
+  test('a deleted exact sibling elects nothing — no fallback to a stranger', async () => {
     const db = makeDb({
       sibling: { id: 'lead-fallback', first_name: 'Pat', status: 'new', estimate_id: null },
       byId: {}, // known id no longer resolvable (soft-deleted)
@@ -123,7 +123,8 @@ describe('noteSharedPhoneSibling', () => {
     const sibId = await noteSharedPhoneSibling(db, {
       leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-gone', knownSiblingExact: true,
     });
-    expect(sibId).toBe('lead-fallback');
+    expect(sibId).toBeNull();
+    expect(db._inserts).toHaveLength(0);
   });
 
   test('two or more open siblings -> one neutral note, no pair election', async () => {
@@ -143,7 +144,7 @@ describe('noteSharedPhoneSibling', () => {
     expect(note.description).toContain('multiple other open leads');
   });
 
-  test('a known sibling whose phone moved falls back instead of cross-linking strangers', async () => {
+  test('an exact sibling whose phone moved elects nothing instead of cross-linking strangers', async () => {
     const db = makeDb({
       sibling: { id: 'lead-fallback2', first_name: 'Pat', status: 'new', estimate_id: null },
       byId: { 'lead-moved': { id: 'lead-moved', phone: '+15555550999', first_name: 'Kim', status: 'new', estimate_id: null } },
@@ -151,7 +152,8 @@ describe('noteSharedPhoneSibling', () => {
     const sibId = await noteSharedPhoneSibling(db, {
       leadId: 'lead-new', phone: PHONE, extracted: {}, knownSiblingId: 'lead-moved', knownSiblingExact: true,
     });
-    expect(sibId).toBe('lead-fallback2');
+    expect(sibId).toBeNull();
+    expect(db._inserts).toHaveLength(0);
   });
 
   test('a terminal known sibling is not consolidation-noted', async () => {

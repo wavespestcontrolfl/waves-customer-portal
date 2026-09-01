@@ -2297,6 +2297,11 @@ async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {},
         .whereIn('status', OPEN_LEAD_STATUSES)
         .whereNull('converted_at')
         .first('id', 'first_name', 'last_name', 'status', 'estimate_id');
+      // Failed revalidation of an EXACT sibling elects NOTHING — falling
+      // back to a different same-phone row would steer consolidation at a
+      // pair the caller never matched, the exact outcome revalidation
+      // exists to prevent.
+      if (!sibling) return null;
     }
     if (!sibling) {
       const openSiblings = await database('leads')
