@@ -36,45 +36,12 @@
  *   pg_advisory_xact_lock(hashtextextended('customer-comms:' || <id>, 0))
  */
 
-// pg_advisory_xact_lock BLOCKS with no deadline of its own, and one of its
-// callers is the call-processing pass — which awaits enrollment while holding
-// a processing claim whose heartbeat keeps beating. An unbounded wait there
-// wedges the call exactly as an unbounded provider call did (codex #3677 P1).
-// SET LOCAL scopes this to the calling transaction, so a contended lock now
-// raises instead of hanging, and every caller already handles a failed
-// transaction. Contention on a per-customer comms key is momentary; ten
-// seconds is generous for it and finite for everything else.
-const LOCK_WAIT_TIMEOUT = '10s';
-const LOCK_WAIT_TIMEOUT_MS = 10000;
-
-// PostgreSQL reports lock_timeout as a bare integer of milliseconds or with a
-// unit suffix ('0', '2500ms', '10s', '1min'). '0' means NO timeout, which is
-// the unlimited wait this bound exists to stop — not a small value.
-function lockTimeoutMs(setting) {
-  const raw = String(setting == null ? '' : setting).trim().toLowerCase();
-  if (!raw) return null;
-  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?$/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  if (!Number.isFinite(value)) return null;
-  const unit = match[2] || 'ms';
-  const factor = { us: 0.001, ms: 1, s: 1000, min: 60000, h: 3600000, d: 86400000 }[unit];
-  return value * factor;
-}
-
-function shouldCapLockTimeout(previous) {
-  const ms = lockTimeoutMs(previous);
-  if (ms === null) return true;   // unreadable: bound it rather than risk an unlimited wait
-  if (ms === 0) return true;      // 0 = wait forever, the case this exists for
-  return ms > LOCK_WAIT_TIMEOUT_MS;
-}
-
 async function lockCustomerComms(trx, customerId) {
   if (!customerId) return;
-  await withBoundedLockWait(trx, () => trx.raw(
+  await trx.raw(
     'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
     [`customer-comms:${customerId}`],
-  ));
+  );
 }
 
 /**
@@ -110,40 +77,4 @@ async function withCustomerCommsLock(db, customerId, fn) {
   });
 }
 
-/**
- * Run an advisory-lock acquisition under a BOUNDED wait.
- *
- * pg_advisory_xact_lock blocks with no deadline of its own. Inside the
- * call-processing pass that is indistinguishable from a hang: the claim's
- * heartbeat keeps beating on its timer, so the row can never be reclaimed.
- * Any blocking lock that pass can reach goes through here.
- *
- * Caps, never widens — a caller's stricter deadlock guard is left alone — and
- * restores the previous setting in a finally, because SET LOCAL otherwise
- * lasts to the end of the caller's transaction.
- */
-async function withBoundedLockWait(trx, acquire) {
-  const previous = await trx.raw('SHOW lock_timeout')
-    .then((res) => res?.rows?.[0]?.lock_timeout)
-    .catch(() => null);
-  const capped = shouldCapLockTimeout(previous);
-  if (capped) {
-    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [LOCK_WAIT_TIMEOUT]);
-  }
-  try {
-    return await acquire();
-  } finally {
-    if (capped) {
-      if (previous != null) {
-        await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(previous)]).catch(() => {});
-      } else {
-        await trx.raw('RESET lock_timeout').catch(() => {});
-      }
-    }
-  }
-}
-
-module.exports = {
-  lockTimeoutMs,
-  shouldCapLockTimeout,
-  withBoundedLockWait, lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };

@@ -1909,9 +1909,6 @@ const {
 // attribution retire path mirrors this exact gate on customer-less
 // phone-matched successors; never re-inline or duplicate it.
 const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
-// Every blocking lock this pass can reach goes through here: an unbounded
-// wait while holding a claim is indistinguishable from a hang.
-const { withBoundedLockWait } = require('../utils/customer-comms-lock');
 // Distinct counts for a bulk run. Extracted so the rule is testable without
 // standing up the pending-query builder — the counting, not the SQL, is what
 // the admin toast reports.
@@ -12078,14 +12075,7 @@ const CallRecordingProcessor = {
                 },
               );
               const svc = await db.transaction(async (trx) => {
-                // BOUNDED: this pass holds a processing claim whose heartbeat
-                // beats on a timer, so an unbounded lock wait is
-                // indistinguishable from a hang and leaves the call
-                // unreclaimable (codex #3677 P1).
-                await withBoundedLockWait(trx, () => trx.raw(
-                  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))',
-                  ['call-recording-schedule', callSid],
-                ));
+                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r25):
                 // every scheduled_services insert in this transaction (the
                 // booking + linked follow-up visits) serializes against a
@@ -12137,10 +12127,10 @@ const CallRecordingProcessor = {
                 // win for a reprocessed call, and the open-callback dedupe
                 // itself runs on the fresh-insert path only (after them).
                 if (isReServiceCatalogRow(callBookingCatalogRow)) {
-                  await withBoundedLockWait(trx, () => trx.raw(
+                  await trx.raw(
                     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
                     ['reservice-lane', `${customerId}:${callBookingCatalogRow.service_key}`],
-                  ));
+                  );
                 }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
