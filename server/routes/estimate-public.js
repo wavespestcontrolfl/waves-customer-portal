@@ -24576,6 +24576,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
+        // C4 restart quote (codex GH #3671 r27 P2): the offer is FROZEN —
+        // cadence, add-ons, bond, interior, and opt-out mutations all 409
+        // restart_quote_frozen, and accept refuses a non-default selection —
+        // so the page renders the deterministic default as fixed instead of
+        // offering controls that can only fail. Present only on restart rows
+        // so every other response stays byte-identical.
+        ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
         // What the customer booked (set at accept). Null for legacy accepts +
         // any non-accepted estimate; the accepted recap falls back to the
         // derived mode/frequency when null.

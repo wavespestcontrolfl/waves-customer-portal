@@ -3715,6 +3715,12 @@ export function ServiceSection({
   onFrequencyChange,
   onAddOnToggle,
   disabled = false,
+  // C4 plan-restart quote: the offer is frozen server-side (every repricing
+  // mutation 409s restart_quote_frozen), so the cadence renders as fixed
+  // text and the add-on / bond / interior pickers are omitted rather than
+  // shown inert. Informational rows (details packet, comparison sheet) and
+  // the price itself are unaffected.
+  frozen = false,
   renderFlags = {},
   waveGuardTier,
   afterPrice = null,
@@ -3758,8 +3764,9 @@ export function ServiceSection({
   const priceWording = glassDayLines
     ? { ...copy.priceWording, dayLineByKey: glassDayLines }
     : copy.priceWording;
-  const showSlider = frequencies.length > 1;
+  const showSlider = frequencies.length > 1 && !frozen;
   const showAddOns = showAddOnsProp
+    && !frozen
     && section.isPest
     && section.isRecurring
     && renderFlags.showPestRecurringAddOns === true
@@ -3819,7 +3826,8 @@ export function ServiceSection({
           // flow on phones.
           paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
         }}>
-          {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
+          {SERVICE_CARD_HEADLINES[sectionSlug]
+            || (frozen ? 'Same protection — at today\'s price' : 'Same protection — pick the rhythm that fits your home')}
         </h2>
         {showSlider ? (
           <GlassFrequencyPills
@@ -3828,6 +3836,11 @@ export function ServiceSection({
             onChange={(next) => onFrequencyChange(section.key, next)}
             disabled={disabled}
           />
+        ) : null}
+        {frozen && frequencies.length > 1 && current?.label ? (
+          <div data-testid="frozen-cadence" style={{ fontSize: 14, color: ESTIMATE_MUTED, margin: '2px 0 6px' }}>
+            Cadence: <strong style={{ color: '#04395E' }}>{current.label}</strong>
+          </div>
         ) : null}
 
         {/* Termite reads install-first (owner copy 2026-07-10, investment
@@ -3972,7 +3985,7 @@ export function ServiceSection({
             server truth — the displayed price and the billed price can never
             diverge. */}
         {sectionSlug === 'termite_bait' && Array.isArray(section.bondOptions)
-          && section.bondOptions.length > 0 && onSelectBondTerm ? (
+          && section.bondOptions.length > 0 && onSelectBondTerm && !frozen ? (
           <div style={{ marginTop: 6 }} aria-label="Termite bond options">
             <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
               Termite Bond — optional re-treatment warranty
@@ -4000,7 +4013,7 @@ export function ServiceSection({
             billed price can never diverge. Gated on the RAW section key: the
             glass slug normalizes commercial_pest to pest_control. */}
         {section.key === 'commercial_pest' && section.interiorOption
-          && onToggleInteriorService ? (
+          && onToggleInteriorService && !frozen ? (
           <div style={{ marginTop: 6 }} aria-label="Interior service options">
             <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
               Interior service — treatments inside the building
@@ -4468,6 +4481,9 @@ function EstimateViewPageInner() {
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
+  // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
+  // the repricing controls and the one-time mode toggle are omitted.
+  const restartQuote = data?.estimate?.planRestart === true;
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   // Payment-only accept (guarantee-only renewal): no slot picker, no
   // reservation — accept goes straight to review, then invoice.
@@ -6144,6 +6160,7 @@ function EstimateViewPageInner() {
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
+                frozen={restartQuote}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
                 waveGuardDiscountPct={Number(pricing.combinedRecurring?.waveGuardDiscountPct) || null}
@@ -6175,7 +6192,7 @@ function EstimateViewPageInner() {
                 // the control can never offer what the write refuses. Never on
                 // the read-only accepted recap (an accepted plan's price is
                 // frozen), and never while the cards are locked mid-submit.
-                serviceOptOut={section.removable === true && !readOnly && !cardsDisabled
+                serviceOptOut={section.removable === true && !readOnly && !cardsDisabled && !restartQuote
                   ? {
                     phase: optOut.sectionKey === section.key ? optOut.phase : 'idle',
                     quote: optOut.sectionKey === section.key ? optOut.quote : null,
@@ -6206,7 +6223,7 @@ function EstimateViewPageInner() {
               the mirror add-service offer above) but the write refuses
               restores — an itemized proposal or a standing tier selection —
               so the "Add it back" control must not render. */}
-          {!readOnly && data?.serviceOptOut?.restoreBlocked !== true
+          {!readOnly && !restartQuote && data?.serviceOptOut?.restoreBlocked !== true
             && (data?.serviceOptOut?.removedKeys || []).length ? (
             <div style={{ marginTop: 12 }}>
               {data.serviceOptOut.removedKeys.map((key, i) => {
@@ -6902,7 +6919,7 @@ function EstimateViewPageInner() {
               ranged price is a recurring concept, and a one-time accept there
               dead-ends — no slots exist, and the one-time card-hold/deposit
               gates require a booked appointment the customer can't pick. */}
-          {!estimate.isOneTimeOnly && !manualScheduleAccept && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+          {!estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}

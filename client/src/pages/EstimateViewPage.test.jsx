@@ -61,6 +61,33 @@ describe('ServiceSection', () => {
     expect(screen.getByText('Skip parts you don\'t need')).toBeInTheDocument();
   });
 
+  it('renders a frozen restart quote as fixed — cadence text, no pills, no add-on toggles', () => {
+    const quarterly = { ...baseFrequency, key: 'quarterly', label: 'Quarterly', monthly: 40, annual: 480 };
+    render(
+      <ServiceSection
+        section={{
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [baseFrequency, quarterly],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="quarterly"
+        selectedAddOns={new Set(['interior_spray'])}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: true, showWaveGuardTierUi: true }}
+        waveGuardTier="Bronze"
+        frozen
+      />,
+    );
+
+    expect(screen.queryByText('How often?')).not.toBeInTheDocument();
+    expect(screen.queryByText('Skip parts you don\'t need')).not.toBeInTheDocument();
+    expect(screen.getByTestId('frozen-cadence')).toHaveTextContent('Quarterly');
+  });
+
   it('does not render pest add-ons for non-pest sections', () => {
     render(
       <ServiceSection
