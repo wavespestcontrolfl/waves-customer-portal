@@ -107,11 +107,22 @@ async function resolveDraftRecipient(draft) {
 // its hardcoded default as an explicit override and out-of-market
 // customers get the wrong line. Display-only: the approve/revise send
 // path is untouched and still derives at send time.
-function derivedOfficeNumber(row, recipientCustomerId) {
+async function derivedOfficeNumber(row, recipientCustomerId) {
   try {
     const { resolveLocation } = require('../config/locations');
-    const cityLocation = recipientCustomerId && row.city ? resolveLocation(row.city)?.id : null;
-    const locationId = (row.campaign_type ? row.nearest_location_id : null) || cityLocation;
+    // The joined row carries message_drafts.customer_id's city — but the
+    // RESOLVED recipient can come from sms_log when the draft row itself
+    // has no customer (Codex r4 P1). The send path routes from THAT
+    // customer's city, so load it when it isn't the joined one.
+    let city = row.city;
+    let nearest = row.nearest_location_id;
+    if (recipientCustomerId && String(recipientCustomerId) !== String(row.customer_id || '')) {
+      const c = await db('customers').where({ id: recipientCustomerId }).first('city', 'nearest_location_id');
+      city = c?.city ?? null;
+      nearest = c?.nearest_location_id ?? null;
+    }
+    const cityLocation = recipientCustomerId && city ? resolveLocation(city)?.id : null;
+    const locationId = (row.campaign_type ? nearest : null) || cityLocation;
     return TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton') || null;
   } catch {
     return null;
@@ -668,19 +679,23 @@ router.get('/', async (req, res, next) => {
     // customer) — the flags-only guess could name one number while Approve
     // texts another (Codex #3700 P1). Resolution failure falls back to the
     // legacy guess rather than dropping the row.
-    const resolved = await Promise.all(drafts.map((d) => resolveDraftRecipient(d).catch(() => null)));
+    const resolved = await Promise.all(drafts.map(async (d) => {
+      const r = await resolveDraftRecipient(d).catch(() => null);
+      const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId);
+      return { r, fromNumber };
+    }));
 
     res.json({
       drafts: drafts.map((d, i) => {
         const flags = parseFlags(d.flags);
-        const r = resolved[i];
+        const { r, fromNumber } = resolved[i];
         return {
           id: d.id, smsLogId: d.sms_log_id,
           customerId: d.customer_id,
           customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
           customerPhone: d.phone || null,
           recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-          resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d, r?.customerId),
+          resolvedFromNumber: fromNumber || null,
           tier: d.waveguard_tier, stage: d.pipeline_stage,
           inboundMessage: d.inbound_message,
           draftResponse: d.draft_response,
@@ -1088,7 +1103,7 @@ router.get('/:id', async (req, res, next) => {
       customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
       customerPhone: d.phone || null,
       recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-      resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d, r?.customerId),
+      resolvedFromNumber: r?.fromNumber || await derivedOfficeNumber(d, r?.customerId) || null,
       tier: d.waveguard_tier,
       stage: d.pipeline_stage,
       inboundMessage: d.inbound_message,
