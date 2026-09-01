@@ -24,8 +24,11 @@ router.post('/group', async (req, res, next) => {
     }
     // Autopay exclusion — same rule as automatic stamping (spec rev-2:
     // "autopay customers are not grouped until grouped autopay ships");
-    // fail-closed inside the helper. Creation-time only: split/separate on
-    // existing visits stays unrestricted.
+    // fail-closed inside the helper. FAST PATH for a clean 409 message —
+    // the authoritative check re-runs inside createOrJoinVisit under the
+    // customer row lock (pre-push codex P0 TOCTOU), whose refusal maps to
+    // the same visit_group_refused below. Creation-time only:
+    // split/separate on existing visits stays unrestricted.
     const anchor = await require('../models/db')('scheduled_services')
       .whereIn('id', serviceIds).first('customer_id');
     if (!anchor || await VisitGroups.customerExcludedByAutopay(anchor.customer_id)) {

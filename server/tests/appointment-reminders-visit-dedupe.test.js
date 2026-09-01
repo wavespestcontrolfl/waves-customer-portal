@@ -70,6 +70,7 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
       whereNotExists: jest.fn().mockReturnThis(),
       orWhere: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
+      join: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
       select: jest.fn().mockResolvedValue([]),
       pluck: jest.fn().mockResolvedValue([]),
@@ -87,6 +88,12 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
       if (arCalls === 2) { const c = genericChain(); c.select = jest.fn().mockResolvedValue(rows); return c; }
       // move-hold checks + flag updates
       return genericChain(holdUntil ? { move_hold_until: holdUntil } : null);
+    }
+    if (table === 'appointment_reminders as ar') {
+      // closeVisitTierRows' member-row scan (durable sent-state fallback).
+      const c = genericChain();
+      c.select = jest.fn().mockResolvedValue(state.visitMemberRows || []);
+      return c;
     }
     if (String(table).startsWith('scheduled_services')) {
       const c = genericChain();
@@ -181,6 +188,37 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(result.sent24h).toBe(1);
     expect(VisitGroups.finalizeVisitNotification).not.toHaveBeenCalled();
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(1);
+  });
+
+  test('lease lost before the provider handoff: no send, row left unmarked', async () => {
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+    VisitGroups.renewNotificationLease.mockResolvedValueOnce(false);
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(VisitGroups.renewNotificationLease).toHaveBeenCalledWith(
+      VISIT, 'reminder_24h', 'tok-1', { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
+    );
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result.sent24h).toBe(0);
+    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+    expect(VisitGroups.finalizeVisitNotification).not.toHaveBeenCalled();
+  });
+
+  test('finalize failure AFTER a real send: every member row is closed as the durable sent state', async () => {
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
+    state.visitMemberRows = [{ id: 'rem-sibling', appointment_time: new Date('2026-05-07T14:00:00.000Z') }];
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+    VisitGroups.finalizeVisitNotification.mockResolvedValueOnce({ ok: false, reason: 'effect finalize failed' });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(result.sent24h).toBe(1);
+    // Sibling row closed by the fallback + owner's own flag close.
+    const closes = flagUpdates(state, 'reminder_24h_sent');
+    expect(closes).toHaveLength(2);
   });
 
   test('MOVE_HOLD at the provider handoff: owner releases the claim as retryable, row unmarked', async () => {

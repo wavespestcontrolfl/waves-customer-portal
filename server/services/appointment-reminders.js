@@ -1095,6 +1095,34 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
 // component ('service' = its no-real-label placeholder — e.g. the
 // appointment moved out from under this scan), and on any error: a
 // reminder with yesterday's label beats no reminder.
+/**
+ * Durable sent-state fallback (pre-push codex P1): when the visit-effect
+ * finalize FAILED after a real send, the effect stays `claimed` and a
+ * sibling could reclaim-and-resend once the lease expires. Closing every
+ * live member row for the tier removes the resend path entirely — no armed
+ * row, no claim, no duplicate. Each close is appointment_time-guarded like
+ * every other flag write, so a concurrent move's re-arm is never stomped.
+ */
+async function closeVisitTierRows(visitId, tierCol, tierAtCol) {
+  try {
+    const rows = await db('appointment_reminders as ar')
+      .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+      .where('ss.visit_id', visitId)
+      .where(`ar.${tierCol}`, false)
+      .where('ar.cancelled', false)
+      .select('ar.id', 'ar.appointment_time');
+    for (const row of rows) {
+      await db('appointment_reminders')
+        .where({ id: row.id })
+        .where('appointment_time', row.appointment_time)
+        .update({ [tierCol]: true, [tierAtCol]: new Date() });
+    }
+    logger.info(`[appt-remind] visit ${visitId}: effect finalize failed after send — closed ${rows.length} member row(s) for ${tierCol} as the durable sent state`);
+  } catch (err) {
+    logger.error(`[appt-remind] visit ${visitId}: durable ${tierCol} close failed after finalize failure — manual check needed: ${err.message}`);
+  }
+}
+
 async function liveReminderServiceLabel(row, { visitId = null } = {}) {
   const stored = smsServiceLabelStored(row.service_type);
   if (!row.scheduled_service_id) return stored;
@@ -2847,6 +2875,14 @@ const AppointmentReminders = {
             // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the
             // pre-check above passed at 19:59, the clock crossed 20:00
             // mid-flight) back out so the hold defers instead of marking.
+            // Lease renewal at the provider boundary (tracker-path parity,
+            // pre-push codex P1): the prep above (customer, label, links)
+            // can eat the lease — a reclaim replaced our token, so sending
+            // now would duplicate. Renew-or-abstain, row left unmarked.
+            if (ownsVisit72 && !(await vg72.renewNotificationLease(svcVisitId, 'reminder_72h', claim72.token, { dedupeKey: claim72.dedupeKey }))) {
+              logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
+              continue;
+            }
             const smsOutcome72 = {};
             const reached72 = await deliverAppointmentNotice({
               channel: channel72,
@@ -2880,12 +2916,16 @@ const AppointmentReminders = {
             }
 
             // Advance the visit ledger with the actual outcome before the
-            // per-row flag: a finalize failure leaves the effect `claimed`
-            // (lease-expiry retry at the visit level) while the row still
-            // closes — the sibling sees in_flight/taken, never a second
-            // send (the finalize's sent-guard cannot double-send past it).
+            // per-row flag. A finalize failure after a REAL send leaves the
+            // effect `claimed` and reclaimable — close every member row as
+            // the durable sent state instead (pre-push codex P1). A failed
+            // finalize on a suppressed outcome needs no fallback: a
+            // lease-expiry resend sends once, never silences.
             if (ownsVisit72) {
-              await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', reached72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              const fin72 = await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', reached72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              if (reached72 && fin72 && fin72.ok === false) {
+                await closeVisitTierRows(svcVisitId, 'reminder_72h_sent', 'reminder_72h_sent_at');
+              }
             }
 
             // Guard on appointment_time: a concurrent move re-arms this row
@@ -2983,15 +3023,24 @@ const AppointmentReminders = {
                 logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} covered by visit ${svcVisitId}`);
               } else {
                 const ownsNight = Boolean(nightClaim && nightClaim.state === 'owner');
+                const nightLabel = await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null });
+                // Lease renewal at the provider boundary — see the 72h twin.
+                if (ownsNight && !(await vgNight.renewNotificationLease(svcVisitId, 'reminder_24h', nightClaim.token, { dedupeKey: nightClaim.dedupeKey }))) {
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
+                  continue;
+                }
                 const emailRes = await sendAppointmentNoticeEmail({
                   kind: '24h',
                   customerId: r.customer_id,
                   scheduledServiceId: r.scheduled_service_id,
                   apptTime,
-                  serviceLabel: await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null }),
+                  serviceLabel: nightLabel,
                 });
                 if (ownsNight) {
-                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  const finNight = await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  if (emailRes?.ok && finNight && finNight.ok === false) {
+                    await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at');
+                  }
                 }
                 logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
               }
@@ -3044,6 +3093,11 @@ const AppointmentReminders = {
               .cardHoldReminderLine(r.scheduled_service_id);
             // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD back
             // out — see the 72h twin above.
+            // Lease renewal at the provider boundary — see the 72h twin.
+            if (ownsVisit24 && !(await vg24.renewNotificationLease(svcVisitId, 'reminder_24h', claim24.token, { dedupeKey: claim24.dedupeKey }))) {
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
+              continue;
+            }
             const smsOutcome24 = {};
             const reached24 = await deliverAppointmentNotice({
               channel: channel24,
@@ -3086,10 +3140,14 @@ const AppointmentReminders = {
               continue;
             }
 
-            // Advance the visit ledger before the per-row flag — see the
-            // 72h twin for the finalize-failure argument.
+            // Advance the visit ledger before the per-row flag; a failed
+            // finalize after a real send closes every member row as the
+            // durable sent state — see the 72h twin.
             if (ownsVisit24) {
-              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', reached24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              const fin24 = await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', reached24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              if (reached24 && fin24 && fin24.ok === false) {
+                await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at');
+              }
             }
 
             // Same appointment_time guard as the 72h flag above — a

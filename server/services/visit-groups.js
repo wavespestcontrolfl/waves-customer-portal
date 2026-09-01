@@ -423,6 +423,12 @@ async function nextStopSeq(trx, baseKey) {
  * catalog flags) or join them onto an eligible open visit for the stop.
  * Caller checks the gate; this only enforces invariants. Returns the visit.
  */
+const baseKeyFor = (r) => stopBaseKey({
+  propertyId: r.property_id,
+  customerId: r.customer_id,
+  scheduledDate: r.scheduled_date,
+});
+
 async function createOrJoinVisit({ rows, createdBy, trx = null }) {
   if (!Array.isArray(rows) || rows.length < 2) throw new Error('createOrJoinVisit needs >= 2 rows');
   const ids = rows.map((r) => (r && r.id) || r).filter(Boolean);
@@ -453,22 +459,33 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // reschedule between peek and lock surfaces as a mismatch.
     const peek = await loadRows(t, { lock: false });
     if (peek.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
-    const baseKey = stopBaseKey({
-      propertyId: peek[0].property_id,
-      customerId: peek[0].customer_id,
-      scheduledDate: peek[0].scheduled_date,
-    });
-    await lockStop(t, baseKey);
+    const stopCustomerId = peek[0].customer_id;
+    // Autopay exclusion UNDER the customer row lock (pre-push codex P0 —
+    // TOCTOU): the callers' unlocked pre-checks are fast paths only; the
+    // authoritative check runs here, in the same transaction that creates
+    // or joins the visit. Customer lock taken BEFORE the stop advisory
+    // lock, matching the booking paths' customer → stop-advisory order
+    // (booking.js locks the customer first, then stamps). A concurrent
+    // enrollment either committed first (seen and refused here) or waits
+    // on this row lock until the grouping commits — enrollment AFTER a
+    // group exists is the documented Phase-2/gate-flip caveat, not this
+    // race.
+    await t('customers').where({ id: stopCustomerId }).forUpdate().first('id');
+    if (await customerExcludedByAutopay(stopCustomerId, t)) {
+      throw new Error('rows not mutually groupable: autopay_enrolled');
+    }
+    await lockStop(t, baseKeyFor(peek[0]));
+    const baseKey = baseKeyFor(peek[0]);
 
     const fresh = await loadRows(t, { lock: true });
     if (fresh.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
     const [first] = fresh;
-    const lockedKey = stopBaseKey({
-      propertyId: first.property_id,
-      customerId: first.customer_id,
-      scheduledDate: first.scheduled_date,
-    });
-    if (lockedKey !== baseKey) {
+    const lockedKey = baseKeyFor(first);
+    if (lockedKey !== baseKey
+      // The stop key anchors on property when present, so a customer swap
+      // (merge repoint) could survive the key check — the autopay verdict
+      // above was rendered for stopCustomerId and must not carry over.
+      || fresh.some((r) => String(r.customer_id) !== String(stopCustomerId))) {
       const err = new Error('visit stop moved concurrently — retry');
       err.code = 'VISIT_STOP_MOVED';
       throw err;
@@ -1032,6 +1049,14 @@ async function customerExcludedByAutopay(customerId, database = db) {
     const customer = await database('customers').where({ id: customerId })
       .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
     if (!customer) return true;
+    // ENROLLMENT excludes, not current chargeability (pre-push codex P0):
+    // customerOnAutopay returns false during an autopay PAUSE, but a
+    // paused customer is still enrolled — a group formed during the pause
+    // would persist into resumed autopay and the per-row charger would
+    // charge each sibling separately. An explicit enrollment flag refuses
+    // outright; the chargeability predicate then catches legacy rows
+    // (autopay_enabled NULL with a live default autopay method).
+    if (customer.autopay_enabled === true) return true;
     const { customerOnAutopay } = require('./autopay-eligibility');
     return await customerOnAutopay(customer, { db: database, failClosed: true });
   } catch (err) {
@@ -1070,13 +1095,12 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     // Autopay exclusion (spec rev-2 item: "autopay customers are not
     // grouped until grouped autopay ships"; owner ruling 2026-08-31): the
     // per-row autopay charger would charge each sibling separately under
-    // one visit. Authoritative predicate reused (autopay-eligibility), and
-    // FAIL-CLOSED: an unreadable autopay state refuses grouping — the safe
-    // direction (an ungrouped stop merely over-notifies; a grouped autopay
-    // stop double-charges). Enforced at the CREATION entry points only
-    // (here + the office group route), never inside createOrJoinVisit —
-    // a unit move of an existing visit whose customer enrolled later must
-    // not start failing.
+    // one visit. FAST PATH ONLY — the authoritative check runs inside
+    // createOrJoinVisit under the customer row lock (pre-push codex P0
+    // TOCTOU); this unlocked read just avoids partner queries for a
+    // customer that will be refused anyway. Unit moves of existing visits
+    // never pass through createOrJoinVisit, so later enrollment cannot
+    // break them.
     if (await customerExcludedByAutopay(row.customer_id, database)) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
@@ -1356,7 +1380,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
   // tracker call sites keep the historical default untouched.
   const key = dedupeKey || `${visitId}:${effectType}`;
   try {
-    await db('visit_effects')
+    return await db('visit_effects')
       .insert({
         visit_id: visitId,
         effect_type: effectType,
@@ -1375,8 +1399,20 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
       .where('visit_effects.status', '<>', 'sent')
       // Only the current claim owner finalizes (codex r10): a stale owner's
       // late finalize never clobbers a reclaimer's row.
-      .modify((q) => { if (token) q.where('visit_effects.claim_token', '=', token); });
-    return { ok: true, effectType, status };
+      .modify((q) => { if (token) q.where('visit_effects.claim_token', '=', token); })
+      .returning('id')
+      .then(async (rows) => {
+        if (rows && rows.length) return { ok: true, effectType, status };
+        // Zero rows finalized (pre-push codex P1): either the row is
+        // already durably `sent` (finalize is then a no-op success), or
+        // ownership changed under us — report ok:false so the caller runs
+        // its durable fallback instead of assuming the ledger advanced.
+        const current = await db('visit_effects')
+          .where({ visit_id: visitId, effect_type: effectType, dedupe_key: key })
+          .first('status');
+        if (current && String(current.status) === 'sent') return { ok: true, effectType, status: 'sent', alreadyFinal: true };
+        return { ok: false, effectType, status, reason: 'claim not finalized (ownership changed)' };
+      });
   } catch (err) {
     require('./logger').warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects finalize failed: ${err.message}`);
     return { ok: false, effectType, status, reason: `effect finalize failed: ${err.message}` };

@@ -159,8 +159,10 @@ describe('send-site wiring', () => {
     // every member of the visit; non-owners keep the exact-slot merge.
     expect(src).toContain('const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit72 ? svcVisitId : null });');
     expect(src).toContain('const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit24 ? svcVisitId : null });');
-    // 24h night-skip email leg
-    expect(src).toContain('serviceLabel: await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null }),');
+    // 24h night-skip email leg (label resolved before the lease renewal,
+    // passed through as nightLabel)
+    expect(src).toContain('const nightLabel = await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null });');
+    expect(src).toContain('serviceLabel: nightLabel,');
     // No reminder-loop site still reads the frozen row column directly.
     expect(src).not.toContain('smsServiceLabelStored(r.service_type)');
   });
