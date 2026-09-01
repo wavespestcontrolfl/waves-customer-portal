@@ -460,6 +460,13 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     const peek = await loadRows(t, { lock: false });
     if (peek.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
     const stopCustomerId = peek[0].customer_id;
+    // A STABLE mixed-customer selection is an invalid request, not a race
+    // (GH codex r2 P2): refuse it as not-groupable (the route's 409)
+    // instead of letting the post-lock check spin it through the
+    // VISIT_STOP_MOVED retries into a 500.
+    if (peek.some((r) => String(r.customer_id) !== String(stopCustomerId))) {
+      throw new Error('rows not mutually groupable: rows span two customers');
+    }
     // Autopay exclusion UNDER the customer row lock (pre-push codex P0 —
     // TOCTOU): the callers' unlocked pre-checks are fast paths only; the
     // authoritative check runs here, in the same transaction that creates

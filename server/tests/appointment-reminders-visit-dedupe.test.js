@@ -15,7 +15,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
-jest.mock('../services/estimate-card-holds', () => ({ cardHoldReminderLine: jest.fn(async () => '') }));
+jest.mock('../services/estimate-card-holds', () => ({
+  cardHoldReminderLine: jest.fn(async () => ''),
+  cardHoldReminderNote: jest.fn(async () => ''),
+}));
 jest.mock('../services/visit-groups', () => ({
   claimVisitNotification: jest.fn(),
   finalizeVisitNotification: jest.fn(async () => ({ ok: true })),

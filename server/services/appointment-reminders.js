@@ -351,7 +351,7 @@ async function moveHoldActive(scheduledServiceId) {
 // the same occurrence will not double-deliver. Best-effort — never throws.
 // A held: true result means a grouped unit move holds the visit — a
 // deferral, not a delivery failure: no fallback, no no-channel alert.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // Callers that already minted the reschedule link for their SMS leg pass
@@ -375,7 +375,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -431,7 +431,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -454,7 +454,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return false;
   }
   const ch = apptChannel(channel);
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote };
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
@@ -550,7 +550,13 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     logger.info(`[appt-remind] ${kind} SMS for ${customerId} held at the send-window boundary — notice deferred`);
     return false;
   }
-  if (!smsOk) await deliverAppointmentEmailFallback(emailArgs);
+  if (!smsOk) {
+    // A successful fallback email IS a real delivery (GH codex r2 P1):
+    // callers that ledger the visit effect must see it, or a failed
+    // finalize would skip the durable close and a sibling could resend.
+    const fallbackOk = await deliverAppointmentEmailFallback(emailArgs);
+    if (fallbackOk && smsOutcome) smsOutcome.fallbackEmailOk = true;
+  }
   return smsOk;
 }
 
@@ -1141,7 +1147,7 @@ async function closeVisitTierRows(visitId, tierCol, tierAtCol, { occurrenceDate 
 async function visitReminderCopyInputs(visitId, row) {
   const ownLine = () => require('./estimate-card-holds')
     .cardHoldReminderLine(row.scheduled_service_id).catch(() => '');
-  const fallback = async () => ({ apptTime: new Date(row.appointment_time), holdLine: await ownLine() });
+  const fallback = async () => ({ apptTime: new Date(row.appointment_time), holdLine: await ownLine(), holdNote: null });
   if (!visitId) return fallback();
   try {
     const members = await db('appointment_reminders as ar')
@@ -1157,12 +1163,19 @@ async function visitReminderCopyInputs(visitId, row) {
       if (t < earliest) earliest = t;
     }
     const lines = [];
+    const notes = [];
     for (const m of members) {
       const line = await require('./estimate-card-holds')
         .cardHoldReminderLine(m.scheduled_service_id).catch(() => '');
       if (line && !lines.includes(line)) lines.push(line);
+      // The EMAIL leg renders its own note copy (cardHoldReminderNote) —
+      // aggregated here too, or the grouped email would drop a held
+      // sibling's disclosure (GH codex r2 P1).
+      const note = await require('./estimate-card-holds')
+        .cardHoldReminderNote(m.scheduled_service_id).catch(() => '');
+      if (note && !notes.includes(note)) notes.push(note);
     }
-    return { apptTime: earliest, holdLine: lines.join(' ') };
+    return { apptTime: earliest, holdLine: lines.join(' '), holdNote: notes.join(' ') };
   } catch {
     return fallback();
   }
@@ -2904,6 +2917,19 @@ const AppointmentReminders = {
             // member's card-hold disclosure (GH codex r1).
             const copy72 = ownsVisit72 ? await visitReminderCopyInputs(svcVisitId, r) : null;
             const apptCopy72 = copy72 ? copy72.apptTime : apptTime;
+            // The grouped copy reflects the visit's CURRENT earliest slot —
+            // a move that committed during the awaits above may have taken
+            // it outside this tier's band (GH codex r2 P1). Release the
+            // claim as retryable and leave the row unmarked: the re-armed
+            // rows own the new date, under a fresh date-bearing key.
+            if (copy72) {
+              const hoursUntilCopy = (apptCopy72.getTime() - now.getTime()) / 3600000;
+              if (!(hoursUntilCopy > 24.25 && hoursUntilCopy <= 72.25)) {
+                await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', 'retry', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+                logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — grouped slot moved out of the 72h band during the scan; claim released, row left unmarked`);
+                continue;
+              }
+            }
             const day = formatDay(apptCopy72);
             const date = formatDate(apptCopy72);
             const time = formatTime(apptCopy72);
@@ -2940,6 +2966,7 @@ const AppointmentReminders = {
               customerId: r.customer_id,
               scheduledServiceId: r.scheduled_service_id,
               apptTime: apptCopy72,
+              cardHoldNote: copy72 ? copy72.holdNote : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsOutcome: smsOutcome72,
@@ -2950,7 +2977,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
             });
 
             // Boundary hold — leave the row UNMARKED, same as the pre-check
@@ -2970,10 +2997,12 @@ const AppointmentReminders = {
             // effect `claimed` and reclaimable — close every member row as
             // the durable sent state instead (pre-push codex P1). A failed
             // finalize on a suppressed outcome needs no fallback: a
-            // lease-expiry resend sends once, never silences.
+            // lease-expiry resend sends once, never silences. A successful
+            // FALLBACK EMAIL is a real delivery too (GH codex r2 P1).
+            const delivered72 = reached72 || smsOutcome72.fallbackEmailOk === true;
             if (ownsVisit72) {
-              const fin72 = await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', reached72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
-              if (reached72 && fin72 && fin72.ok === false) {
+              const fin72 = await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', delivered72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              if (delivered72 && fin72 && fin72.ok === false) {
                 await closeVisitTierRows(svcVisitId, 'reminder_72h_sent', 'reminder_72h_sent_at', { occurrenceDate: claim72.dedupeKey.slice(claim72.dedupeKey.lastIndexOf(':') + 1) });
               }
             }
@@ -3088,7 +3117,18 @@ const AppointmentReminders = {
                   scheduledServiceId: r.scheduled_service_id,
                   apptTime: nightCopy ? nightCopy.apptTime : apptTime,
                   serviceLabel: nightLabel,
+                  cardHoldNote: nightCopy ? nightCopy.holdNote : null,
                 });
+                // A move-hold at the email handoff is a DEFERRAL (GH codex
+                // r2 P1): finalizing it terminally would mark the whole
+                // visit's only deliverable leg taken. Release the claim as
+                // retryable, leave the row unmarked, let the post-move
+                // scan re-decide.
+                if (emailRes?.held && ownsNight) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held by a grouped move — claim released, row left unmarked`);
+                  continue;
+                }
                 if (ownsNight) {
                   const finNight = await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
                   if (emailRes?.ok && finNight && finNight.ok === false) {
@@ -3138,6 +3178,12 @@ const AppointmentReminders = {
             // Grouped owner copy — see the 72h twin (GH codex r1).
             const copy24 = ownsVisit24 ? await visitReminderCopyInputs(svcVisitId, r) : null;
             const apptCopy24 = copy24 ? copy24.apptTime : apptTime;
+            // Tier recheck on the grouped copy — see the 72h twin.
+            if (copy24 && etDateString(apptCopy24) !== tomorrowET) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — grouped slot moved off tomorrow during the scan; claim released, row left unmarked`);
+              continue;
+            }
             const time = formatTime(apptCopy24);
 
             const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit24 ? svcVisitId : null });
@@ -3162,6 +3208,7 @@ const AppointmentReminders = {
               customerId: r.customer_id,
               scheduledServiceId: r.scheduled_service_id,
               apptTime: apptCopy24,
+              cardHoldNote: copy24 ? copy24.holdNote : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
@@ -3181,7 +3228,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
               smsOutcome: smsOutcome24,
             });
 
@@ -3199,10 +3246,12 @@ const AppointmentReminders = {
 
             // Advance the visit ledger before the per-row flag; a failed
             // finalize after a real send closes every member row as the
-            // durable sent state — see the 72h twin.
+            // durable sent state; a successful fallback email counts as a
+            // real delivery — see the 72h twin.
+            const delivered24 = reached24 || smsOutcome24.fallbackEmailOk === true;
             if (ownsVisit24) {
-              const fin24 = await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', reached24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
-              if (reached24 && fin24 && fin24.ok === false) {
+              const fin24 = await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', delivered24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              if (delivered24 && fin24 && fin24.ok === false) {
                 await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: claim24.dedupeKey.slice(claim24.dedupeKey.lastIndexOf(':') + 1) });
               }
             }
