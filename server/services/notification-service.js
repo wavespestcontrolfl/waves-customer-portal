@@ -178,15 +178,13 @@ const NotificationService = {
     try {
       const persisted = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-        const existing = await trx('notifications')
+        let existingQuery = trx('notifications')
           .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .modify((q) => {
-            if (Number.isFinite(windowMs) && windowMs > 0) {
-              q.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
-            }
-          })
-          .first();
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
+        if (Number.isFinite(windowMs) && windowMs > 0) {
+          existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
+        }
+        const existing = await existingQuery.first();
         if (existing) return { notification: existing, deduped: true };
         const created = await this.create({
           recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
