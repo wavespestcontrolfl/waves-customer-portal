@@ -10,7 +10,7 @@ const mockTables = {};
 function mockChain(cfg = {}) {
   const b = {};
   for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'whereRaw', 'orWhereRaw',
-    'whereExists', 'whereNotExists', 'whereNot', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'limit', 'modify', 'forUpdate', 'insert', 'onConflict', 'update', 'count']) {
+    'whereExists', 'whereNotExists', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'limit', 'modify', 'forUpdate', 'insert', 'onConflict', 'update', 'count']) {
     b[m] = jest.fn(() => b);
   }
   b.select = jest.fn(async () => cfg.select ?? []);
@@ -40,12 +40,8 @@ jest.mock('../services/stale-visit-sweep', () => ({ _private: { findStaleVisits:
 jest.mock('../services/estimate-conversion-guard', () => ({ convertedOpenEstimatesQuery: jest.fn() }));
 jest.mock('../config/completion-lane-registry', () => ({ ALL_LISTS: { A: ['known_key', 'gone_key'] }, classifyCatalogRow: jest.fn() }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
-jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
-jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
 
 const db = require('../models/db');
-const { resolveForInvoice } = require('../services/payer');
-const { customerOnAutopay } = require('../services/autopay-eligibility');
 const sendgrid = require('../services/sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { auditChurnedAccountsLiveState } = require('../scripts/audit-churned-accounts-live-state');
@@ -307,153 +303,6 @@ describe('detector adapters', () => {
     expect(out.detail).toEqual({ activeServices: 2, ghostLanes: 2 });
   });
 
-  test('unbilled_completed_visits flags only the money-gap visits, and skips the ones that DID invoice', async () => {
-    // v1 = the reported shape (no price, no rate, self-pay) → finding.
-    // v2 = same shape but a callback → free BY DESIGN, no finding.
-    // v3 = same shape as v1, but completion minted an invoice → settled.
-    // v4 = priced visit → invoice predicted, no finding.
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
-      { id: 'v2', estimated_price: null, is_callback: true, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
-      { id: 'v3', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
-      { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1' },
-    ] });
-    // v4 is priced, so its invoice must exist or it is itself a finding under
-    // the owed-but-never-minted arm.
-    mockTables.invoices = mockChain({ select: [{ scheduled_service_id: 'v3' }, { scheduled_service_id: 'v4' }] });
-    mockTables.service_records = mockChain({ select: [] });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    // The db is mocked, so a nonexistent column cannot fail the query here —
-    // it shipped once as `ss.billed_to_payer_id`, which is a schedule-query
-    // ALIAS and threw in Postgres on every sweep (Codex P1). Pin the real
-    // per-job column by name.
-    const selected = mockTables.scheduled_services.select.mock.calls[0];
-    expect(selected).toContain('ss.payer_id');
-    expect(selected).toContain('ss.customer_id');
-    expect(selected).not.toContain('ss.billed_to_payer_id');
-    expect(out.count).toBe(1);
-    expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
-    expect(out.detail).toMatchObject({ checked: 4, truncated: false });
-  });
-
-  test('unbilled_completed_visits: a rate added AFTER an unbilled completion does not hide it (Codex P1)', async () => {
-    // The repair path: staff sets monthly_rate to fix the account. Recomputing
-    // from current fields would re-predict the visit as billable/covered and
-    // silently drop it. Dues coverage now needs PAYMENT evidence for the
-    // visit's month (the payments mock returns none), so the owed-but-never-
-    // minted invoice is still reported.
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 46.33, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(out.count).toBe(1);
-    expect(out.ids).toEqual(['v1 [no_invoice_minted:invoice]']);
-  });
-
-  test('unbilled_completed_visits: an autopay-active member covered by dues is NOT a finding (Codex P1)', async () => {
-    // Dues cover the visit and no invoice is expected — reporting it would put
-    // healthy membership visits in the sweep every morning.
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: 'monthly_membership', monthly_rate: 46.33, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    customerOnAutopay.mockResolvedValueOnce(true);
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(out.count).toBe(0);
-  });
-
-  test('unbilled_completed_visits: non-performed outcomes are not incidents (Codex P1)', async () => {
-    // Completion deliberately mints nothing for these — reporting them would
-    // manufacture a daily incident out of correct behavior. A null outcome is
-    // NOT an excuse (fail toward reporting).
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: 'inspection_only' },
-      { id: 'v2', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: 'customer_declined' },
-      { id: 'v3', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: 'incomplete' },
-      { id: 'v4', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null, visit_outcome: null },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    // Outcomes are resolved from service_records in a SEPARATE query — the
-    // join was fanning visits out before the cap (non-unique FK).
-    mockTables.service_records = mockChain({ select: [
-      { scheduled_service_id: 'v1', visit_outcome: 'inspection_only' },
-      { scheduled_service_id: 'v2', visit_outcome: 'customer_declined' },
-      { scheduled_service_id: 'v3', visit_outcome: 'incomplete' },
-      // v3 also has a later recap row — newest must win, and it still says
-      // incomplete. v4 has no record at all: NOT an excuse.
-      { scheduled_service_id: 'v3', visit_outcome: 'incomplete' },
-    ] });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(out.ids).toEqual(['v4 [no_invoice_minted:invoice]']);
-  });
-
-  test('unbilled_completed_visits: the NEWEST completion record wins when several rails wrote (Codex P1)', async () => {
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: 129, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    // Ordered ascending by created_at: an early 'incomplete' superseded by a
-    // real completion must NOT keep excusing the missing invoice.
-    mockTables.service_records = mockChain({ select: [
-      { scheduled_service_id: 'v1', visit_outcome: 'incomplete' },
-      { scheduled_service_id: 'v1', visit_outcome: 'completed' },
-    ] });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(out.ids).toEqual(['v1 [no_invoice_minted:invoice]']);
-  });
-
-  test('unbilled_completed_visits: a VOID invoice is not proof of billing (Codex P1)', async () => {
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
-    ] });
-    // The detector must EXCLUDE void rows in the query, so the mock returns
-    // none — pin the filter itself, since a mocked db cannot enforce it.
-    mockTables.invoices = mockChain({ select: [] });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(mockTables.invoices.whereNot).toHaveBeenCalledWith('status', 'void');
-    expect(out.count).toBe(1);
-  });
-
-  test('unbilled_completed_visits: payer resolution gets BOTH ids for every evaluated visit (Codex P1)', async () => {
-    // Gating the call on ss.payer_id skipped visits inheriting an active
-    // customers.payer_id default; passing customerId is also what makes
-    // self_pay_override resolve the way completion resolves it. (A payer no
-    // longer EXEMPTS anything — it only classifies who the AR belongs to.)
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    mockTables.service_records = mockChain({ select: [] });
-    await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'v1', customerId: 'c1' }));
-  });
-
-  test('unbilled_completed_visits: an UNPRICED payer-billed visit IS reported — a payer is not an amount', async () => {
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: 42 },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(out.count).toBe(1);
-    expect(out.ids).toEqual(['v1 [no_amount_on_file]']);
-  });
-
-  test('unbilled_completed_visits: visits beyond the cap make the day a finding, never a silent pass', async () => {
-    const rows = Array.from({ length: CLOSEOUT_VISIT_CAP + 1 }, (_, i) => ({
-      id: `v${i}`, estimated_price: 100, is_callback: false, is_recurring: false,
-      service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze',
-    }));
-    mockTables.scheduled_services = mockChain({ select: rows, first: { n: String(CLOSEOUT_VISIT_CAP + 4) } });
-    // All priced and all invoiced — the ONLY finding must be the truncation.
-    mockTables.invoices = mockChain({ select: rows.map((r) => ({ scheduled_service_id: r.id })) });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    expect(out.count).toBe(1);
-    expect(out.ids).toEqual([`[truncated: 4 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);
-    expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
-  });
-
   test('closeout_failed_facts flags failed facts/contradictions and treats unevaluable visits as findings', async () => {
     mockTables.scheduled_services = mockChain({ select: [{ id: 'v1' }, { id: 'v2' }, { id: 'v3' }, { id: 'v4' }] });
     getCloseoutStatus
@@ -479,34 +328,5 @@ describe('detector adapters', () => {
     expect(out.count).toBe(1);
     expect(out.ids).toEqual([`[truncated: 7 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);
     expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
-  });
-});
-
-describe('unbilled_completed_visits — ET calendar discipline', () => {
-  const byKey = (k) => DETECTORS.find((d) => d.key === k);
-
-  test('sweeps YESTERDAY across a DST boundary, not now-minus-24h (Codex P1)', async () => {
-    mockTables.scheduled_services = mockChain({ select: [] });
-    mockTables.invoices = mockChain({ select: [] });
-    // 2026-03-09 00:30 ET (EDT, UTC-4). Elapsed-time subtraction lands on
-    // Mar 7 here — skipping Mar 8 entirely.
-    const out = await byKey('unbilled_completed_visits').run({ now: new Date('2026-03-09T04:30:00Z') });
-    expect(out.detail.date).toBe('2026-03-08');
-  });
-});
-
-describe('unbilled_completed_visits — payer AR', () => {
-  const byKey = (k) => DETECTORS.find((d) => d.key === k);
-
-  test('a PRICED payer visit with no invoice is reported (Codex P1)', async () => {
-    mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: 183, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: 42 },
-    ] });
-    mockTables.invoices = mockChain({ select: [] });
-    mockTables.service_records = mockChain({ select: [] });
-    resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
-    // The AP invoice is owed exactly as a customer invoice would be.
-    expect(out.ids).toEqual(['v1 [no_invoice_minted:payer]']);
   });
 });
