@@ -71,41 +71,10 @@ function shouldCapLockTimeout(previous) {
 
 async function lockCustomerComms(trx, customerId) {
   if (!customerId) return;
-  // SET LOCAL lasts to the END of the transaction, not to the next
-  // statement, so setting it bare would hand this timeout to every later
-  // write in a booking, scheduling or estimate transaction and would widen a
-  // stricter one a caller had already chosen (codex #3677 P1). Read the
-  // value in force, bound only the acquisition, put it back either way.
-  // set_config(..., true) is the LOCAL form that accepts bind parameters —
-  // plain `SET LOCAL x = ?` does not, so a parameterized restore would throw,
-  // and a swallowed throw would leave this timeout imposed on the rest of the
-  // caller's transaction: the very bug being fixed (codex #3677 P1).
-  const previous = await trx.raw('SHOW lock_timeout')
-    .then((res) => res?.rows?.[0]?.lock_timeout)
-    .catch(() => null);
-  // CAP, never widen. A caller that deliberately set a shorter timeout — a
-  // deadlock or latency guard — must keep it; this bound exists only to stop
-  // an UNLIMITED wait, so it applies when the setting is 0 or longer than the
-  // bound (codex #3677 P1).
-  if (shouldCapLockTimeout(previous)) {
-    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [LOCK_WAIT_TIMEOUT]);
-  }
-  try {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-      [`customer-comms:${customerId}`],
-    );
-  } finally {
-    // Restoring inside finally matters: on a lock timeout the caller's catch
-    // may still run more statements in this transaction. '0' — no timeout —
-    // is a value to preserve like any other, so the check is for a READ, not
-    // for truthiness.
-    if (previous != null) {
-      await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(previous)]).catch(() => {});
-    } else {
-      await trx.raw('RESET lock_timeout').catch(() => {});
-    }
-  }
+  await withBoundedLockWait(trx, () => trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+    [`customer-comms:${customerId}`],
+  ));
 }
 
 /**
@@ -141,6 +110,40 @@ async function withCustomerCommsLock(db, customerId, fn) {
   });
 }
 
+/**
+ * Run an advisory-lock acquisition under a BOUNDED wait.
+ *
+ * pg_advisory_xact_lock blocks with no deadline of its own. Inside the
+ * call-processing pass that is indistinguishable from a hang: the claim's
+ * heartbeat keeps beating on its timer, so the row can never be reclaimed.
+ * Any blocking lock that pass can reach goes through here.
+ *
+ * Caps, never widens — a caller's stricter deadlock guard is left alone — and
+ * restores the previous setting in a finally, because SET LOCAL otherwise
+ * lasts to the end of the caller's transaction.
+ */
+async function withBoundedLockWait(trx, acquire) {
+  const previous = await trx.raw('SHOW lock_timeout')
+    .then((res) => res?.rows?.[0]?.lock_timeout)
+    .catch(() => null);
+  const capped = shouldCapLockTimeout(previous);
+  if (capped) {
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [LOCK_WAIT_TIMEOUT]);
+  }
+  try {
+    return await acquire();
+  } finally {
+    if (capped) {
+      if (previous != null) {
+        await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(previous)]).catch(() => {});
+      } else {
+        await trx.raw('RESET lock_timeout').catch(() => {});
+      }
+    }
+  }
+}
+
 module.exports = {
   lockTimeoutMs,
-  shouldCapLockTimeout, lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };
+  shouldCapLockTimeout,
+  withBoundedLockWait, lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };

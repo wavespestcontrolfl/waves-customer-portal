@@ -272,6 +272,24 @@ describe('customer comms lock timeout is scoped and restorable', () => {
     };
   };
 
+  test('every blocking advisory lock the pass can reach is bounded', () => {
+    // An unbounded lock wait while holding a claim is indistinguishable from
+    // a hang: the heartbeat keeps beating and the call never becomes
+    // reclaimable.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const locks = [];
+    for (let i = source.indexOf('pg_advisory_xact_lock'); i !== -1; i = source.indexOf('pg_advisory_xact_lock', i + 1)) {
+      locks.push(i);
+    }
+    expect(locks.length).toBeGreaterThan(0);
+    for (const at of locks) {
+      // Either taken through the bounded helper, or through a lock utility
+      // that bounds it internally.
+      const preceding = source.slice(Math.max(0, at - 400), at);
+      expect(preceding).toMatch(/withBoundedLockWait|lockTriageCall|lockCustomerComms/);
+    }
+  });
+
   test('caps an unlimited wait but never widens a stricter one', () => {
     const { shouldCapLockTimeout } = require('../utils/customer-comms-lock');
     // 0 means wait forever — the case the bound exists for.
@@ -285,7 +303,8 @@ describe('customer comms lock timeout is scoped and restorable', () => {
   });
 
   test('restores through set_config, which can bind — SET LOCAL cannot', async () => {
-    const trx = trxSpy('5s');
+    // '0' = wait forever, so the cap applies and must be undone afterwards.
+    const trx = trxSpy('0');
     await lockCustomerComms(trx, 'cust-1');
     const setters = trx.calls.filter((c) => String(c.sql).includes('lock_timeout'));
     for (const call of setters) {
@@ -294,22 +313,24 @@ describe('customer comms lock timeout is scoped and restorable', () => {
     }
     const restore = trx.calls[trx.calls.length - 1];
     expect(String(restore.sql)).toContain("set_config('lock_timeout'");
-    expect(restore.bindings).toEqual(['5s']);
-  });
-
-  test("preserves '0' — no timeout is a value, not an absence", async () => {
-    const trx = trxSpy('0');
-    await lockCustomerComms(trx, 'cust-1');
-    const restore = trx.calls[trx.calls.length - 1];
     expect(restore.bindings).toEqual(['0']);
   });
 
-  test('restores even when the acquisition times out', async () => {
+  test("a stricter caller timeout is never touched at all", async () => {
     const trx = trxSpy('5s');
+    await lockCustomerComms(trx, 'cust-1');
+    const setters = trx.calls.filter((c) => String(c.sql).includes('set_config'));
+    expect(setters).toHaveLength(0);
+  });
+
+
+
+  test('restores even when the acquisition times out', async () => {
+    const trx = trxSpy('0');
     trx.raw.mockImplementation((sql, bindings) => {
       trx.calls.push({ sql, bindings });
       if (String(sql).includes('SHOW lock_timeout')) {
-        return Promise.resolve({ rows: [{ lock_timeout: '5s' }] });
+        return Promise.resolve({ rows: [{ lock_timeout: '0' }] });
       }
       if (String(sql).includes('pg_advisory_xact_lock')) {
         return Promise.reject(new Error('canceling statement due to lock timeout'));
