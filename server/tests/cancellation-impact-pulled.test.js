@@ -16,9 +16,11 @@ jest.mock('../services/cancellation-eligibility', () => ({
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
   LIVE_TRACK_STATES: ['en_route', 'on_property'],
 }));
+const mockRentalState = jest.fn(async () => ({ rented: [], flaggedRental: false }));
 jest.mock('../services/cancellation-processor', () => ({
   planScopedWindDown: jest.fn(),
   familyOfServiceRow: (r) => r.family || null,
+  rentedTermiteStationState: (...a) => mockRentalState(...a),
 }));
 jest.mock('../services/self-booking-plan-sync', () => ({ inferTierFromServiceCount: () => null }));
 jest.mock('../services/plan-rate-ledger', () => ({ loadComponents: jest.fn(async () => []) }));
@@ -123,9 +125,24 @@ test('termiteRental promises a retrieval task only when one will be raised — n
     { id: 'v1', family: 'lawn_care', status: 'confirmed', scheduled_date: '2099-02-01', track_state: null },
     { id: 'v2', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-02-05', track_state: null },
   ];
+  mockRentalState.mockClear().mockResolvedValue({ rented: [], flaggedRental: true });
   const scoped = await buildCancellationImpact('cust-1', ['lawn_care']);
   expect(scoped.termiteRental).toBe(false);
+  // An unrelated scope never consults the predicate — the processor
+  // wouldn't either.
+  expect(mockRentalState).not.toHaveBeenCalled();
   // Whole-account: the churn raises the task for the flagged rental.
   const whole = await buildCancellationImpact('cust-1', []);
   expect(whole.termiteRental).toBe(true);
+  // The preview asks the PROCESSOR'S predicate, not the family/flag
+  // heuristic: mapped stations beat a stale false customer flag…
+  mockRentalState.mockResolvedValue({ rented: [{ id: 's1' }], flaggedRental: false });
+  const mapped = await buildCancellationImpact('cust-1', []);
+  expect(mapped.termiteRental).toBe(true);
+  // …and no rental evidence promises no task, even on a whole-account
+  // churn of a flagged-false account (raiseTermiteRetrievalTask would
+  // return no_rented_stations).
+  mockRentalState.mockResolvedValue({ rented: [], flaggedRental: false });
+  const none = await buildCancellationImpact('cust-1', []);
+  expect(none.termiteRental).toBe(false);
 });

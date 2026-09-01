@@ -54,21 +54,28 @@ const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'cha
  * @returns {Promise<{cancelledCount:number, recurrenceStopped:number,
  *                    churned:boolean, ok:boolean, errors:string[]}>}
  */
-async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
-  // program filter: the table also holds rodent/trapping stations, which are
-  // always Waves-owned and are NOT bait-station rentals.
+// Rental-state predicate, shared with the impact preview: active Waves-owned
+// termite-program stations on the map, or the customer-level rental flag
+// (migration 20260726000003) when none were ever pinned. The preview must
+// promise a retrieval task with exactly the evidence the task uses —
+// program filter matters: the table also holds rodent/trapping stations,
+// which are always Waves-owned and are NOT bait-station rentals.
+async function rentedTermiteStationState(customerId) {
   const stations = await db('termite_stations')
     .where({ customer_id: customerId, program: 'termite' })
     .select('id', 'owned_by', 'is_active');
   const rented = (stations || []).filter((row) => row && row.owned_by === 'waves' && row.is_active !== false);
   let flaggedRental = false;
   if (!rented.length) {
-    // Customer-level flag (migration 20260726000003) covers rental programs
-    // whose stations were never pinned on the map.
     const customer = await db('customers').where({ id: customerId }).first('termite_stations_rented');
     flaggedRental = !!(customer && customer.termite_stations_rented === true);
-    if (!flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   }
+  return { rented, flaggedRental };
+}
+
+async function raiseTermiteRetrievalTask(customerId, requestId = null, { retrieveAfter = null } = {}) {
+  const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
+  if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
   const NotificationService = require('./notification-service');
   const count = rented.length;
   // An ACCELERATED program end (end_at_term later switched to
@@ -638,7 +645,11 @@ async function processCancellationRequest({
         const keptRows = await db('scheduled_services')
           .where({ customer_id: customerId })
           .whereIn('id', keepIds)
-          .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
+          // 'rescheduled' matches the sweep's own predicate: an open rebook
+          // intent is pulled regardless of date and keepIds, so a covered
+          // termite row in that state does NOT stay deliverable — counting
+          // it would date the retrieval task for a visit nobody delivers.
+          .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
           .select('id', 'scheduled_date', 'status', 'service_id', 'service_type');
         const serviceIds = [...new Set(keptRows.map((r) => r.service_id).filter(Boolean))];
         const services = serviceIds.length
@@ -1168,6 +1179,7 @@ async function processCancellationRequest({
 }
 
 module.exports = {
-  processCancellationRequest, raiseTermiteRetrievalTask, planScopedWindDown, familyOfServiceRow,
+  processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState,
+  planScopedWindDown, familyOfServiceRow,
   CHURN_REASON, CANCELLABLE_STATUSES,
 };

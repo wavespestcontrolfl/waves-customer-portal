@@ -123,6 +123,13 @@ async function previewCancelSignup(customerId) {
   let refundTotalCents = 0;
   const invoicesToVoid = new Map();
 
+  // Deposit money this flow still owes back if the account churns — an
+  // UNAPPLIED received deposit, or a credit whose carrying invoice is still
+  // voidable (voiding returns the money) or untraceable (unverifiable =
+  // outstanding). A credit consumed by a PAID invoice is the established-
+  // customer steady state — every legacy account keeps its credited signup
+  // deposit row forever — and is NOT outstanding.
+  let depositCreditRecoverable = false;
   for (const row of refundableDeposits) {
     const remainderCents = toCents(row.amount) - toCents(row.refunded_amount);
     if (remainderCents <= 0) continue;
@@ -131,6 +138,7 @@ async function previewCancelSignup(customerId) {
       const carrying = await invoicesCarryingDepositCredit(row, customerId);
       if (carrying.length === 0) {
         blockers.push('a deposit credit could not be traced to its invoice — manual reconciliation required');
+        depositCreditRecoverable = true;
         continue;
       }
       for (const invoice of carrying) {
@@ -139,7 +147,10 @@ async function previewCancelSignup(customerId) {
           continue;
         }
         invoicesToVoid.set(invoice.id, invoice);
+        depositCreditRecoverable = true;
       }
+    } else {
+      depositCreditRecoverable = true;
     }
   }
 
@@ -212,6 +223,10 @@ async function previewCancelSignup(customerId) {
   return {
     eligible: blockers.length === 0,
     blockers,
+    // The plan-cancel guard refuses on this too (not just eligible:true):
+    // a deposit-stage account whose signup cancel is merely BLOCKED must
+    // not slip through to the generic churn with its deposit stranded.
+    depositOutstanding: deposits.some((d) => d.status === 'refunding') || depositCreditRecoverable,
     customer: {
       id: customer.id,
       tier: customer.waveguard_tier || null,

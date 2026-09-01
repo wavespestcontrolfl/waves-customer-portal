@@ -789,6 +789,31 @@ describe('processCancellationRequest', () => {
     expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
   });
 
+  test('a RESCHEDULED covered termite visit never dates the retrieval — the sweep pulls open rebook intents, so nothing deliverable remains', async () => {
+    db.__tables.scheduled_services = [
+      // Covered by the term but sitting as an open rebook intent (stale
+      // original date): the sweep cancels it regardless of date/keepIds.
+      { id: 'tv1', customer_id: 'c1', status: 'rescheduled', scheduled_date: '2020-01-01', track_state: null, cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice', service_type: 'Termite Bait Station Quarterly' },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [
+      { id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true },
+    ];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT2r', keepThrough: '2099-02-28', keepVisitIds: ['tv1'] });
+
+    expect(result.churned).toBe(true);
+    // The rebook intent was pulled, so staff pull the stations NOW — a
+    // dated task would tell them to wait for a visit nobody delivers.
+    expect(db.__tables.scheduled_services[0].status).toBe('cancelled');
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Termite stations to retrieve after cancellation');
+    expect(opts.metadata.retrieveAfter).toBeUndefined();
+  });
+
   test('mixed account: a NON-termite prepaid term never dates the retrieval — the uncovered termite program ends now, stations come out now', async () => {
     db.__tables.scheduled_services = [
       // The prepaid PEST term's covered visit rides out the window…

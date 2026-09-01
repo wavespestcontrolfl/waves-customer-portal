@@ -102,19 +102,28 @@ function normalizeInput(raw = {}) {
 // retryable — proceeding on a probe error could churn a deposit-stage
 // account without refunding the deposit.
 async function refuseDepositStageAccount(customerId) {
-  let signupEligible = false;
+  let signup = null;
   try {
     const { previewCancelSignup } = require('./customer-offboarding');
-    const signup = await previewCancelSignup(customerId);
-    signupEligible = signup && signup.eligible === true;
+    signup = await previewCancelSignup(customerId);
   } catch (probeErr) {
     logger.warn(`[admin-cancellation] signup-cancel probe failed for ${customerId}: ${probeErr.message}`);
     throw new CancelPlanError(503, 'deposit_check_unavailable',
       'Could not verify this account is past the deposit stage — cancellation not processed. Try again shortly.');
   }
-  if (signupEligible) {
+  if (signup && signup.eligible === true) {
     throw new CancelPlanError(409, 'use_cancel_signup',
       'This account is still at the deposit stage — use "Cancel signup & refund deposit" so the deposit is refunded, instead of a plan cancellation.');
+  }
+  // Blocked is not clearance: a deposit still owed back (refund in flight,
+  // unapplied money, or a credit the signup flow could recover by voiding
+  // its invoice) makes this a deposit-stage account even when blockers put
+  // the dedicated flow out of reach — the generic churn would pull the
+  // booked visits and keep the deposit. Resolve the deposit first.
+  if (signup && signup.depositOutstanding === true) {
+    const why = Array.isArray(signup.blockers) && signup.blockers.length ? ` (${signup.blockers[0]})` : '';
+    throw new CancelPlanError(409, 'deposit_outstanding',
+      `A customer deposit is still outstanding on this account — resolve it before a plan cancellation${why}.`);
   }
 }
 
@@ -549,7 +558,14 @@ async function acquireCancelCommitLock(customerId) {
     try {
       await conn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [CANCEL_LOCK_NS, String(customerId)]);
     } catch (err) {
-      logger.warn(`[admin-cancellation] cancel lock release failed for ${customerId} (session end clears it): ${err.message}`);
+      // A failed unlock on a still-usable session would return the
+      // connection to the pool WITH the advisory lock held — every later
+      // cancel for this customer reads cancel_in_progress until the
+      // process restarts. Poison the connection instead: knex destroys a
+      // __knex__disposed connection rather than handing it out again, and
+      // ending the session is what actually releases the lock.
+      conn.__knex__disposed = err;
+      logger.warn(`[admin-cancellation] cancel lock release failed for ${customerId} — connection poisoned so the pool destroys it: ${err.message}`);
     }
     try { await db.client.releaseConnection(conn); } catch { /* pool reaps */ }
   };
@@ -1425,7 +1441,14 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         updated_at: new Date(),
       });
     } catch (outcomeErr) {
-      logger.warn(`[admin-cancellation] outcome record failed for case ${caseRow.id}: ${outcomeErr.message}`);
+      // A lost outcome stamp is NOT a clean run: closing the acceptance
+      // below would hand a lost-response retry the resolved-acceptance echo
+      // with NO snapshot.outcome — "0 visits, no confirmation" for a
+      // destructive cancellation that happened. Ride the errors list so the
+      // acceptance stays open (the retry's repair pass recomputes and
+      // re-stamps the durable result) and the office is belled.
+      errors.push('outcome_record_failed');
+      logger.error(`[admin-cancellation] outcome record failed for case ${caseRow.id}: ${outcomeErr.message}`);
     }
   }
 

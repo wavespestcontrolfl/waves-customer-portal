@@ -1723,8 +1723,12 @@ async function cancelPlan(input, actionContext = {}) {
   // BOTH confirmation signals, or it's a preview: /confirm-action is the
   // only caller that attaches input.confirmed AND actionContext.confirmed
   // (route-derived, never client params) — so a params-level confirmed
-  // smuggled through /execute or the gate-off model loop still previews
-  // (same posture as the estimate tools' actionContext.confirmed gate).
+  // smuggled through /execute or the model loop still previews (same
+  // posture as the estimate tools' actionContext.confirmed gate). This is
+  // never preview-only: UI confirmation is STRUCTURAL (W0B — no env value
+  // restores model-loop writes), cancel_plan is registered in
+  // write-gates.js, so every commit arrives via a pending action's
+  // /confirm-action.
   if (input.confirmed !== true || actionContext.confirmed !== true) {
     let preview;
     try {

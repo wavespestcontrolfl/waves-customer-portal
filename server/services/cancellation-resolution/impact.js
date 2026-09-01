@@ -164,6 +164,25 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
   const tierBefore = customer.waveguard_tier || inferTierFromServiceCount(owned.length);
   const monthly = customer.monthly_rate == null ? null : Number(customer.monthly_rate);
 
+  // The processor raises the retrieval task only when ITS OWN predicate
+  // finds rental state (active Waves-owned termite stations, or the
+  // customer flag when none are mapped) — so the preview asks the same
+  // question: family scope alone promises tasks that never come, and the
+  // stale customer flag alone hides one that will (mapped stations on a
+  // whole-account cancel). Unverifiable falls back to the flag/family
+  // heuristic rather than dropping the warning.
+  let termiteRental = false;
+  if (wholeAccount || cancelledFamilies.includes('termite_bait')) {
+    try {
+      const { rentedTermiteStationState } = require('../cancellation-processor');
+      const rental = await rentedTermiteStationState(customerId);
+      termiteRental = rental.rented.length > 0 || rental.flaggedRental === true;
+    } catch (err) {
+      logger.warn(`[cancel-impact] rental-state lookup failed for ${customerId}: ${err.message}`);
+      termiteRental = customer.termite_stations_rented === true || cancelledFamilies.includes('termite_bait');
+    }
+  }
+
   return {
     families: owned.map((f) => ({
       key: f,
@@ -196,10 +215,7 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     payUrl: null,
     prepay,
     autopayOn: customer.autopay_enabled === true,
-    // The processor raises the retrieval task on a whole-account churn or a
-    // scoped cancel that INCLUDES termite — a flagged rental cancelling only
-    // another family gets no task, so the preview must not promise one.
-    termiteRental: (wholeAccount && customer.termite_stations_rented === true) || cancelledFamilies.includes('termite_bait'),
+    termiteRental,
     effectiveDate: today,
     billingMode: customer.billing_mode || null,
     wholeAccount,

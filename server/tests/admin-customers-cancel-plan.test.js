@@ -620,6 +620,57 @@ describe('POST /:id/cancel-plan', () => {
     expect(retry.status).toBe(200);
   }));
 
+  test('an outstanding deposit refuses even when the signup flow is blocked — blocked is not clearance', () => withServer(async (baseUrl) => {
+    mockSignupPreview.mockResolvedValue({
+      eligible: false,
+      blockers: ['a deposit refund is already in flight — retry after it settles'],
+      depositOutstanding: true,
+    });
+    const commit = await postCancel(baseUrl);
+    expect(commit.status).toBe(409);
+    const body = await commit.json();
+    expect(body.code).toBe('deposit_outstanding');
+    expect(body.error).toContain('refund is already in flight');
+    expect(mockProcess).not.toHaveBeenCalled();
+    const preview = await post(baseUrl, '/cancel-plan/preview');
+    expect(preview.status).toBe(409);
+    // An ESTABLISHED account (its signup deposit long consumed by a paid
+    // invoice) reports depositOutstanding:false and cancels normally.
+    mockSignupPreview.mockResolvedValue({
+      eligible: false,
+      blockers: ['a visit invoice is paid (INV-1) — money collected beyond the deposit; out of scope'],
+      depositOutstanding: false,
+    });
+    const ok = await postCancel(baseUrl);
+    expect(ok.status).toBe(200);
+  }));
+
+  test('a LOST outcome stamp keeps the acceptance open — never a resolved echo with an empty outcome', () => withServer(async (baseUrl) => {
+    const resolvedCloses = [];
+    db.mockImplementation((table) => {
+      const b = builderFor(table);
+      if (table === 'cancellation_cases') {
+        b.update = async () => { throw new Error('case table down'); };
+      }
+      if (table === 'service_requests') {
+        const update = b.update;
+        b.update = async (patch) => {
+          if (patch.status === 'resolved') resolvedCloses.push(patch);
+          return update(patch);
+        };
+      }
+      return b;
+    });
+    const body = await (await postCancel(baseUrl)).json();
+    expect(body.processed).toBe(true);
+    expect(body.errors).toEqual(['outcome_record_failed']);
+    // The acceptance was NOT resolved: the retry path can still repair and
+    // re-stamp the durable result instead of echoing an empty outcome.
+    expect(resolvedCloses).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('outcome_record_failed');
+  }));
+
   test('the accepted waiver survives a LOST case write — the request metadata is the durable record', () => withServer(async (baseUrl) => {
     // Run 1: waived, a fee leg failed AND the case write failed.
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));

@@ -14,8 +14,12 @@ const TEMPLATE = {
   template_key: 'service_cancellation_end_of_term_confirmation',
   name: 'Cancellation Confirmation (end of paid coverage)',
   category: 'automations',
+  // "Nothing new … charged" is future-service only — completed-visit
+  // charges stay payable (the email says so; the SMS must not read as
+  // forgiving an open balance). 275 chars rendered worst-case (GSM-7,
+  // two segments).
   body:
-    'Hello {first_name}! Your Waves plan is cancelled and will not renew. Paid-for visits stay on the calendar through {effective_date}; after that nothing more is scheduled or charged. Changed your mind or have a question? Reply here.',
+    'Hello {first_name}! Your Waves plan is cancelled and will not renew. Paid-for visits stay on the calendar through {effective_date}; after that nothing new is scheduled or charged. Charges for completed visits remain payable. Changed your mind or have a question? Reply here.',
   variables: ['first_name', 'effective_date'],
   sort_order: 125,
 };
