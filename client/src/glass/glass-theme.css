@@ -32,6 +32,14 @@ html[data-glass-theme] {
   --brand-ring: rgba(4, 57, 94, 0.18);
 }
 
+/* Decorative orbs and the review ticker intentionally extend beyond their
+   visual containers. Keep those layers from widening the document scroller,
+   especially on narrow customer estimate/report screens. */
+html[data-glass-theme],
+html[data-glass-theme] body {
+  overflow-x: clip;
+}
+
 /* ---------- native-markup helpers ----------
    Attribute hooks for surfaces that author data-glass markup natively
    (no classify() walker). Inert without html[data-glass-theme]. */
