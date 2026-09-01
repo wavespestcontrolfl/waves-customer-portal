@@ -69,6 +69,19 @@ describe('tip-library registry', () => {
     }
   });
 
+  test('the registry is deep-frozen — a consumer cannot alter what later resolutions emit', () => {
+    'use strict';
+    const tip = TIPS.find((t) => t.id === 'lawn_irrigation_portal');
+    expect(Object.isFrozen(tip)).toBe(true);
+    expect(Object.isFrozen(tip.keywords)).toBe(true);
+    expect(Object.isFrozen(tip.link)).toBe(true);
+    expect(() => { tip.copy = 'unscreened'; }).toThrow(TypeError);
+    expect(() => { tip.link.path = '/evil'; }).toThrow(TypeError);
+    const served = tipsForVisit({ serviceLine: 'lawn', date: '2026-08-15' }).groups.flatMap((g) => g.tips).find((t) => t.id === tip.id);
+    expect(Object.isFrozen(served)).toBe(true);
+    expect(resolveTipIds([tip.id])[0].copy).toBe(tip.copy);
+  });
+
   test('a tip that links only links inside the portal', () => {
     for (const tip of TIPS.filter((t) => t.link)) {
       expect(tip.link.path).toMatch(/^\/portal(?:\?|$)/);
