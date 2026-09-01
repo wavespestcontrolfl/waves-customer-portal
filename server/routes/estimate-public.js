@@ -5113,7 +5113,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // /calculate), same as the operator waiver.
   const frozenQuoteFeeRaw = Number(estData?.setupFeeQuote?.amount);
   const frozenQuoteFeeWaived = !!estData?.setupFeeQuote && !(frozenQuoteFeeRaw > 0);
-  const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived && !frozenQuoteFeeWaived
+  // A frozen UNIFIED decision (GATE_UNIFIED_SETUP_FEE quotes, owner ruling
+  // 2026-09-01) discloses on ANY recurring mix — the mix rule above is the
+  // legacy membership fee's. Disclosure and the accept invoice must agree:
+  // shouldIncludeWaveGuardSetupFeeForRecurring bills a positive unified
+  // quote on every mix, so the page shows it the same way.
+  const frozenUnifiedQuoteFee = estData?.setupFeeQuote?.kind === 'unified' && frozenQuoteFeeRaw > 0
+    ? frozenQuoteFeeRaw
+    : 0;
+  const membershipFee = (hasWaveGuardMembership || frozenUnifiedQuoteFee > 0)
+    && !operatorSetupFeeWaived && !frozenQuoteFeeWaived
     ? (frozenQuoteFeeRaw > 0
       ? frozenQuoteFeeRaw
       : (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99)))
@@ -5122,7 +5131,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // (shown struck-through), and with no waivable fee the annual-prepay option
   // drops too: existing customers are offered pay-per-application only.
   // estimate-converter mirrors this so the accept invoice can't include it.
-  const membershipSetupWaivedForExistingCustomer = isExistingMember && membershipFee > 0;
+  // (Legacy kinds only: a unified quote decided existing-customer status
+  // once, at quote time — the frozen positive is authoritative here too.)
+  const membershipSetupWaivedForExistingCustomer = isExistingMember && membershipFee > 0
+    && !(frozenUnifiedQuoteFee > 0);
   const showMembershipFee = membershipFee > 0 && !locked && !membershipSetupWaivedForExistingCustomer;
 
   const tierDiscountPct = Math.round(estimateTierDiscount * 100);
@@ -16499,6 +16511,15 @@ function normalizeOneTimeBreakdown(estData) {
   const membershipFeeMixApplies = require('../services/estimate-converter')
     .recurringMixHasMembershipFeeService(recurringServicesForFee)
     && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(estData);
+  // A frozen UNIFIED decision (GATE_UNIFIED_SETUP_FEE quotes, owner ruling
+  // 2026-09-01) discloses on ANY recurring mix — the accept invoice bills a
+  // positive unified quote regardless of the legacy mix rule, so the
+  // one-time breakdown must show the same fee (disclosure ↔ charge).
+  const frozenUnifiedBreakdownFee = estData?.setupFeeQuote?.kind === 'unified'
+    && Number(estData?.setupFeeQuote?.amount) > 0
+    && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(estData)
+    ? Math.round(Number(estData.setupFeeQuote.amount) * 100) / 100
+    : 0;
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
   if (Number.isFinite(membershipFee) && membershipFee > 0 && membershipFeeMixApplies && !hasExplicitWaveGuardSetup) {
     addRows([{
@@ -16506,6 +16527,13 @@ function normalizeOneTimeBreakdown(estData) {
       name: 'WaveGuard setup',
       price: membershipFee,
       detail: 'Membership setup fee',
+    }]);
+  } else if (frozenUnifiedBreakdownFee > 0 && !hasExplicitWaveGuardSetup) {
+    addRows([{
+      service: 'waveguard_setup',
+      name: 'Setup fee',
+      price: frozenUnifiedBreakdownFee,
+      detail: 'One-time setup fee',
     }]);
   }
   const termiteInstall = Number(oneTime?.tmInstall ?? nestedOneTime?.tmInstall);
@@ -16583,7 +16611,7 @@ function normalizeOneTimeBreakdown(estData) {
   // shouldIncludeWaveGuardSetupFeeForRecurring already refuses to CHARGE it
   // for these mixes, so this keeps the page consistent with the invoice.
   let suppressedExplicitSetupTotal = 0;
-  if (!membershipFeeMixApplies) {
+  if (!membershipFeeMixApplies && !(frozenUnifiedBreakdownFee > 0)) {
     for (let i = rows.length - 1; i >= 0; i -= 1) {
       const row = rows[i];
       if (row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row)) {

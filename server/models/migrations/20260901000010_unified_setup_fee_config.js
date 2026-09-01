@@ -51,10 +51,24 @@ exports.down = async function down(knex) {
     .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG })
     .first('id');
   if (!proof) return;
+  // The seed audit row must also be the LATEST mutation recorded for the
+  // key — any later audit entry (admin panel writes one per edit) means the
+  // row is no longer ours to remove, even if the values happen to match.
+  const laterMutation = await knex('pricing_config_audit')
+    .where({ config_key: CONFIG_KEY })
+    .where('id', '>', proof.id)
+    .first('id');
+  if (laterMutation) return;
   const row = await knex('pricing_config').where({ config_key: CONFIG_KEY }).first();
   if (!row) return;
   const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
-  if (Number(data?.value) !== SEED_DATA.value) return; // admin-edited — keep
+  // Whole-row equality with what up() seeded — ANY admin edit (value, note,
+  // extra keys, name, category, sort order) keeps the row.
+  const seededRowIntact = JSON.stringify(data) === JSON.stringify(SEED_DATA)
+    && row.name === 'Unified Setup Fee'
+    && row.category === 'global'
+    && Number(row.sort_order) === 20;
+  if (!seededRowIntact) return; // admin-edited — keep
   await knex('pricing_config').where({ config_key: CONFIG_KEY }).delete();
   await knex('pricing_config_audit').insert({
     config_key: CONFIG_KEY,
