@@ -2,16 +2,20 @@
 // affiliate pilot requires (docs/affiliate-links-pilot.md — "Baseline first: 90
 // days of GSC + GA4 per candidate URL ... recorded before any link activates").
 //
+// CAPTURES per candidate URL: GSC clicks / impressions / CTR / position, the
+// top queries the page ranks for, GA4 sessions and users, GA4 pageviews /
+// bounce / session duration, and GA4 key events.
+//
 // ⚠️ PARTIAL BASELINE — not sufficient to activate links on its own. The pilot
 // spec also names estimate starts, calls, CTA clicks and geography. Those are
 // portal-side conversion signals needing URL-to-conversion attribution, which
-// is NOT built here. The documented stop rule ("STOP a page if its local
-// service conversion drops >10% vs baseline") cannot be evaluated from this
+// is NOT built here. GA4 key events are a leading indicator, not the same
+// thing. The documented stop rule ("STOP a page if its local service
+// conversion drops >10% vs baseline") therefore cannot be evaluated from this
 // output alone: it measures traffic, not leads. Capture the conversion half
 // separately before any link activates.
 //
-// Pulls per-URL Search Console performance and GA4 pageviews for a window,
-// keeps blog-lane URLs only, and flags the topic classes the pilot excludes.
+// Keeps blog-lane URLs only and flags the topic classes the pilot excludes.
 // Writes NOTHING: it calls searchanalytics.query directly rather than the
 // service's syncPages(), which upserts into gsc_pages.
 //
@@ -115,6 +119,39 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   });
   const gscTruncated = (gscRes.data.rows || []).length >= GSC_ROW_LIMIT;
 
+  // Per-URL QUERIES — the pilot's baseline names queries explicitly, and a
+  // page-only pull cannot show which searches a page was winning before the
+  // links went live. Grouped page+query, then reduced to the top few per page.
+  const QUERIES_PER_PAGE = 5;
+  const gscQueryRes = await gsc.webmasters.searchanalytics
+    .query({
+      siteUrl,
+      requestBody: {
+        startDate,
+        endDate,
+        dimensions: ['page', 'query'],
+        rowLimit: GSC_ROW_LIMIT,
+        type: 'web',
+      },
+    })
+    .catch((e) => ({ data: {}, error: e.message }));
+  const gscQueryTruncated = (gscQueryRes.data?.rows || []).length >= GSC_ROW_LIMIT;
+  const queriesByUrl = new Map();
+  for (const row of gscQueryRes.data?.rows || []) {
+    const [pageUrl, query] = row.keys;
+    if (!queriesByUrl.has(pageUrl)) queriesByUrl.set(pageUrl, []);
+    queriesByUrl.get(pageUrl).push({
+      query,
+      clicks: row.clicks || 0,
+      impressions: row.impressions || 0,
+      position: +(row.position || 0).toFixed(1),
+    });
+  }
+  for (const list of queriesByUrl.values()) {
+    list.sort((a, b) => b.impressions - a.impressions);
+    list.splice(QUERIES_PER_PAGE);
+  }
+
   const pages = (gscRes.data.rows || []).map((row) => {
     const pageUrl = row.keys[0];
     let path = pageUrl;
@@ -171,15 +208,46 @@ const fmt = (d) => d.toISOString().slice(0, 10);
     delete v.durWeighted;
   }
 
+  // ── GA4 landing pages: SESSIONS, users and key events ──
+  // The pilot's baseline names sessions, not pageviews — they are different
+  // metrics and the stop rule is written against sessions. keyEvents is GA4's
+  // configured key-event count, which is NOT the same as portal-side estimate
+  // starts or calls; it is a leading indicator, not the conversion half.
+  const landingRes = await ga4.getTopLandingPages(startDate, endDate, GA4_ROW_LIMIT).catch((e) => ({
+    configured: false, data: [], error: e.message,
+  }));
+  const landingRows = landingRes.data || [];
+  const landingTruncated = landingRows.length >= GA4_ROW_LIMIT;
+  const landingByPath = new Map();
+  for (const r of landingRows) {
+    const prev = landingByPath.get(r.landingPage);
+    if (!prev) {
+      landingByPath.set(r.landingPage, {
+        sessions: r.sessions || 0,
+        users: r.users || 0,
+        keyEvents: r.conversions || 0,
+      });
+    } else {
+      prev.sessions += r.sessions || 0;
+      prev.users += r.users || 0;
+      prev.keyEvents += r.conversions || 0;
+    }
+  }
+
   // ── Merge, filter, rank ──
   let rows = pages.map((p) => {
     const g = ga4ByPath.get(p.path) || null;
+    const l = landingByPath.get(p.path) || null;
     return {
       ...p,
+      sessions: l ? l.sessions : null,
+      users: l ? l.users : null,
+      keyEvents: l ? l.keyEvents : null,
       pageviews: g ? g.pageviews : null,
       bounceRate: g ? g.bounceRate : null,
       avgSessionDuration: g ? g.avgSessionDuration : null,
       title: g ? g.pageTitle : null,
+      topQueries: queriesByUrl.get(p.url) || [],
     };
   });
 
@@ -203,29 +271,50 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   const eligible = rows.filter((r) => !r.excludedBecause);
   const excluded = rows.filter((r) => r.excludedBecause);
 
+  const missingSessions = rows.filter((r) => r.sessions === null).map((r) => r.path);
+
   const warnings = [];
-  if (gscTruncated) warnings.push(`GSC hit the ${GSC_ROW_LIMIT}-row cap — some pages are missing from this baseline.`);
-  if (ga4Truncated) warnings.push(`GA4 hit the ${GA4_ROW_LIMIT}-row cap — some pageview figures are missing.`);
+  if (gscTruncated) warnings.push(`GSC pages hit the ${GSC_ROW_LIMIT}-row cap — some pages are missing from this baseline.`);
+  if (gscQueryTruncated) warnings.push(`GSC page+query hit the ${GSC_ROW_LIMIT}-row cap — top queries are incomplete for some pages.`);
+  if (gscQueryRes.error) warnings.push(`GSC query pull failed (${gscQueryRes.error}) — no per-URL queries captured.`);
+  if (ga4Truncated) warnings.push(`GA4 pages hit the ${GA4_ROW_LIMIT}-row cap — some pageview figures are missing.`);
+  if (landingTruncated) warnings.push(`GA4 landing pages hit the ${GA4_ROW_LIMIT}-row cap — some session figures are missing.`);
+  if (landingRes.configured === false) warnings.push(`GA4 landing-page report unavailable — SESSIONS not captured (${landingRes.error || 'not configured'}).`);
   for (const f of unmatchedFilters) warnings.push(`--url=${f} matched no returned page — NOT captured.`);
-  if (missingGa4.length) warnings.push(`${missingGa4.length} page(s) have GSC data but no GA4 pageviews (GSC-only rows).`);
+  if (missingGa4.length) warnings.push(`${missingGa4.length} page(s) have GSC data but no GA4 pageviews.`);
+  if (missingSessions.length) warnings.push(`${missingSessions.length} page(s) have no GA4 sessions — the stop rule's own metric is blank for these.`);
 
   const payload = {
     window: { startDate, endDate, days: DAYS },
     siteUrl,
     capturedAt: new Date().toISOString(),
-    partialBaseline: 'search/traffic only — estimate starts, calls, CTA clicks and geography are NOT captured here',
+    captured: ['per-URL GSC clicks/impressions/CTR/position', 'top queries per URL', 'GA4 sessions/users', 'GA4 pageviews/bounce/duration', 'GA4 key events'],
+    notCaptured: ['estimate starts', 'calls', 'CTA clicks', 'geography'],
+    partialBaseline:
+      'search/traffic only. GA4 key events are a leading indicator, NOT portal-side estimate starts or calls — ' +
+      'the documented stop rule (service conversion drop) still needs URL-to-conversion attribution captured separately.',
     sources: {
-      gsc: { rows: pages.length, rowLimit: GSC_ROW_LIMIT, truncated: gscTruncated },
+      gsc: {
+        pageRows: pages.length,
+        queryRows: (gscQueryRes.data?.rows || []).length,
+        rowLimit: GSC_ROW_LIMIT,
+        truncated: gscTruncated,
+        queryTruncated: gscQueryTruncated,
+        queryError: gscQueryRes.error || null,
+      },
       ga4: {
         configured: ga4Res.configured !== false,
         rows: ga4Rows.length,
         rowLimit: GA4_ROW_LIMIT,
         truncated: ga4Truncated,
         pathsAfterTitleMerge: ga4ByPath.size,
-        error: ga4Res.error || null,
+        landingRows: landingRows.length,
+        landingTruncated,
+        error: ga4Res.error || landingRes.error || null,
       },
     },
     warnings,
+    missingSessions,
     missingGa4,
     counts: { blogLane: rows.length, eligible: eligible.length, excluded: excluded.length },
     eligible: eligible.slice(0, LIMIT),
@@ -252,9 +341,12 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   }
 
   console.log(`\n── Eligible candidates (${eligible.length}) ──`);
-  console.log(`${pad('PATH', 52)} ${num('CLICKS', 7)} ${num('IMPR', 8)} ${num('POS', 6)} ${num('VIEWS', 7)}`);
+  console.log(`${pad('PATH', 46)} ${num('CLICKS', 7)} ${num('IMPR', 8)} ${num('POS', 6)} ${num('SESS', 7)} ${num('KEYEV', 6)}`);
   for (const r of eligible.slice(0, LIMIT)) {
-    console.log(`${pad(r.path, 52)} ${num(r.clicks, 7)} ${num(r.impressions, 8)} ${num(r.position.toFixed(1), 6)} ${num(r.pageviews, 7)}`);
+    console.log(`${pad(r.path, 46)} ${num(r.clicks, 7)} ${num(r.impressions, 8)} ${num(r.position.toFixed(1), 6)} ${num(r.sessions, 7)} ${num(r.keyEvents, 6)}`);
+    if (r.topQueries.length) {
+      console.log(`${' '.repeat(4)}queries: ${r.topQueries.map((q) => `${q.query} (${q.impressions})`).join(' · ').slice(0, 150)}`);
+    }
   }
 
   if (excluded.length) {
