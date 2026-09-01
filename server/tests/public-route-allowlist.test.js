@@ -134,6 +134,16 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
         const assignOver = /Object\.assign\(\s*module\.exports/.test(src);
         expect({ guard: g.name, module: g.module, memberRewrites, wholesale, assignOver })
           .toEqual({ guard: g.name, module: g.module, memberRewrites: [], wholesale: 1, assignOver: false });
+        // ...and the BINDING itself must never be reassigned before export
+        // (`adminAuthenticate = noop; module.exports = { adminAuthenticate }`
+        // would pass every check above while exporting the no-op).
+        const reassignedLines = src.split('\n').filter((line) =>
+          new RegExp(`(^|[^.\\w$'"\`])${g.name}\\s*=[^=>]`).test(line)
+          && !new RegExp(`(const|let|var|function)\\s+(async\\s+)?${g.name}\\b`).test(line)
+          && !/module\.exports/.test(line)
+          && !new RegExp(`${g.name}\\s*:`).test(line));
+        expect({ guard: g.name, module: g.module, reassignedLines })
+          .toEqual({ guard: g.name, module: g.module, reassignedLines: [] });
       }
     }
   });
@@ -1204,6 +1214,84 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(res.problems.some((p) => p.includes('registered inside a function'))).toBe(true);
+  });
+
+  test('overwriting a router registration METHOD (router.use = noop) is a problem; helper exports are not', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'router.use = () => router;',
+        'router._test = { helper: 1 };',
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    const methodWrites = res.problems.filter((p) => p.includes('overwriting a router/app registration method'));
+    expect(methodWrites.length).toBe(1); // router.use, not router._test
+  });
+
+  test('registrations through module.exports itself attribute to the exported router', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'module.exports = router;',
+        "module.exports.get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a SECOND express() app handed to the listener is caught by the appOnly check', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          'const live = express();',
+          "live.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(live);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
+  });
+
+  test('external mutations resolve the target through the FINAL export mapping', () => {
+    // module.exports = { api: leak } — mutating .api from outside mutates
+    // leak, which is mounted; the internal name `api` does not even exist.
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/multi').api);",
+      ].join('\n')),
+      'server/routes/multi.js': [
+        "const leak = require('express').Router();",
+        "leak.get('/thing', (req, res) => res.json({}));",
+        'module.exports = { api: leak };',
+      ].join('\n'),
+      'server/services/installer.js': "require('../routes/multi').api.get('/extra', (req, res) => res.json({}));",
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a member-expression argument (install(holder.api)) enters the unanalysed-consumer check', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const { install } = require('./services/installer');",
+        "const router = require('express').Router();",
+        'const holder = { api: router };',
+        'install(holder.api);',
+        "app.use('/api/x', router);",
+      ].join('\n')),
+      'server/services/installer.js': [
+        "function install(r) { r.get('/leak', (req, res) => res.json({})); }",
+        'module.exports = { install };',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('unanalysed function'))).toBe(true);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {

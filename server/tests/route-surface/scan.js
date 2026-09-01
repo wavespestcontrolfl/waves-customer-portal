@@ -244,7 +244,7 @@ class ModuleAnalysis {
     const memberAssignments = [];
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
-        && node.arguments.some((a) => a && (a.type === 'Identifier' || a.type === 'ArrayExpression'))) {
+        && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
         callsWithIdentifierArgs.push(node);
       }
       if (node.type === 'OptionalCallExpression'
@@ -445,6 +445,14 @@ class ModuleAnalysis {
       if (a.right.type === 'Identifier' && this.routers.has(this.canonName(a.right.name))) {
         this.problems.push(`${this.loc(a.node)}: router ${a.right.name} assigned into an object shape the scanner cannot model — register routes via the router identifier, or a one-level object literal bound to a const`);
       }
+      // `router.use = noop` / `app.get = ...` — overwriting REGISTRATION
+      // machinery makes every later static conclusion about that object a
+      // lie. Attaching unrelated helper/test exports (`router._test = fn`)
+      // is the accepted repo idiom and stays legal.
+      if (base && (this.routers.has(base) || APP_IDENTIFIERS.has(base))
+        && (VERBS.has(a.prop) || ['use', 'route', 'param', 'handle', 'stack', '_router'].includes(a.prop))) {
+        this.problems.push(`${this.loc(a.node)}: assignment to ${base}.${a.prop} — overwriting a router/app registration method is not supported by the scanner`);
+      }
     }
     this.externalRouterRegs = [...this.directExternalRegs]; // registrations on OTHER modules' routers
     for (const r of this.registrations) {
@@ -537,16 +545,24 @@ class ModuleAnalysis {
     // callees with a reviewed `routerConsumers` registry entry
     // (http.createServer, the Sentry error handler).
     for (const call of callsWithIdentifierArgs) {
-      const argNames = [];
+      const resolvedArgs = [];
       for (const a of call.arguments) {
-        if (a && a.type === 'Identifier') argNames.push(a.name);
-        else if (a && a.type === 'ArrayExpression') {
-          for (const el of a.elements) if (el && el.type === 'Identifier') argNames.push(el.name);
+        if (!a) continue;
+        if (a.type === 'Identifier') resolvedArgs.push(this.canonName(a.name));
+        else if (a.type === 'MemberExpression') {
+          const n = this.resolveMemberChain(a);
+          if (n) resolvedArgs.push(n);
+        } else if (a.type === 'ArrayExpression') {
+          for (const el of a.elements) {
+            if (el && el.type === 'Identifier') resolvedArgs.push(this.canonName(el.name));
+            else if (el && el.type === 'MemberExpression') {
+              const n = this.resolveMemberChain(el);
+              if (n) resolvedArgs.push(n);
+            }
+          }
         }
       }
-      const passed = argNames
-        .map((n) => this.canonName(n))
-        .filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
+      const passed = resolvedArgs.filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
       if (!passed.length) continue;
       const c = call.callee;
       const consumerOk = (entry) => {
@@ -672,6 +688,13 @@ class ModuleAnalysis {
     if (node.type === 'Identifier') return this.canonName(node.name);
     if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
       && !node.computed && node.property.type === 'Identifier') {
+      // `module.exports` IS whatever was exported — registrations through it
+      // (`module.exports.get('/leak', h)`) belong to the exported router.
+      if (node.object.type === 'Identifier' && node.object.name === 'module'
+        && node.property.name === 'exports') {
+        if (this.exportUnstable || !this.exportCandidate) return null;
+        return this.canonName(this.exportCandidate);
+      }
       const base = this.resolveMemberChain(node.object);
       if (!base) return null;
       const b = this.bindings.get(base);
@@ -702,9 +725,18 @@ class ModuleAnalysis {
     if (w > 1) this.reassignedNames.add(name);
   }
 
+  /** `express()` — a second Express APPLICATION registers surface too. */
+  isAppFactory(node) {
+    if (!node || node.type !== 'CallExpression' || node.arguments.length) return false;
+    const c = node.callee;
+    if (c.type !== 'Identifier') return false;
+    const b = this.cleanBinding(c.name);
+    return Boolean(b && b.kind === 'require' && b.module === null && b.spec === 'express');
+  }
+
   recordBinding(name, init, topLevel) {
     if (init) this.countWrite(name);
-    if (this.isRouterFactory(init)) {
+    if (this.isRouterFactory(init) || this.isAppFactory(init)) {
       this.routers.add(name);
       this.setBinding(name, { kind: 'router', topLevel });
     } else if (isRequireCall(init)) {
@@ -1040,7 +1072,7 @@ class ModuleAnalysis {
             const b = this.cleanBinding(arg.name);
             if (b && b.kind === 'string') desc = `${arg.name} = '${b.value}'`;
             else if (b && b.kind === 'call' && b.node) {
-              desc = `${arg.name} = ${this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ').slice(0, 120)}`;
+              desc = `${arg.name} = ${predicateLabel(this.src.slice(b.node.start, b.node.end))}`;
             } else desc = `${arg.name} = <unresolved>`;
           }
           return [{ type: 'static', desc }];
@@ -1300,7 +1332,14 @@ class Scanner {
       for (const x of m.externalRouterRegs || []) {
         if (!this.modules.has(x.module)) continue; // target is not mounted surface
         const t = this.modules.get(x.module);
-        const targetsRouter = x.name ? t.routers.has(t.canonName(x.name)) : Boolean(t.exportedRouter);
+        let targetsRouter;
+        if (x.name) {
+          const exp = t.exportLookup(x.name);
+          if (exp.kind === 'ident') targetsRouter = t.routers.has(t.canonName(exp.name));
+          else targetsRouter = exp.kind === 'opaque'; // unresolvable export: fail closed
+        } else {
+          targetsRouter = Boolean(t.exportedRouter);
+        }
         if (targetsRouter) {
           this.problems.push(`${x.loc}: ${x.method}() on the router exported by ${x.module} — routes registered outside the owning module bypass its guard ordering; register them in ${x.module}`);
         }
