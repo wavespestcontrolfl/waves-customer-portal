@@ -13764,7 +13764,9 @@ export function CompletionPanel({
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
         observations: reportObservations,
-        structuredObservations: activeSelectedLabels(selectedObservationLabels),
+        structuredObservations: specialtyCompletion
+          ? activeSelectedLabels(selectedObservationLabels)
+          : [],
         recommendations: reportRecommendations,
         lawnAssessmentId,
         // Tree & Shrub AI photo assessment. When the background review ran,
