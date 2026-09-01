@@ -115,13 +115,24 @@ const gates = {
 
   // Unified accept-time setup fee (owner ruling 2026-09-01): ONE setup fee
   // (pricing_config.unified_setup_fee, default $99) for every NEW customer
-  // starting recurring service, REGARDLESS of mix — pest+rodent, lawn+pest,
-  // rodent alone all carry it; waived only for EXISTING customers (an
-  // active recurring service on the account). Decided ONCE at accept/quote
-  // and frozen — supersedes the solo-pest/mosquito membership-fee rule and
-  // the rodent cross-family waiver on gated quotes. Money surface —
-  // fail-closed ==='true' in EVERY environment; gate off = today's two-fee
-  // behavior byte-identical. Full effect expects RECURRING_CARD_ON_FILE +
+  // starting recurring service — waived only for EXISTING customers (an
+  // active recurring service on the account); decided ONCE and frozen.
+  // ⚠ COVERAGE IN THIS STAGE (deliberate — disclosure must land before a
+  // charge, and only these surfaces disclose today):
+  //   • PUBLIC WIZARD quotes: any recurring mix quotes, freezes, and bills
+  //     the unified fee (supersedes the solo-pest/mosquito membership rule
+  //     and the rodent cross-family waiver on gated quotes).
+  //   • No-freeze staff/AI/call estimates: the accept-time decision runs
+  //     ONLY on surfaces the customer already saw a fee on (the legacy
+  //     solo-mix card, or a rodent setup line — which then prices at the
+  //     unified knob); their lawn-only/bundle mixes keep charging NOTHING
+  //     (exactly today's behavior) until those creation lanes
+  //     freeze-and-disclose in the next stage. The gate does NOT yet
+  //     deliver any-mix coverage on staff/AI/call lanes — do not flip it
+  //     expecting that.
+  // Money surface — fail-closed ==='true' in EVERY environment; gate off =
+  // today's two-fee behavior byte-identical (frozen unified quotes still
+  // bill as disclosed). Full effect expects RECURRING_CARD_ON_FILE +
   // GATE_PREPAY_CARD_AND_CHARGE (+ its prerequisites) so estimate accepts
   // can collect at accept. Kill switch: unset or any non-'true' value.
   unifiedSetupFee: process.env.GATE_UNIFIED_SETUP_FEE === 'true',
