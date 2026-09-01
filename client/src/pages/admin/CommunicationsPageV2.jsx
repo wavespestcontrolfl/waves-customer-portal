@@ -1039,8 +1039,13 @@ function SmsTab() {
           // capture would trip the mismatch effect below and silently
           // detach the draft (r2 P1).
           const draftFrom = draft?.resolvedFromNumber || queryFromNumber || null;
-          if (draftFrom && draftFrom !== fromNumber) {
-            setFromNumber(draftFrom);
+          if (draftFrom) {
+            // Lock UNCONDITIONALLY when a resolved From exists — even when
+            // it equals the composer default, an editable selector would
+            // let a From change clear loadedMessageDraft and quietly turn
+            // the approval into a manual send (Codex r7 P1). Only the
+            // state write is guarded on inequality.
+            if (draftFrom !== fromNumber) setFromNumber(draftFrom);
             setThreadLock({
               contactPhone: finalPhone,
               ourNumber: draftFrom,
