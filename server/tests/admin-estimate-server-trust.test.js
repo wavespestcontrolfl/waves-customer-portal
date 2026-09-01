@@ -158,3 +158,39 @@ describe('P1-2 server-authoritative recompute ignores forged identity inputs', (
     expect(r.serverResult.isRecurringCustomer).toBe(true);
   });
 });
+
+describe('setupWaiverPriorQualifyingServices is a stripped client identity field (codex #3591 r15 P1)', () => {
+  test('a browser-supplied waiver identity never survives the sanitizer', () => {
+    const out = sanitizeClientIdentityFields({ homeSqFt: 2000, setupWaiverPriorQualifyingServices: ['pest_control'], priorQualifyingServices: ['lawn_care'] });
+    expect(out).toEqual({ homeSqFt: 2000 });
+  });
+});
+
+describe('setup-waiver evidence is server-derived per purpose (codex #3591 r34 P1)', () => {
+  const rodentInput = () => ({
+    homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family',
+    services: { rodentBait: { frequency: 'quarterly' } },
+  });
+  const setupRow = (r) => (r.serverResult?.specItems || []).find((it) => it.service === 'rodent_bait_setup');
+
+  test('a client-claimed setupWaiverPriorQualifyingServices is stripped: a non-member still owes the setup', async () => {
+    const r = await serverRecomputeFromEstimateData(
+      { engineInputs: { ...rodentInput(), setupWaiverPriorQualifyingServices: ['pest_control'] } },
+      { priorQualifyingServices: [], setupWaiverPriorQualifyingServices: [], recurringCustomer: false },
+    );
+    expect(r.recomputed).toBe(true);
+    expect(setupRow(r)).toBeTruthy();
+  });
+
+  test('the ACCOUNT-wide server list waives the setup even when the property-scoped tier list is empty (grouped / secondary property)', async () => {
+    const r = await serverRecomputeFromEstimateData(
+      { engineInputs: rodentInput() },
+      { priorQualifyingServices: [], setupWaiverPriorQualifyingServices: ['pest_control'], recurringCustomer: false },
+    );
+    expect(r.recomputed).toBe(true);
+    expect(setupRow(r)).toBeUndefined();
+    // …and the empty property-scoped tier list keeps the tier standalone.
+    const tier = r.serverResult?.recurring?.tier || r.serverResult?.waveGuardTier;
+    expect(tier).toBe('Bronze');
+  });
+});

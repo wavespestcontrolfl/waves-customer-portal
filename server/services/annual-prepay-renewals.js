@@ -773,8 +773,32 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   let seededVisitPrice = null;
   if (cols.estimated_price && term?.prepay_invoice_id) {
     try {
-      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total');
-      const base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total', 'line_items');
+      let base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      // One-time setup lines (rodent bait-station setup, owner 2026-08-29)
+      // ride the prepay invoice but are NOT per-visit coverage money —
+      // subtract them before dividing, or the voided-prepay fallback price
+      // rebills every visit with a slice of the setup fee. The IMMUTABLE
+      // setup_fee_claims record decides first (codex #3591 r71 P1) — a
+      // staff-renamed line would otherwise inflate every seeded fallback
+      // price by the setup's slice while a later reversal also restores the
+      // setup itself; the text scan stays only for pre-ledger invoices.
+      let setupTotal = 0;
+      try {
+        const claimRow = await conn('setup_fee_claims').where({ invoice_id: term.prepay_invoice_id }).first('amount');
+        setupTotal = Math.round((Number(claimRow?.amount) || 0) * 100) / 100;
+      } catch { /* unreadable ledger — fall back to the line scan */ }
+      if (!(setupTotal > 0)) {
+        try {
+          const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
+          if (Array.isArray(lines)) {
+            setupTotal = lines
+              .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
+              .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
+          }
+        } catch { /* unparseable line_items — keep the subtotal basis */ }
+      }
+      if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
       if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
     } catch (err) {
       logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);
@@ -1348,6 +1372,29 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       }
     } catch (err) {
       logger.warn(`[annual-prepay] term ${term.id} effective first-visit stamp failed (${err.message}) — paid-invoice dates may not match the seeded schedule`);
+    }
+  }
+
+  // Anchor the prepay's anchor-less setup claim to the covered series root
+  // (codex #3591 r77 P1): a Customer 360 coverage-only mint ledgered its
+  // claim before any series existed — once seeding creates (or finds) the
+  // covered root, the claim belongs HERE. Left anchor-less, a later
+  // unrelated rodent booking could adopt it and suppress its own setup.
+  // Best-effort (warn, never roll back the seeding): an unanchored claim is
+  // recoverable — the adoption path only reads claims of LIVE terms.
+  if (term?.prepay_invoice_id && createdParentId) {
+    try {
+      const claimless = await conn('setup_fee_claims')
+        .where({ invoice_id: term.prepay_invoice_id })
+        .whereNull('scheduled_service_id')
+        .first('id');
+      if (claimless) {
+        const { anchorSetupFeeClaim } = require('./secure-appointment-plans');
+        await anchorSetupFeeClaim(conn, { claimId: claimless.id, anchorId: createdParentId });
+        logger.info(`[annual-prepay] term ${term.id}: anchor-less setup claim ${claimless.id} anchored to covered series root ${createdParentId}`);
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id}: setup-claim anchoring skipped (${err.message}) — retried on the next term refresh`);
     }
   }
 
@@ -2622,35 +2669,68 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // marker). It is cleared after the follow-ups run clean; GUARD 5 is
       // unaffected either way (it only reads the marker on payment_pending
       // rows).
-      const [updated] = await conn('annual_prepay_terms')
-        .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
-        .update({ status: 'active', updated_at: new Date() })
-        .returning('*');
+      // The flip and the setup cleanup commit TOGETHER (codex #3591 r52
+      // P1): many callers pass the global handle, and an auto-committed
+      // flip beside a failed cleanup left the restored stamp/replacement
+      // live forever (the retry skips an already-active term).
+      const reviveFromPending = async (t) => {
+        const [updated] = await t('annual_prepay_terms')
+          .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
+          .update({ status: 'active', updated_at: new Date() })
+          .returning('*');
+        if (updated) {
+          await require('./invoice').retireRodentSetupObligationForRevivedPrepay(t, invoice.id);
+          // …and any switch-restored per-application invoice becomes a
+          // duplicate of the revived coverage (codex #3591 r54 P1).
+          await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
+        }
+        return updated;
+      };
+      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
+        ? await conn.transaction(reviveFromPending)
+        : await reviveFromPending(conn);
       current = updated || term;
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
       // (someone else already revived) leaves current cancelled and the
-      // next sync of this invoice picks the term up as active.
-      const [updated] = await conn('annual_prepay_terms')
-        .where({ id: term.id, status: 'cancelled' })
-        .whereNull('renewal_decision')
-        .update({ status: 'active', updated_at: new Date() })
-        .returning('*');
+      // next sync of this invoice picks the term up as active. Flip +
+      // credits + setup cleanup commit TOGETHER (codex #3591 r52 P1).
+      const reviveFromCancelled = async (t) => {
+        const [updated] = await t('annual_prepay_terms')
+          .where({ id: term.id, status: 'cancelled' })
+          .whereNull('renewal_decision')
+          .update({ status: 'active', updated_at: new Date() })
+          .returning('*');
+        if (updated) {
+          logger.warn(`[annual-prepay] term ${term.id} revived (cancelled→active) — dispute-cancelled term's invoice ${invoice.id} was re-paid`);
+          // The refund clawed the extension credit; the repayment restores
+          // it with the coverage (guards P0). Idempotent (last-event rule).
+          await restoreWaveguardExtensionCredits(updated, t);
+          // …and the setup line is live again — retire the restored claim
+          // and re-ledger the record (codex #3591 r45 local P0).
+          await require('./invoice').retireRodentSetupObligationForRevivedPrepay(t, invoice.id);
+          // …and any switch-restored per-application invoice becomes a
+          // duplicate of the revived coverage (codex #3591 r54 P1).
+          await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
+        }
+        return updated;
+      };
+      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
+        ? await conn.transaction(reviveFromCancelled)
+        : await reviveFromCancelled(conn);
       current = updated || term;
-      if (updated) {
-        logger.warn(`[annual-prepay] term ${term.id} revived (cancelled→active) — dispute-cancelled term's invoice ${invoice.id} was re-paid`);
-        // The refund clawed the extension credit; the repayment restores
-        // it with the coverage (guards P0). Idempotent (last-event rule).
-        await restoreWaveguardExtensionCredits(updated, conn);
-      }
     } else if (nextStatus === 'cancelled') {
-      const [updated] = await conn('annual_prepay_terms')
+      // The cancel flip and EVERY restoration commit TOGETHER (codex #3591
+      // r53 local P0 — symmetric with the revival branches): on the global
+      // handle an autocommitted flip beside a failed restore stranded the
+      // claim forever (the next sync excludes cancelled terms).
+      const cancelWithRestorations = async (t) => {
+      const [updated] = await t('annual_prepay_terms')
         .where({ id: term.id })
         .whereNull('renewal_decision')
         .update({ status: 'cancelled', updated_at: new Date() })
         .returning('*');
-      current = updated || term;
       // A true void/refund (no renewal decision) cancels coverage — drop the
       // per-visit prepaid stamps so future covered visits bill normally. A
       // renewal-lapse (renewal_decision set) keeps its paid window, so the
@@ -2664,32 +2744,32 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // concurrent accept + refund for one customer can deadlock. On
         // autocommit (conn === db) every statement is its own transaction
         // and no multi-statement order exists to invert.
-        if (conn.isTransaction && updated.customer_id) {
-          await conn('customers').where({ id: updated.customer_id }).forUpdate().first('id');
+        if (t.isTransaction && updated.customer_id) {
+          await t('customers').where({ id: updated.customer_id }).forUpdate().first('id');
         }
-        await clearPrepaidStampsForTerm(term.id, conn);
+        await clearPrepaidStampsForTerm(term.id, t);
         // Also reopen any per-visit invoices this term settled as NON-CASH coverage
         // (status='prepaid' by this term, or a partial with a coverage line) — the
         // prepay was refunded, so the covered work is owed again. Mirrors the stamp
         // clear; best-effort (never blocks the refund sync), and never reopens a
         // cash-paid invoice.
         try {
-          await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(term.id, conn);
+          await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(term.id, t);
         } catch (err) {
           logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${term.id}: ${err.message}`);
         }
         // And claw back the pending-window completion credits this term
         // issued — the full-annual refund would otherwise refund those
         // slices twice (once inside the refund, once as kept credit).
-        await reversePendingWindowCompletionCredits(updated, conn);
+        await reversePendingWindowCompletionCredits(updated, t);
         // Same double-pay shape for the WaveGuard tier-extension credit:
         // the refund returns the prepaid dollars the discounted allocation
         // was carved from, so the extension's prepaid-difference grant
         // reverses with it.
-        await reverseWaveguardExtensionCredits(updated, conn);
+        await reverseWaveguardExtensionCredits(updated, t);
         // Coverage is gone — return the customer to a billable mode (the
         // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
-        await resetBillingModeAfterTermCancel(updated, conn);
+        await resetBillingModeAfterTermCancel(updated, t);
         // An ON-SITE SWITCH retired the accept-minted per-application
         // invoice when this prepay was created; with the prepay dead that
         // AR (setup fee included) must come back, or it is silently gone
@@ -2697,7 +2777,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // idempotent; best-effort (never blocks the void/refund sync).
         if (updated.prepay_invoice_id) {
           try {
-            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, conn);
+            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, t);
           } catch (err) {
             // The markers are durable, so this is recoverable — but only by a
             // human who knows: the void succeeded and the superseded
@@ -2706,8 +2786,23 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             // here was a permanent silent AR loss).
             logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
           }
+          // A DIRECT rodent series' setup rode this prepay as its own line
+          // and the mint retired the parent's per-application claim; the
+          // fee is owed again now (codex #3591 r34 P1). Record-keyed and
+          // one-shot. PROPAGATES on failure (codex #3591 r46 local P0):
+          // the term flip and this restore commit TOGETHER — a swallowed
+          // error left the cancelled term unselectable by any later sync,
+          // the claim record unused, and the $99 cleared forever. A throw
+          // rolls the whole void/refund sync back and the event retries.
+          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, t, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
         }
       }
+      return updated;
+      };
+      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
+        ? await conn.transaction(cancelWithRestorations)
+        : await cancelWithRestorations(conn);
+      current = updated || term;
     }
 
     if (ACTIVE_STATUSES.includes(current.status)) {
@@ -2817,7 +2912,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             this.where('status', 'cancelled').whereNotNull('renewal_decision');
           });
       })
-      .select('id', 'customer_id', 'source_estimate_id', 'prepay_invoice_id');
+      .select('id', 'customer_id', 'source_estimate_id', 'prepay_invoice_id', 'coverage_service_type');
     for (const decided of decidedCoveredTerms) {
       // Same customer-first lock order as the true-refund cancel branch
       // above (deadlock guard vs the accept transaction).
@@ -2855,6 +2950,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         } catch (err) {
           logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for decided term ${decided.id} (prepay invoice ${decided.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
         }
+        // Same one-shot claim restore as the true-void branch (codex #3591
+        // r34 P1) — a decided term's refund removes the prepay that billed
+        // the direct rodent setup, so the per-application claim comes back.
+        // PROPAGATES on failure (codex #3591 r46 local P0) — same
+        // atomic-with-the-transition posture as the true-refund branch.
+        await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(decided.prepay_invoice_id, conn, { sourceEstimateId: decided.source_estimate_id || null, customerId: decided.customer_id || null, coverageServiceType: decided.coverage_service_type || null });
       }
     }
   }

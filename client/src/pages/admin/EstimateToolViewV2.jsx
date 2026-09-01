@@ -36,11 +36,17 @@ import React, {
   Component,
 } from "react";
 import {
+  applyServerRodentBaitBracketsPricingConfig,
+  applyServerRodentSetupFeePricingConfig,
+  applyServerRodentWaveguardPricingConfig,
   collectMarginReviewNotes,
   fmt,
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
+  rodentBaitBracketForFootprint,
+  rodentBaitPolicyNote,
+  rodentBaitWaveguardFlags,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
@@ -1216,6 +1222,22 @@ function fallbackCadenceForPreview(E) {
       intervalMonths: 3,
       period: "/quarter",
     };
+  }
+  // SOLO per-application rodent bait (2026-08-29 realignment): the row bills
+  // per application on its own cadence, but the fallback would show
+  // annual/12 as "/mo" — the customer's estimate says "$X per application".
+  // Keyed on the billing-unit marker so a pinned LEGACY monthly rodent row
+  // (no marker) keeps the monthly path. Solo only, same bundle rule as the
+  // commercial branch below.
+  const perApplicationRodent = services.length === 1 && services[0]?.perApplicationBilled === true ? services[0] : null;
+  if (perApplicationRodent) {
+    const visits = Number(perApplicationRodent.visitsPerYear ?? perApplicationRodent.visits) || 4;
+    if (visits < 6) {
+      return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/application" };
+    }
+    if (visits < 12) {
+      return { key: "bi_monthly", label: "Bi-monthly", intervalMonths: 2, period: "/application" };
+    }
   }
   // SOLO commercial pest sells one cadence (risk bucket / estimator override)
   // and has no residential pest tiers, so without this the preview takes the
@@ -2456,6 +2478,11 @@ export default function EstimateToolViewV2({
     }
   }, [form.grassType, form.bermudaSuppression]);
 
+  // Live rodent WaveGuard posture (codex #3591 r34 P1): module state the
+  // rodent pricing-config loader effect below mutates; mirrored here so the
+  // preview memo re-runs once the live rows land (the bracket helper reads
+  // the same freshly-applied module state on that re-run).
+  const [rodentWaveguardPosture, setRodentWaveguardPosture] = useState(() => rodentBaitWaveguardFlags());
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
     const commercialDetected = isCommercialEstimateInput(form);
@@ -2465,8 +2492,15 @@ export default function EstimateToolViewV2({
       "svcTs",
       "svcMosquito",
       "svcTermiteBait",
+      // Rodent bait counts toward the tier ONLY while the live
+      // rodent_waveguard.tier_qualifier flag says so (codex #3591 r33 P1) —
+      // the same mechanism calculateEstimate and the server engine read, so
+      // the preview never advertises a Silver a Bronze estimate won't give.
+      // Read from the mirrored posture state, which the loader effect
+      // refreshes after the live row applies (codex #3591 r34 P1).
+      ...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : []),
     ];
-    const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
+    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring"];
     // ALL commercial pest-family services now auto-price as recurring lines
     // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
     // to a manual commercial quote.
@@ -2511,7 +2545,7 @@ export default function EstimateToolViewV2({
     const recurringCount = commercialDetected
       ? 0
       : qualifyingRecurringKeys.filter((k) => form[k]).length;
-    // For commercial, rodent-bait (a separate-recurring key) is now a commercial
+    // For commercial, palm/foam separate-recurring keys are counted here; a commercial
     // auto-priced line counted above — don't double-count it here.
     const separateRecurringCount = separateRecurringKeys
       .filter((k) => form[k] && !(commercialDetected && commercialAutoKeys.includes(k)))
@@ -2582,7 +2616,14 @@ export default function EstimateToolViewV2({
       approx.mosquito = Math.round((mqPerVisit * (mqSeasonal ? 9 : 12)) / 12);
     }
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
-    if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;
+    if (form.svcRodentBait && !commercialDetected) {
+      // LIVE footprint-bracket ladder (pricing_config.rodent_bait_brackets,
+      // loaded into the engine module by refreshPricingConfig — codex #3591
+      // r16 P1): per-visit × 4 ÷ 12 as a monthly-equivalent preview figure;
+      // the engine is authoritative.
+      const rbPerVisit = rodentBaitBracketForFootprint(sqft).perVisit;
+      approx.rodentBait = Math.round((rbPerVisit * 4) / 12);
+    }
     if (form.svcFoamRecurring) {
       // Rough preview; engine is authoritative. One-time per-visit by tier
       // (no floor) × cadence multiplier × visits/yr ÷ 12.
@@ -2594,9 +2635,15 @@ export default function EstimateToolViewV2({
       approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
     }
 
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0) + (approx.foamRecurring || 0);
+    // Rodent revenue leaves the discountable subtotal when the LIVE policy
+    // excludes it from the tier % (codex #3591 r84 P2) — the authoritative
+    // engine reads the same exclude_from_pct_discount flag, so the preview
+    // must not show a tier reduction the engine will not apply.
+    const rodentPctExcluded = rodentWaveguardPosture.excludeFromPctDiscount === true;
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.foamRecurring || 0)
+      + (rodentPctExcluded ? (approx.rodentBait || 0) : 0);
     const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" || key === "foamRecurring" ? 0 : value),
+      (s, [key, value]) => s + (key === "injection" || key === "foamRecurring" || (rodentPctExcluded && key === "rodentBait") ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
@@ -2647,7 +2694,7 @@ export default function EstimateToolViewV2({
       annualSavings,
       anySelected,
     };
-  }, [form]);
+  }, [form, rodentWaveguardPosture]);
 
   const [estimate, setEstimateState] = useState(null);
   // Monotonic invalidation version for the generated estimate. Every
@@ -3492,6 +3539,55 @@ export default function EstimateToolViewV2({
     };
   }, []);
 
+  // Live rodent bait pricing rows (codex #3591 r34 P1): the sidebar's tier
+  // count reads rodentBaitWaveguardFlags() and the bracket helper reads the
+  // ladder, both module state the LEGACY estimator's loader mutates through
+  // these same appliers — this view never loaded them, so it advertised the
+  // in-code default (Silver) while the server priced from the live row
+  // (Bronze). Same semantics as EstimatePage.refreshPricingConfig: a 404 is
+  // AUTHORITATIVE (row removed ⇒ reset to the in-code default via `null`),
+  // any other failure leaves the last applied state. The posture state
+  // (declared beside the preview memo) is refreshed AFTER all three rows
+  // apply, so the memo re-runs once against the live ladder + flags.
+  useEffect(() => {
+    let active = true;
+    const fetchRow = async (key) => {
+      try {
+        const r = await adminFetch(`/admin/pricing-config/${key}`);
+        if (r.status === 404) return { ok: true, data: null };
+        if (!r.ok) return { ok: false, data: null };
+        const body = await r.json();
+        return { ok: true, data: body?.data ?? null };
+      } catch {
+        return { ok: false, data: null };
+      }
+    };
+    (async () => {
+      const [bracketsRow, setupRow, waveguardRow] = await Promise.all([
+        fetchRow("rodent_bait_brackets"),
+        fetchRow("rodent_setup_fee"),
+        fetchRow("rodent_waveguard"),
+      ]);
+      if (!active) return;
+      // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
+      // partial set leaves module defaults beside live values — the sidebar
+      // could advertise a Silver/discounted posture the server's disabled
+      // policy won't give. A failed load keeps the fail-closed posture
+      // (tierQualifier false ⇒ rodent stays out of the member-key preview).
+      if (bracketsRow.ok && setupRow.ok && waveguardRow.ok) {
+        applyServerRodentBaitBracketsPricingConfig(bracketsRow.data);
+        applyServerRodentSetupFeePricingConfig(setupRow.data);
+        applyServerRodentWaveguardPricingConfig(waveguardRow.data);
+        setRodentWaveguardPosture(rodentBaitWaveguardFlags());
+      } else {
+        setRodentWaveguardPosture({ tierQualifier: false, excludeFromPctDiscount: true, unavailable: true });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -4193,6 +4289,16 @@ export default function EstimateToolViewV2({
 
       const options = {
         grassType: form.grassType || "st_augustine",
+        // The matched account — the server derives its canonical qualifying
+        // families for tier + rodent setup waiver (codex #3591 r16 P1).
+        existingCustomerId: existingCustomerMatch?.id || form.customerId || null,
+        // The quoted address + group anchor let the server scope the TIER
+        // list per property (grouped / non-primary street) while the rodent
+        // setup waiver stays account-wide — the same signals the save body
+        // carries, so preview and save resolve identically (codex #3591 r34
+        // P1). A revise keeps its stored group linkage (not sent here either).
+        address: form.address || null,
+        ...(!editMode?.id && groupAnchorId ? { groupWithEstimateId: groupAnchorId } : {}),
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         // Availability gates only the CHECKBOX (new selections); a selection
         // already in the form — e.g. seeded from a saved estimate's inputs
@@ -8531,6 +8637,7 @@ export default function EstimateToolViewV2({
                       <div className="p-4">
                     {/* Summary Card */}
                     {(E.recurring.serviceCount > 0 ||
+                      Number(E.recurring.monthlyTotal) > 0 ||
                       E.oneTime.total > 0 ||
                       E.recurring.palmInjectionMo > 0 ||
                       E.recurring.rodentBaitMo > 0) && (
@@ -8997,15 +9104,18 @@ export default function EstimateToolViewV2({
                             <TierGridV2>
                               {" "}
                               <TierRowV2
-                                name="Monthly"
-                                detail={`${R.rodBaitSize} property`}
-                                price={`$${R.rodBaitMo}/mo`}
+                                name={R.rodBait ? "Quarterly" : "Monthly"}
+                                detail={R.rodBait
+                                  ? `Up to ${R.rodBait.stations} stations`
+                                  : `${R.rodBaitSize} property`}
+                                price={R.rodBait
+                                  ? `$${R.rodBait.perVisit}/application`
+                                  : `$${R.rodBaitMo}/mo`}
                                 recommended
                               />{" "}
                             </TierGridV2>{" "}
                             <div className="text-11 text-ink-secondary mt-1">
-                              Not included in bundle discount — priced
-                              separately
+                              {rodentBaitPolicyNote(E)}
                             </div>{" "}
                           </div>
                         )}
@@ -9374,6 +9484,7 @@ export default function EstimateToolViewV2({
 
                     {/* Bundle + Totals */}
                     {(E.recurring.serviceCount > 0 ||
+                      Number(E.recurring.monthlyTotal) > 0 ||
                       E.oneTime.total > 0 ||
                       E.recurring.rodentBaitMo > 0 ||
                       E.recurring.palmInjectionMo > 0) && (
@@ -9472,7 +9583,11 @@ export default function EstimateToolViewV2({
                               </span>{" "}
                             </div>
                           )}
-                          {E.recurring.rodentBaitMo > 0 && (
+                          {/* Legacy scalar-only results only — a 2026-08-29+
+                              rodent_bait services row is already inside the
+                              recurring totals (codex #3591 r7). */}
+                          {E.recurring.rodentBaitMo > 0
+                            && !(E.recurring.services || []).some((s) => (s.service || '') === 'rodent_bait') && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               {" "}
                               <span className="text-ink-secondary">

@@ -1057,3 +1057,30 @@ describe('ts_material_rates v4.7 knobs', () => {
     expect(constants.TREE_SHRUB.densityFactors).toEqual({ light: 1, moderate: 1, heavy: 1 });
   });
 });
+
+describe('rodent bait brackets runtime sync — quarterly invariant (codex #3591 r45 P2)', () => {
+  const originalVisits = constants.RODENT.baitVisitsPerYear;
+  afterEach(() => { constants.RODENT.baitVisitsPerYear = originalVisits; });
+
+  function bracketRow(visits) {
+    return [{
+      config_key: 'rodent_bait_brackets',
+      data: JSON.stringify({
+        brackets: [
+          { max_sq_ft: 1750, stations: 4, per_visit: 79 },
+          { max_sq_ft: 2750, stations: 5, per_visit: 89 },
+        ],
+        extension: { per_sq_ft: 1000, stations_per_step: 1, per_visit_per_step: 10 },
+        visits_per_year: visits,
+      }),
+    }];
+  }
+
+  test('a seeded/imported row with a non-quarterly cadence is REJECTED at the bridge; 4 is accepted', async () => {
+    constants.RODENT.baitVisitsPerYear = 4;
+    await syncConstantsFromDB(pricingConfigDb(bracketRow(6)));
+    expect(constants.RODENT.baitVisitsPerYear).toBe(4);
+    await syncConstantsFromDB(pricingConfigDb(bracketRow(4)));
+    expect(constants.RODENT.baitVisitsPerYear).toBe(4);
+  });
+});

@@ -17,6 +17,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 jest.mock('../services/waveguard-existing-services', () => ({
   ...jest.requireActual('../services/waveguard-existing-services'),
   isActivePlanCustomer: jest.fn(),
+  loadExistingQualifyingServiceKeys: jest.fn(async () => []),
 }));
 jest.mock('../services/estimate-pricing-cache', () => ({
   ...jest.requireActual('../services/estimate-pricing-cache'),
@@ -27,7 +28,7 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   serverRecomputeFromEstimateData: jest.fn(),
 }));
 
-const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
+const { isActivePlanCustomer, loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
 const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
 const {
@@ -291,5 +292,81 @@ describe('resolveEstimateQuoteRequirement — membershipLapsedRequote', () => {
   test('without the flag nothing changes', () => {
     const state = resolveEstimateQuoteRequirement(null, {});
     expect(state.quoteRequired).toBe(false);
+  });
+});
+
+describe('reconcileFrozenMembershipSnapshot — the rodent setup waiver is re-validated on its own (codex #3591 r39 P1)', () => {
+  // A saved rodent quote whose $99 setup was waived by the account's pest
+  // plan: the evidence lives top-level AND in a replay shape. The customer
+  // is STILL an active member (rodent-only Bronze) after the pest plan is
+  // cancelled — rodent bait never self-waives, so the evidence is stale.
+  function waivedRodentEstData() {
+    return {
+      membershipSnapshot: { isExistingCustomer: true },
+      priorQualifyingServices: ['rodent_bait'],
+      setupWaiverPriorQualifyingServices: ['pest_control'],
+      engineInputs: { homeSqFt: 2000, services: { rodentBait: {} }, setupWaiverPriorQualifyingServices: ['pest_control'] },
+      result: { oneTime: { items: [], total: 0 } },
+    };
+  }
+
+  test('active member, only rodent_bait left on the account → the waiver evidence is dropped everywhere and the quote repriced; membership artifacts stay', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    loadExistingQualifyingServiceKeys.mockResolvedValue(['rodent_bait']);
+    const estimate = estimateRow(waivedRodentEstData());
+    await reconcileFrozenMembershipSnapshot(estimate);
+    const estData = JSON.parse(estimate.estimate_data);
+    expect(estData.setupWaiverPriorQualifyingServices).toBeUndefined();
+    expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toBeUndefined();
+    expect(estData.membershipSnapshot).toEqual({ isExistingCustomer: true });
+    expect(estData.priorQualifyingServices).toEqual(['rodent_bait']);
+    expect(serverRecomputeFromEstimateData).toHaveBeenCalledTimes(1);
+    expect(clearEstimatePricingCache).toHaveBeenCalledWith('est-1');
+  });
+
+  test('active member with another family still on the account → untouched, no reprice', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    loadExistingQualifyingServiceKeys.mockResolvedValue(['rodent_bait', 'pest_control']);
+    const estimate = estimateRow(waivedRodentEstData());
+    const before = estimate.estimate_data;
+    await reconcileFrozenMembershipSnapshot(estimate);
+    expect(estimate.estimate_data).toBe(before);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+  });
+
+  test('a failed family re-read keeps the frozen evidence UNTOUCHED, reprices nothing, and marks the estimate quote-required (codex #3591 r41 P1)', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    loadExistingQualifyingServiceKeys.mockRejectedValue(new Error('db down'));
+    const estimate = estimateRow(waivedRodentEstData());
+    await reconcileFrozenMembershipSnapshot(estimate);
+    const estData = JSON.parse(estimate.estimate_data);
+    expect(estData.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
+    expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
+    expect(estData.membershipSnapshot).toEqual({ isExistingCustomer: true });
+    expect(estData.setupWaiverUnverifiedRequote).toBe(true);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+    expect(clearEstimatePricingCache).toHaveBeenCalledWith('est-1');
+    const state = resolveEstimateQuoteRequirement(null, estData);
+    expect(state.quoteRequired).toBe(true);
+    expect(state.reason).toBe('setup_waiver_unverified_requote');
+    // A lapsed (non-member) row with an unverifiable waiver fails the same way — no fabricated non-member reprice.
+    isActivePlanCustomer.mockResolvedValue(false);
+    const lapsed = estimateRow(waivedRodentEstData());
+    await reconcileFrozenMembershipSnapshot(lapsed);
+    expect(JSON.parse(lapsed.estimate_data).setupWaiverUnverifiedRequote).toBe(true);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+  });
+
+  test('evidence nested ONLY in a replay shape still arms the trigger', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    loadExistingQualifyingServiceKeys.mockResolvedValue(['rodent_bait']);
+    const estimate = estimateRow({
+      engineInputs: { homeSqFt: 2000, setupWaiverPriorQualifyingServices: ['pest_control'] },
+      result: { oneTime: { items: [], total: 0 } },
+    });
+    await reconcileFrozenMembershipSnapshot(estimate);
+    const estData = JSON.parse(estimate.estimate_data);
+    expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toBeUndefined();
+    expect(serverRecomputeFromEstimateData).toHaveBeenCalledTimes(1);
   });
 });

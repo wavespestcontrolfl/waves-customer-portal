@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { costLineFromUsage } = require('./product-costing');
 const { matchServiceProtocol } = require('./protocol-matcher');
+const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
 
 const SERVICE_MAP = {
   pest_control: {
@@ -123,8 +124,15 @@ const NAME_TO_KEY = [
   // "Missing COGS" on the renamed line.
   [/lawn|turf/i, 'lawn_care'],
   [/mosquito/i, 'mosquito'],
-  [/termite|bait station/i, 'termite_bait'],
+  // Rodent-led bait names must resolve BEFORE the generic "bait station"
+  // termite pattern — "Rodent Bait Stations" is a recurring.services row
+  // since 2026-08-29 and would otherwise mis-key as termite_bait.
+  // The one-time bait-station setup (non-member rodent plans, 2026-08-29)
+  // must resolve before BOTH bait patterns — "Bait Station Setup" would
+  // otherwise key as termite_bait.
+  [/rodent.*setup|bait station setup/i, 'rodent_bait_setup'],
   [/rodent.*bait/i, 'rodent_bait'],
+  [/termite|bait station/i, 'termite_bait'],
   [/rodent.*trap/i, 'rodent_trapping'],
   [/sanitation/i, 'rodent_sanitation'],
   [/exclusion/i, 'exclusion'],
@@ -430,6 +438,14 @@ function normalizeRecurringLines(result) {
   for (const svc of result?.recurring?.services || []) {
     const monthly = Number(svc.monthly ?? svc.mo ?? 0);
     const serviceKey = keyFromName(svc.name);
+    // Honor the row's own discount eligibility before applying the plan-wide
+    // percentage (codex #3591 r11 P2): a PINNED pre-realignment rodent row
+    // (legacy posture flags, waveGuardDiscountEligible:false) keeps its
+    // disclosed rate in the engine — the audit must not report a discounted
+    // price and an artificially low margin for it.
+    const rowDiscount = svc.waveGuardDiscountEligible === false || lineFlagsBlockPercentDiscount(svc)
+      ? 0
+      : discount;
     // The mapper preserves the AUTHORITATIVE net on the row itself
     // (manualFinalAnnual / annualAfterDiscount — manual and floor-capped
     // discounts land ONLY there); recomputing from the generic tier
@@ -439,7 +455,7 @@ function normalizeRecurringLines(result) {
     // reconstruct it ($1,108 vs $92.33×12) — it is the authoritative gross
     // (GH codex P2).
     const grossAnnual = pickNum(svc.annual) ?? monthly * 12;
-    const priceNet = Number.isFinite(netAnnual) ? money(netAnnual) : money(grossAnnual * (1 - discount));
+    const priceNet = Number.isFinite(netAnnual) ? money(netAnnual) : money(grossAnnual * (1 - rowDiscount));
     const line = {
       serviceKey,
       label: svc.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
@@ -447,7 +463,7 @@ function normalizeRecurringLines(result) {
       price: priceNet,
       monthly: Number.isFinite(netAnnual)
         ? money(netAnnual / 12)
-        : (Number.isFinite(pickNum(svc.annual)) ? money((grossAnnual * (1 - discount)) / 12) : money(monthly * (1 - discount))),
+        : (Number.isFinite(pickNum(svc.annual)) ? money((grossAnnual * (1 - rowDiscount)) / 12) : money(monthly * (1 - rowDiscount))),
       priceBeforeDiscount: money(grossAnnual),
       discount: grossAnnual > 0 && grossAnnual > priceNet
         ? Math.round((1 - priceNet / grossAnnual) * 1000) / 1000
@@ -473,7 +489,10 @@ function normalizeRecurringLines(result) {
     if (quoted) line.quoted = quoted;
     lines.push(line);
   }
-  if (Number(result?.recurring?.rodentBaitMo || 0) > 0) {
+  // The scalar is legacy fallback only — a 2026-08-29+ estimate carries a
+  // real rodent_bait services row, and reading both double-counts the plan.
+  if (Number(result?.recurring?.rodentBaitMo || 0) > 0
+    && !lines.some((l) => l.serviceKey === 'rodent_bait')) {
     lines.push({
       serviceKey: 'rodent_bait',
       label: 'Rodent Bait',
@@ -530,6 +549,11 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
       line.cogsServiceTypes = cogs.serviceTypes;
       line.cogsServiceTypeFixedMultipliers = cogs.serviceTypeFixedMultipliers;
     }
+    // The bait-station setup fee (inspection, hardware placement, mapping)
+    // has no inventory of its own — the station hardware is costed under
+    // the recurring rodent_bait program's mapping — so it is not separately
+    // COGS-applicable, like the membership fee (codex #3591 r11 P2).
+    if (serviceKey === 'rodent_bait_setup') line.skipCogs = true;
     lines.push(line);
   }
   for (const item of result?.oneTime?.specItems || []) {
@@ -551,6 +575,10 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
       priceBeforeDiscount: money(gross),
       discount: gross > 0 && gross > net ? Math.round((1 - net / gross) * 1000) / 1000 : 0,
       priceSource: 'saved_estimate.result.oneTime.specItems',
+      // Server-generated estimates place the bait-station setup in
+      // specItems (not in ONE_TIME_SERVICES) — same COGS exemption as the
+      // items path (codex #3591 r22 P2).
+      ...(serviceKey === 'rodent_bait_setup' ? { skipCogs: true } : {}),
       ...(packageVisits ? { visitsPerYear: packageVisits } : {}),
     });
   }
@@ -1318,6 +1346,8 @@ module.exports = {
   // Exported for regression tests (turf must map to lawn_care, not fall through
   // to an unmapped key that trips a false "Missing COGS" warning).
   keyFromName,
+  normalizeRecurringLines,
+  normalizeOneTimeLines,
   // Exported for regression tests (every persisted priced-input shape —
   // wizard engineInput, admin engineRequest.profile, automated-lead
   // nested engineInput — must resolve to nonzero COGS dimensions).

@@ -1,4 +1,12 @@
 jest.mock('../models/db', () => jest.fn());
+// Pass-through mock: every test keeps the real qualifying-services lookup;
+// the lookup-failure test below overrides it once.
+jest.mock('../services/waveguard-existing-services', () => {
+  const actual = jest.requireActual('../services/waveguard-existing-services');
+  return { ...actual, loadExistingQualifyingServiceKeys: jest.fn(actual.loadExistingQualifyingServiceKeys) };
+});
+const mockQualifyingLookup = require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
+const actualQualifyingLookup = jest.requireActual('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
 
 const {
   buildEstimatePersistenceFields,
@@ -19,6 +27,15 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
   let storedEstimate = estimate;
 
   const trx = (table) => ({
+    // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
+    // (planGate: false): it reaches the live rows even for a non-member
+    // customer, so the fake serves an empty account (a real lookup failure
+    // 503s the save by design). leftJoin serves the canonical catalog join
+    // the waiver read runs regardless of the auto-tier gate (r79 P1).
+    columnInfo: async () => ({ is_recurring: {} }),
+    whereNotIn() { return this; },
+    leftJoin() { return this; },
+    select: async () => [],
     where(clause) {
       return {
         forUpdate() {
@@ -27,6 +44,13 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNull() {
           return this;
         },
+        where() {
+          return this;
+        },
+        whereNotIn() {
+          return this;
+        },
+        select: async () => [],
         first: async () => {
           if (table === 'leads' && clause.id === lead?.id) return lead;
           if (table === 'estimates' && clause.id === storedEstimate?.id) return storedEstimate;
@@ -879,6 +903,83 @@ describe('admin estimate persistence', () => {
     expect(stored.priorQualifyingServices).toBeUndefined();
   });
 
+  test('a linked customer whose qualifying-services lookup FAILS refuses the save retryably (503) — never read as a non-member (codex #3591 r31 P1)', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver' },
+    });
+    mockQualifyingLookup.mockRejectedValueOnce(new Error('db down'));
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-member',
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 10000, services: { rodentBait: {} } },
+          inputs: { homeSqFt: 2000 },
+          result: { total: 89 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    })).rejects.toMatchObject({ statusCode: 503 });
+    expect(inserts.filter((i) => i.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a SECONDARY-property rodent add-on for a member: tier evidence is property-scoped, the setup waiver is account-wide (codex #3591 r34 P1)', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver', address_line1: '100 Main St', city: 'Parrish', zip: '34219' },
+    });
+    // Account-wide: a pest plan somewhere on the account. Property-scoped
+    // (streetScope passed): nothing active at the quoted property. Call
+    // history cleared so the index assertions below read THIS save's calls.
+    mockQualifyingLookup.mockClear();
+    mockQualifyingLookup.mockImplementation(async (_db, _id, opts) => (opts?.streetScope ? [] : ['pest_control']));
+
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-member',
+        // A NON-primary street on the same account (the primary is 100 Main
+        // St) — the per-property rule scopes the tier to this property.
+        address: '12 Second St, Parrish, FL 34219',
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { rodentBait: { frequency: 'quarterly' } } },
+          inputs: { homeSqFt: 2000 },
+          result: { total: 89 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    const estimateInsert = inserts.find((e) => e.table === 'estimates');
+    const stored = JSON.parse(estimateInsert.row.estimate_data);
+    // The first lookup is the account-wide one — waiver evidence, UNGATED
+    // by the membership stamp (codex #3591 r73 P1: the owner's waiver rule
+    // is qualifying families, not plan membership); the second is the
+    // street-scoped one — tier evidence, which keeps the plan gate.
+    expect(mockQualifyingLookup.mock.calls[0][1]).toBe('cust-member');
+    expect(mockQualifyingLookup.mock.calls[0][2]).toEqual({ planGate: false, strict: true });
+    expect(mockQualifyingLookup.mock.calls[1][2]).toMatchObject({ streetScope: expect.objectContaining({ estimateStreet: expect.any(String) }) });
+    // Persisted for replay: the account-wide waiver list; NO property tier
+    // list (nothing qualifies at this property → standalone tier).
+    expect(stored.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
+    expect(stored.priorQualifyingServices).toBeUndefined();
+    // …and the engine honored it: no $99 setup row for a member.
+    const setupRow = (stored.result?.specItems || []).find((it) => it.service === 'rodent_bait_setup');
+    expect(setupRow).toBeUndefined();
+    // The replay shapes never carry a client-claimable copy.
+    expect(stored.engineInputs.setupWaiverPriorQualifyingServices).toBeUndefined();
+    mockQualifyingLookup.mockImplementation(actualQualifyingLookup);
+  });
+
   test('P1-2: a verified active-plan member with NO qualifying priors keeps recurring status on the STORED replay', async () => {
     const now = () => new Date('2026-05-15T12:00:00.000Z');
     const { database, inserts } = makeDatabase({
@@ -887,6 +988,10 @@ describe('admin estimate persistence', () => {
       // WaveGuard-qualifying, so loadExistingQualifyingServiceKeys returns [].
       customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver' },
     });
+    // The fake database cannot serve the real lookup (it used to throw and be
+    // swallowed as []); a failed lookup now refuses the save, so model the
+    // documented "no qualifying priors" result explicitly.
+    mockQualifyingLookup.mockResolvedValueOnce([]);
 
     await createOrReuseAdminEstimate({
       database,

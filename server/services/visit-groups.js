@@ -25,13 +25,8 @@
 const db = require('../models/db');
 
 const OPEN_STATUSES = ['open'];
-// Terminal scheduled_services statuses (CHECK constraint,
-// 20260426000004): rows in these states never join a visit.
-const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
-// A 'rescheduled' row is a live visit AWAITING RE-PLACEMENT
-// (recurring-appointment-seeder.js:834) — its date/window are stale, so it
-// never JOINS a visit; it is not terminal for member counting.
-const JOIN_INELIGIBLE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
+// Row-status vocabularies live in the canonical visit-context module.
+const { TERMINAL_ROW_STATUSES, JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const ACTIVE_PACKET_STATUSES = ['accepted', 'processing'];
 // service_completion_attempts statuses that mean a legacy /complete owns the
 // row: pending (claimed), side effects queued/running, or already succeeded.

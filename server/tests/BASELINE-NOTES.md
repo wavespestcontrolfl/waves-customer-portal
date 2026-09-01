@@ -677,3 +677,15 @@ drift and this retirement; the driveway-only delta there is expected to match
 the local one (`edge_large_footprint_5500sf_platinum_bundle` only — none of
 the removed values were DB-overridden: `pest_features` driveway keys were
 stripped 2026-07-16 and no seed ever wrote `concrete_pct_driveway`).
+
+## 2026-08-29 — rodent bait bracket realignment (PR TBD)
+
+Local baselines recaptured (`CAPTURE_BASELINE=1 LOCAL=1`) after the owner
+directive moving rodent bait to footprint-bracket per-quarterly-visit
+pricing ($79–$129, station allowances, ladder extends above 6,750 sf),
+full WaveGuard membership (tier-counted + tier-discounted), and the $99
+non-member setup fee. Only `v1adapter_rodent_bait_large_footprint` moved:
+4,000 sf now prices $109/visit × 4 = $436/yr INSIDE the recurring totals
+(was $69/mo = $828 outside them), plus the $99 setup as a one-time row
+(rodent-only = non-member). DB (prod-parity) baselines still need an
+owner-run recapture after the migration `20260829000040` deploys.

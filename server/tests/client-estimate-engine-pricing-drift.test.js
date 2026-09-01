@@ -704,4 +704,69 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(adminToolViewSource).toContain('Base price does not include bagging or debris hauling.');
     expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });
+
+  test('both admin previews count rodent bait toward the tier ONLY through rodentBaitWaveguardFlags (codex #3591 r33 P1)', () => {
+    for (const src of [legacyAdminSource, adminToolViewSource]) {
+      const at = src.indexOf('const qualifyingRecurringKeys = [');
+      expect(at).toBeGreaterThan(0);
+      const list = src.slice(at, src.indexOf('];', at));
+      expect(list).not.toMatch(/^\s*"svcRodentBait",\s*$/m);
+      expect(src).toMatch(/rodentBaitWaveguardFlags,\n/);
+      if (src === legacyAdminSource) {
+        expect(list).toContain('...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : [])');
+      } else {
+        // V2 reads the SAME flags through a state mirror so the memoized
+        // preview re-runs once the live rows land (codex #3591 r34 P1) —
+        // the mirror must be seeded from, and refreshed by, the shared
+        // rodentBaitWaveguardFlags() reader after the live row applies.
+        expect(list).toContain('...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : [])');
+        expect(src).toContain('useState(() => rodentBaitWaveguardFlags())');
+        expect(src).toMatch(/applyServerRodentWaveguardPricingConfig\(waveguardRow\.data\);[\s\S]{0,200}setRodentWaveguardPosture\(rodentBaitWaveguardFlags\(\)\);/);
+        expect(src).toMatch(/\}, \[form, rodentWaveguardPosture\]\);/);
+      }
+    }
+  });
+
+  test('client fallback emits rodentBaitMo 0 — the plan rides INSIDE monthlyTotal as a services row (codex #3591 r33 P2)', () => {
+    const clientEngineSource = fs.readFileSync(clientEstimatorPath, 'utf8');
+    expect(clientEngineSource).toMatch(/rodentBaitMo: 0,\n\s*palmInjectionMo: palmMo,/);
+    expect(clientEngineSource).not.toContain('rodentBaitMo: R.rodBaitMo || 0');
+    // The summary/totals cards no longer depend on the scalar (or the tier
+    // count) to render a rodent-only plan.
+    for (const src of [legacyAdminSource, adminToolViewSource]) {
+      expect((src.match(/Number\(E\.recurring\.monthlyTotal\) > 0 \|\|/g) || []).length).toBe(2);
+    }
+  });
+
+  test('legacy admin page batch-flow nextEstimate resets the customer binding through the binder (codex #3591 r32 P1)', () => {
+    const at = legacyAdminSource.indexOf('function nextEstimate() {');
+    expect(at).toBeGreaterThan(0);
+    const body = legacyAdminSource.slice(at, legacyAdminSource.indexOf('\n  }\n', at));
+    expect(body).toContain('bindMatchedCustomer(null);');
+    expect(body).not.toContain('setExistingCustomerMatch(null);');
+  });
+
+  test('legacy admin page clears the stale customer binding at the TOP of doLookup (codex #3591 r62 P1)', () => {
+    // r61 cleared the binding only after the property request succeeded with
+    // usable enrichment — a changed address whose lookup returned non-2xx or
+    // the no-enrichment error exited before the clear and left the prior
+    // customer matched (priced with their services / setup waiver, attached
+    // to them). The clear + version bump must precede the property fetch so
+    // EVERY lookup outcome — success, error, abort — starts unbound.
+    const at = legacyAdminSource.indexOf('async function doLookup() {');
+    expect(at).toBeGreaterThan(0);
+    const fetchAt = legacyAdminSource.indexOf('"/api/admin/estimator/property-lookup"', at);
+    expect(fetchAt).toBeGreaterThan(at);
+    expect(legacyAdminSource.slice(at, fetchAt)).toMatch(/bindMatchedCustomer\(null\);\s+estimateVersionRef\.current \+= 1;/);
+  });
+
+  test('legacy admin page ignores a superseded qualifying-services load (codex #3591 r30 P2)', () => {
+    // A bind cleared/replaced before its fetch resolved must not repopulate
+    // the former customer's families for an unmatched fallback quote.
+    const bindAt = legacyAdminSource.indexOf('const bindMatchedCustomer = (match) => {');
+    expect(bindAt).toBeGreaterThan(0);
+    const bind = legacyAdminSource.slice(bindAt, bindAt + 2500);
+    expect(bind).toContain('existingQualifyingKeysRef.current = keysLoad;');
+    expect(bind).toMatch(/keysLoad\.then\(\(keys\) => \{[\s\S]*?if \(existingQualifyingKeysRef\.current !== keysLoad\) return;\s*\n\s*if \(Array\.isArray\(keys\)\) setExistingQualifyingKeys\(keys\);/);
+  });
 });

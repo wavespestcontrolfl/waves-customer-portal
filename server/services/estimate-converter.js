@@ -506,14 +506,49 @@ function explicitServiceCadence(svc = {}) {
 // it to the matcher as a synthetic companion line; supplements never got
 // their own scheduled row from the converter, so the combined row is
 // strictly added coverage.
+// A PINNED pre-realignment rodent row (mapper keeps it inside
+// recurring.services with legacyPinnedReplay and no per-application marker)
+// is the legacy monthly-billed plan and must convert exactly like the legacy
+// rodentBaitMo scalar did — as a standalone supplement on the monthly lane,
+// never as the single recurring unit the per-application stamp is derived
+// from (codex #3591 r19 P0: a disclosed $49/mo plan would otherwise become
+// a $147 per-completion charge under billing_mode per_application).
+const { isPinnedLegacyRodentRow, legacyRodentRowPredicateFor } = require('./billing-cadence');
+
+// The whole recurring plan is a pinned pre-realignment rodent bait plan —
+// the legacy MONTHLY DUES product (billed monthly, visits covered by dues).
+// Such an accept must land on the monthly_membership lane, not the
+// estimate-flow per_application stamp: with per_application the monthly
+// cron skips the customer and completion collects the monthly figure only
+// four times a year (codex #3591 r21 P0). Mixed plans (pest + pinned rodent)
+// keep the per-application stamp — the pest half always billed per visit.
+// `isLegacyRow` defaults to the pin-only check; the converter passes the
+// stored-signal-aware predicate (legacyRodentRowPredicateFor) so a manual
+// accept of a pre-realignment quote-wizard row classifies identically to a
+// replayed/pinned one (codex #3591 r37 P0).
+function isPinnedLegacyRodentOnlyPlan(recurringServices = [], isLegacyRow = isPinnedLegacyRodentRow) {
+  const rows = (Array.isArray(recurringServices) ? recurringServices : []).filter((r) => r && typeof r === 'object');
+  return rows.length > 0 && rows.every(isLegacyRow);
+}
+
 function supplementalCompanionLines(estimateData = {}) {
   const result = estimateData.result || {};
   const recurring = estimateData.recurring || result.recurring || {};
   const resultStats = estimateData.results || result.results || {};
   const lines = [];
-  const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
+  // Pinned OR stored-legacy (unpinned manual-accept shape) rodent row — the
+  // same predicate the conversion filter drops it with (codex #3591 r37 P0).
+  const isLegacyRow = legacyRodentRowPredicateFor(estimateData);
+  const pinnedRow = (Array.isArray(recurring.services) ? recurring.services : []).find(isLegacyRow);
+  const rodentMonthly = firstPositiveNumber(
+    recurring.rodentBaitMo,
+    resultStats.rodBaitMo,
+    pinnedRow?.mo,
+    pinnedRow?.monthly,
+    pinnedRow?.annual > 0 ? pinnedRow.annual / 12 : null,
+  );
   if (rodentMonthly) {
-    lines.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: rodentMonthly });
+    lines.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: Math.round(rodentMonthly * 100) / 100 });
   }
   return lines;
 }
@@ -2295,6 +2330,62 @@ function frozenSetupFeeAmount(estimateData = {}) {
     : WAVEGUARD_SETUP_FEE;
 }
 
+// Disclosed rodent bait-station setup (owner 2026-08-29): a non-member's
+// estimate carries a one-time rodent_bait_setup row — every charging path
+// (standard accept AND annual prepay) bills exactly the STORED amount the
+// customer accepted, never a live constant. 0 = no disclosed setup.
+// TRUE when the estimate's rodent bait program is the COMMERCIAL key —
+// its setup is never family-waived (owner ruling 2026-08-29), so the
+// accept-side gained-family guard must not refuse it (codex #3591 r79 P1).
+function estimateRodentBaitIsCommercial(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const pools = [
+    data?.result?.lineItems,
+    data?.engineResult?.lineItems,
+    data?.result?.recurring?.services,
+    data?.recurring?.services,
+    data?.result?.specItems,
+  ];
+  for (const arr of pools) {
+    if (!Array.isArray(arr)) continue;
+    for (const it of arr) {
+      if (recurringServiceKey(it) === 'commercial_rodent_bait') return true;
+    }
+  }
+  return false;
+}
+
+function frozenRodentBaitSetupAmount(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  // A persisted ZERO decision for the rodent kind (wizard: claim already
+  // queued / lookup-failure waiver) outranks any leftover engine row —
+  // conversion never re-adds a setup the quote disclosed as absent (codex
+  // #3591 r26 P1; kind-aware so the membership fee's waiver is untouched).
+  const quote = data?.setupFeeQuote;
+  if (quote && quote.kind === 'rodent_bait_setup' && !(Number(quote.amount) > 0)) return 0;
+  // Quote-wizard saves persist the disclosed setup ONLY as a raw engine
+  // line (engineResult.lineItems / result.lineItems) — the mapped oneTime
+  // containers exist on mapper-shaped saves alone (codex #3591 r5 P1), so
+  // both shapes are scanned.
+  const containers = [
+    data?.result?.oneTime?.items,
+    data?.result?.oneTime?.specItems,
+    data?.result?.specItems,
+    data?.oneTime?.items,
+    data?.result?.lineItems,
+    data?.engineResult?.lineItems,
+  ];
+  for (const arr of containers) {
+    if (!Array.isArray(arr)) continue;
+    const row = arr.find((it) => String(it?.service || '').toLowerCase() === 'rodent_bait_setup'
+      || String(it?.name || '').toLowerCase() === 'rodent_bait_setup'
+      || /bait station setup/i.test(String(it?.name || '')));
+    const amt = Number(row?.price ?? row?.amount);
+    if (Number.isFinite(amt) && amt > 0) return Math.round(amt * 100) / 100;
+  }
+  return 0;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
@@ -2356,7 +2447,7 @@ const FL_COMMERCIAL_TAX_RATE = 0.07;
 // discount hits only discountable lines (a non-discountable line like
 // foam_recurring stays full price), so a pre-discount ratio would mis-tax a
 // mixed plan that includes one.
-function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscountApplied = false, baseRate = FL_COMMERCIAL_TAX_RATE } = {}) {
+function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscountApplied = false, baseRate = FL_COMMERCIAL_TAX_RATE, taxableOneTimeAmount = 0 } = {}) {
   const rows = Array.isArray(recurringServices) ? recurringServices : [];
   const effectiveBaseRate = Number.isFinite(baseRate) ? baseRate : FL_COMMERCIAL_TAX_RATE;
   if (!(effectiveBaseRate > 0)) return 0;
@@ -2377,9 +2468,13 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
     const annual = recurringLineAnnualAmount(svc);
     return isNonDiscountableRecurringLine(svc) ? annual : annual * (1 - discountRate);
   };
-  const invoiceTotal = rows.reduce((sum, svc) => sum + postDiscount(svc), 0);
+  // A taxable ONE-TIME line riding the same invoice (the rodent bait-station
+  // setup — codex #3591 r55 P1) joins BOTH sides of the blend, or
+  // InvoiceService's whole-subtotal multiplication under-taxes it.
+  const oneTime = Number(taxableOneTimeAmount) > 0 ? Number(taxableOneTimeAmount) : 0;
+  const invoiceTotal = rows.reduce((sum, svc) => sum + postDiscount(svc), 0) + oneTime;
   if (!(invoiceTotal > 0)) return 0;
-  const taxableTotal = rows.filter(isTaxableCommercial).reduce((sum, svc) => sum + postDiscount(svc), 0);
+  const taxableTotal = rows.filter(isTaxableCommercial).reduce((sum, svc) => sum + postDiscount(svc), 0) + oneTime;
   // FULL precision — InvoiceService multiplies invoiceTotal by this rate and
   // rounds the resulting tax DOLLARS to cents. Rounding the rate here (e.g. to 4
   // dp) would drop the tax to $0 or drift by dollars when the taxable pest share
@@ -3797,9 +3892,18 @@ const EstimateConverter = {
     // MULTI-unit plans (codex P1 round 4), so the rider's amounts are
     // folded into the bait line's billing fields before the row goes —
     // single-unit fees still derive from the rental-inclusive plan totals.
+    // Pinned legacy rodent rows leave the conversion line set and ride as
+    // the legacy supplement instead (supplementalCompanionLines) — same
+    // monthly lane the pre-realignment scalar took (codex #3591 r19 P0).
+    // Stored-signal-aware legacy predicate (codex #3591 r37 P0): a manual
+    // "mark as won" hands the STORED shape here without either replay path,
+    // so a pre-realignment quote-wizard row carries no pin — the stored
+    // estimate's own legacy signal classifies it instead.
+    const isLegacyRodentRow = legacyRodentRowPredicateFor(estimateData);
     const recurringServicesForConversion = suppressRecurringConversion
       ? []
-      : foldTermiteRentalIntoBait(recurringServices);
+      : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isLegacyRodentRow(svc));
+    const pinnedLegacyRodentOnlyPlan = !suppressRecurringConversion && isPinnedLegacyRodentOnlyPlan(recurringServices, isLegacyRodentRow);
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -4191,7 +4295,13 @@ const EstimateConverter = {
     // established per-application customer's add-on accept the two
     // deliberately differ — the stamp preserves the original series' fee,
     // the email prices what was just accepted.
-    const stampedPerApplicationFee = preservesExistingMembership
+    // A pinned pre-realignment rodent-only plan lands on the monthly dues
+    // lane (billing_mode monthly_membership below — codex #3591 r21 P0):
+    // no per-application fee exists for it. The customers-row stamp stays
+    // the ONE fallback authority, so the legacy branch lives here.
+    const stampedPerApplicationFee = (pinnedLegacyRodentOnlyPlan && !preservesExistingMembership)
+      ? null
+      : preservesExistingMembership
       ? (customer.per_application_fee ?? null)
       : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
         ? Number(customer.per_application_fee)
@@ -4256,9 +4366,13 @@ const EstimateConverter = {
           // model (see preservesExistingMembership above). Column-guarded —
           // pre-migration accepts keep the legacy update shape.
           ...(billingModeColumnsExist ? {
+            // A pinned pre-realignment rodent-only plan is the legacy monthly
+            // dues product: explicit monthly_membership so the monthly cron
+            // charges the disclosed $/mo and completions are dues-covered
+            // (codex #3591 r21 P0).
             billing_mode: preservesExistingMembership
               ? (customer.billing_mode || null)
-              : 'per_application',
+              : (pinnedLegacyRodentOnlyPlan ? 'monthly_membership' : 'per_application'),
             // Fee semantics documented on stampedPerApplicationFee above —
             // shared with the membership.started email payload.
             per_application_fee: stampedPerApplicationFee,
@@ -5830,10 +5944,17 @@ const EstimateConverter = {
           // county) on the SAME connection so the just-written
           // property_type='commercial' is visible — then blend by the taxable
           // pest share. Never hardcode 7%.
+          const prepayRodentSetupForTax = frozenRodentBaitSetupAmount(estimateData);
+          const prepayCommercialBaseRate = hasCommercialRecurring
+            ? await resolveCommercialPrepayBaseRate(customerId, { database })
+            : 0;
           const prepayTaxRate = hasCommercialRecurring
             ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
               prepayDiscountApplied,
-              baseRate: await resolveCommercialPrepayBaseRate(customerId, { database }),
+              baseRate: prepayCommercialBaseRate,
+              // The taxable bait-station setup rides this same invoice —
+              // it must sit in the blend or it is under-taxed (r55 P1).
+              taxableOneTimeAmount: prepayRodentSetupForTax,
             })
             : undefined;
           // Acceptance deposit credits against this prepay invoice through
@@ -5875,6 +5996,14 @@ const EstimateConverter = {
             && Number(opts.manualDiscountItemization.annualAmount) > 0
             ? String(opts.manualDiscountItemization.label || '').trim()
             : '';
+          // Disclosed rodent bait-station setup (owner 2026-08-29; codex
+          // #3591 r4 P1): a non-member's prepay accept must collect the
+          // one-time setup the estimate disclosed — the prepay invoice is
+          // the ONLY invoice a prepay estimate ever mints. Rides as its own
+          // line; annual-prepay-renewals' seeded-visit fallback subtracts
+          // setup lines before dividing by visits (setup is not per-visit
+          // coverage money).
+          const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
           const inv = await InvoiceService.create({
             database,
             customerId,
@@ -5885,7 +6014,12 @@ const EstimateConverter = {
                 : prepayLineDescription,
               quantity: 1,
               unit_price: annualAmount,
-            }],
+            },
+            ...(prepayRodentSetupAmount > 0 ? [{
+              description: 'Bait Station Setup — one-time setup fee',
+              quantity: 1,
+              unit_price: prepayRodentSetupAmount,
+            }] : [])],
             notes: prepayNotes,
             dueDate: etDateString(),
             ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
@@ -6079,8 +6213,26 @@ const EstimateConverter = {
               // stamping splits it across visits — recording the net would
               // understate the year by the deposit. Residential with no deposit
               // is untaxed so this stays === annualAmount there.
+              // The one-time bait-station setup rides the INVOICE but is not
+              // annual coverage money (codex #3591 r5 P1): prepay_amount is
+              // the coverage-slicing basis (renewals split it across covered
+              // visits), so the setup share is excluded — otherwise every
+              // covered visit is over-credited by setup/visits during the
+              // payment-pending window. TAX-INCLUSIVE subtraction (codex r7
+              // P1): a taxable commercial prepay taxes the setup line too,
+              // so the coverage basis drops the setup's gross share — the
+              // blended prepayTaxRate is exactly the rate create() applies
+              // to the whole subtotal. Residential passes no rate (gross ==
+              // face), keeping the r5 behavior byte-identical there.
+              // The setup's gross share leaves at its FULL effective rate
+              // (codex #3591 r56 P1): the blend collects each taxable line
+              // at the base county rate, so the fully-taxable setup carries
+              // setup × baseRate of the invoice's tax — a blended-rate
+              // subtraction left part of that tax inside the coverage
+              // basis. Residential (no rate) stays byte-identical.
               prepayAmount: draftInvoiceAmount != null
-                ? Math.round((draftInvoiceAmount + appliedPrepayDepositCredit) * 100) / 100
+                ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
+                  - prepayRodentSetupAmount * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get
@@ -6223,6 +6375,51 @@ const EstimateConverter = {
           // after-credit total — the same figure the /pay page collects.
           draftInvoiceAmount = inv ? (Number(inv.total) || 0) : invoiceSubtotal;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
+        }
+      }
+      // An estimate-accept ANNUAL PREPAY billed the non-member rodent setup as
+      // its own line (frozenRodentBaitSetupAmount). Ledger it against the
+      // prepay on the rodent series root the scheduling above created
+      // (codex #3591 r37 P1) — the same setup_fee_claims record the switch /
+      // secure / prepay-on-book mints write — so a later void/refund of this
+      // prepay re-stamps the per-application claim
+      // (InvoiceService.restoreRetiredSetupFeeClaimForPrepay) instead of
+      // silently forgiving the setup. Fail closed: inside the accept
+      // transaction, a ledger failure fails the accept rather than minting a
+      // prepay whose setup could never be restored.
+      if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0) {
+        const { authoritativeServiceKey, recordSetupFeeClaimForInvoice, assertFrozenRodentSetupStillOwed } = require('./secure-appointment-plans');
+        // Gained-family recheck under the customer-row lock (codex #3591
+        // r79 P1): a qualifying booking that committed since the unlocked
+        // pre-accept reconciliation waives a RESIDENTIAL setup — refuse
+        // retryably so a refresh reprices the quote without it. Commercial
+        // bait is never family-waived, so it is exempt.
+        if (!estimateRodentBaitIsCommercial(estimateData)) {
+          await assertFrozenRodentSetupStillOwed(database, customerId);
+        }
+        const roots = await database('scheduled_services')
+          .where({ source_estimate_id: estimateId, customer_id: customerId })
+          .whereNull('recurring_parent_id')
+          .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+          .select('id', 'service_type', 'service_id');
+        let rodentRoot = null;
+        for (const root of roots || []) {
+          if ((await authoritativeServiceKey(database, root)) === 'rodent_bait') { rodentRoot = root; break; }
+        }
+        // No root yet (manual Mark Won runs skipAutoSchedule — the series is
+        // seeded by the operator afterwards): the record is still written,
+        // anchor-less, keyed to the prepay invoice (codex #3591 r39 P1). The
+        // term-cancel restore resolves the anchor THEN, from the term's
+        // source estimate, so a refund of this prepay can still put the
+        // setup obligation back on the series that was booked later.
+        await recordSetupFeeClaimForInvoice(database, {
+          invoiceId: draftInvoiceId,
+          anchorId: rodentRoot ? rodentRoot.id : null,
+          amount: frozenRodentBaitSetupAmount(estimateData),
+          estimateId,
+        });
+        if (!rodentRoot) {
+          logger.info(`[estimate-converter] Estimate ${estimateId}: prepay billed the rodent setup before any series root exists — claim ledgered anchor-less; the restore resolves the root from the estimate`);
         }
       }
       if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {
@@ -6731,6 +6928,8 @@ module.exports.estimateHasCommercialOneTime = estimateHasCommercialOneTime;
 // invoices on standard accepts. Never hardcode 99 elsewhere.
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
+module.exports.frozenRodentBaitSetupAmount = frozenRodentBaitSetupAmount;
+module.exports.estimateRodentBaitIsCommercial = estimateRodentBaitIsCommercial;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary
@@ -6758,6 +6957,8 @@ module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
 module.exports.combinedRewriteUpdate = combinedRewriteUpdate;
 module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
+module.exports.isPinnedLegacyRodentRow = isPinnedLegacyRodentRow;
+module.exports.isPinnedLegacyRodentOnlyPlan = isPinnedLegacyRodentOnlyPlan;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.identityAwareComboMatches = identityAwareComboMatches;
 module.exports.comboRouteFamiliesFromCatalogKey = comboRouteFamiliesFromCatalogKey;

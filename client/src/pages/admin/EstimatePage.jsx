@@ -14,7 +14,13 @@ import {
   applyServerTermiteBondPricingConfig,
   applyServerTermiteRentalPricingConfig,
   applyServerTermiteMonitoringPricingConfig,
+  applyServerRodentBaitBracketsPricingConfig,
+  applyServerRodentSetupFeePricingConfig,
+  applyServerRodentWaveguardPricingConfig,
   calculateEstimate,
+  rodentBaitBracketForFootprint,
+  rodentBaitPolicyNote,
+  rodentBaitWaveguardFlags,
   collectMarginReviewNotes,
   fmt,
   fmtInt,
@@ -947,8 +953,13 @@ function EstimateToolView() {
       "svcTs",
       "svcMosquito",
       "svcTermiteBait",
+      // Rodent bait counts toward the tier ONLY while the live
+      // rodent_waveguard.tier_qualifier flag says so (codex #3591 r33 P1) —
+      // the same mechanism calculateEstimate and the server engine read, so
+      // the preview never advertises a Silver a Bronze estimate won't give.
+      ...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : []),
     ];
-    const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
+    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring"];
     // ALL commercial pest-family services now auto-price as recurring lines
     // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
     // to a manual commercial quote.
@@ -989,7 +1000,7 @@ function EstimateToolView() {
     const recurringCount = commercialDetected
       ? 0
       : qualifyingRecurringKeys.filter((k) => form[k]).length;
-    // For commercial, rodent-bait (a separate-recurring key) is now a commercial
+    // For commercial, palm/foam separate-recurring keys are counted here; a commercial
     // auto-priced line counted above — don't double-count it here.
     const separateRecurringCount = separateRecurringKeys
       .filter((k) => form[k] && !(commercialDetected && commercialAutoKeys.includes(k)))
@@ -1035,7 +1046,14 @@ function EstimateToolView() {
     if (form.svcMosquito && !commercialDetected)
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
-    if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;
+    if (form.svcRodentBait && !commercialDetected) {
+      // LIVE footprint-bracket ladder (pricing_config.rodent_bait_brackets,
+      // loaded into the engine module by refreshPricingConfig — codex #3591
+      // r16 P1): per-visit × 4 ÷ 12 as a monthly-equivalent preview figure;
+      // the engine is authoritative.
+      const rbPerVisit = rodentBaitBracketForFootprint(sqft).perVisit;
+      approx.rodentBait = Math.round((rbPerVisit * 4) / 12);
+    }
     if (form.svcFoamRecurring) {
       // Rough preview; engine is authoritative. One-time per-visit by tier
       // (no floor) × cadence multiplier × visits/yr ÷ 12.
@@ -1047,9 +1065,15 @@ function EstimateToolView() {
       approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
     }
 
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0) + (approx.foamRecurring || 0);
+    // Rodent revenue leaves the discountable subtotal when the LIVE policy
+    // excludes it from the tier % (codex #3591 r84 P2) — the authoritative
+    // engine reads the same exclude_from_pct_discount flag, so the preview
+    // must not show a tier reduction the engine will not apply.
+    const rodentPctExcluded = rodentBaitWaveguardFlags().excludeFromPctDiscount === true;
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.foamRecurring || 0)
+      + (rodentPctExcluded ? (approx.rodentBait || 0) : 0);
     const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" || key === "foamRecurring" ? 0 : value),
+      (s, [key, value]) => s + (key === "injection" || key === "foamRecurring" || (rodentPctExcluded && key === "rodentBait") ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
@@ -1289,11 +1313,50 @@ function EstimateToolView() {
     }));
     setCustomerSearch("");
     setCustomers([]);
+    // A manually selected customer is a matched account too (codex #3591
+    // r27 P1): bind it and load its canonical qualifying families exactly
+    // like the address match does, so a member's rodent add-on generated
+    // without Property Lookup prices at the combined tier with the setup
+    // waived — and the save carries customerId.
+    bindMatchedCustomer(c);
   }
 
   /* ── v2 Property Lookup — AI property search + satellite review in one call ── */
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
+  // Canonical qualifying families on the matched account (admin endpoint →
+  // loadExistingQualifyingServiceKeys). null = not loaded / failed.
+  const [existingQualifyingKeys, setExistingQualifyingKeys] = useState(null);
+  // The in-flight canonical-keys load for the matched account; a rodent
+  // fallback quote AWAITS it and blocks when it failed (codex #3591 r18 P1
+  // — never guess the setup waiver from the tier).
+  const existingQualifyingKeysRef = useRef(Promise.resolve(null));
+  // ONE binding for both match paths (address auto-match + manual search
+  // selection): the matched account + its canonical qualifying-services
+  // load (codex #3591 r27 P1).
+  const bindMatchedCustomer = (match) => {
+    if (!match || !match.id) {
+      setExistingCustomerMatch(null);
+      setExistingQualifyingKeys(null);
+      existingQualifyingKeysRef.current = Promise.resolve(null);
+      return;
+    }
+    setExistingCustomerMatch(match);
+    setExistingQualifyingKeys(null);
+    const keysLoad = fetch(`/api/admin/customers/${match.id}/waveguard-qualifying-services`, { headers: authHeaders })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => (body && Array.isArray(body.keys) ? body.keys : null))
+      .catch(() => null);
+    existingQualifyingKeysRef.current = keysLoad;
+    keysLoad.then((keys) => {
+      // Only the CURRENT binding's load may populate state (codex #3591 r30
+      // P2): a bind that was cleared or replaced before this fetch resolved
+      // (account selected, then a property lookup found no match) must not
+      // repopulate the former customer's families for an unmatched quote.
+      if (existingQualifyingKeysRef.current !== keysLoad) return;
+      if (Array.isArray(keys)) setExistingQualifyingKeys(keys);
+    });
+  };
 
   /* ── Live lawn pricing config → client fallback engine ────── */
   // The fallback engine (calculateEstimate, used when there is no enriched
@@ -1317,6 +1380,10 @@ function EstimateToolView() {
   // defaults BY DESIGN (db-bridge's kill-value pattern) — it resets to
   // them and counts as a successful load.
   const pricingConfigReadyRef = useRef(Promise.resolve(false));
+  // Rodent rows are readiness-gated only when rodent bait is selected
+  // (codex #3591 r13 P1): a selective failure on any of the three rows must
+  // block a rodent fallback quote rather than price it on defaults.
+  const rodentConfigOkRef = useRef(false);
   const refreshPricingConfig = useCallback(() => {
     const run = (async () => {
       const fetchConfigRow = async (key) => {
@@ -1344,12 +1411,15 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
         fetchConfigRow("termite_monitoring"),
+        fetchConfigRow("rodent_bait_brackets"),
+        fetchConfigRow("rodent_setup_fee"),
+        fetchConfigRow("rodent_waveguard"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
@@ -1366,6 +1436,19 @@ function EstimateToolView() {
       // Station-check brackets: same live-rates posture as the rental horizon
       // above, and same not-part-of-readiness reasoning (new row shape).
       if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
+      // Rodent bait ladder + setup fee: live-rates posture, not part of the
+      // readiness return (new rows — codex #3591 r10 P1). A missing row
+      // leaves the in-code default in place.
+      // Applied whenever the fetch succeeded — including an authoritative
+      // 404 (data null), which the appliers read as "reset to the in-code
+      // default" so a removed row cannot leave stale customized pricing in
+      // module state (codex #3591 r25 P2).
+      if (rodentBracketsRow.ok) applyServerRodentBaitBracketsPricingConfig(rodentBracketsRow.data);
+      if (rodentSetupRow.ok) applyServerRodentSetupFeePricingConfig(rodentSetupRow.data);
+      // Tier-count / bundle-% posture must follow the same live row the
+      // server's WaveGuard maps follow (codex #3591 r12 P1).
+      if (rodentWaveguardRow.ok) applyServerRodentWaveguardPricingConfig(rodentWaveguardRow.data);
+      rodentConfigOkRef.current = rodentBracketsRow.ok && rodentSetupRow.ok && rodentWaveguardRow.ok;
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
@@ -1478,6 +1561,18 @@ function EstimateToolView() {
     if (lookupAbortRef.current) lookupAbortRef.current.abort();
     const lookupController = new AbortController();
     lookupAbortRef.current = lookupController;
+    // Clear the PREVIOUS customer binding before anything can fail (codex
+    // #3591 r62 P1): the r61 clear ran only after the property request
+    // succeeded with usable enrichment, so a changed address whose lookup
+    // returned non-2xx or a no-enrichment error exited above it and left the
+    // prior customer matched — generation/persistence would then price the
+    // new property with that customer's qualifying services / setup waiver
+    // and attach the estimate to them. Clearing up front means every lookup
+    // outcome (success, error, abort) starts unbound; only THIS lookup's
+    // customer-match success rebinds. The version bump keeps a generate
+    // racing the unbind from mounting a result priced with the stale account.
+    bindMatchedCustomer(null);
+    estimateVersionRef.current += 1;
     // Supersession gate for everything this lookup applies. A NEWER lookup
     // owns the status UI (plain return); an address edit with NO new lookup
     // leaves nobody to clear the "loading" status this lookup set — clear it
@@ -1580,7 +1675,10 @@ function EstimateToolView() {
         return next;
       });
 
-      // Auto-detect existing customer by address
+      // Auto-detect existing customer by address. The previous binding was
+      // already cleared at the top of doLookup (codex #3591 r62 P1 — the
+      // clear must precede every failure exit, not just this success path),
+      // so this block only ever REBINDS on a fresh match.
       try {
         const addrSearch = address.split(",")[0].trim();
         const custR = await fetch(
@@ -1599,7 +1697,9 @@ function EstimateToolView() {
                 .includes(c.address.split(",")[0].trim().toLowerCase()),
           );
           if (match) {
-            setExistingCustomerMatch(match);
+            // Canonical qualifying families for the rodent setup waiver and
+            // the fallback tier (codex #3591 r13/r21 P1) — shared binding.
+            bindMatchedCustomer(match);
             // The match flips isRecurringCustomer (loyalty pricing) below —
             // a generate started between the property autofill and this
             // point must not mount a result priced without it.
@@ -1618,7 +1718,7 @@ function EstimateToolView() {
               customerEmail: match.email || f.customerEmail || "",
             }));
           } else {
-            setExistingCustomerMatch(null);
+            bindMatchedCustomer(null);
           }
         }
       } catch {
@@ -2011,6 +2111,15 @@ function EstimateToolView() {
           urgency: form.urgency || "ROUTINE",
           afterHours: form.isAfterHours === "YES",
           recurringCustomer: form.isRecurringCustomer === "YES",
+          // The matched account — the server derives its canonical
+          // qualifying families for tier + rodent setup waiver (codex #3591
+          // r16 P1); never a client-supplied key list.
+          existingCustomerId: existingCustomerMatch?.id || null,
+          // The quoted address lets the server scope the TIER list per
+          // property (non-primary street) while the rodent setup waiver
+          // stays account-wide — same signal the save body carries (codex
+          // #3591 r34 P1).
+          address: form.address || null,
           plugArea: parseInt(form.plugArea) || 0,
           plugSpacing: parseInt(form.plugSpacing) || 12,
           dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
@@ -2266,6 +2375,46 @@ function EstimateToolView() {
       alert("Live pricing configuration could not be loaded — retry in a moment. (Quotes are blocked rather than priced on possibly-stale floor settings.)");
       return;
     }
+    if (form.svcRodentBait && !rodentConfigOkRef.current) {
+      alert("Live rodent bait pricing (brackets, setup fee, WaveGuard flags) could not be loaded — retry in a moment. (Rodent quotes are blocked rather than priced on possibly-stale configuration.)");
+      return;
+    }
+    // EVERY quote for a MATCHED account waits for the canonical
+    // qualifying-services load and blocks when it failed: the WaveGuard
+    // tier combines the account's current families with this quote's, and
+    // the rodent setup waiver is decided from the same keys — never guessed
+    // from the tier (codex #3591 r18 P1, widened r29 P1: generating any
+    // add-on in the window right after a manual bind priced the customer as
+    // a first-time Bronze account).
+    let resolvedQualifyingKeys = existingQualifyingKeys;
+    if (existingCustomerMatch) {
+      const keys = await existingQualifyingKeysRef.current;
+      if (!Array.isArray(keys)) {
+        alert("The matched customer's existing services could not be loaded — retry in a moment. (Quotes for a matched account are blocked rather than priced as a first-time customer.)");
+        return;
+      }
+      resolvedQualifyingKeys = keys;
+    }
+    // TIER evidence is PROPERTY-SCOPED (codex #3591 r52 local P1): the save
+    // path resolves families at the quoted street, so the preview must too —
+    // an account-wide tier on a secondary-property quote previews a discount
+    // the save then silently drops. Account-wide keys remain the setup
+    // waiver's evidence. Fail closed like the account-wide load above.
+    let propertyScopedTierKeys = resolvedQualifyingKeys;
+    if (existingCustomerMatch && String(form.address || "").trim()) {
+      try {
+        const scopedRes = await fetch(
+          `/api/admin/customers/${existingCustomerMatch.id}/waveguard-qualifying-services?street=${encodeURIComponent(form.address)}`,
+          { headers: authHeaders },
+        );
+        const scopedBody = scopedRes.ok ? await scopedRes.json() : null;
+        if (!scopedBody || !Array.isArray(scopedBody.keys)) throw new Error("scoped keys unavailable");
+        propertyScopedTierKeys = scopedBody.keys;
+      } catch {
+        alert("The matched customer's services at this address could not be loaded — retry in a moment. (The WaveGuard tier is property-scoped; quotes are blocked rather than previewed on account-wide evidence.)");
+        return;
+      }
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
@@ -2318,6 +2467,20 @@ function EstimateToolView() {
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
       isRecurringCustomer: yesNo(form.isRecurringCustomer),
+      // Evidence for the rodent setup waiver = an OTHER qualifying family on
+      // the matched account (canonical loader), matching generateEstimate's
+      // priorQualifyingServices-minus-rodent decision. When the keys did not
+      // load, only a Silver+ tier is accepted: two or more qualifying
+      // families necessarily include one that is not rodent (codex #3591
+      // r13 P1 — a rodent-only Bronze account must still owe the setup).
+      existingOtherQualifyingService: Array.isArray(resolvedQualifyingKeys)
+        ? resolvedQualifyingKeys.some((k) => k !== "rodent_bait")
+        : false,
+      // The PROPERTY-SCOPED family set — the fallback tier counts these
+      // like the authoritative save's resolveCustomerQualifyingEvidence
+      // (codex #3591 r52 local P1: account-wide keys are the setup-waiver
+      // evidence above, never the tier's).
+      existingQualifyingServices: Array.isArray(propertyScopedTierKeys) ? propertyScopedTierKeys : [],
       exclWaive: yesNo(form.exclWaive),
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
@@ -2360,6 +2523,10 @@ function EstimateToolView() {
         headers: authHeaders,
         body: JSON.stringify({
           address: form.address,
+          // The matched account — persistence reloads its canonical
+          // qualifying families from this id for the server recompute
+          // (codex #3591 r21 P1).
+          customerId: existingCustomerMatch?.id || null,
           customerName: customerSearch || form.customerName || "",
           customerPhone: form.customerPhone || "",
           customerEmail: form.customerEmail || "",
@@ -2542,7 +2709,11 @@ function EstimateToolView() {
     setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
-    setExistingCustomerMatch(null);
+    // Reset through the binder (codex #3591 r32 P1): clearing only the match
+    // left existingQualifyingKeys + its ref holding the previous customer's
+    // families, so the next unmatched fallback quote inherited that tier /
+    // rodent setup waiver while saving with customerId null.
+    bindMatchedCustomer(null);
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");
@@ -4712,6 +4883,7 @@ function EstimateToolView() {
                   >
                     {/* ── Summary Card ──────────────────────── */}
                     {(E.recurring.serviceCount > 0 ||
+                      Number(E.recurring.monthlyTotal) > 0 ||
                       E.oneTime.total > 0 ||
                       E.recurring.palmInjectionMo > 0 ||
                       E.recurring.rodentBaitMo > 0) && (
@@ -5301,15 +5473,18 @@ function EstimateToolView() {
                             <TierGrid>
                               {" "}
                               <TierRow
-                                name="Monthly"
-                                detail={`${R.rodBaitSize} property`}
-                                price={`$${R.rodBaitMo}/mo`}
+                                name={R.rodBait ? "Quarterly" : "Monthly"}
+                                detail={R.rodBait
+                                  ? `Up to ${R.rodBait.stations} stations`
+                                  : `${R.rodBaitSize} property`}
+                                price={R.rodBait
+                                  ? `$${R.rodBait.perVisit}/application`
+                                  : `$${R.rodBaitMo}/mo`}
                                 recommended
                               />{" "}
                             </TierGrid>{" "}
                             <div style={sModNote}>
-                              Not included in WaveGuard bundle discount — priced
-                              separately
+                              {rodentBaitPolicyNote(E)}
                             </div>{" "}
                           </div>
                         )}
@@ -5683,6 +5858,7 @@ function EstimateToolView() {
 
                     {/* ── WaveGuard + Totals ───────────────── */}
                     {(E.recurring.serviceCount > 0 ||
+                      Number(E.recurring.monthlyTotal) > 0 ||
                       E.oneTime.total > 0 ||
                       E.recurring.rodentBaitMo > 0 ||
                       E.recurring.palmInjectionMo > 0) && (
@@ -5875,7 +6051,12 @@ function EstimateToolView() {
                               </span>{" "}
                             </div>
                           )}
-                          {E.recurring.rodentBaitMo > 0 && (
+                          {/* Legacy scalar-only results only: since 2026-08-29
+                              a rodent_bait services row rides INSIDE the
+                              recurring totals — rendering the scalar beside it
+                              would show the plan twice (codex #3591 r7). */}
+                          {E.recurring.rodentBaitMo > 0
+                            && !(E.recurring.services || []).some((s) => (s.service || '') === 'rodent_bait') && (
                             <div
                               style={{
                                 display: "flex",

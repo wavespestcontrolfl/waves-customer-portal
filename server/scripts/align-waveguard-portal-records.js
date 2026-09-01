@@ -45,10 +45,12 @@ const {
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
   resolvePestControlRecurringPlan,
+  resolveRodentBaitRecurringPlan,
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
   isCommercialServiceRow,
-  isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
+  liveWaveGuardServiceFamilies,
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
@@ -176,6 +178,12 @@ function detectServiceKeys(row = {}) {
   if (treeShrubPlan) add(treeShrubPlan.planKey || 'tree_shrub');
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
+  // Rodent bait stations are a qualifying family since 2026-08-29 — the
+  // shared resolver (trapping/exclusion/one-time rodent work never resolve)
+  // keeps this script's detection in step with the runtime
+  // detectWaveGuardPlanKeys (codex #3591 r11 P1).
+  const rodentPlan = resolvePlan(resolveRodentBaitRecurringPlan);
+  if (rodentPlan) add(rodentPlan.planKey || 'rodent_bait');
 
   // Catalog FAMILY authority (Codex #3011 r12, mirrors the runtime
   // detectWaveGuardPlanKeys): when the catalog identity resolves to at least
@@ -187,6 +195,7 @@ function detectServiceKeys(row = {}) {
       resolveMosquitoRecurringPlan,
       resolveTreeShrubRecurringPlan,
       resolveTermiteBaitRecurringPlan,
+      resolveRodentBaitRecurringPlan,
     ].map((resolver) => resolver(catalogText)?.planKey).filter(Boolean));
     if (catalogFamilies.length) {
       return keys.filter((key) => catalogFamilies.includes(serviceFamilyKey(key)));
@@ -198,9 +207,12 @@ function detectServiceKeys(row = {}) {
 
 function serviceFamilyKey(serviceKey) {
   const key = String(serviceKey || '');
-  for (const family of ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait']) {
+  // Live family list (codex #3591 r13 P1): rodent_bait is a family only
+  // while pricing_config.rodent_waveguard.tier_qualifier is on.
+  for (const family of liveWaveGuardServiceFamilies()) {
     if (key === family || key.startsWith(`${family}_`)) return family;
   }
+  if (key === 'rodent_bait' || key.startsWith('rodent_bait_')) return null;
   return serviceKey;
 }
 
@@ -504,7 +516,7 @@ async function scheduledRowsForCustomer(customerId) {
       .where({ 's.customer_id': customerId })
       .whereNotIn('s.status', TERMINAL_STATUSES)
       .orderBy('s.scheduled_date', 'asc')
-      .select('s.*', 'svc.service_key', 'svc.name as service_name');
+      .select('s.*', 'svc.service_key', 'svc.name as service_name', 'svc.billing_type as catalog_billing_type');
   } catch (_err) {
     return db('scheduled_services')
       .where({ customer_id: customerId })
@@ -528,7 +540,7 @@ async function analyzeCustomer(customer, customerColumns, today) {
       // customer must not be stamped a residential tier, and a "Rodent Pest
       // Control" row is a rodent service, not pest coverage (Codex #3011
       // r4/r6 P1, mirrors the runtime detectUpcomingRecurringPlanKeys).
-      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return false;
+      if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
       const rowDate = dateKey(row.scheduled_date);
       return rowDate && rowDate >= today;
     });

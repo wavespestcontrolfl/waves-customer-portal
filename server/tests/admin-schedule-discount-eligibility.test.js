@@ -122,6 +122,22 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(bookingCreatesWaveGuardCoverage({
       isRecurring: true, isCallback: true, ...quarterlyPest,
     })).toBe(false);
+    // Rodent BAIT stations are coverage only while the live
+    // rodent_waveguard.tier_qualifier flag is on (codex #3591 r23 P1).
+    const baitBooking = {
+      isRecurring: true, isCallback: false, ...quarterlyPest,
+      serviceType: 'Quarterly Rodent Bait Station Service',
+      serviceRecord: { service_key: 'rodent_bait_quarterly', name: 'Quarterly Rodent Bait Station Service' },
+    };
+    expect(bookingCreatesWaveGuardCoverage(baitBooking)).toBe(true);
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      expect(bookingCreatesWaveGuardCoverage(baitBooking)).toBe(false);
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
     // Rodent-led recurring work is not a WaveGuard plan family.
     expect(bookingCreatesWaveGuardCoverage({
       isRecurring: true,
@@ -266,9 +282,13 @@ describe('admin schedule appointment discount eligibility', () => {
       { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
       { service_key: 'termite_bond_1yr', engine_keys: null },
     ]);
-    // engine identity wins — including over a would-be prefix guess
-    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly', catalog)).toBe(true);
-    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', catalog)).toBe(false);
+    // engine identity wins — including over a would-be prefix guess.
+    // rodent_bait joined WaveGuard 2026-08-29 (owner directive): the engine
+    // identity now resolves DISCOUNTABLE.
+    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly', catalog)).toBe(false);
+    // The $99 setup fee is flat cost-recovery — excluded from every %
+    // discount since 2026-08-29 (it joined WAVEGUARD.excludedFromPercentDiscount).
+    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', catalog)).toBe(true);
     expect(lineExcludedFromPercentDiscount('bed_bug_treatment', catalog)).toBe(true);
     expect(lineExcludedFromPercentDiscount('termite_bait', catalog)).toBe(false);
     // no engine link → pricing map, then the explicit alias table
@@ -278,9 +298,10 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(lineExcludedFromPercentDiscount('palm_injection_semiannual', catalog)).toBe(true);
     // the archived nutritional program is NOT an injection variant (r11 P1)
     expect(lineExcludedFromPercentDiscount('palm_treatment', catalog)).toBe(false);
-    expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(true);
-    // unknown prefixed keys are NOT inferred
-    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', new Map())).toBe(false);
+    expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(false);
+    // Even with no catalog, rodent_bait_setup resolves excluded straight
+    // from the pricing map (flat $99, never % discounted — 2026-08-29).
+    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', new Map())).toBe(true);
     expect(lineExcludedFromPercentDiscount('pest_general_quarterly', catalog)).toBe(false);
     expect(lineExcludedFromPercentDiscount(null, catalog)).toBe(false);
   });

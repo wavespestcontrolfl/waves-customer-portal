@@ -136,6 +136,30 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
   });
 });
 
+describe('PriceCard — rodent bait row tier tag (codex #3591 r9 P2)', () => {
+  const rows = (rodentRow) => ({
+    key: 'quarterly',
+    monthly: 61.4,
+    annual: 736.8,
+    perServiceTreatments: [
+      { service: 'pest_control', label: 'Pest Control', displayPrice: 96.3, perTreatment: 107, visitsPerYear: 4, waveGuardDiscountEligible: true },
+      rodentRow,
+    ],
+  });
+
+  it('a new-model (tier-discounted) rodent row wears the tier tag like the other plan rows', () => {
+    render(<PriceCard frequency={rows({ service: 'rodent_bait', label: 'Rodent Bait Stations', displayPrice: 80.1, perTreatment: 89, visitsPerYear: 4, waveGuardDiscountEligible: true })} waveGuardTier="Silver" />);
+    // Header badge + both row sub-labels ("4 applications/year · WaveGuard Silver").
+    expect(screen.getAllByText(/WaveGuard Silver/)).toHaveLength(3);
+  });
+
+  it('a pinned legacy / bare pre-realignment rodent row (not tier-discounted) never wears a tier it does not receive', () => {
+    render(<PriceCard frequency={rows({ service: 'rodent_bait', label: 'Rodent Bait Stations', displayPrice: 49, monthly: 49, waveGuardDiscountEligible: false })} waveGuardTier="Silver" />);
+    // Header badge + the pest row only.
+    expect(screen.getAllByText(/WaveGuard Silver/)).toHaveLength(2);
+  });
+});
+
 describe('PriceCard — WaveGuard savings display', () => {
   it('suppresses a rounding-noise "savings" on a 0%-discount tier (Bronze quarterly)', () => {
     // $94.00/visit quarterly stored as $31.33/mo → cadence 93.99 vs anchor 94:
