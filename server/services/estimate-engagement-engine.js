@@ -214,7 +214,10 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
   try {
     if (!estimate || !ACTIVE_STATUSES.includes(estimate.status) || estimate.archived_at) return;
     if (estimateOptedOutOfEngagement(estimate)) return;
-    if (!estimate.customer_email) return;
+    // The customer follow-up jobs below need an email; the owner-side
+    // hot-view bell does not (it is admin-only), so the email requirement
+    // gates the enqueue, not the whole evaluation (pre-push codex P1).
+    const customerEmailable = !!estimate.customer_email;
     const rules = await loadRules('view_event');
     if (!rules.length) return;
     const sessions = await sessionsForEstimate(estimate.id);
@@ -263,7 +266,7 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
       } else if (rule.rule_key === 'dark_then_return') {
         matches = !!prev && latest.startedAt - prev.endedAt >= p.minDarkDays * 86400000;
       }
-      if (!matches) continue;
+      if (!matches || !customerEmailable) continue;
       const dueAt = new Date(now + (p.fireDelayMinutes || 15) * 60000);
       const queued = await enqueueJob(estimate.id, rule, dueAt, {
         sessions: matchSessions.length,

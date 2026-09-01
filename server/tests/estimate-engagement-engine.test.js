@@ -297,6 +297,21 @@ describe('onEstimateViewed (view-event rules)', () => {
     expect(maybeRaiseHotViewAlert).not.toHaveBeenCalled();
   });
 
+  test('a phone-only estimate still raises the owner hot-view bell but queues no customer email job (pre-push codex P1)', async () => {
+    enqueueViewRules();
+    sessionsForEstimate.mockResolvedValue([
+      session('2026-06-09T12:00:00Z', '2026-06-09T12:05:00Z'),
+      session('2026-06-10T09:00:00Z', '2026-06-10T09:05:00Z'),
+      session('2026-06-10T14:55:00Z'),
+    ]);
+
+    await Engine.onEstimateViewed(baseEstimate({ customer_email: null }), NOW);
+
+    expect(rawJobs).toEqual([]);
+    const { maybeRaiseHotViewAlert } = require('../services/estimate-hot-view-alert');
+    expect(maybeRaiseHotViewAlert).toHaveBeenCalledTimes(1);
+  });
+
   test('prior send or terminal job suppresses the enqueue inside ONE statement', async () => {
     enqueueViewRules();
     sessionsForEstimate.mockResolvedValue([
