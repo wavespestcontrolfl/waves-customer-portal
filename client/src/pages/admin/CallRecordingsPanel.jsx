@@ -561,10 +561,15 @@ export default function CallRecordingsPanel() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        // User-initiated tap → always force, so a row wedged at
-                        // 'processing' from a crashed run isn't blocked by the
-                        // concurrent-run guard.
-                        processOne(r.twilio_call_sid, { force: true });
+                        // A human tap is `operator` (the short quiet window for
+                        // a wedged claim) on every row. `force` ONLY on a row
+                        // that already finished: it also changes extraction
+                        // policy, so sending it on a first run bypassed the
+                        // retry cap and backoff and left caller-stated name
+                        // corrections review-only (codex #3677 P1).
+                        processOne(r.twilio_call_sid, {
+                          force: r.processing_status === "processed",
+                        });
                       }}
                       style={{
                         ...sBtn(D.teal, D.white),

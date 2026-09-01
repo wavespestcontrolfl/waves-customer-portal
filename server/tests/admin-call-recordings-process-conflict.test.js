@@ -234,14 +234,16 @@ describe('claim ceiling is derived from the provider budgets', () => {
 
   test('the mirrored budget counts every sequential leg at the processor timeouts', () => {
     // Primary + provider fallback + contact dictation transcriptions, two
-    // labeling attempts, two V1 extraction attempts PLUS the CSR scoring and
-    // lead-synopsis legs,
+    // labeling attempts, two V1 extraction attempts PLUS the CSR scoring,
+    // lead-synopsis, contact-decoder and address-recovery legs (recovery is
+    // one aggregate deadline, plus the one validation it may have in flight),
     // the download and the V2 fallback chain — the worst case a HEALTHY pass
     // can reach while holding its claim.
     const expected = PROVIDER_FETCH_TIMEOUTS_MS.recording_download
       + (3 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
       + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcript_label)
-      + (4 * PROVIDER_FETCH_TIMEOUTS_MS.extraction)
+      + (6 * PROVIDER_FETCH_TIMEOUTS_MS.extraction)
+      + 30000
       + require('../services/llm/call').DEFAULT_FALLBACK_BUDGET_MS;
     expect(providerBudgetMs()).toBe(expected);
   });
@@ -318,6 +320,41 @@ describe('claim ceiling is derived from the provider budgets', () => {
     const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
     expect(predicate).not.toMatch(/CeilingMinutes/);
     expect(predicate).toContain('CURRENT_BEAT');
+  });
+
+  test('the customer checkpoint write is token-fenced and abandons on zero rows', () => {
+    // The last ownership gate sits above the whole customer-resolution step,
+    // a thousand lines and many awaits back; an unfenced UPDATE there let a
+    // superseded pass overwrite the replacement's customer_id, extraction
+    // and summary by call id alone (codex #3677 P1).
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const start = source.indexOf('let deferredNonLeadAttributionRetire = false;');
+    const end = source.indexOf('const v2ExtractionForAudit', start);
+    const checkpoint = source.slice(start, end);
+    expect(checkpoint).toContain("const checkpointRows = await db('call_log')");
+    expect(checkpoint).toContain(".where('processing_token', procToken)");
+    expect(checkpoint).toContain("if (!checkpointRows) return abandonToPeer(");
+  });
+
+  test('an ownership loss reported by CSR scoring abandons the pass', () => {
+    // scoreCall returns { skipped, reason: 'ownership_lost' } from its own
+    // post-await check; reading that as "no score" and carrying on reached
+    // the unfenced route-decision insert and ai_validation write.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const start = source.indexOf('await CSRCoach.scoreCall({');
+    const end = source.indexOf('csrScoreResult = {', start);
+    expect(source.slice(start, end)).toMatch(/scoreResult\.reason === 'ownership_lost'[^;]*\)\s*\{\s*return abandonToPeer\(/);
+  });
+
+  test('the recordings list forces only rows that already finished', () => {
+    // force changes extraction policy (retry cap, backoff, first-run name
+    // auto-apply), so a first-run Process click must send operator alone.
+    const path = require('path');
+    const panel = require('fs').readFileSync(
+      path.join(__dirname, '../../client/src/pages/admin/CallRecordingsPanel.jsx'), 'utf8',
+    );
+    expect(panel).not.toContain('force: true');
+    expect(panel).toContain('force: r.processing_status === "processed"');
   });
 
   test('the ceiling never reaches the reclaim predicates — those are heartbeat-only', () => {

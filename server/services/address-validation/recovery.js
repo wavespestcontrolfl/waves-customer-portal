@@ -43,9 +43,22 @@ const RECOVERY_MODEL = () => process.env.GEMINI_RECOVERY_MODEL
 // Bounded: the call-processing pass awaits these while holding a claim whose
 // heartbeat beats on a timer, so an unbounded fetch reads as a hang and
 // leaves the call unreclaimable (codex #3677 P1).
-const RECOVERY_FETCH_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
+//
+// ONE AGGREGATE deadline for the whole recovery, not one per fetch. A single
+// recovery can fan out to a dozen sequential requests (the initial
+// autocomplete, up to MAX_CANDIDATES dictation re-hearings, the phonetic
+// model, up to MAX_CANDIDATES more autocompletes, MAX_CONFIRMATIONS
+// validations); budgeted per request that is a legitimate hour-long pass and
+// the stall watchdog's ceiling — derived from this same env var — would ring
+// falsely on a slow Google day (codex #3677 P2). Every request gets whatever
+// is LEFT of the budget, and once it is gone recovery stops and hands the
+// unresolved candidates to a human instead of adopting from a partial view.
+const RECOVERY_BUDGET_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
   ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
   : 180000;
+const newDeadline = () => Date.now() + RECOVERY_BUDGET_MS;
+const remainingMs = (deadline) => Math.max(1, deadline - Date.now());
+const budgetSpent = (deadline) => Date.now() >= deadline;
 
 // AV statuses where the input street may simply be a mis-hearing worth a
 // second-chance lookup. validated_accept/corrected already resolved;
@@ -66,13 +79,13 @@ const zip5 = (zip) => (String(zip || '').match(/^\d{5}/) || [null])[0];
 const cityKey = (city) => String(city || '').toLowerCase().replace(/[^a-z]/g, '');
 
 /** Places Autocomplete → array of prediction descriptions ([] on zero results, null on API failure). */
-async function fetchAutocompletePredictions(input) {
+async function fetchAutocompletePredictions(input, { deadline = newDeadline() } = {}) {
   const key = GOOGLE_KEY();
   if (!key) return null;
   try {
     const url = 'https://maps.googleapis.com/maps/api/place/autocomplete/json'
       + `?input=${encodeURIComponent(input)}&types=address&components=country:us&key=${key}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(RECOVERY_FETCH_TIMEOUT_MS) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(remainingMs(deadline)) });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') return null;
@@ -86,7 +99,7 @@ async function fetchAutocompletePredictions(input) {
  * Gemini phonetic re-hearing: street names that sound like the garbled one.
  * Returns [] on any model failure — recovery just proceeds with nothing.
  */
-async function fetchPhoneticStreetCandidates({ streetName, city, state, zip }) {
+async function fetchPhoneticStreetCandidates({ streetName, city, state, zip, deadline = newDeadline() }) {
   if (!process.env.GEMINI_API_KEY) return [];
   const prompt = `A phone-call transcription mis-heard a street name. The transcriber wrote the street name as "${streetName}" for an address in ${[city, state, zip].filter(Boolean).join(', ')}.
 Street names are usually real words or proper names; transcription errors are PHONETIC (the written words sound like the real street when read aloud — e.g. "C Phone" is how "Seafoam" sounds, "Amber Crick" is "Amber Creek").
@@ -102,7 +115,7 @@ Return ONLY JSON: {"candidates": ["...", "..."]}`;
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: { response_mime_type: 'application/json', temperature: 0.2 },
         }),
-        signal: AbortSignal.timeout(RECOVERY_FETCH_TIMEOUT_MS),
+        signal: AbortSignal.timeout(remainingMs(deadline)),
       }
     );
     if (!res.ok) return [];
@@ -183,6 +196,12 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
   const validate = deps.validate || validateAddress;
 
   const locality = [callerCity, extracted.state || 'FL', callerZip].filter(Boolean).join(' ');
+  const deadline = newDeadline();
+  const outOfBudget = (phase) => {
+    if (!budgetSpent(deadline)) return false;
+    logger.warn(`[address-recovery] budget spent before ${phase} — leaving the rest to review`);
+    return true;
+  };
   const matchesHouse = (p) => houseNumberOf(p) === houseNumber;
   const seen = new Set();
   const distinct = (list) => (list || []).filter((p) => {
@@ -195,24 +214,26 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
   try {
     // Phase 1: the street as heard — Autocomplete's own fuzzy matching.
     let method = 'autocomplete';
-    let predictions = distinct((await autocomplete(`${street}, ${locality}`) || []).filter(matchesHouse));
+    let predictions = distinct((await autocomplete(`${street}, ${locality}`, { deadline }) || []).filter(matchesHouse));
 
     // Phase 1.5: re-hearings an upstream pass (contact-dictation decoder)
     // already produced — free candidates before spending our own model call.
     if (!predictions.length && extraStreetCandidates.length) {
       method = 'dictation';
       for (const candidate of extraStreetCandidates.slice(0, MAX_CANDIDATES)) {
-        const preds = await autocomplete(`${houseNumber} ${candidate}, ${locality}`);
+        if (outOfBudget('dictation re-hearings')) break;
+        const preds = await autocomplete(`${houseNumber} ${candidate}, ${locality}`, { deadline });
         predictions.push(...distinct((preds || []).filter(matchesHouse)));
       }
     }
 
     // Phase 2: our own phonetic re-hearings, anchored to the caller's house number.
-    if (!predictions.length) {
+    if (!predictions.length && !outOfBudget('phonetic re-hearings')) {
       method = 'phonetic';
-      const candidates = await phonetic({ streetName, city: callerCity, state: extracted.state || 'FL', zip: callerZip });
+      const candidates = await phonetic({ streetName, city: callerCity, state: extracted.state || 'FL', zip: callerZip, deadline });
       for (const candidate of candidates) {
-        const preds = await autocomplete(`${houseNumber} ${candidate}, ${locality}`);
+        if (outOfBudget('phonetic autocompletes')) break;
+        const preds = await autocomplete(`${houseNumber} ${candidate}, ${locality}`, { deadline });
         predictions.push(...distinct((preds || []).filter(matchesHouse)));
       }
     }
@@ -222,10 +243,12 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
     // and "exactly one confirmed premise" is the entire adoption contract — a
     // fourth unvalidated prediction could be a different real street. Hand the
     // whole list to a human instead of adopting from a truncated view.
-    const truncated = predictions.length > MAX_CONFIRMATIONS;
+    // Running out of budget mid-confirmation is the same truncated view.
+    let truncated = predictions.length > MAX_CONFIRMATIONS;
 
     const confirmed = [];
     for (const prediction of predictions.slice(0, MAX_CONFIRMATIONS)) {
+      if (outOfBudget('confirmation')) { truncated = true; break; }
       const hit = await confirmPrediction(prediction, { houseNumber, callerZip, callerCity }, validate);
       if (hit) confirmed.push(hit);
     }

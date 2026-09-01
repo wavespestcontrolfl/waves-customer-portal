@@ -9244,7 +9244,15 @@ const CallRecordingProcessor = {
     // must ride the FINAL fenced status write, not the settle's own
     // transaction (pre-push P0 r12).
     let deferredNonLeadAttributionRetire = false;
-    await db('call_log').where({ id: call.id }).update({
+    // TOKEN-FENCED, not merely preceded by an ownership check: the last gate
+    // sits above the whole customer-resolution step, a thousand lines and
+    // many awaits back. A pass that lost its claim in between would otherwise
+    // overwrite the replacement pass's customer_id, extraction and summary by
+    // call id alone (codex #3677 P1). Zero rows means the claim moved.
+    const checkpointRows = await db('call_log')
+      .where({ id: call.id })
+      .where('processing_token', procToken)
+      .update({
       customer_id: customerId || call.customer_id,
       // Call-creation provenance rides the SAME durable write that links
       // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
@@ -9263,6 +9271,7 @@ const CallRecordingProcessor = {
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
     });
+    if (!checkpointRows) return abandonToPeer('the customer checkpoint write');
 
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
@@ -14415,6 +14424,14 @@ const CallRecordingProcessor = {
             sentiment: extracted.sentiment,
           },
         });
+        // The scorer's own post-await check found the claim gone. That is
+        // not "no score" — it is this pass being superseded, and the
+        // route-decision insert and ai_validation write below are unfenced,
+        // so a stale pass that carried on could win the unique insert or
+        // overwrite the replacement's verdict (codex #3677 P1). Abandon.
+        if (scoreResult?.skipped && scoreResult.reason === 'ownership_lost') {
+          return abandonToPeer('finalization after CSR scoring');
+        }
         csrScoreResult = { score: scoreResult?.score?.total_score, outcome: scoreResult?.score?.call_outcome };
         logger.info(`[call-proc] CSR scored: ${csrScoreResult.score}/15 (${csrScoreResult.outcome})`);
       } catch (err) {

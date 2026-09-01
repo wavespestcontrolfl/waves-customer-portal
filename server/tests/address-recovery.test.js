@@ -305,3 +305,56 @@ describe('recoverStreetAddress — truncation + avResult', () => {
     expect(out.avResult).toBeNull();
   });
 });
+
+// One AGGREGATE deadline for the whole fan-out. Budgeted per request, a single
+// recovery could legitimately run a dozen sequential Google/model calls and
+// hold the call-processing claim for most of an hour — past the stall
+// watchdog's ceiling, which is derived from the same env var (codex #3677 P2).
+describe('recoverStreetAddress — one aggregate budget', () => {
+  let now;
+  beforeEach(() => { now = jest.spyOn(Date, 'now'); });
+  afterEach(() => now.mockRestore());
+
+  const spend = () => {
+    // Deadline is taken from the first Date.now(); everything after is past it.
+    const t0 = 1_700_000_000_000;
+    let calls = 0;
+    now.mockImplementation(() => (calls++ === 0 ? t0 : t0 + 10 * 60 * 1000));
+  };
+
+  test('every request carries the shared deadline, not its own fresh one', async () => {
+    const autocomplete = jest.fn(async () => ['5039 Seafoam Trail, Lakewood Ranch, FL, USA']);
+    await recoverStreetAddress({ extracted: GARBLED, avStatus: 'missing_component', deps: deps({ autocomplete }) });
+    const [, opts] = autocomplete.mock.calls[0];
+    expect(typeof opts.deadline).toBe('number');
+    expect(opts.deadline).toBeGreaterThan(Date.now());
+  });
+
+  test('budget spent after the first lookup → no more re-hearings, nothing adopted', async () => {
+    spend();
+    const autocomplete = jest.fn(async () => []);
+    const phonetic = jest.fn(async () => ['Seafoam Trail']);
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      extraStreetCandidates: ['Sea Foam Trail', 'Seafarer Trail'],
+      deps: deps({ autocomplete, phonetic }),
+    });
+    expect(autocomplete).toHaveBeenCalledTimes(1);
+    expect(phonetic).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ attempted: true, recovered: null, method: null });
+  });
+
+  test('budget spent before confirmation → candidates go to review, never auto-adopted', async () => {
+    spend();
+    const validate = jest.fn(async () => avAccept());
+    const out = await recoverStreetAddress({
+      extracted: GARBLED,
+      avStatus: 'missing_component',
+      deps: deps({ autocomplete: async () => ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'], validate }),
+    });
+    expect(validate).not.toHaveBeenCalled();
+    expect(out.recovered).toBeNull();
+    expect(out.candidates).toEqual(['5039 Seafoam Trail, Lakewood Ranch, FL, USA']);
+  });
+});

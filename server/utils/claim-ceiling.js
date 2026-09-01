@@ -42,8 +42,12 @@ function providerBudgetMs() {
   const { DEFAULT_FALLBACK_BUDGET_MS } = require('../services/llm/call');
   // + the CSR scoring and lead-synopsis legs, which each run on the
   // extraction budget and are awaited while the claim is still held
-  // (codex #3677 P2).
-  return download + (3 * transcription) + (2 * label) + (4 * extraction) + DEFAULT_FALLBACK_BUDGET_MS;
+  // (codex #3677 P2), + the contact-dictation decoder (one request) and the
+  // garbled-street recovery, which runs its whole fan-out under ONE
+  // aggregate deadline on the same budget — plus the single address
+  // validation that deadline can already have in flight when it expires.
+  const addressValidation = envMs('GOOGLE_ADDRESS_TIMEOUT_MS', 30000);
+  return download + (3 * transcription) + (2 * label) + (6 * extraction) + addressValidation + DEFAULT_FALLBACK_BUDGET_MS;
 }
 
 // TWO ceilings, because alerting and stealing carry opposite risks.
