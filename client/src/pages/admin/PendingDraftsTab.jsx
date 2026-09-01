@@ -60,8 +60,13 @@ function laneLabel(lane) {
 function communicationsHref(draft) {
   const params = new URLSearchParams({ draftId: draft.id });
   const to = draft.recipientPhone || draft.customerPhone;
-  if (to) params.set("phone", to);
-  if (draft.resolvedFromNumber) params.set("fromNumber", draft.resolvedFromNumber);
+  if (to) {
+    params.set("phone", to);
+    // Only alongside phone — the composer applies ?fromNumber= inside its
+    // phone branch, and a from without a phone would record a from-number
+    // the state never adopted (tripping the draft-detach mismatch effect).
+    if (draft.resolvedFromNumber) params.set("fromNumber", draft.resolvedFromNumber);
+  }
   return `/admin/communications?${params.toString()}`;
 }
 

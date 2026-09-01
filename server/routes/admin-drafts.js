@@ -96,6 +96,26 @@ async function resolveDraftRecipient(draft) {
   return { toPhone: null, customerId: draft.customer_id || null, identityTrustLevel: 'phone_provided_unverified' };
 }
 
+// The From number the send path will END UP using for a draft with no
+// inbound sms_log anchor (campaign/click lanes): TwilioService derives the
+// customer's office line from customerLocationId, falling back to
+// resolveLocation(city) then Bradenton (services/twilio.js). The list
+// mirrors that derivation so the Communications deep link can pin the
+// SAME number — without it the composer submits its hardcoded default as
+// an explicit override and out-of-market customers get the wrong line
+// (Codex #3700 r2 P1). Display-only: the approve/revise send path is
+// untouched and still derives at send time.
+function derivedOfficeNumber(row) {
+  try {
+    const { resolveLocation } = require('../config/locations');
+    const locationId = row.nearest_location_id
+      || (row.city ? resolveLocation(row.city)?.id : null);
+    return TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton') || null;
+  } catch {
+    return null;
+  }
+}
+
 async function releaseDraftClaim(draftId, fields = {}) {
   await db('message_drafts').where({ id: draftId }).update({
     status: 'pending',
@@ -615,7 +635,8 @@ router.get('/', async (req, res, next) => {
       .where(status === 'all' ? {} : { status })
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
-        'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage')
+        'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
+        'customers.nearest_location_id', 'customers.city')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -651,7 +672,7 @@ router.get('/', async (req, res, next) => {
           customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
           customerPhone: d.phone || null,
           recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-          resolvedFromNumber: r?.fromNumber || null,
+          resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d),
           tier: d.waveguard_tier, stage: d.pipeline_stage,
           inboundMessage: d.inbound_message,
           draftResponse: d.draft_response,
@@ -1042,7 +1063,9 @@ router.get('/:id', async (req, res, next) => {
         'customers.last_name',
         'customers.phone',
         'customers.waveguard_tier',
-        'customers.pipeline_stage'
+        'customers.pipeline_stage',
+        'customers.nearest_location_id',
+        'customers.city'
       )
       .first();
     if (!d) return res.status(404).json({ error: 'Draft not found' });
@@ -1057,7 +1080,7 @@ router.get('/:id', async (req, res, next) => {
       customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
       customerPhone: d.phone || null,
       recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-      resolvedFromNumber: r?.fromNumber || null,
+      resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d),
       tier: d.waveguard_tier,
       stage: d.pipeline_stage,
       inboundMessage: d.inbound_message,

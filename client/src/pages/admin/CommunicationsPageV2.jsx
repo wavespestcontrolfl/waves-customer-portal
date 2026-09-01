@@ -1032,7 +1032,13 @@ function SmsTab() {
             id: draft.id,
             draftResponse: draft.draftResponse || "",
             recipientPhone: finalPhone,
-            fromNumber,
+            // Record the from-number the STATE is becoming, not the initial
+            // closure value: a ?fromNumber= deep link (Pending Drafts tab)
+            // sets state before this async callback lands, and the stale
+            // capture would trip the mismatch effect below, silently
+            // detaching the draft and re-routing send to the manual path
+            // (Codex #3700 r2 P1).
+            fromNumber: queryFromNumber || fromNumber,
           } : null);
           if (draft?.customerId && draft?.customerPhone && phoneKey(finalPhone) === phoneKey(draft.customerPhone)) {
             setSelectedCustomerId(draft.customerId);
