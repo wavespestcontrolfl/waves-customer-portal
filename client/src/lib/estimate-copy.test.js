@@ -6,7 +6,7 @@ describe('estimate-copy', () => {
     const copy = estimateCopyFor('pre_slab_termiticide');
     expect(copy).not.toBe(SERVICE_COPY.pest_control);
     expect(copy.aiTitle).toBe('Waves AI reviewed the slab area before pricing this estimate');
-    expect(copy.askChips).toContain('What warranty is selected?');
+    expect(copy.askChips).toEqual([]);
   });
 
   it('falls back to pest-control copy only for unknown categories', () => {

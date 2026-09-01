@@ -5938,10 +5938,11 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
-  const isRegulatedWdoSurface = serviceCategory === 'wdo_inspection'
-    || services.some((service) => glassServiceSlug(service?.key || service?.name) === 'wdo_inspection')
+  const regulatedCertificateCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
+  const isRegulatedCertificateSurface = regulatedCertificateCategories.has(serviceCategory)
+    || services.some((service) => regulatedCertificateCategories.has(glassServiceSlug(service?.key || service?.name)))
     || (pricing?.oneTimeBreakdown?.items || []).some(
-      (item) => glassServiceSlug(item?.service || item?.label || item?.name) === 'wdo_inspection',
+      (item) => regulatedCertificateCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)),
     );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
@@ -5996,7 +5997,7 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  const intelligenceDisplay = isRegulatedWdoSurface
+  const intelligenceDisplay = isRegulatedCertificateSurface
     ? null
     : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
@@ -6596,7 +6597,7 @@ function EstimateViewPageInner() {
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-        {showAskBar && !isRegulatedWdoSurface ? (
+        {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
@@ -6655,7 +6656,7 @@ function EstimateViewPageInner() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
-      {!isRegulatedWdoSurface ? (
+      {!isRegulatedCertificateSurface ? (
         <>
           <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
           <EstimateAskBar
@@ -7129,7 +7130,7 @@ function EstimateViewPageInner() {
                   — the standalone card read as a duplicate review section). */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              {!isRegulatedWdoSurface ? (
+              {!isRegulatedCertificateSurface ? (
                 <EstimateAskBar
                   token={token}
                   askToken={estimate.askToken}

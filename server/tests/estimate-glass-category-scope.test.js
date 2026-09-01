@@ -45,20 +45,24 @@
 //   matcher. Every input source is now scanned and unioned, and the scope
 //   path classifies rows through scopeCategoryForOneTimeItem (stinging split
 //   out; copy classification untouched).
-const { glassCategoryEligible, deriveServiceCategory, hasWdoServiceMix } = require('../routes/estimate-public');
+const { glassCategoryEligible, deriveServiceCategory, hasRegulatedCertificateServiceMix } = require('../routes/estimate-public');
 
 const PEST_LAWN_SCOPE = ['pest_control', 'lawn_care'];
 
 describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATEGORIES)', () => {
-  test('mixed estimates remain regulated WDO surfaces when any WDO line is present', () => {
-    expect(hasWdoServiceMix(
+  test('mixed estimates remain regulated certificate surfaces when any WDO or pre-slab line is present', () => {
+    expect(hasRegulatedCertificateServiceMix(
       [{ service: 'pest_control', name: 'Pest Control' }],
       [{ service: 'wdo_inspection', name: 'WDO Inspection' }],
     )).toBe(true);
-    expect(hasWdoServiceMix(
+    expect(hasRegulatedCertificateServiceMix(
       [{ service: 'pest_control', name: 'Pest Control' }],
       [{ service: 'termite_foam', name: 'Termite Foam Treatment' }],
     )).toBe(false);
+    expect(hasRegulatedCertificateServiceMix(
+      [{ service: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment' }],
+    )).toBe(true);
   });
 
   test('empty scope list releases every estimate', () => {

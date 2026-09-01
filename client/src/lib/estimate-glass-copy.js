@@ -301,12 +301,7 @@ const GLASS_PACKS = {
     eyebrow: 'Your pre-slab treatment quote',
     aiTitle: 'Priced from the measured slab area',
     aiBody: 'This quote comes from the measured slab area, the selected product, and your warranty option — nothing padded, nothing guessed.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
   bora_care: {

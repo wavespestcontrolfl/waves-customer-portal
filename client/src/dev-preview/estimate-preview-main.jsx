@@ -142,7 +142,7 @@ function preslabScenario() {
       services: [],
       renderFlags: {},
       waveGuardTier: null,
-      askChips: ['What product is used?', 'Do I get documentation?', 'What warranty is selected?', 'When should this be done?'],
+      askChips: [],
       anchorOneTimePrice: 1850,
       oneTimeBreakdown: {
         total: 1850,

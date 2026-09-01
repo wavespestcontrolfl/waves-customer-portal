@@ -2248,8 +2248,7 @@ describe('public estimate one-time breakdown', () => {
         headline: "Hey {first}, here's your pre-slab termite treatment quote.",
       }),
     }));
-    expect(payload.askChips).toContain('Do I get documentation?');
-    expect(payload.askChips).not.toContain('How long does the barrier last?');
+    expect(payload.askChips).toEqual([]);
   });
 
   test('deriveServiceCategory returns pest, trenching, and bundle categories from normalized services', () => {
@@ -3602,9 +3601,9 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    // Pre-slab is a soil treatment, not a bait system — the chip matches the method.
-    expect(html).toContain('data-estimate-ask-prompt="How does pre-slab treatment work?"');
-    expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
+    // FDACS pre-treatment certificates remain conservative: no AI ask surface.
+    expect(html).not.toContain('class="card estimate-ask-card"');
+    expect(html).not.toContain('class="card ai-card waveguard-ai-card"');
 
     // The one-time hero price card and its guarantee line are retired on
     // one-time-only pages (owner 2026-08-27 — the itemized card leads), so

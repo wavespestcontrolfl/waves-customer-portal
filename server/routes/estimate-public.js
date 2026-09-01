@@ -2026,12 +2026,7 @@ const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
@@ -3277,14 +3272,17 @@ function boraCareCustomerCopy() {
   };
 }
 
-function hasWdoServiceMix(recurring = [], oneTimeItems = []) {
+function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
-  const isWdoRow = (row = {}) => /\bwdo\b|wood destroying/i.test(
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|termiticide/i.test(
     [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
   );
-  return recurringRows.some(isWdoRow)
-    || oneTimeRows.some((row) => serviceCategoryForOneTimeItem(row) === 'wdo_inspection' || isWdoRow(row));
+  return recurringRows.some(isRegulatedRow)
+    || oneTimeRows.some((row) => (
+      ['wdo_inspection', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(row))
+      || isRegulatedRow(row)
+    ));
 }
 
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
@@ -5662,8 +5660,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const isRegulatedWdoSurface = hasWdoServiceMix(recurring, oneTimeItems);
-  const intelligence = isRegulatedWdoSurface
+  const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  const intelligence = isRegulatedCertificateSurface
     ? null
     : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
@@ -5873,7 +5871,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     pestRecurring,
     hasPestOneTime,
   );
-  const estimateAskEnabled = !isRegulatedWdoSurface && isEstimateAskAnswerable({
+  const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
   });
@@ -21904,9 +21902,11 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // sections, so its chip is missing from the section-derived list. Prepend it (so
   // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
   // Waves prompt builder now reads.
-  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-    : askChipsBase;
+  const askChips = hasRegulatedCertificateServiceMix(services, oneTimeBreakdownItems)
+    ? []
+    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+      : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -24352,7 +24352,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || []
     );
-    const isRegulatedWdoSurface = hasWdoServiceMix(
+    const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(
       recurringServicesForIntelligence,
       pricingBundle?.oneTimeBreakdown?.items || [],
     );
@@ -24374,7 +24374,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = isRegulatedWdoSurface
+    const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
           {
@@ -25080,7 +25080,7 @@ module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationCol
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
-module.exports.hasWdoServiceMix = hasWdoServiceMix;
+module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServiceMix;
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;

@@ -108,12 +108,7 @@ export const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },

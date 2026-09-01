@@ -53,9 +53,10 @@ describe('glassCopyActive', () => {
 });
 
 describe('glassEstimateCopyFor', () => {
-  it('keeps the regulated WDO glass copy free of AI quick questions', () => {
+  it('keeps regulated certificate copy free of AI quick questions', () => {
     setGlassDefault(true);
     expect(glassEstimateCopyFor('wdo_inspection').askChips).toEqual([]);
+    expect(glassEstimateCopyFor('pre_slab_termiticide').askChips).toEqual([]);
   });
 
   it('returns a pack for every service category under glass, none when glass is off', () => {
@@ -90,7 +91,7 @@ describe('glassEstimateCopyFor', () => {
       expect(pack.eyebrow, category).toBeTruthy();
       expect(pack.aiTitle, category).toBeTruthy();
       expect(pack.aiBody, category).toBeTruthy();
-      expect(pack.askChips, category).toHaveLength(4);
+      expect(pack.askChips, category).toHaveLength(category === 'pre_slab_termiticide' ? 0 : 4);
     }
   });
 });
