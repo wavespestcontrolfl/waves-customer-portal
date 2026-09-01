@@ -141,27 +141,39 @@ function builder(table) {
     if (val === undefined) return (r) => String(r[norm(a)]) === String(op);
     if (op === 'like') { const prefix = String(val).replace(/%$/, ''); return (r) => String(r[norm(a)] || '').startsWith(prefix); }
     if (op === '>=') return (r) => (r[norm(a)] ?? '') >= val;
+    if (op === '<=') return (r) => (r[norm(a)] ?? '') <= val;
     return (r) => String(r[norm(a)]) === String(val);
   };
+  // Grouped predicate with knex's real AND/OR semantics (the reason group,
+  // notCallback, and coveredTermsAsOf's nested status guard all run through
+  // here) — a where/andWhere ANDs, an orWhere ORs, and a function nests.
+  const groupCond = (fn) => {
+    const parts = [];
+    const push = (or, cond) => { parts.push({ or, cond }); };
+    const sub = {
+      where: (sa, sop, sval) => { push(false, typeof sa === 'function' ? groupCond(sa) : scalarCond(sa, sop, sval)); return sub; },
+      andWhere: (sa, sop, sval) => sub.where(sa, sop, sval),
+      orWhere: (sa, sop, sval) => { push(true, typeof sa === 'function' ? groupCond(sa) : scalarCond(sa, sop, sval)); return sub; },
+      whereNull: (col) => { push(false, (r) => r[norm(col)] == null); return sub; },
+      orWhereNull: (col) => { push(true, (r) => r[norm(col)] == null); return sub; },
+      whereNotNull: (col) => { push(false, (r) => r[norm(col)] != null); return sub; },
+      orWhereNotNull: (col) => { push(true, (r) => r[norm(col)] != null); return sub; },
+      whereIn: (col, vals) => { push(false, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
+      orWhereIn: (col, vals) => { push(true, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
+    };
+    fn.call(sub);
+    return (r) => parts.reduce((acc, p, i) => (i === 0 ? p.cond(r) : (p.or ? (acc || p.cond(r)) : (acc && p.cond(r)))), false);
+  };
   b.where = (a, op, val) => {
-    if (typeof a === 'function') {
-      // Grouped predicate (is_callback NULL OR false; the customer-cancel
-      // reason group) — knex ORs the branches inside the group, so mirror
-      // that instead of passing through: the reason predicate is exactly
-      // what the codex GH r5 P1 fix changed and must be exercised.
-      const subConds = [];
-      const sub = {
-        where: (sa, sop, sval) => { subConds.push(scalarCond(sa, sop, sval)); return sub; },
-        orWhere: (sa, sop, sval) => { subConds.push(scalarCond(sa, sop, sval)); return sub; },
-        whereNull: (col) => { subConds.push((r) => r[norm(col)] == null); return sub; },
-      };
-      a.call(sub);
-      conds.push((r) => subConds.some((c) => c(r)));
-      return b;
-    }
+    if (typeof a === 'function') { conds.push(groupCond(a)); return b; }
     conds.push(scalarCond(a, op, val));
     return b;
   };
+  b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[norm(col)]))); return b; };
+  // coveredTermsAsOf's raw guards (cancelled-invoice coalesce, refunded-
+  // payment NOT EXISTS) are vacuously true with no invoice/payment rows in
+  // these fixtures — pass through.
+  b.whereRaw = () => b;
   b.whereNotIn = (col, vals) => { conds.push((r) => !vals.map(String).includes(String(r[norm(col)]))); return b; };
   b.whereNot = (col, val) => { conds.push((r) => String(r[norm(col)]) !== String(val)); return b; };
   b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
@@ -202,6 +214,9 @@ function fakeTrx(ops = null, tableFactory = builder) {
     if (ops) ops.push(`raw:${String(sql)}:${JSON.stringify(bindings)}`);
     return {};
   };
+  // Savepoint stand-in: the mint nests best-effort lookups (seed) so their
+  // failure can't abort the outer transaction.
+  t.transaction = async (fn) => fn(t);
   return t;
 }
 const fakeDb = { transaction: async (fn) => fn(fakeTrx()) };
@@ -461,6 +476,50 @@ describe('mintRestartEstimate', () => {
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-3', source: 'cancelled_rows' });
+  });
+
+  test('a live annual-prepay term is plan evidence even with zero schedule rows (codex GH r10 P1)', async () => {
+    // Coverage visits ride recurring_ongoing=false and the last one is
+    // completed — nothing for the sweep or the recurrence stop to stamp;
+    // the term that covered the attempt date names the plan.
+    tables.cancellation_cases = [{
+      id: 'case-5', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-11',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', status: 'active', term_start: '2026-01-01', term_end: '2026-12-31',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
+    }];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-5', source: 'cancelled_rows' });
+  });
+
+  test('a prepay term still covering TODAY is owned coverage — the mint refuses rather than re-sell it (codex pre-push P0)', async () => {
+    tables.cancellation_cases = [{
+      id: 'case-6', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-12',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-2', customer_id: 'cust-1', status: 'active', term_start: '2026-01-01', term_end: '2027-12-31',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
+    }];
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
+      .rejects.toMatchObject({ code: 'nothing_to_restart' });
+    expect(tables.estimates).toHaveLength(0);
+  });
+
+  test('an EXPIRED prepay term that covered the attempt is restartable — evidence without ownership', async () => {
+    tables.cancellation_cases = [{
+      id: 'case-7', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-13',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-3', customer_id: 'cust-1', status: 'active', term_start: '2025-09-01', term_end: '2026-08-25',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
+    }];
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(result.reused).toBe(false);
+    expect(tables.estimates).toHaveLength(1);
   });
 
   test('a stale case (newest request has no case row) contributes neither scope nor correlation — the request itself does', async () => {

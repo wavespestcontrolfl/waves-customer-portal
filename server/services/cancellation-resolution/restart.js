@@ -163,6 +163,24 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) if (!keys.includes(key)) keys.push(key);
   }
+  // Annual-prepay evidence (codex GH r10 P1): a live prepay term is a plan
+  // even with ZERO schedule evidence — the last coverage visit can be
+  // completed with recurring_ongoing=false, so neither the sweep nor the
+  // recurrence stop leaves a stamped row, and the processor never touches
+  // annual_prepay_terms. Anchored to the term that covered the ATTEMPT
+  // date — not today — so an old expired term never resurrects a family.
+  // A failed read only narrows the evidence (fewer families), never widens
+  // it. (Ownership reads the same terms as of TODAY, fail-closed —
+  // ownedResidualFamilies — so a still-covered term is owned, not quoted.)
+  try {
+    const { etDateString } = require('../../utils/datetime-et');
+    const attemptDate = etDateString(attemptAnchor ? new Date(attemptAnchor) : new Date());
+    for (const key of await prepayTermFamilyKeys(dbh, customerId, attemptDate)) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  } catch (err) {
+    logger.warn(`[plan-restart] prepay family evidence failed for ${customerId}: ${err.message}`);
+  }
   const fromRows = uniqueServiceFamilies(keys).filter((f) => RESTARTABLE_FAMILIES.includes(f));
   if (fromRows.length) return { families: fromRows, caseId: current ? current.id : null, source: 'cancelled_rows' };
 
@@ -189,6 +207,37 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     }
   }
   return { families: [], caseId: current ? current.id : null, source: 'none' };
+}
+
+// Families named by the annual-prepay terms covering `dateStr` — the same
+// coveredTermsAsOf derivation the cancellation facts run (facts.js):
+// family off the term's anchor visit, falling back to the plan label.
+// Serves BOTH readers: cancelled-plan evidence (attempt date, fail-open to
+// narrower) and residual ownership (today, fail-closed).
+async function prepayTermFamilyKeys(dbh, customerId, dateStr) {
+  const {
+    detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow,
+  } = require('../self-booking-plan-sync');
+  const { coveredTermsAsOf } = require('../annual-prepay-renewals');
+  const terms = await coveredTermsAsOf(dbh, dateStr)
+    .where('t.customer_id', customerId)
+    .select('t.plan_label', 't.last_scheduled_service_id');
+  const keys = [];
+  for (const term of terms || []) {
+    let anchorKeys = [];
+    if (term.last_scheduled_service_id) {
+      const anchor = await dbh('scheduled_services as s')
+        .leftJoin('services as sv', 's.service_id', 'sv.id')
+        .where('s.id', term.last_scheduled_service_id)
+        .first('s.*', 'sv.service_key', 'sv.name as service_name');
+      if (anchor && !isCommercialServiceRow(anchor) && !isRodentLedServiceRow(anchor)) {
+        anchorKeys = detectWaveGuardPlanKeys(anchor);
+      }
+    }
+    if (!anchorKeys.length && term.plan_label) anchorKeys = detectWaveGuardPlanKeys({ service_type: term.plan_label });
+    for (const key of anchorKeys) if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
 }
 
 // The families with residual LIVE recurring obligations on this account —
@@ -224,6 +273,15 @@ async function ownedResidualFamilies(dbh, customerId) {
   for (const row of [...nonTerminalRows, ...ongoingAnchorRows]) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) if (!residualKeys.includes(key)) residualKeys.push(key);
+  }
+  // (c) A prepay term still covering TODAY is paid, live coverage — owned,
+  // never re-sold (codex pre-push P0: a cancelled prepay customer's family
+  // was quotable again while their paid term still ran, double-billing the
+  // coverage). Deliberately NOT try/caught: ownership fails closed, same
+  // as the row reads above.
+  const { etDateString } = require('../../utils/datetime-et');
+  for (const key of await prepayTermFamilyKeys(dbh, customerId, etDateString())) {
+    if (!residualKeys.includes(key)) residualKeys.push(key);
   }
   return uniqueServiceFamilies(residualKeys);
 }
@@ -363,7 +421,12 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     // supplies the footprint the stored profile lacks.
     let propertySeed = null;
     try {
-      propertySeed = await crossSell.loadEstimateSeed(trx, fresh.id, primaryStreet);
+      // Savepoint (codex GH r10 P2): the seed is best-effort, but a
+      // statement error raised on the OUTER trx aborts the whole mint
+      // ("current transaction is aborted" on the very next query) — the
+      // nested transaction scopes the rollback to the lookup so the mint
+      // continues on profile/cache evidence as intended.
+      propertySeed = await trx.transaction((sp) => crossSell.loadEstimateSeed(sp, fresh.id, primaryStreet));
     } catch (err) {
       logger.warn(`[plan-restart] estimate property seed skipped for ${fresh.id}: ${err.message}`);
     }
