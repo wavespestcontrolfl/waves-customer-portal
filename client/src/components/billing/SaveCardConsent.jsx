@@ -45,7 +45,12 @@ export default function SaveCardConsent({
   // CONSENT_VERSION) is unchanged; splitting must never alter characters.
   const paragraphs = consentText.split(/(?<=\.) (?=[A-Z])/);
   const isChecked = locked ? true : !!checked;
-  const showText = !collapsible || expanded;
+  // The authorization may collapse only while UNCHECKED. Once the box is
+  // checked — and always in locked required-save flows — the full canonical
+  // text stays on screen so the recorded consent was visibly presented
+  // (pre-push Codex P1: never hide an ACTIVE authorization behind a toggle).
+  const showText = !collapsible || expanded || isChecked;
+  const showToggle = collapsible && !isChecked;
   return (
     <label
       data-glass="soft"
@@ -74,7 +79,7 @@ export default function SaveCardConsent({
         <div style={{ fontSize: 14, fontWeight: 850, color: CONSENT_STYLE.text, lineHeight: 1.35 }}>
           {resolvedHeadline}
         </div>
-        {collapsible && (
+        {showToggle && (
           <button
             type="button"
             aria-expanded={expanded}
