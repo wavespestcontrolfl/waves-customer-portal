@@ -1892,6 +1892,25 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
   });
 
+  test('a BORROWED registration through a required BINDING (shared.get.call) is caught too', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "const shared = require('../routes/x');",
+        "shared.get.call(shared, '/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
   test('a BORROWED registration on a LOCAL router is rejected outright', () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),

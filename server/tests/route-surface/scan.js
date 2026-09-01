@@ -758,7 +758,8 @@ class ModuleAnalysis {
       } else if (base) {
         const bb = this.cleanBinding(base);
         if (bb && (bb.kind === 'require' || bb.kind === 'requireMember') && bb.module !== null) {
-          this.externalRouterRegs.push({ module: bb.module, name: bb.kind === 'requireMember' ? bb.name : null, method: br.method, loc: this.loc(br.node) });
+          // directExternalRegs is merged into externalRouterRegs below.
+          this.directExternalRegs.push({ module: bb.module, name: bb.kind === 'requireMember' ? bb.name : null, method: br.method, loc: this.loc(br.node) });
         }
       }
     }
