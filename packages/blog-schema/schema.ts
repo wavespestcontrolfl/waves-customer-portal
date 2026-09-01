@@ -2085,6 +2085,20 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
           if (decodedInner === null) return undefined; // unsupported escape — the prop stays opaque
           out += JSON.stringify(decodedInner);
           i = j;
+        } else if (ch === '/' && (trimmed[i + 1] === '*' || trimmed[i + 1] === '/')) {
+          // JS comments between static values are lexer-legal and render
+          // nothing — skipped so they never poison the JSON parse into
+          // "opaque", which left an invalid risk unvalidated (Codex #3646
+          // r33). An unterminated block comment is a build error; the
+          // prop stays opaque.
+          if (trimmed[i + 1] === '*') {
+            const end = trimmed.indexOf('*/', i + 2);
+            if (end === -1) return undefined;
+            i = end + 1;
+          } else {
+            const nl = trimmed.indexOf('\n', i + 2);
+            i = nl === -1 ? trimmed.length : nl;
+          }
         } else {
           out += ch;
         }

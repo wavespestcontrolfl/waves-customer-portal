@@ -3530,9 +3530,12 @@ async function publishRefresh(draft, brief = {}) {
     // The SHARED guardrails blanker (fences with CommonMark delimiter
     // rules, indented code, inline spans, comments) — an ad-hoc regex
     // false-flagged component text preserved inside legacy code blocks
-    // (Codex #3646 r26).
+    // (Codex #3646 r26). It strips comments ITSELF, fence-aware: a "<!--"
+    // inside a fenced sample is code, not a comment opener — the separate
+    // fence-blind comment pre-pass erased a real component that followed
+    // the fence (Codex #3646 r33).
     const guardrailsMod = require('../content/content-guardrails');
-    const rendered = guardrailsMod.blankNonRenderedMarkdown(guardrailsMod.blankComments(newBody));
+    const rendered = guardrailsMod.blankNonRenderedMarkdown(newBody);
     // Only CATALOGUED MDX components flag — uppercase standard HTML
     // (<BR>, <DIV>) is raw HTML in a .md and renders fine (Codex #3646 r30).
     const comp = rendered.match(new RegExp('<(' + guardrailsMod.SAFE_MDX_COMPONENTS.join('|') + ')(?=[\\s/>])'));

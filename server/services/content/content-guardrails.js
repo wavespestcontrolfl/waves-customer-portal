@@ -1836,7 +1836,10 @@ function maskJsxAttrQuotes(src, { keepValuesOf = null } = {}) {
         keepThis = false;
         if (keepValuesOf) {
           const nm = /([A-Za-z_][\w:-]*)\s*=\s*$/.exec(s.slice(Math.max(m.index, j - 64), j));
-          if (nm && keepValuesOf.has(nm[1])) keepThis = true;
+          // HTML attribute names are case-insensitive (<a HREF=…> is a
+          // live link the route gate must read); JSX props are exact, so
+          // ctaHref keeps its spelling (Codex #3646 r33).
+          if (nm && (keepValuesOf.has(nm[1]) || keepValuesOf.has(nm[1].toLowerCase()))) keepThis = true;
         }
         continue;
       }
@@ -2318,6 +2321,20 @@ function tolerantStaticJson(text) {
         if (decodedInner === null) return undefined; // unsupported escape — the prop stays opaque
         out += JSON.stringify(decodedInner);
         i = j;
+      } else if (ch === '/' && (trimmed[i + 1] === '*' || trimmed[i + 1] === '/')) {
+        // JS comments between static values are lexer-legal and render
+        // nothing — skipped so they never poison the JSON parse into
+        // "opaque", which left an invalid risk unvalidated (Codex #3646
+        // r33). An unterminated block comment is a build error upstream;
+        // the prop stays opaque.
+        if (trimmed[i + 1] === '*') {
+          const end = trimmed.indexOf('*/', i + 2);
+          if (end === -1) return undefined;
+          i = end + 1;
+        } else {
+          const nl = trimmed.indexOf('\n', i + 2);
+          i = nl === -1 ? trimmed.length : nl;
+        }
       } else {
         out += ch;
       }
@@ -3693,7 +3710,25 @@ function blankNonRenderedMarkdownWithDepths(text) {
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
   // A span also stops at an ATX HEADING line — a heading starts a new
   // block and can never lazily continue the previous paragraph.
-  const spanned = afterComments.replace(new RegExp(SPAN_RE_SOURCE, 'g'), (c, run, offset, whole) => {
+  // Scanned on the ATTR-MASKED view (astro blankNonRenderedCode parity):
+  // a backtick inside a quoted JSX attribute is inert text, and a backtick
+  // inside MDX expression braces — anywhere in the expression, not only
+  // the bare {`…`} shape — is a JS TEMPLATE delimiter whose VALUE renders
+  // (species={[{name: `x`}]}), never a markdown code span (Codex #3646
+  // r31/r33). The view is length-preserving, so masks land on the real
+  // text at the view's offsets.
+  const spanView = (() => {
+    const v = maskJsxAttrQuotes(afterComments).split('');
+    let d = 0;
+    for (let k = 0; k < v.length; k += 1) {
+      if (v[k] === '{') d += 1;
+      else if (v[k] === '}') { if (d > 0) d -= 1; }
+      else if (v[k] === '`' && d > 0) v[k] = ' ';
+    }
+    return v.join('');
+  })();
+  const spannedChars = afterComments.split('');
+  spanView.replace(new RegExp(SPAN_RE_SOURCE, 'g'), (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
@@ -3701,10 +3736,6 @@ function blankNonRenderedMarkdownWithDepths(text) {
       const open = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '').match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (!open || !(open[1][0] === '`' && open[2].includes('`'))) return c;
     }
-    // A backtick run inside MDX expression braces (`href={\`/contact/\`}`)
-    // is a JS template literal whose VALUE renders — an expression, not a
-    // markdown code span. Leave it for the link scanners.
-    if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
     // A span cannot pair across a DEEPENING blockquote line or a LIST-ITEM
     // opener (both interrupt the paragraph) — leave the candidate unpaired;
     // its content stays visible for the link/table scanners.
@@ -3715,8 +3746,11 @@ function blankNonRenderedMarkdownWithDepths(text) {
     // A pipe's preceding BACKSLASH RUN survives with it — "\\|" is escaped
     // cell CONTENT even inside code (splitCells applies the same parity),
     // so "| `a \\| b` | c |" stays a 2-cell header, not a 3-cell one.
-    return c.replace(/(\\*\|)|[^\n]/g, (ch, pipeRun) => pipeRun || '\u0002');
+    const masked = afterComments.slice(offset, offset + c.length).replace(/(\\*\|)|[^\n]/g, (ch, pipeRun) => pipeRun || '\u0002');
+    for (let k = 0; k < masked.length; k += 1) spannedChars[offset + k] = masked[k];
+    return c;
   });
+  const spanned = spannedChars.join('');
   // Pass 3 — fenced code, per line, scoped to its blockquote AND list
   // containers. Opener VALIDITY is judged on the pre-span-mask source line:
   // a span mask can blank the info-string backtick that rejects a backtick

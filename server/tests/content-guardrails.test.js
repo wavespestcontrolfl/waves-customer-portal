@@ -813,6 +813,27 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel="(941) 599-3489" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
   });
 
+  test('case-insensitive HTML href; comments inside static species arrays (Codex #3646 r33)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // <a HREF=…> is a live link (HTML attribute names are case-insensitive)
+    // — an invented hub route still flags; display text still never does.
+    expect(codesOf(guardrails.evaluate({ body: wrap('<a HREF="https://www.wavespestcontrol.com/invented-route/">go</a>'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<a TITLE="https://www.wavespestcontrol.com/invented-route/" href="/quote/">go</a>'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+    // A lexer-legal comment inside the species array never hides an invalid
+    // row; a valid row with a comment still passes; an unterminated block
+    // comment fails CLOSED — the lexer reads it as an unterminated tag.
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', /* note */ risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', // note\n risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', /* note */ risk: 'nuisance', where: 'x', hunt: 'x', eggSac: 'x', source: { label: 'l', url: 'https://example.com/a' } }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', /* open risk: 'nuisance', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    // Template backticks deeper inside an expression are JS delimiters, not
+    // code spans — prose code spans around the tag still mask normally.
+    const mixed = 'Intro.\n\n## Section\n\nUse `code` here.\n\n<SpiderIdBoard species={[{name: `x`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />\n\nAnd `more` prose.';
+    expect(codesOf(guardrails.evaluate({ body: mixed, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(guardrails.blankNonRenderedMarkdown('Use `a | b` here.')).toBe('Use `\u0002\u0002|\u0002\u0002` here.'.replace(/`/g, '\u0002'));
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;

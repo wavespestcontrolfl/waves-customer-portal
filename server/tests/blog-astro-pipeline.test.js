@@ -2800,6 +2800,28 @@ describe('publishRefresh fact-check (refreshed blog bodies)', () => {
     expect(gh.createBranch).toHaveBeenCalled();
     expect(result.pr_number).toBe(50);
   });
+
+  test('legacy .md refresh: a "<!--" inside a fenced sample is code, not a comment opener — a real component after the fence still fails the publish (Codex #3646 r33)', async () => {
+    const MD_PATH = 'src/content/blog/dollar-spot-venice.md';
+    const existing = fm.stringify(
+      validFrontmatter({ slug: '/dollar-spot-venice/', canonical: 'https://www.wavespestcontrol.com/dollar-spot-venice/' }),
+      'Old body about dollar spot in Venice.',
+    );
+    gh.getFile.mockImplementation(async (p) => (p === MD_PATH ? { sha: 'existing-sha', content: existing, path: p } : null));
+    const body = 'Refreshed body.\n\n```html\n<!-- example only\n```\n<InlineCTA />\n-->\n\nMore prose.';
+    await expect(AstroPublisher.publishRefresh(
+      { type: 'draft', file_path: MD_PATH, page_url: 'https://www.wavespestcontrol.com/dollar-spot-venice/', body, frontmatter: {} },
+      { action_type: 'refresh_existing_page' },
+    )).rejects.toMatchObject({ statusCode: 422, message: expect.stringMatching(/legacy \.md file — an MDX component \(<InlineCTA>\)/) });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    // The same component INSIDE the fence is a code sample — the refresh proceeds.
+    const fenced = 'Refreshed body.\n\n```html\n<!-- example only -->\n<InlineCTA />\n```\n\nMore prose.';
+    const result = await AstroPublisher.publishRefresh(
+      { type: 'draft', file_path: MD_PATH, page_url: 'https://www.wavespestcontrol.com/dollar-spot-venice/', body: fenced, frontmatter: {} },
+      { action_type: 'refresh_existing_page' },
+    );
+    expect(result.pr_number).toBe(50);
+  });
 });
 
 describe('post-merge internal-link planning', () => {
