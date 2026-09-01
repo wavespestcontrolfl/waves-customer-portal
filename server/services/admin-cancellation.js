@@ -1064,11 +1064,22 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             Object.assign(outcome, nextOutcome);
             if (!outcome.errors.length && !repairErrors.length) {
               try {
-                await db('service_requests').where({ id: reqRow.id, status: 'new' })
+                const closed = await db('service_requests').where({ id: reqRow.id, status: 'new' })
                   .update({ status: 'resolved', updated_at: new Date() });
+                if (!closed) {
+                  // Same affected-row check as the commit path: a zero-row
+                  // close with the row still 'new' is a LOST close, not a
+                  // benign race — a stale 'new' acceptance hands the next
+                  // cancellation this request and its dedupe state.
+                  const live = await db('service_requests').where({ id: reqRow.id }).first('status');
+                  if (!live || live.status === 'new') throw new Error('acceptance close updated zero rows');
+                }
               } catch (closeErr) {
-                // Leaves 'new' — the next retry re-lands here, the resends
-                // dedupe, and the close is re-attempted.
+                // Leaves 'new' — surfaced on the echo so the response never
+                // claims a clean resolution for a still-reusable request;
+                // the next retry re-lands here, the resends dedupe, and the
+                // close is re-attempted.
+                outcome.errors = [...(outcome.errors || []), 'acceptance_close_failed'];
                 logger.warn(`[admin-cancellation] acceptance close after repair failed for request ${reqRow.id}: ${closeErr.message}`);
               }
             }

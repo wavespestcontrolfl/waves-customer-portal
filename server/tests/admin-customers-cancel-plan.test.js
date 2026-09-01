@@ -1323,6 +1323,40 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockProcess).not.toHaveBeenCalled();
     }));
 
+    test('a repair close that lands on zero rows while the acceptance is still new is a surfaced failure — never a clean echo over a reusable request', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: null, confirmationChannels: [],
+            errors: ['confirmation_sms_not_sent', 'confirmation_email_not_sent'],
+          },
+        }),
+      }];
+      db.mockImplementation((table) => {
+        const b = builderFor(table);
+        if (table === 'service_requests') {
+          const update = b.update;
+          b.update = async (patch) => (patch.status === 'resolved' ? 0 : update(patch));
+        }
+        return b;
+      });
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(body.duplicate).toBe(true);
+      expect(body.errors).toContain('acceptance_close_failed');
+      // The acceptance stays 'new': the next retry re-lands, resends
+      // dedupe, and the close is re-attempted.
+      expect(mockState.service_requests[0].status).toBe('new');
+    }));
+
     test('a repair whose case stamp FAILS clears nothing and keeps the acceptance open — retryable, never stale-resolved', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
