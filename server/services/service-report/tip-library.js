@@ -30,6 +30,9 @@ const { detectServiceLine } = require('./service-line-configs');
 const SERVICE_LINES = Object.freeze(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
 const SEASONS = Object.freeze(['wet', 'dry', 'all']);
 const MAX_TIPS_PER_VISIT = 3;
+// The "write your own" line: one sentence. The picker enforces the same
+// maxLength; the server rejects, never trims.
+const MAX_CUSTOM_TIP_CHARS = 240;
 
 // SWFL rain season, June–October. This is the rainfall calendar (standing
 // water, humidity), not turf growth — lawn-seasonality's peak/shoulder/dormant
@@ -392,9 +395,11 @@ function freezeTechTips(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
   const tips = resolveTipIds(input.ids);
   const dropped = [];
-  const custom = String(input.custom || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  // Never truncated: an over-long line is rejected as `too_long` so the
+  // tech rewrites it, rather than a silently shortened sentence printing.
+  const custom = String(input.custom || '').replace(/\s+/g, ' ').trim();
   if (custom) {
-    const violations = customerCopyViolations(custom);
+    const violations = custom.length > MAX_CUSTOM_TIP_CHARS ? ['too_long'] : customerCopyViolations(custom);
     if (violations.length) dropped.push({ copy: custom, violations });
     else if (tips.length < MAX_TIPS_PER_VISIT) tips.push({ id: 'custom', copy: custom, source: 'technician' });
     else dropped.push({ copy: custom, violations: ['over_cap'] });
@@ -408,6 +413,7 @@ module.exports = {
   SERVICE_LINES,
   SEASONS,
   MAX_TIPS_PER_VISIT,
+  MAX_CUSTOM_TIP_CHARS,
   seasonForDate,
   registryLineFor,
   tipsForVisit,

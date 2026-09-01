@@ -5379,11 +5379,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const drop = techTipsFreeze.dropped[0];
       logger.warn(`[tech-tips] custom tip rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
       const overCap = drop.violations.includes('over_cap');
+      const tooLong = drop.violations.includes('too_long');
       return res.status(400).json({
         error: overCap
           ? 'Your own tip needs a free slot — three tips is the limit. Remove one, then complete.'
-          : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
-        code: overCap ? 'TECH_TIP_OVER_CAP' : 'TECH_TIP_COPY_REJECTED',
+          : tooLong
+            ? 'Your own tip is too long for the report — keep it to one sentence (240 characters), then complete.'
+            : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
+        code: overCap ? 'TECH_TIP_OVER_CAP' : tooLong ? 'TECH_TIP_TOO_LONG' : 'TECH_TIP_COPY_REJECTED',
         techTip: { copy: drop.copy, violations: drop.violations },
       });
     }

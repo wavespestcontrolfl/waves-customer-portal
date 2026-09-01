@@ -13,6 +13,7 @@ const {
   SERVICE_LINES,
   SEASONS,
   MAX_TIPS_PER_VISIT,
+  MAX_CUSTOM_TIP_CHARS,
   seasonForDate,
   registryLineFor,
   tipsForVisit,
@@ -131,6 +132,17 @@ describe('freezeTechTips', () => {
     expect(tips).toHaveLength(MAX_TIPS_PER_VISIT);
     expect(tips.map((t) => t.source)).toEqual(['library', 'library', 'library']);
     expect(dropped).toEqual([{ copy: 'Flip the mats.', violations: ['over_cap'] }]);
+  });
+
+  test('an over-long custom line is rejected as too_long, never truncated', () => {
+    const long = `Flip the mats after rain. ${'Really. '.repeat(40)}`.trim();
+    expect(long.length).toBeGreaterThan(MAX_CUSTOM_TIP_CHARS);
+    const { tips, dropped } = freezeTechTips({ ids: [], custom: long });
+    expect(tips).toEqual([]);
+    expect(dropped).toEqual([{ copy: long, violations: ['too_long'] }]);
+    const exact = 'x'.repeat(MAX_CUSTOM_TIP_CHARS - 26) + ' flip the mats after rain.';
+    expect(exact.length).toBeLessThanOrEqual(MAX_CUSTOM_TIP_CHARS);
+    expect(freezeTechTips({ ids: [], custom: exact }).tips[0].copy).toBe(exact);
   });
 
   test('malformed input freezes nothing', () => {
