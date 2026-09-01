@@ -9,6 +9,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { isPaused, autopayActivePredicate } = require('../services/autopay-eligibility');
+const { MONTHLY_LANE_SQL, resolveBillingLane } = require('../services/billing-lane');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -56,7 +57,8 @@ router.get('/customers/:id/autopay-state', async (req, res, next) => {
 /**
  * POST /api/admin/customers/:id/charge-now
  * Body: { amount?: number, description?: string }
- * If amount omitted, charges customer.monthly_rate.
+ * If amount omitted, charges customer.monthly_rate — ONLY for a customer the
+ * lane resolver puts on the monthly lane. Any other lane 400s (fail closed).
  */
 router.post('/customers/:id/charge-now', async (req, res, next) => {
   try {
@@ -65,6 +67,23 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Amount-less = "collect this month's dues". monthly_rate alone is NOT
+    // the monthly lane — per-visit / prepay / per-application rows carry a
+    // monthly_rate too (the #3140 shortcut that mislabeled 187 accounts).
+    // Resolve the lane through the ONE classifier the dues cron uses and
+    // refuse to charge dues to anyone it would not charge. FAIL CLOSED:
+    // no explicit amount + not monthly lane = no charge.
+    if (amount == null) {
+      const lane = resolveBillingLane(customer);
+      if (lane.mode !== 'monthly_membership') {
+        return res.status(400).json({
+          error: `This customer is not on the monthly lane (billing_mode: ${lane.mode}, ${lane.source}) — the monthly rate is not their dues. To charge them, enter an explicit amount.`,
+          billing_mode: lane.mode,
+          billing_mode_source: lane.source,
+        });
+      }
+    }
 
     const chargeAmount = amount != null
       ? parseFloat(amount)
@@ -252,6 +271,7 @@ router.get('/billing-health', async (req, res, next) => {
       .where({ active: true })
       .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .count('* as n').first();
     const totalBillable = parseInt(billable.n) || 0;
 
@@ -260,16 +280,19 @@ router.get('/billing-health', async (req, res, next) => {
       .where({ active: true, autopay_enabled: true })
       .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .count('* as n').first();
     const disabled = await db('customers')
       .where({ active: true, autopay_enabled: false })
       .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .count('* as n').first();
     const paused = await db('customers')
       .where({ active: true, autopay_enabled: true })
       .whereNull('deleted_at')
       .where('monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .whereNotNull('autopay_paused_until')
       .where('autopay_paused_until', '>=', etDateString(now))
       .count('* as n').first();
@@ -283,6 +306,7 @@ router.get('/billing-health', async (req, res, next) => {
       .where({ 'c.active': true })
       .whereNull('c.deleted_at')
       .where('c.monthly_rate', '>', 0)
+      .whereRaw(MONTHLY_LANE_SQL)
       .whereRaw(chargeableSql, [chargeableBinding])
       .count('* as n').first()
       .catch(() => ({ n: 0 }));
@@ -293,10 +317,15 @@ router.get('/billing-health', async (req, res, next) => {
     // the other attention buckets is guaranteed to catch them (Codex P2 on
     // #2939). Overlaps no_payment_method when the method pointer is also
     // NULL — both chips firing for one account is truthful, so no subtraction.
+    // Card-dependent audience (Codex #3669 r9): dues-lane accounts AND
+    // per-application accounts — a per-application customer's saved card is
+    // HOW their per-visit charge collects (see admin-billing-recovery), so
+    // an unchargeable/missing method is actionable on that lane too, rate
+    // or no rate. The coverage metrics above stay dues-lane only.
     const unchargeable = await db('customers as c')
       .where({ 'c.active': true })
       .whereNull('c.deleted_at')
-      .where('c.monthly_rate', '>', 0)
+      .where(function cardDependentLanes() { this.where(function monthlyLane() { this.where('c.monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL); }).orWhere('c.billing_mode', 'per_application'); })
       .where('c.autopay_enabled', true)
       .whereRaw(
         'NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)',
@@ -306,11 +335,12 @@ router.get('/billing-health', async (req, res, next) => {
       .count('* as n').first()
       .catch(() => ({ n: 0 }));
 
-    // Customers with no autopay payment method
+    // Customers with no autopay payment method — card-dependent audience
+    // (dues lane ∪ per-application), same rationale as `unchargeable`.
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
       .whereNull('deleted_at')
-      .where('monthly_rate', '>', 0)
+      .where(function cardDependentLanes() { this.where(function monthlyLane() { this.where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL); }).orWhere('billing_mode', 'per_application'); })
       .whereNull('autopay_payment_method_id')
       .count('* as n').first();
 
@@ -388,11 +418,14 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
     const now = new Date();
     const sixtyDaysOut = new Date(); sixtyDaysOut.setDate(sixtyDaysOut.getDate() + 60);
 
-    // No payment method
+    // No payment method — card-dependent audience (dues lane ∪
+    // per-application): a per-application customer's saved card is how
+    // their per-visit charge collects, so a missing method is actionable
+    // there too (Codex #3669 r9).
     const noMethod = await db('customers')
       .where({ active: true, autopay_enabled: true })
       .whereNull('deleted_at')
-      .where('monthly_rate', '>', 0)
+      .where(function cardDependentLanes() { this.where(function monthlyLane() { this.where('monthly_rate', '>', 0).whereRaw(MONTHLY_LANE_SQL); }).orWhere('billing_mode', 'per_application'); })
       .whereNull('autopay_payment_method_id')
       .select('id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier');
 

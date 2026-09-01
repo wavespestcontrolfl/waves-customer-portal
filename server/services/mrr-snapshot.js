@@ -1,26 +1,49 @@
-const { computeMrrBreakdown } = require('./mrr-breakdown');
+const { computeMrrBreakdown, mrrPopulationQuery } = require('./mrr-breakdown');
 const { etMonthStart, etDateString } = require('../utils/datetime-et');
-const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const logger = require('./logger');
 
+// The payment-pending annual-prepay ids computeMrrBreakdown unions into its
+// population (those rows sit on billing_mode 'per_application' until the
+// prepay invoice is PAID, so the monthly-lane predicate alone would drop
+// them). The AGGREGATE by-tier query unions the SAME set or the tiers stop
+// reconciling to the same snapshot row's total_mrr (Codex #3669 r1 P1).
+// The LONGITUDINAL per-customer query (customerRateRows) deliberately does
+// NOT — see its comment (Codex #3669 r2 P2).
+// Returns NULL on a lookup failure — never an empty array (Codex r14): an
+// unavailable lookup is not proof that no pending accounts exist, and under
+// the narrowed lane population a false-empty set would drop every pending
+// prepay account. READ surfaces may degrade a null to "no union" (a live
+// tile heals on the next request); the snapshot WRITER must not persist on
+// null (recordMrrSnapshot skips the write and the previous row stands).
+async function pendingPrepayIds(conn) {
+  const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
+  // throwOnError: the inner table probe must REJECT on a failed schema
+  // probe instead of caching "no table" and resolving empty (Codex r15) —
+  // otherwise this wrapper's null failure signal could never fire.
+  const set = await Promise.resolve()
+    .then(() => getPaymentPendingCustomerIds(etDateString(), conn, { throwOnError: true }))
+    .catch(() => null);
+  return set == null ? null : [...set];
+}
+
 // By-tier MRR over the SAME population computeMrrBreakdown uses (active,
-// not-deleted, monthly_rate > 0, internal/test accounts excluded), so the
-// snapshot's tiers reconcile to its total AND match the live trend population.
+// not-deleted, monthly_rate > 0, monthly lane OR payment-pending prepay,
+// internal/test accounts excluded — mrrPopulationQuery is shared, not
+// re-implemented, so the two can't drift), so the snapshot's tiers reconcile
+// to its total AND match the live trend population.
 // db is lazy-required so this module (and its tests) load without knex.
-async function tierBreakdown(conn) {
+// `pendingIds`: pre-fetched pending-prepay ids — recordMrrSnapshot fetches
+// ONE set and passes it to both this and computeMrrBreakdown, so a transient
+// lookup failure between the two reads can't persist a snapshot whose
+// by_tier disagrees with its own total_mrr (Codex #3669 r4). Three states,
+// same contract as computeMrrBreakdown (Codex r15): omitted/undefined =
+// fetched here (fail-soft); an array = used as-is; explicit NULL = the
+// caller's shared lookup failed — degrade to no union WITHOUT refetching,
+// so sibling reads in one response degrade identically. The snapshot
+// WRITER never reaches here with null (it aborts first).
+async function tierBreakdown(conn, pendingIds = undefined) {
   conn = conn || require('../models/db');
-  const rows = await conn('customers as c')
-    .where('c.active', true)
-    .whereNull('c.deleted_at')
-    .where('c.monthly_rate', '>', 0)
-    .modify((qb) => {
-      if (INTERNAL_TEST_CUSTOMERS.length) {
-        qb.whereNotIn(
-          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
-          INTERNAL_TEST_CUSTOMERS,
-        );
-      }
-    })
+  const rows = await mrrPopulationQuery(conn, pendingIds !== undefined ? (pendingIds || []) : ((await pendingPrepayIds(conn)) || []))
     .select('c.waveguard_tier as waveguard_tier', conn.raw('SUM(c.monthly_rate) as mrr'), conn.raw('COUNT(*) as count'))
     .groupBy('c.waveguard_tier');
   return rows.map((r) => ({
@@ -30,25 +53,25 @@ async function tierBreakdown(conn) {
   }));
 }
 
-// Per-customer monthly_rate over the SAME population the aggregate snapshot uses
-// (active, not-deleted, monthly_rate > 0, internal/test excluded), so a month's
-// per-customer rows sum to that month's total_mrr. Feeds true point-in-time MRR
-// retention: "what each customer was paying in month X" instead of applying
-// today's rate retroactively. db is lazy-required so this module loads without knex.
+// Per-customer monthly_rate over the STABLE monthly-lane population (active,
+// not-deleted, monthly_rate > 0, monthly lane, internal/test excluded). Feeds
+// true point-in-time MRR retention: "what each customer was paying in month X"
+// instead of applying today's rate retroactively.
+//
+// The payment-pending prepay union is deliberately EXCLUDED here (Codex #3669
+// r2 P2): it is a transient collections overlay, and these rows are the
+// LONGITUDINAL per-customer snapshots the Net MRR bridge diffs month over
+// month. Unioning a pending customer in month M and then paying the prepay
+// (which stamps billing_mode 'annual_prepay' and removes the id from month
+// M+1's population) would make buildBridgeMonths classify a SUCCESSFUL prepay
+// collection as churned MRR (mrr-bridge.js prior-only branch). The pending set
+// stays aggregate-only: total_mrr / at_risk_mrr / by_tier carry it; the
+// per-customer rows therefore sum to the committed monthly-lane population,
+// not to total_mrr — by design. db is lazy-required so this module loads
+// without knex.
 async function customerRateRows(conn) {
   conn = conn || require('../models/db');
-  const rows = await conn('customers as c')
-    .where('c.active', true)
-    .whereNull('c.deleted_at')
-    .where('c.monthly_rate', '>', 0)
-    .modify((qb) => {
-      if (INTERNAL_TEST_CUSTOMERS.length) {
-        qb.whereNotIn(
-          conn.raw("LOWER(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))"),
-          INTERNAL_TEST_CUSTOMERS,
-        );
-      }
-    })
+  const rows = await mrrPopulationQuery(conn)
     .select('c.id as customer_id', 'c.monthly_rate as monthly_rate', 'c.waveguard_tier as waveguard_tier');
   return rows.map((r) => ({
     customer_id: r.customer_id,
@@ -66,8 +89,10 @@ async function customerRateRows(conn) {
  * Also DROPS this period's rows for customers who have since fallen out of the
  * population — deactivated, soft-deleted, or monthly_rate set to 0 mid-month.
  * The aggregate (mrr_snapshots.total_mrr) is recomputed from the live population
- * each refresh, so without this prune a dropped customer's stale row would linger
- * and the period's per-customer rows would stop summing to total_mrr. The cron
+ * each refresh, so without this prune a dropped customer's stale row would
+ * linger and the period's per-customer rows would stop reconciling to the
+ * aggregate (they sum to its monthly-lane portion — the transient pending-
+ * prepay overlay is aggregate-only, see customerRateRows). The cron
  * only ever refreshes the CURRENT month, so a closed month keeps its final
  * population. Returns how many rows were written and removed.
  *
@@ -76,6 +101,18 @@ async function customerRateRows(conn) {
  */
 async function recordCustomerMrrSnapshots(periodMonth, conn) {
   conn = conn || require('../models/db');
+  // Never rewrite a PRE-BOUNDARY month with the corrected (narrow) lane
+  // population (Codex #3669 r6 P1): a deploy landing before the 11:50pm ET
+  // month-end capture (scheduler.js) would otherwise prune the closing
+  // month's legacy residue rows while the bridge boundary still treats that
+  // month as old-definition — the prior→closing diff would report every
+  // pruned row as churn. The month keeps its last old-definition rows.
+  // (recordMrrSnapshot skips pre-boundary months wholesale, so this guard
+  // matters for DIRECT callers of this function.)
+  const { LANE_DEFINITION_BOUNDARY } = require('./mrr-bridge');
+  if (String(periodMonth) < LANE_DEFINITION_BOUNDARY) {
+    return { period_month: periodMonth, count: 0, removed: 0, skipped: 'lane_definition_boundary' };
+  }
   const rows = await customerRateRows(conn);
   // Empty result = no qualifying customers (or the population query yielded none);
   // skip both the insert AND the prune so a transient empty read can't wipe the
@@ -92,8 +129,9 @@ async function recordCustomerMrrSnapshots(periodMonth, conn) {
     .insert(records)
     .onConflict(['period_month', 'customer_id'])
     .merge(); // refresh monthly_rate/waveguard_tier/captured_at for the in-progress month
-  // Prune rows for customers who left the population since an earlier refresh of
-  // this same month, so per-customer rows reconcile to mrr_snapshots.total_mrr.
+  // Prune rows for customers who left the population since an earlier refresh
+  // of this same month, so per-customer rows keep tracking the live lane
+  // population mrr_snapshots aggregates over.
   const keepIds = records.map((r) => r.customer_id);
   const removed = await conn('customer_mrr_snapshots')
     .where({ period_month: periodMonth })
@@ -113,8 +151,31 @@ async function recordCustomerMrrSnapshots(periodMonth, conn) {
  */
 async function recordMrrSnapshot(periodMonth = etMonthStart(), conn) {
   conn = conn || require('../models/db');
-  const breakdown = await computeMrrBreakdown(conn, etDateString());
-  const by_tier = await tierBreakdown(conn);
+  // Never rewrite a PRE-BOUNDARY month at all (Codex #3669 r6 + r14): the
+  // month-end capture calls this on the CLOSING month, so a deploy landing
+  // before it would overwrite the closing month's aggregate with the
+  // corrected narrow population while its neighbors stay wide — the trend
+  // could then never tell which month was the step. Skipping the whole
+  // write makes LANE_DEFINITION_BOUNDARY deterministically the first
+  // narrow month for BOTH the aggregate and per-customer series; the
+  // closing month keeps its last old-definition row.
+  const { LANE_DEFINITION_BOUNDARY } = require('./mrr-bridge');
+  if (String(periodMonth) < LANE_DEFINITION_BOUNDARY) {
+    logger.info(`[mrr-snapshot] ${periodMonth}: pre-boundary month — snapshot left at its old-definition capture`);
+    return { period_month: periodMonth, skipped: 'lane_definition_boundary' };
+  }
+  // ONE pending-prepay set for the whole snapshot write — see tierBreakdown.
+  // A null set = the lookup FAILED (not "no pending accounts"); persisting
+  // without the union would freeze an incomplete total — permanently if
+  // this is the month-end capture — so skip the write and let the previous
+  // row stand until a healthy run (Codex r14).
+  const pendingIds = await pendingPrepayIds(conn);
+  if (pendingIds == null) {
+    logger.error(`[mrr-snapshot] ${periodMonth}: pending-prepay lookup unavailable — snapshot write skipped`);
+    return { period_month: periodMonth, skipped: 'pending_prepay_unavailable' };
+  }
+  const breakdown = await computeMrrBreakdown(conn, etDateString(), pendingIds);
+  const by_tier = await tierBreakdown(conn, pendingIds);
 
   await conn('mrr_snapshots')
     .insert({
@@ -147,4 +208,4 @@ async function recordMrrSnapshot(periodMonth = etMonthStart(), conn) {
   return { period_month: periodMonth, ...breakdown, by_tier, customerSnapshot };
 }
 
-module.exports = { recordMrrSnapshot, recordCustomerMrrSnapshots, customerRateRows, tierBreakdown };
+module.exports = { recordMrrSnapshot, recordCustomerMrrSnapshots, customerRateRows, tierBreakdown, pendingPrepayIds };

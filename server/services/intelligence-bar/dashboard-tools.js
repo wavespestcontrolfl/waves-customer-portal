@@ -7,6 +7,9 @@
  */
 
 const db = require('../../models/db');
+const { MONTHLY_LANE_SQL } = require('../billing-lane');
+const { computeMrrBreakdown } = require('../mrr-breakdown');
+const { pendingPrepayIds } = require('../mrr-snapshot');
 const logger = require('../logger');
 const { whereLiveCustomer, CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -257,7 +260,11 @@ async function getKpiSnapshot() {
       db.raw("COUNT(*) as total"),
       db.raw("COUNT(*) FILTER (WHERE status = 'completed') as completed"),
     ).first(),
-    db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first(),
+    // Headline MRR = the shared breakdown (monthly lane ∪ payment-pending
+    // prepay, internal excluded) — one definition with the dashboard tile and
+    // the snapshot, so the IB answer can't sit below them while an annual
+    // invoice awaits payment (Codex #3669 r3).
+    computeMrrBreakdown(db),
     // Source-of-truth filter for "outstanding" — paid_at IS NULL and not
     // a draft/void. Mirrors the cleaner pattern used by /core-kpis AR
     // Days; the prior status whitelist would silently drop any new
@@ -458,9 +465,16 @@ async function getMrrTrend(months) {
   // Real recorded MRR per month (point-in-time snapshots). A past month reads
   // its snapshot's actual MRR; the current (in-progress) month and any month
   // recorded before snapshots existed fall back to the live recompute below
-  // (which dates the right customers but at today's prices — the limitation
-  // snapshots replace going forward).
+  // (which dates the right customers but at today's prices AND today's
+  // billing lane — the customers row is current-state, so the fallback is a
+  // current-state approximation either way; snapshots are the point-in-time
+  // record that replaces it going forward). The lane predicate is applied to
+  // the fallback for BOTH cases deliberately: without it, per-visit / prepay
+  // / per-application rows that merely carry a monthly_rate inflate the
+  // recomputed months — the exact #3140 distortion — and current lane is no
+  // less historical than the current rate the same query already sums.
   const currentMonthStart = etMonthStart(now);
+  const { LANE_DEFINITION_BOUNDARY } = require('../mrr-bridge');
   const snapshotsByMonth = {};
   try {
     const snaps = await db('mrr_snapshots').whereIn('period_month', windows.map(w => w.startDay));
@@ -480,11 +494,29 @@ async function getMrrTrend(months) {
     return [];
   }
 
-  function customersActiveAsOf(endIso) {
+  // Payment-pending annual-prepay ids: those customers sit on billing_mode
+  // 'per_application' until the prepay invoice is PAID, so the lane predicate
+  // alone would drop them from the CURRENT-month recompute while the
+  // completed-month snapshots and the live headline (computeMrrBreakdown)
+  // both union them — the chart's current point would sit below both sources
+  // whenever an annual invoice awaits payment (Codex #3669 r3 P1). The union
+  // is TODAY's transient set, so it applies only to the current window — a
+  // historical fallback month gets the plain lane predicate, or today's
+  // pending customers would inflate months they weren't pending (or even
+  // prepay) in (Codex r4). A FAILED lookup (null) degrades to no union on
+  // this read surface — the chart heals on the next request; the snapshot
+  // WRITER, unlike this, refuses to persist on a failed lookup (r14).
+  const pendingIds = (await pendingPrepayIds(db)) || [];
+
+  function customersActiveAsOf(endIso, { includePendingUnion = false } = {}) {
+    const unionIds = includePendingUnion ? pendingIds : [];
     return excludeInternalCustomers(
       db({ c: 'customers' })
         .where('c.created_at', '<=', endIso)
         .where('c.monthly_rate', '>', 0)
+        // Monthly LANE, not merely rate-bearing (#3140) — see fallback note
+        // above. Pending-prepay union per the note on pendingIds.
+        .where(function laneOrPendingPrepay() { this.whereRaw(MONTHLY_LANE_SQL); if (unionIds.length) this.orWhereIn('c.id', unionIds); })
         .where(function () {
           this.where('c.active', true).orWhereNotNull('c.churned_at');
         })
@@ -500,8 +532,17 @@ async function getMrrTrend(months) {
   // Batch: one query per month, all in parallel (instead of sequential awaits)
   const settled = await Promise.all(windows.map(async w => {
     // Use the snapshot for any COMPLETED month that has one; recompute the
-    // current month live (snapshots only freeze at month rollover).
-    const snap = w.startDay !== currentMonthStart ? snapshotsByMonth[w.startDay] : null;
+    // current month live (snapshots only freeze at month rollover) — UNLESS
+    // the current month predates the lane-definition boundary (deploy lands
+    // mid-month): its snapshot is the old wide population and the writer
+    // deliberately leaves it that way (recordMrrSnapshot pre-boundary skip),
+    // so recomputing it narrow here would put the population step INSIDE
+    // the pre-boundary series. Prefer the wide snapshot; the boundary month
+    // is then deterministically the first narrow point (Codex #3669 r14).
+    const currentIsPreBoundary = currentMonthStart < LANE_DEFINITION_BOUNDARY;
+    const snap = (w.startDay !== currentMonthStart || currentIsPreBoundary)
+      ? snapshotsByMonth[w.startDay]
+      : null;
     if (snap) {
       return {
         month: w.label,
@@ -515,13 +556,14 @@ async function getMrrTrend(months) {
       };
     }
     const endIso = w.end.toISOString();
+    const isCurrentMonth = w.startDay === currentMonthStart;
     const [mrrRow, byTier] = await Promise.all([
-      customersActiveAsOf(endIso)
+      customersActiveAsOf(endIso, { includePendingUnion: isCurrentMonth })
         .select(
           db.raw('SUM(c.monthly_rate) as mrr'),
           db.raw('COUNT(*) as customer_count'),
         ).first(),
-      customersActiveAsOf(endIso)
+      customersActiveAsOf(endIso, { includePendingUnion: isCurrentMonth })
         .select('c.waveguard_tier', db.raw('SUM(c.monthly_rate) as mrr'), db.raw('COUNT(*) as count'))
         .groupBy('c.waveguard_tier'),
     ]);
@@ -539,10 +581,20 @@ async function getMrrTrend(months) {
 
   const results = settled;
 
-  // Growth rates
+  // Growth rates. Never computed across the lane-definition boundary
+  // (#3669, Codex r8+r14): pre-boundary points hold the old wide
+  // population — guaranteed on BOTH deploy timings, because the writer
+  // skips pre-boundary snapshot writes and the recompute above prefers a
+  // pre-boundary current month's wide snapshot. Exactly one pair crosses
+  // (into the boundary month); it reads null and drops out of
+  // avg_growth_pct, which already skips nulls. Same rule and constant as
+  // the Net MRR bridge.
   for (let i = 1; i < results.length; i++) {
-    const prev = results[i - 1].mrr;
-    results[i].growth_pct = prev > 0 ? Math.round((results[i].mrr - prev) / prev * 100) : null;
+    const prev = results[i - 1];
+    const crossesLaneBoundary = prev.date < LANE_DEFINITION_BOUNDARY && results[i].date >= LANE_DEFINITION_BOUNDARY;
+    results[i].growth_pct = (!crossesLaneBoundary && prev.mrr > 0)
+      ? Math.round((results[i].mrr - prev.mrr) / prev.mrr * 100)
+      : null;
   }
 
   return {
