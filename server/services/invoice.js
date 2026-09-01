@@ -5601,11 +5601,18 @@ const InvoiceService = {
       // Strict (staff unvoid) refuses; the automated flip pages a human
       // and proceeds (a poisoned webhook retry loop is worse than a paged
       // reconcile).
-      const siblingClaim = await conn("setup_fee_claims")
+      // EVERY sibling claim is reconciled, not just an unordered first
+      // (codex #3591 r85 P1): a series reversed more than once can carry
+      // several sibling claims — an old terminal one AND a later paid
+      // one. Processing only the first could delete the terminal claim
+      // and retire the stamp while the paid sibling stays silently
+      // collectible alongside the reinstated invoice. Same per-sibling
+      // disposition as the prepay-revival loop above.
+      const siblingClaims = await conn("setup_fee_claims")
         .where({ scheduled_service_id: anchorId })
         .whereNot({ invoice_id: invoiceRow.id })
-        .first("id", "invoice_id");
-      if (siblingClaim) {
+        .select("id", "invoice_id");
+      for (const siblingClaim of siblingClaims || []) {
         // An UNPAID sibling is retired automatically (codex #3591 r49
         // local P0) — the reinstated invoice becomes THE setup carrier;
         // only money attached needs a human refund/reconcile.

@@ -2886,6 +2886,19 @@ async function createSelfBooking(payload = {}) {
                   const rodentDraft = draftLineServices.includes('rodent_bait')
                     || estData?.setupFeeQuote?.kind === 'rodent_bait_setup';
                   if (!rodentDraft) return;
+                  // A PRE-REALIGNMENT draft is not a lapsed waiver (codex
+                  // #3591 r85 P1): the old engine emitted rodent_bait with
+                  // no setup decision at all, so a legacy draft booked
+                  // after deployment would page staff to add a fee the
+                  // in-flight quote never disclosed. Only a NEW-model
+                  // draft can lapse — an explicit persisted rodent
+                  // decision, or a rodent line carrying the realignment
+                  // markers (perApplicationBilled/stations — the same
+                  // evidence estimate-public's legacy replay pin reads).
+                  const newModelRodentDraft = estData?.setupFeeQuote?.kind === 'rodent_bait_setup'
+                    || (estData?.engineResult?.lineItems || []).some((l) => String(l?.service || '').toLowerCase() === 'rodent_bait'
+                      && (l?.perApplicationBilled === true || Number(l?.stations) > 0));
+                  if (!newModelRodentDraft) return;
                   if (estData?.setupFeeQuote?.kind === 'rodent_bait_setup'
                     && estData?.setupFeeQuote?.waived === 'fee_already_queued') return;
                   // An operator-DISABLED fee is not a lapsed waiver (codex
@@ -2895,6 +2908,10 @@ async function createSelfBooking(payload = {}) {
                   // resolver bills from (DB-authoritative via db-bridge).
                   const { RODENT } = require('../services/pricing-engine/constants');
                   if (!(Number(RODENT.baitSetupFee) > 0)) return;
+                  // The alerts name the LIVE configured amount (codex
+                  // #3591 r85 P2): a supported nonzero edit (e.g. $79.50)
+                  // must not have staff adding a hardcoded $99.
+                  const configuredSetupFee = `$${(Math.round(Number(RODENT.baitSetupFee) * 100) / 100).toFixed(2).replace(/\.00$/, '')}`;
                   const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
                   if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
                   await sp('customers').where({ id: custId }).forUpdate().first('id');
@@ -2908,7 +2925,7 @@ async function createSelfBooking(payload = {}) {
                   // customer, so neither refusing nor silently stamping is
                   // available — this is the exception lane: page the office
                   // to re-quote or bill the setup deliberately.
-                  logger.error(`[booking:confirm] FIX: rodent quote ${freshPricingEst.id} waived the bait-station setup on a family that has since lapsed — booking ${custId} commits without the $99; office must re-quote or bill it`);
+                  logger.error(`[booking:confirm] FIX: rodent quote ${freshPricingEst.id} waived the bait-station setup on a family that has since lapsed — booking ${custId} commits without the ${configuredSetupFee}; office must re-quote or bill it`);
                   // notifyAdmin swallows insert errors and resolves null
                   // (codex #3591 r81 P1) — this page is the only recovery
                   // for the underbilling, so retry once and log loudly on
@@ -2918,11 +2935,11 @@ async function createSelfBooking(payload = {}) {
                   const pageLapsedWaiver = () => require('../services/notification-service').notifyAdmin(
                     'billing',
                     'Rodent booking: setup waiver lapsed before self-booking',
-                    'A self-booked rodent bait quote had its $99 setup waived by another service that is no longer active. The booking stands without the fee — re-quote or add the setup deliberately.',
+                    `A self-booked rodent bait quote had its ${configuredSetupFee} setup waived by another service that is no longer active. The booking stands without the fee — re-quote or add the setup deliberately.`,
                     { link: `/admin/customers/${custId}`, metadata: { customerId: custId, estimateId: freshPricingEst.id } },
                   ).catch(() => null);
                   if (!(await pageLapsedWaiver()) && !(await pageLapsedWaiver())) {
-                    logger.error(`[booking:confirm] FIX: lapsed-waiver alert could NOT be persisted for booking ${custId} / quote ${freshPricingEst.id} — the $99 underbilling has no notification; reconcile from this log`);
+                    logger.error(`[booking:confirm] FIX: lapsed-waiver alert could NOT be persisted for booking ${custId} / quote ${freshPricingEst.id} — the ${configuredSetupFee} underbilling has no notification; reconcile from this log`);
                   }
                   return;
                 }

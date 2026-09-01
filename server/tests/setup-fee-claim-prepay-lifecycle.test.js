@@ -733,6 +733,22 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(bookingSrc).toMatch(/if \(!\(await pageLapsedWaiver\(\)\) && !\(await pageLapsedWaiver\(\)\)\) \{\s+logger\.error\(`\[booking:confirm\] FIX: lapsed-waiver alert could NOT be persisted/);
   });
 
+  test('the lapse branch spares pre-realignment drafts and names the live configured fee (codex #3591 r85)', () => {
+    const bookingSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    // A legacy rodent draft (no persisted setup decision, no
+    // perApplicationBilled/stations marker on the rodent line) never
+    // reaches the lapse page — the old engine priced no setup to lapse.
+    expect(bookingSrc).toMatch(/const newModelRodentDraft = estData\?\.setupFeeQuote\?\.kind === 'rodent_bait_setup'[\s\S]{0,300}l\?\.perApplicationBilled === true \|\| Number\(l\?\.stations\) > 0[\s\S]{0,60}if \(!newModelRodentDraft\) return;/);
+    // The alerts name the LIVE configured amount, never a hardcoded $99.
+    expect(bookingSrc).toMatch(/commits without the \$\{configuredSetupFee\}/);
+    expect(bookingSrc).toMatch(/had its \$\{configuredSetupFee\} setup waived/);
+    expect(bookingSrc).toMatch(/the \$\{configuredSetupFee\} underbilling/);
+    const lapseBranch = bookingSrc
+      .slice(bookingSrc.indexOf('const newModelRodentDraft'), bookingSrc.indexOf('underbilling has no notification'))
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(lapseBranch).not.toContain('$99');
+  });
+
   test('lapsed zero-waiver self-bookings page the office · wizard engineInput joins the reconciliation · prepay preview carries the setup (codex #3591 r80)', () => {
     // A rodent draft with a ZERO/ABSENT setup re-derives the waiver under
     // the customer lock; draft-internal families still waive; a lapse pages
@@ -1339,7 +1355,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     ...over,
   });
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function revConn({ stamp = null, claimRow = { id: 'claim-c' }, termBacked = null, siblings = [], invoiceRow = stdInvoice(), liveVisitProbe = { id: 'child-live' }, siblingInvoice = null } = {}) {
+  function revConn({ stamp = null, claimRow = { id: 'claim-c' }, termBacked = null, siblings = [], invoiceRow = stdInvoice(), liveVisitProbe = { id: 'child-live' }, siblingInvoice = null, siblingInvoices = null } = {}) {
     const writes = [];
     const trx = (table) => {
       const q = { _where: null };
@@ -1350,10 +1366,19 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
         if (table === 'setup_fee_claims') return q._where && q._where.scheduled_service_id ? (siblings[0] || null) : claimRow;
         if (table === 'annual_prepay_terms') return termBacked;
         if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : { id: 'root-rb', pending_setup_fee: stamp, status: 'confirmed' };
-        if (table === 'invoices') return q._where && q._where.id && q._where.id !== invoiceRow.id ? siblingInvoice : invoiceRow;
+        if (table === 'invoices') {
+          if (q._where && q._where.id && q._where.id !== invoiceRow.id) {
+            return (siblingInvoices && siblingInvoices[q._where.id]) || siblingInvoice;
+          }
+          return invoiceRow;
+        }
         return null;
       };
-      q.select = async () => (table === 'scheduled_services' ? [rodentRoot] : []);
+      q.select = async () => {
+        if (table === 'scheduled_services') return [rodentRoot];
+        if (table === 'setup_fee_claims') return q._where && q._where.scheduled_service_id ? siblings : [];
+        return [];
+      };
       q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return 1; };
       q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
       q.insert = (row) => { writes.push({ table, op: 'insert', row }); const p = Promise.resolve([{}]); p.onConflict = () => ({ ignore: async () => 1 }); return p; };
@@ -1395,6 +1420,26 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const paged = revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }], siblingInvoice: paidSibling });
     expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(paged, 'inv-completion')).toMatchObject({ retired: false });
     expect(paged.writes.filter((w) => w.table === 'invoices')).toEqual([]);
+  });
+
+  test('EVERY sibling claim is reconciled — a terminal first sibling cannot hide a later paid one (codex #3591 r85 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    const terminalSib = { id: 'inv-terminal', status: 'refunded', paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null };
+    const paidSib = { id: 'inv-paid', status: 'paid', paid_at: '2026-08-30', payment_recorded_at: null, stripe_payment_intent_id: null };
+    const multi = () => revConn({
+      stamp: null,
+      claimRow: null,
+      siblings: [{ id: 'claim-terminal', invoice_id: 'inv-terminal' }, { id: 'claim-paid', invoice_id: 'inv-paid' }],
+      siblingInvoices: { 'inv-terminal': terminalSib, 'inv-paid': paidSib },
+    });
+    // Strict (staff unvoid): the paid sibling behind the terminal one still refuses.
+    await expect(InvoiceService.retireRodentSetupObligationForReinstatedInvoice(multi(), 'inv-completion', { strict: true }))
+      .rejects.toThrow(/already collected/);
+    // Non-strict (webhook flip): the terminal claim is consumed, the paid claim is KEPT for reconciliation.
+    const paged = multi();
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(paged, 'inv-completion')).toMatchObject({ retired: false });
+    expect(paged.writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'delete' && w.where.id === 'claim-terminal')).toBe(true);
+    expect(paged.writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'delete' && w.where.id === 'claim-paid')).toBe(false);
   });
 
   test('revival voids an untouched DRAFT completion setup invoice on the same anchor and consumes its claim', async () => {
