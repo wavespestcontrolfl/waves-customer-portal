@@ -121,6 +121,14 @@ describe('validation (ungated)', () => {
     }
   });
 
+  test('non-string attribution is refused, never coerced (GH Codex r8 P2)', async () => {
+    for (const bad of [{ a: 1 }, true, 7]) {
+      await expect(run(BASE, { source: { sourceAction: bad } })).rejects.toThrow(/must be a string/);
+      await expect(run({ ...BASE, source_action: bad }, { source: {} })).rejects.toThrow(/must be a string/);
+      await expect(run(BASE, { source: { sourceAction: 'admin_ib', bookingSource: bad } })).rejects.toThrow(/must be a string/);
+    }
+  });
+
   test('whitespace-only attribution never satisfies the requirement nor gets stamped', async () => {
     // Trimmed on both sides (pre-push Codex r6 P1): '   ' from the option
     // is absent, and a whitespace bookingSource is not persisted.

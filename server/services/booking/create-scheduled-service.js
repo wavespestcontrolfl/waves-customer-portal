@@ -143,8 +143,16 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   // whitespace-only string all count as absent, so '   ' can neither
   // satisfy the requirement nor be persisted as provenance (pre-push Codex
   // r6 P1, same rule as the idempotency key).
-  const blank = (v) => v == null || String(v).trim() === '';
-  const trimmed = (v) => (blank(v) ? null : String(v).trim());
+  // Only STRINGS are attribution: an object/boolean/number would coerce to
+  // '[object Object]' / 'true' and satisfy the requirement while losing the
+  // exact marker (voice_agent, the call pipeline) that schedule.js's
+  // membership checks key on (GH Codex r8 P2).
+  const blank = (v) => v == null || (typeof v === 'string' && v.trim() === '');
+  const trimmed = (v) => {
+    if (blank(v)) return null;
+    if (typeof v !== 'string') throw contractError(`source attribution must be a string, got ${typeof v}`);
+    return v.trim();
+  };
   const sourceAction = trimmed(source?.sourceAction) || trimmed(insertData.source_action);
   if (!sourceAction) {
     throw contractError('source attribution is required: pass source.sourceAction (e.g. admin_manual, voice_agent, admin_ib)');

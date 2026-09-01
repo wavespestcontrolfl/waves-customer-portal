@@ -465,6 +465,29 @@ function chaseAlias(source, refIndex, site, statementText = statementPrefix(sour
   }
 }
 
+// The fluent chain following a table ref: from just past the ref string,
+// the closing `)` of the call it is an argument of, then `.method(<balanced
+// args>)` links repeated, trivia between links skipped (and excluded from
+// the fingerprint). null when the ref is not a call argument.
+function forwardChain(source, afterRef) {
+  let i = skipTrivia(source, afterRef);
+  if (source[i] !== ')') return null;
+  i += 1;
+  let chain = "scheduled_services')";
+  for (;;) {
+    const j = skipTrivia(source, i);
+    if (source[j] !== '.') break;
+    const nm = /^[A-Za-z0-9_$]+/.exec(source.slice(j + 1));
+    if (!nm) break;
+    const parenStart = skipTrivia(source, j + 1 + nm[0].length);
+    if (source[parenStart] !== '(') break;
+    const end = balancedParens(source, parenStart);
+    chain += `.${nm[0]}${source.slice(parenStart, end)}`;
+    i = end;
+  }
+  return chain;
+}
+
 // Collect scheduled_services insert-site fingerprints in one file by
 // walking each table ref's ENTIRE chained expression. A builder stored in
 // a variable first (`const visits = trx('scheduled_services'); await
@@ -495,19 +518,24 @@ function collectInsertSites(source) {
   const re = /['"`](?:\w+\.)?scheduled_services['"`]/g;
   let m;
   while ((m = re.exec(source)) !== null) {
-    // Table-LAST builder forms: trx.insert(data).into('scheduled_services')
-    // / .table('scheduled_services') put the insert BEFORE the table ref,
-    // so the forward chain walk below never sees it (GH Codex r5 P1). The
-    // WHOLE statement up to the ref — walked backward from the .into/.table
-    // link, any number of lines (pre-push Codex r6 P1) — carries the
-    // .insert( in that shape.
+    // .into('scheduled_services') / .table('scheduled_services') refs. The
+    // insert may sit BEFORE the ref (table-last:
+    // trx.insert(data).into('scheduled_services') — GH Codex r5 P1): the
+    // WHOLE statement up to the ref, walked backward from the link across
+    // any number of lines (pre-push Codex r6 P1), carries the .insert( in
+    // that shape. Or AFTER it (table-first:
+    // trx.table('scheduled_services').insert(data) — GH Codex r8 P2): the
+    // forward chain does. Neither → an alias may have been captured.
     const before = source.slice(Math.max(0, m.index - 12), m.index);
     const link = /\.(into|table)\s*\($/.exec(before);
     if (link) {
       const linkAt = m.index - link[0].length;
       const stmt = source.slice(statementStart(source, linkAt), m.index).replace(/\s+/g, ' ').trim();
+      const chain = forwardChain(source, m.index + m[0].length);
       if (/\.insert\s*\(/.test(stmt)) {
         site(m.index, `${stmt} table-last:scheduled_services`, insertArgument(stmt));
+      } else if (chain && /\.insert\s*\(/.test(chain)) {
+        site(m.index, `${stmt} ${fingerprintOf(chain)}`, insertArgument(chain));
       } else {
         chaseAlias(source, m.index, site, stmt);
       }
@@ -515,23 +543,8 @@ function collectInsertSites(source) {
     }
     // The ref must be the argument of a call: the next non-trivia char
     // closes it (this also catches a table string on its own line).
-    let i = skipTrivia(source, m.index + m[0].length);
-    if (source[i] !== ')') continue;
-    i += 1;
-    let chain = "scheduled_services')";
-    // Follow the chain: .method(<balanced args>) repeated, trivia between
-    // links skipped (and excluded from the fingerprint).
-    for (;;) {
-      const j = skipTrivia(source, i);
-      if (source[j] !== '.') break;
-      const nm = /^[A-Za-z0-9_$]+/.exec(source.slice(j + 1));
-      if (!nm) break;
-      const parenStart = skipTrivia(source, j + 1 + nm[0].length);
-      if (source[parenStart] !== '(') break;
-      const end = balancedParens(source, parenStart);
-      chain += `.${nm[0]}${source.slice(parenStart, end)}`;
-      i = end;
-    }
+    const chain = forwardChain(source, m.index + m[0].length);
+    if (chain === null) continue;
     const prefix = statementPrefix(source, m.index);
     if (/\.insert\s*\(/.test(chain)) {
       site(m.index, `${prefix} ${fingerprintOf(chain)}`, insertArgument(chain));
@@ -582,6 +595,11 @@ describe('booking insert-site contract', () => {
     // A builder captured in a variable is followed through the alias
     // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
+    expect(collectInsertSites("await trx.table('scheduled_services').insert(data);")).toEqual(["await trx.table( scheduled_services').insert(data"]);
+    expect(collectInsertSites("const [row] = await trx\n  .into('scheduled_services')\n  .insert(data)\n  .returning('*');")).toEqual(["const [row] = await trx .into( scheduled_services').insert(data"]);
+    // …while a table-first READ is not.
+    expect(collectInsertSites("await trx.table('scheduled_services').where({ id }).first();")).toEqual([]);
     // …a plain assignment binds the alias too (pre-push r8 P1)…
     expect(collectInsertSites("let visits;\nvisits = trx('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
     // …including an alias captured through the table-last forms (r7 P2).
