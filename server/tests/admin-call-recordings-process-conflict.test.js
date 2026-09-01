@@ -99,12 +99,22 @@ describe('claim ceiling is derived from the provider budgets', () => {
   const { alertCeilingMinutes, reclaimCeilingMinutes, providerBudgetMs } = require('../utils/claim-ceiling');
   const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
 
-  test('the mirrored budget matches the processor timeout map', () => {
+  test('the mirrored budget counts every sequential leg at the processor timeouts', () => {
+    // Primary + provider fallback + contact dictation transcriptions, two
+    // labeling attempts, two V1 extraction attempts, the download and the V2
+    // fallback chain — the worst case a HEALTHY pass can reach.
     const expected = PROVIDER_FETCH_TIMEOUTS_MS.recording_download
-      + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
-      + PROVIDER_FETCH_TIMEOUTS_MS.transcript_label
-      + (2 * PROVIDER_FETCH_TIMEOUTS_MS.extraction);
+      + (3 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
+      + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcript_label)
+      + (2 * PROVIDER_FETCH_TIMEOUTS_MS.extraction)
+      + 240000;
     expect(providerBudgetMs()).toBe(expected);
+  });
+
+  test('no legitimate provider path can reach either ceiling', () => {
+    const worstCaseMs = providerBudgetMs();
+    expect(alertCeilingMinutes() * 60000).toBeGreaterThan(worstCaseMs);
+    expect(reclaimCeilingMinutes() * 60000).toBeGreaterThan(worstCaseMs);
   });
 
   test('the bell rings before a peer may steal a still-beating claim', () => {

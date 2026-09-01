@@ -32,9 +32,13 @@ function providerBudgetMs() {
   const transcription = envMs('CALL_PROC_TRANSCRIBE_TIMEOUT_MS', 300000);
   const label = envMs('CALL_PROC_LABEL_TIMEOUT_MS', 120000);
   const extraction = envMs('CALL_PROC_EXTRACT_TIMEOUT_MS', 180000);
-  // Transcription and extraction each have a fallback leg that runs AFTER the
-  // primary one times out, so both count twice.
-  return download + (2 * transcription) + label + (2 * extraction);
+  // Every leg processRecording can run SEQUENTIALLY on one pass, counted at
+  // its own timeout: the download, three transcriptions (primary, provider
+  // fallback, contact dictation), two labeling attempts, two V1 extraction
+  // attempts, and the V2 fallback chain. This is the worst case a HEALTHY
+  // pass can legitimately reach — both ceilings sit above it.
+  const v2FallbackChain = envMs('CALL_PROC_V2_FALLBACK_TIMEOUT_MS', 240000);
+  return download + (3 * transcription) + (2 * label) + (2 * extraction) + v2FallbackChain;
 }
 
 // TWO ceilings, because alerting and stealing carry opposite risks.
@@ -42,8 +46,9 @@ function providerBudgetMs() {
 // Ringing a bell early on a pass that turns out to be healthy costs one
 // notification. RECLAIMING a live claim costs duplicate side effects on a
 // customer's record, so it must never happen to a pass that is merely slow.
-// The bell therefore fires at 1.5x the measurable budget while the reclaim
-// waits for 3x.
+// Both sit ABOVE the worst case a healthy pass can reach — the bell at 2x
+// that budget, the reclaim at 4x — so neither fires on a slow-but-working
+// pass, and the bell always comes first.
 //
 // Neither number is an attempt to enumerate the call graph. The processor can
 // run more legs than the four timeouts describe — a second labeling attempt,
@@ -58,8 +63,8 @@ function providerBudgetMs() {
 // no leg can outlive it and the ceiling becomes true by construction rather
 // than by margin. That needs cancellation threaded through every provider
 // await and is deliberately not attempted here.
-const ALERT_HEADROOM = 1.5;
-const RECLAIM_HEADROOM = 3;
+const ALERT_HEADROOM = 2;
+const RECLAIM_HEADROOM = 4;
 
 // When the stall watchdog should ring about a claim that is still beating.
 function alertCeilingMinutes() {
