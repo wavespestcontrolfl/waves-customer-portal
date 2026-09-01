@@ -360,7 +360,7 @@ export const componentPropSchemas = {
       }, 'ctaHref must be a well-formed root-relative path (no dot segments) or an https URL')
       .optional(),
     phone: z.string().optional(),
-    tel: z.string().regex(/^(?:tel:)?\+?[\d\-().\s]{7,20}$/, 'tel must be a phone number (optionally tel:-prefixed)').optional(),
+    tel: z.string().regex(/^(?:tel:)?\+?(?=(?:\D*\d){7})[\d\-().\s]{7,20}$/, 'tel must be a phone number with at least 7 digits (optionally tel:-prefixed)').optional(),
     eyebrow: z.string().optional(),
   }),
   BottomLineBox: z.object({
@@ -748,7 +748,21 @@ function blankNonRenderedCode(src: string): string {
   // an inert character, never a span delimiter that could pair across a
   // real component (Codex #504 r25).
   {
-    const spanView = maskJsxAttrQuotes(out);
+    let spanView = maskJsxAttrQuotes(out);
+    // Backticks inside MDX expressions are JS TEMPLATE delimiters, not
+    // markdown code spans (Codex #3646 r31) — blank them from the scan
+    // view so they never pair across an expression's content.
+    {
+      const cv = spanView.split('');
+      let d = 0;
+      for (let k2 = 0; k2 < spanView.length; k2 += 1) {
+        const c2 = spanView[k2];
+        if (c2 === '{') d += 1;
+        else if (c2 === '}') { if (d > 0) d -= 1; }
+        else if (c2 === '`' && d > 0) cv[k2] = ' ';
+      }
+      spanView = cv.join('');
+    }
     const spanChars = out.split('');
     const spanRe = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
     let sm2: RegExpExecArray | null;
@@ -1395,9 +1409,11 @@ function hiddenAttrRendersHidden(attrs: string): boolean {
   let hidden = false;
   for (const a of walked.list) {
     if (a.name.toLowerCase() !== 'hidden') continue;
-    if (a.expr !== null) hidden = !/^\{\s*(?:false|null|undefined|0|(['"`])\1?)\s*\}$/.test(a.expr);
-    else if (a.literal !== null) hidden = a.literal !== '';
-    else hidden = true; // bare `hidden` or unquoted value
+    // ASTRO rendering semantics (Codex #3646 r31): only false/null/
+    // undefined omit the attribute — hidden="" and hidden={''}/{0} render
+    // it PRESENT, and a present boolean attribute hides.
+    if (a.expr !== null) hidden = !/^\{\s*(?:false|null|undefined)\s*\}$/.test(a.expr);
+    else hidden = true; // any literal (even ""), bare, or unquoted value
   }
   return hidden;
 }
@@ -1410,9 +1426,12 @@ function detailsRendersOpen(attrs: string): boolean {
   let open = false;
   for (const a of walked.list) {
     if (a.name.toLowerCase() !== 'open') continue;
-    if (a.expr !== null) open = /^\{\s*true\s*\}$/.test(a.expr);
-    else if (a.literal !== null) open = a.literal !== '';
-    else open = true; // bare `open` or an unquoted value
+    // ASTRO semantics: any statically-rendered value (true, numbers,
+    // strings — "" included) leaves the attribute PRESENT → open; only
+    // false/null/undefined omit it; a dynamic expression stays closed
+    // (fail closed — a CTA behind an expandable is no CTA).
+    if (a.expr !== null) open = /^\{\s*(?:true|-?\d|['"`])/.test(a.expr);
+    else open = true; // any literal (even ""), bare, or unquoted value
   }
   return open;
 }
@@ -1984,7 +2003,7 @@ function parseJsxProps(attrs: string): {
 // string was truncated by the invocation-extraction regex).
 function extractBalancedExpression(text: string, openBraceIdx: number): string | null {
   let depth = 0;
-  let quote: '"' | "'" | null = null;
+  let quote: '"' | "'" | '`' | null = null;
   for (let i = openBraceIdx; i < text.length; i++) {
     const ch = text[i];
     if (quote) {
@@ -1992,7 +2011,7 @@ function extractBalancedExpression(text: string, openBraceIdx: number): string |
       else if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '"' || ch === "'") quote = ch;
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch; // template literals are strings too (r31)
     else if (ch === '{' || ch === '[') depth++;
     else if (ch === '}' || ch === ']') {
       depth--;
@@ -2035,6 +2054,20 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
           }
           const decodedInner = decodeJsStaticString(rawInner);
           if (decodedInner === null) return undefined; // unsupported escape — opaque
+          out += JSON.stringify(decodedInner);
+          i = j;
+        } else if (ch === '`') {
+          // Interpolation-free template literals are static strings too
+          // (Codex #3646 r31) — decoded like the quoted forms; `${`
+          // makes the whole prop opaque.
+          let j = i + 1; let rawInner = '';
+          while (j < trimmed.length && trimmed[j] !== '`') {
+            if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+            rawInner += trimmed[j]; j += 1;
+          }
+          if (rawInner.includes('${')) return undefined;
+          const decodedInner = decodeJsStaticString(rawInner);
+          if (decodedInner === null) return undefined;
           out += JSON.stringify(decodedInner);
           i = j;
         } else if (ch === "'") {

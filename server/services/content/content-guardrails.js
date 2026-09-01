@@ -2091,7 +2091,8 @@ const INLINE_CTA_ROOT_RELATIVE_RE = /^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-
 // by the astro publish gate after a full generation spend, so it blocks
 // here first (Codex #3646 r16 P1).
 const INLINE_CTA_PROP_NAMES = Object.freeze(new Set(['headline', 'description', 'ctaLabel', 'ctaHref', 'phone', 'tel', 'eyebrow']));
-const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?[\d\-().\s]{7,20}$/;
+// At least 7 digits — '-------' is a truthy non-number (Codex #3646 r31).
+const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?(?=(?:\D*\d){7})[\d\-().\s]{7,20}$/;
 // The real string value of a STATIC quoted string expression
 // ({'x'} / {"x"}) — null for anything else. tel={'not-a-phone'} carries a
 // value the schemas must see (astro parseJsxProps parity, Codex #3646 r23).
@@ -2286,6 +2287,20 @@ function tolerantStaticJson(text) {
         }
         const decodedInner = decodeJsStaticString(rawInner);
         if (decodedInner === null) return undefined; // unsupported escape — opaque
+        out += JSON.stringify(decodedInner);
+        i = j;
+      } else if (ch === '`') {
+        // Interpolation-free template literals are static strings too
+        // (Codex #3646 r31) — decoded like the quoted forms; `${`
+        // makes the whole prop opaque.
+        let j = i + 1; let rawInner = '';
+        while (j < trimmed.length && trimmed[j] !== '`') {
+          if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+          rawInner += trimmed[j]; j += 1;
+        }
+        if (rawInner.includes('${')) return undefined;
+        const decodedInner = decodeJsStaticString(rawInner);
+        if (decodedInner === null) return undefined;
         out += JSON.stringify(decodedInner);
         i = j;
       } else if (ch === "'") {
