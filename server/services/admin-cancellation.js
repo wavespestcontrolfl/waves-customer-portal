@@ -98,8 +98,9 @@ function normalizeInput(raw = {}) {
 // (customer-offboarding.cancelSignupAndRefundDeposit): the generic plan
 // cancel would churn the account and pull the booked visits WITHOUT
 // refunding the received deposit. Refuse and point at the right action.
-// Best-effort probe: a failed check proceeds (matching today's behavior)
-// rather than blocking every cancellation on an offboarding hiccup.
+// Fail closed: an unverifiable deposit-stage check refuses the cancel as
+// retryable — proceeding on a probe error could churn a deposit-stage
+// account without refunding the deposit.
 async function refuseDepositStageAccount(customerId) {
   let signupEligible = false;
   try {
@@ -108,6 +109,8 @@ async function refuseDepositStageAccount(customerId) {
     signupEligible = signup && signup.eligible === true;
   } catch (probeErr) {
     logger.warn(`[admin-cancellation] signup-cancel probe failed for ${customerId}: ${probeErr.message}`);
+    throw new CancelPlanError(503, 'deposit_check_unavailable',
+      'Could not verify this account is past the deposit stage — cancellation not processed. Try again shortly.');
   }
   if (signupEligible) {
     throw new CancelPlanError(409, 'use_cancel_signup',
