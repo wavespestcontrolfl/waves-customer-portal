@@ -18,7 +18,7 @@
 const Ajv = require('ajv');
 const {
   ACQUISITION_TYPES, PATH_LINK_TYPES, EXPECTED_REL, EXPECTED_INDEXABILITY,
-  EXPECTED_PERSISTENCE, RENEWAL_PERIODS, FEE_SCOPES,
+  EXPECTED_PERSISTENCE, RENEWAL_PERIODS, FEE_SCOPES, pathKey,
 } = require('./link-registry');
 
 const VERDICTS = Object.freeze(['qualified', 'not_reproducible', 'watching']);
@@ -228,12 +228,24 @@ const ajv = new Ajv({ allErrors: true, allowUnionTypes: true, formats: { uuid: /
 const validateFn = ajv.compile(INVESTIGATION_SCHEMA);
 
 // Returns { valid, errors } — errors formatted for the repair-retry prompt.
+// Beyond the JSON Schema: every path must carry a DISTINCT persisted
+// identity — the same derived (acquisition_type, normalized submission_url)
+// key the write phase upserts on. Two entries collapsing onto one key (an
+// apex and its www alias with different inferred fees) would otherwise
+// upsert the same row twice, letting array order decide which price, flags
+// and evidence survive and double-bumping revisions in one investigation.
 function validateInvestigation(data) {
   const valid = validateFn(data);
-  return {
-    valid,
-    errors: valid ? [] : (validateFn.errors || []).map((e) => `${e.instancePath || '(root)'} ${e.message}`),
-  };
+  if (!valid) return { valid, errors: (validateFn.errors || []).map((e) => `${e.instancePath || '(root)'} ${e.message}`) };
+  const seen = new Map();
+  for (const [i, p] of (data.paths || []).entries()) {
+    const key = pathKey(p.acquisition_type, p.submission_url);
+    if (seen.has(key)) {
+      return { valid: false, errors: [`/paths/${i} duplicates the identity of /paths/${seen.get(key)} (${key}) — report each (acquisition_type, submission_url) once, merging what you observed`] };
+    }
+    seen.set(key, i);
+  }
+  return { valid: true, errors: [] };
 }
 
 module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, URL_REQUIRED_ACQUISITION_TYPES, MAX_MODEL_PATHS, validateInvestigation };

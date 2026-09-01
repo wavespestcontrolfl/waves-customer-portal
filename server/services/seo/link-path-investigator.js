@@ -433,7 +433,7 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
   // to active paths, the newer-than-stamp test, and the per-domain limit
   // all run in the database (indexed on path_id and (outcome, created_at)),
   // so a growing attempt ledger never becomes an unbounded scan per sweep.
-  const failedAttemptRows = async () => {
+  const failedAttemptRows = async ({ seedOnly = false } = {}) => {
     let due = db('seo_link_attempts as a')
       .join('seo_link_acquisition_paths as p', 'p.id', 'a.path_id')
       .whereNull('p.superseded_by')
@@ -441,21 +441,27 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
       .where('a.created_at', '>', new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000))
       .where((b) => b.whereNull('p.last_investigated_at').orWhere('a.created_at', '>', db.ref('p.last_investigated_at')));
     if (seen.size) due = due.whereNotIn('p.domain_id', [...seen]);
+    // the seed pass bounds ITS query to seed domains too — a seed's failure
+    // must not be crowded out of the LIMIT by ordinary domains' failures
+    if (seedOnly) due = due.whereIn('p.domain_id', db('seo_link_domains').select('id').where({ discovery_priority: 'owner_seed' }));
     const dueRows = await due.groupBy('p.domain_id').select('p.domain_id').orderByRaw('MAX(a.created_at) DESC').limit(limit);
     const dueDomainIds = [...new Set((dueRows || []).map((r) => r.domain_id).filter(Boolean))];
     if (!dueDomainIds.length) return [];
-    return notSeen2(db('seo_link_domains')
+    let q = notSeen2(db('seo_link_domains')
       .whereIn('id', dueDomainIds)
       .where(backoffDue())
       .whereNotIn('agent_state', ['rejected'])
-      .where((b) => b.whereNot('agent_state', 'watching').orWhere('watch_recheck_at', '<=', now))
-      .select('*').limit(limit));
+      .where((b) => b.whereNot('agent_state', 'watching').orWhere('watch_recheck_at', '<=', now)));
+    if (seedOnly) q = q.where({ discovery_priority: 'owner_seed' });
+    return q.select('*').limit(limit);
   };
   // Owner seeds jump the WHOLE queue (§5), refresh work included: seed
-  // claims, then seed refreshes, then everything else — a seed with a due
-  // path can never be starved behind a full page of ordinary new rows.
+  // claims, then seed refreshes (never-investigated, failed-attempt, stale),
+  // then everything else — a seed with a due path can never be starved
+  // behind a full page of ordinary new rows.
   take(claimPool.filter((d) => d.discovery_priority === 'owner_seed'), true);
   if (out.length < limit) take(await refreshRows('never', { seedOnly: true }), false);
+  if (out.length < limit) take(await failedAttemptRows({ seedOnly: true }), false);
   if (out.length < limit) take(await refreshRows('stale', { seedOnly: true }), false);
   take(claimPool, true); // seeds already taken; dedupe skips them
   if (out.length < limit) take(await refreshRows('never'), false);
@@ -584,15 +590,12 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
       .where({ id: replacesPathId, domain_id: domainId }).whereNull('superseded_by').first('id');
     if (old) await trx('seo_link_acquisition_paths').where({ id: old.id }).update({ superseded_by: id, superseded_at: now, updated_at: now });
   }
-  // Placements follow the successor ONLY while nobody holds their lease: a
-  // leased placement (claimed_at set) is mid-submission through the path it
-  // was claimed on — the signup runner acts between claim and report and
-  // records its attempt against that path — so repointing it now would
-  // leave the placement on the successor while its ledger names the
-  // predecessor. Leased rows keep the retired path and are repointed by the
-  // next upsert of this successor once the lease settles (report/release/
-  // sweep clear claimed_at), which is why this runs on EVERY upsert and
-  // covers every path this one superseded, not just the one matched now.
+  // Placements follow the successor ONLY while nobody holds their lease
+  // (registry.settleRetiredPlacements — the worker calls the same helper at
+  // every lease release, so a placement mid-submission through the retired
+  // path is settled the moment its lease clears, never left waiting for a
+  // future re-investigation). This runs on EVERY upsert and covers every
+  // path this one superseded, not just the one matched now.
   if (id) {
     // the whole retirement chain (old → mid → this), bounded — a placement
     // leased on a twice-superseded path still lands on the live successor
@@ -603,17 +606,7 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
       frontier = rows.map((r) => r.id).filter((x) => x !== id && !retired.includes(x));
       retired.push(...frontier);
     }
-    if (retired.length) {
-      // The placement's EXECUTION URL moves with it: the runner submits at
-      // target_url, and the board catch-up treats target_url as the
-      // placement's identity — left on the predecessor's URL, the next
-      // runner invocation would resurrect the retired path and submit
-      // through its obsolete route. A URL-less successor (outreach) leaves
-      // target_url alone.
-      const patch = { path_id: id, updated_at: now };
-      if (row.submission_url) patch.target_url = row.submission_url;
-      await trx('seo_link_prospects').whereIn('path_id', retired).whereNull('claimed_at').update(patch);
-    }
+    await registry.settleRetiredPlacements(trx, { pathIds: retired, successor: { id, submission_url: row.submission_url }, now });
   }
   return id;
 }
@@ -947,6 +940,11 @@ async function investigatePaths(db, {
         // evidence keys (coverage, disproof, redirects) stay on the ORIGINAL
         // URL, which is the identity every path row and hint carries
         const rebasedFrom = new Map();
+        // BOUNDED origin fallbacks tried when the https apex homepage fails:
+        // www-only sites, plain-http sites, and legacy http-only www hosts
+        // (canonicalization strips the www the registry once observed, so
+        // the combined variant must be offered explicitly).
+        const fallbackOrigins = [`https://www.${host}`, `http://${host}`, `http://www.${host}`];
         // Origin fallbacks are inserted at fetch time, AFTER candidateUrls
         // reserved the last pre-cap slots for uncovered probes — each one
         // spends a slot the reservation never saw. Re-apply the reservation
@@ -997,10 +995,10 @@ async function investigatePaths(db, {
             // alike re-base onto the origin that answers — a known custom
             // route (/get-listed) would otherwise fail on every generation
             // and stay due forever while the probes moved on.
-            if (url === `https://www.${host}` || url === `http://${host}`) {
-              // a working origin makes the remaining fallback pointless —
-              // drop it rather than spend a slot on a second homepage
-              if (urlQueue[qi + 1] === `http://${host}`) urlQueue.splice(qi + 1, 1);
+            if (fallbackOrigins.includes(url)) {
+              // a working origin makes the remaining fallbacks pointless —
+              // drop them rather than spend slots on more homepages
+              while (fallbackOrigins.includes(urlQueue[qi + 1])) urlQueue.splice(qi + 1, 1);
               for (let j = qi + 1; j < urlQueue.length; j++) {
                 if (urlQueue[j].startsWith(`https://${host}/`)) {
                   const u = new URL(urlQueue[j]);
@@ -1026,7 +1024,7 @@ async function investigatePaths(db, {
             // when the apex homepage itself fails, try its two origin
             // variants next (same cap, same host-bound rules).
             if (url === `https://${host}`) {
-              urlQueue.splice(qi + 1, 0, `https://www.${host}`, `http://${host}`);
+              urlQueue.splice(qi + 1, 0, ...fallbackOrigins);
               reserveRemaining(qi + 1); // the fallbacks spend slots the reservation never saw
             }
           }
@@ -1132,9 +1130,13 @@ async function investigatePaths(db, {
         // path (transient errors, blocks, and timeouts are not): the dead
         // path must retire and stamp instead of holding best_path_id and
         // re-selecting the domain every sweep.
+        // …reconciled against what DID load: an apex 404 whose www/http
+        // fallback then answered is the same normalized identity (www is
+        // stripped), observed alive later in the pass — never a disproof.
         const goneKeys = new Set(fetchErrors
           .filter((f) => /^status_(404|410)$/.test(String(f.reason)))
-          .map((f) => registry.normalizeSubmissionUrl(f.url)));
+          .map((f) => registry.normalizeSubmissionUrl(f.url))
+          .filter((k) => !fetchedKeys.has(k)));
         let verifyAttempts = 0;
         for (const p of writable) {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
@@ -1464,6 +1466,15 @@ async function investigatePaths(db, {
           // re-spend a model call each time.
           const unsettled = unstampedIds.size > 0 || uncoveredEcho;
           const newProbeMask = priorProbeMask | passProbeMask;
+          // An UNSETTLED pass (unstamped writes, an uncovered echo) is a
+          // retryable non-verdict exactly like a failed fetch or model call:
+          // it rides the SAME escalating failure curve and counter — a known
+          // path whose page times out on every pass re-spends a model call
+          // at 6h·12h·24h·48h·96h, never every six hours forever — and at
+          // the ceiling a still-undecided domain parks for review. A settled
+          // pass resets the counter.
+          const failures = (Number(domain.investigate_failures) || 0) + 1;
+          let parkNote = unsettled && failures >= MAX_INVESTIGATE_FAILURES ? `${failures} consecutive unsettled passes` : null;
           // The mask accumulates ONLY across a near-term deferral chain; a
           // CONCLUDED generation (qualified, not_reproducible, a plain
           // 30-day watching park, or a lane-owned refresh) resets it to 0 —
@@ -1471,11 +1482,11 @@ async function investigatePaths(db, {
           // added since (a new /register) could be closed on stale bits.
           // The decideState block below overrides this back to newProbeMask
           // when the pass defers near-term.
-          const patch = { best_path_id: best ? best.id : keptBaselineId, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null, probe_coverage_mask: 0 };
-          // how soon a near-term (transient) watching downgrade rechecks —
-          // the base interval, or the escalating failure curve for a pass
-          // that made no probe progress
-          let deferMs = INVESTIGATE_BACKOFF_BASE_MS;
+          // how soon this domain is due again — the escalating failure curve
+          // for an unsettled pass (and, below, for a pass that made no probe
+          // progress); the base interval otherwise
+          let deferMs = unsettled ? failureBackoffMs(failures) : INVESTIGATE_BACKOFF_BASE_MS;
+          const patch = { best_path_id: best ? best.id : keptBaselineId, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: unsettled ? failures : 0, investigate_after: unsettled ? new Date(now.getTime() + deferMs) : null, probe_coverage_mask: 0 };
           if (decideState) {
             // Defensive downgrades, both directions: a qualified verdict with
             // no executable best path parks `watching` (never a qualified
@@ -1512,12 +1523,12 @@ async function investigatePaths(db, {
                 // at the ceiling, PARK FOR REVIEW on the normal watch
                 // cadence (mask resets — the next generation re-earns
                 // coverage) instead of ever closing on an uninspected route.
-                const failures = (Number(domain.investigate_failures) || 0) + 1;
+                effectiveVerdict = 'watching';
+                patch.investigate_failures = failures;
                 if (failures >= MAX_INVESTIGATE_FAILURES) {
-                  effectiveVerdict = 'watching'; downgradeNote = 'probe routes never reached a definitive result — parked for review';
+                  downgradeNote = 'probe routes never reached a definitive result'; parkNote = parkNote || downgradeNote;
                 } else {
-                  effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered probe has no definitive result yet'; tailDeferred = true;
-                  patch.investigate_failures = failures;
+                  downgradeNote = 'terminal verdict deferred: an uncovered probe has no definitive result yet'; tailDeferred = true;
                   deferMs = failureBackoffMs(failures);
                 }
               }
@@ -1527,7 +1538,19 @@ async function investigatePaths(db, {
             // path — failed probe, inconclusive terms, exhausted budget)
             // rechecks on the failure-backoff horizon, not the 30-day watch
             // cadence: the advertised rotated retry must actually be near.
-            const transientDowngrade = downgradeNote && (unstampedIds.size > 0 || tailDeferred);
+            let transientDowngrade = downgradeNote && (unstampedIds.size > 0 || tailDeferred);
+            // THE CEILING: a domain still undecided after MAX consecutive
+            // unsettled / no-progress passes PARKS FOR REVIEW on the normal
+            // watch cadence — the chain ends (mask resets, backoff cleared)
+            // and an owner Reopen starts a fresh generation. A domain the
+            // pass DID decide (qualified, or a genuine close) is never
+            // parked for a side path that stays unverifiable: it keeps its
+            // verdict and the retry cadence simply caps at the max interval.
+            if (effectiveVerdict === 'watching' && parkNote) {
+              downgradeNote = `${downgradeNote && !downgradeNote.includes(parkNote) ? `${downgradeNote}; ` : ''}parked for review: ${parkNote}`;
+              transientDowngrade = false;
+              patch.investigate_after = null;
+            }
             if (effectiveVerdict === 'watching' && transientDowngrade) patch.probe_coverage_mask = newProbeMask; // the chain continues
             patch.watch_recheck_at = effectiveVerdict === 'watching'
               ? new Date(now.getTime() + (transientDowngrade ? deferMs : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))

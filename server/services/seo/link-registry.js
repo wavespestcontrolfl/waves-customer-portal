@@ -347,6 +347,51 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
   return { id: row.id, domain: key, created, touched, touchId: (touchRow && touchRow.id) || null };
 }
 
+const SUPERSESSION_MAX_HOPS = 8;
+
+/**
+ * Placements follow path supersession (§3.2) — ONE mechanism, two callers:
+ *
+ *   settleRetiredPlacements(q, { pathIds, successor })   — the investigator,
+ *     right after it superseded `pathIds` into `successor` ({ id, submission_url }).
+ *   settleRetiredPlacements(q, { prospectIds })          — the worker, right
+ *     after a lease is released (report / release / expired-claim sweep):
+ *     each placement's linked path is followed along `superseded_by` to the
+ *     live successor.
+ *
+ * Only UN-LEASED placements move (`claimed_at IS NULL`): a leased one is
+ * mid-submission through the path it was claimed on and its attempt ledger
+ * names that path — it is settled when its lease clears, which is why the
+ * worker calls this at every lease release rather than waiting for a future
+ * re-investigation. The placement's EXECUTION URL (`target_url`) moves with
+ * it whenever the successor has one (the runner submits at target_url, and
+ * the board catch-up keys legacy placements on it); a URL-less successor
+ * (outreach) leaves target_url alone. Returns the number of rows moved.
+ */
+async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
+  const move = async (where, target) => {
+    const patch = { path_id: target.id, updated_at: now };
+    if (target.submission_url) patch.target_url = target.submission_url;
+    return where.whereNull('claimed_at').update(patch);
+  };
+  if (successor && successor.id && Array.isArray(pathIds)) {
+    if (!pathIds.length) return 0;
+    return move(q('seo_link_prospects').whereIn('path_id', pathIds), successor);
+  }
+  if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
+  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select('id', 'path_id');
+  let moved = 0;
+  for (const r of rows) {
+    let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).first('id', 'superseded_by', 'submission_url');
+    for (let hop = 0; cur && cur.superseded_by && hop < SUPERSESSION_MAX_HOPS; hop++) {
+      cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).first('id', 'superseded_by', 'submission_url');
+    }
+    if (!cur || cur.id === r.path_id || cur.superseded_by) continue; // already live, or the chain did not resolve
+    moved += await move(q('seo_link_prospects').where({ id: r.id }), cur);
+  }
+  return moved;
+}
+
 module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES, CURRENCIES, FEE_SCOPES,
@@ -355,4 +400,5 @@ module.exports = {
   NEVER_TARGET_HOSTS, isNeverTargetHost,
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
+  settleRetiredPlacements,
 };

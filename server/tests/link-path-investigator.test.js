@@ -121,7 +121,15 @@ function makeDb(seed = {}) {
         return q;
       },
       whereNull(col) { state.preds.push((row, get) => get(row, col) == null); return q; },
-      whereIn(col, arr) { state.preds.push((row, get) => arr.includes(get(row, col))); return q; },
+      whereNotNull(col) { state.preds.push((row, get) => get(row, col) != null); return q; },
+      // an array, or a sub-builder (`db('t').select('id').where(...)`) resolved lazily as a sub-select
+      whereIn(col, arr) {
+        const vals = () => (arr && typeof arr._resolve === 'function' ? arr._resolve().map((r) => r[(arr._state.select || ['id'])[0]]) : arr);
+        state.preds.push((row, get) => vals().includes(get(row, col)));
+        return q;
+      },
+      _state: state,
+      _resolve: () => resolve(),
       whereNotIn(col, arr) { state.preds.push((row, get) => !arr.includes(get(row, col))); return q; },
       join(tableExpr, on1, on2) { state.join = { tableExpr, on1, on2 }; return q; },
       forUpdate() { return q; },
@@ -1911,9 +1919,9 @@ describe('full run', () => {
     let t = NOW;
     for (let i = 0; i < 10; i++) {
       await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: t, domainIds: [d.id] });
+      if (/parked for review/.test(String(dom().score_reasons))) break; // the park keeps its count but rechecks on the 30-day cadence
       const f = Number(dom().investigate_failures) || 0;
       if (f > 0) pairs.push([f, dom().watch_recheck_at.getTime() - t.getTime()]);
-      if (/parked for review/.test(String(dom().score_reasons))) break;
       t = dom().watch_recheck_at;
     }
     const H = 60 * 60 * 1000;
@@ -2140,5 +2148,139 @@ describe('full run', () => {
     expect(dom.score_reasons).toContain('an uncovered active path remains');
     expect(dom.watch_recheck_at.getTime() - NOW.getTime()).toBe(_internals.INVESTIGATE_BACKOFF_BASE_MS); // the due path leads the next rotation soon
     expect(db._tables.seo_link_acquisition_paths[0].confidence).toBe(0.7); // never disproven by omission
+  });
+
+  // ---- Codex PR round 18 -------------------------------------------------
+
+  test('a placement released from its lease follows the superseded chain to the live successor (Codex PR r18 P1)', async () => {
+    const { settleRetiredPlacements } = require('../services/seo/link-registry');
+    const d = domainRow();
+    const old = { id: uid(), domain_id: d.id, submission_url: 'https://example.com/old-join', superseded_by: null };
+    const mid = { id: uid(), domain_id: d.id, submission_url: 'https://example.com/mid-join', superseded_by: null };
+    const live = { id: uid(), domain_id: d.id, submission_url: 'https://example.com/join', superseded_by: null };
+    old.superseded_by = mid.id; mid.superseded_by = live.id;
+    const released = { id: uid(), domain_id: d.id, path_id: old.id, claimed_at: null, target_url: 'https://example.com/old-join' };
+    const stillLeased = { id: uid(), domain_id: d.id, path_id: old.id, claimed_at: new Date('2026-08-31T11:55:00Z'), target_url: 'https://example.com/old-join' };
+    const onLive = { id: uid(), domain_id: d.id, path_id: live.id, claimed_at: null, target_url: 'https://example.com/join' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [old, mid, live], seo_link_prospects: [released, stillLeased, onLive] });
+    const moved = await settleRetiredPlacements(db, { prospectIds: [released.id, stillLeased.id, onLive.id], now: NOW });
+    expect(moved).toBe(1);
+    expect(released).toMatchObject({ path_id: live.id, target_url: 'https://example.com/join', updated_at: NOW }); // the whole chain, execution URL included
+    expect(stillLeased.path_id).toBe(old.id); // its lease still stands — settled when THAT lease clears
+    expect(onLive.updated_at).toBeUndefined(); // already live: untouched
+  });
+
+  test('an unsettled pass rides the escalating failure curve; undecided domains park at the ceiling, qualified ones never do (Codex PR r18 P1)', async () => {
+    const { failureBackoffMs, MAX_INVESTIGATE_FAILURES } = _internals;
+    const H = 60 * 60 * 1000;
+    const known = (domainId) => ({
+      id: uid(), domain_id: domainId, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    // the known path's page times out on EVERY pass while the homepage loads and the model keeps echoing it
+    const fetcher = async (url) => (url.includes('/join') ? { status: null, finalUrl: null, html: null, blocked: false, error: 'timeout' } : okFetch(url));
+    const run = async (db, d, verdict, passes) => {
+      const dom = () => db._tables.seo_link_domains[0];
+      const horizons = [];
+      let t = NOW; let calls = 0;
+      for (let i = 0; i < passes; i++) {
+        const r = await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath()], verdict) }) }), now: t, domainIds: [d.id] });
+        calls += r.llmCalls;
+        if (!dom().investigate_after) break; // parked
+        horizons.push([Number(dom().investigate_failures), dom().investigate_after.getTime() - t.getTime()]);
+        t = dom().investigate_after;
+      }
+      return { horizons, calls, dom: dom() };
+    };
+    // qualified: the verified best path stands; the unverifiable echo escalates to the max interval and never parks
+    const dq = domainRow(); const dbq = makeDb({ seo_link_domains: [dq], seo_link_acquisition_paths: [known(dq.id)] });
+    const q = await run(dbq, dq, 'qualified', 8);
+    expect(q.dom.agent_state).toBe('qualified');
+    expect(q.horizons.slice(0, 5)).toEqual([[1, 6 * H], [2, 12 * H], [3, 24 * H], [4, 48 * H], [5, 96 * H]]);
+    expect(q.horizons[7]).toEqual([8, 7 * 24 * H]); // capped, still qualified, still retrying weekly
+    expect(q.horizons.every(([f, ms]) => ms === failureBackoffMs(f))).toBe(true);
+    // watching (closed today): the same curve, then PARK FOR REVIEW at the ceiling — the chain ends
+    const dw = domainRow(); const dbw = makeDb({ seo_link_domains: [dw], seo_link_acquisition_paths: [known(dw.id)] });
+    const w = await run(dbw, dw, 'watching', 10);
+    expect(w.horizons.map(([f]) => f)).toEqual([1, 2, 3, 4, 5]);
+    expect(w.dom.agent_state).toBe('watching');
+    expect(w.dom.score_reasons).toContain(`parked for review: ${MAX_INVESTIGATE_FAILURES} consecutive unsettled passes`);
+    expect(w.dom.investigate_after).toBeNull();
+    expect(w.dom.probe_coverage_mask).toBe(0);
+    expect(w.calls).toBe(MAX_INVESTIGATE_FAILURES); // one model call per pass, bounded by the ceiling
+  });
+
+  test('an apex 404 answered by a working www origin is not a disproof — the acquired baseline keeps best_path_id (Codex PR r18 P2)', async () => {
+    const d = domainRow({ agent_state: 'acquired' });
+    const baseline = {
+      id: uid(), domain_id: d.id, acquisition_type: 'editorial_outreach', submission_url: 'https://example.com', baseline: true,
+      path_key: 'editorial_outreach:https://example.com', superseded_by: null, last_investigated_at: null, confidence: 0.1,
+      investigation: JSON.stringify({ baseline: true }), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    d.best_path_id = baseline.id;
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [baseline] });
+    const fetcher = async (url) => {
+      if (url === 'https://example.com') return { status: 404, finalUrl: url, html: null, blocked: false }; // apex vhost gone…
+      if (url.startsWith('https://www.example.com')) return okFetch(url); // …the same site answers on www
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' };
+    };
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }), domainIds: [d.id] });
+    expect(db._tables.seo_link_domains[0].best_path_id).toBe(baseline.id);
+  });
+
+  test('a legacy http-only www host is reached through the combined fallback (Codex PR r18 P2)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url.startsWith('http://www.example.com')) return okFetch(url);
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' }; // apex, https-www, http-apex all dead
+    };
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
+    expect(fetched.slice(0, 4)).toEqual(['https://example.com', 'https://www.example.com', 'http://example.com', 'http://www.example.com']); // bounded, in order
+    expect(r.investigated).toBe(1);
+    expect(fetched.some((u) => u.startsWith('http://www.example.com/'))).toBe(true); // routes re-based onto the origin that answers
+    expect(r.fetches).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN);
+  });
+
+  test('an owner-seed failed-attempt refresh outranks ordinary new claims (Codex PR r18 P2)', async () => {
+    const { selectTargets } = _internals;
+    const seed = domainRow({ domain: 'seed.com', discovery_priority: 'owner_seed', agent_state: 'qualified', created_at: new Date('2026-08-30') });
+    const plain = domainRow({ domain: 'plain.com', agent_state: 'qualified', created_at: new Date('2026-08-30') });
+    const mkPath = (d) => ({
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: `https://${d.domain}/join`,
+      path_key: `paid_listing:https://${d.domain}/join`, superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-08-20'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    const [ps, pp] = [mkPath(seed), mkPath(plain)];
+    const attempt = (path, created_at) => ({ id: uid(), path_id: path.id, prospect_id: null, provider: 'deterministic_runner', action: 'submit', outcome: 'failed', created_at });
+    const fresh = [1, 2, 3].map((i) => domainRow({ domain: `new-${i}.com`, created_at: new Date(`2026-08-0${i}`) })); // a full page of ordinary new rows
+    const db = makeDb({ seo_link_domains: [...fresh, seed, plain], seo_link_acquisition_paths: [ps, pp], seo_link_attempts: [attempt(ps, new Date('2026-08-29')), attempt(pp, new Date('2026-08-30'))] });
+    const picked = await selectTargets(db, { limit: 2, now: NOW });
+    expect(picked.map((t) => [t.domain.domain, t.claimState])).toEqual([['seed.com', false], ['new-1.com', true]]); // the seed's failure jumps the queue; the ordinary one waits
+  });
+
+  test('the output contract rejects two paths collapsing onto one persisted identity (Codex PR r18 P2)', async () => {
+    const { validateInvestigation } = require('../services/seo/link-path-investigation-schema');
+    const dup = validateInvestigation(verdictOf([modelPath(), modelPath({ submission_url: 'https://www.example.com/join/', price_text: 'USD 150' })]));
+    expect(dup.valid).toBe(false);
+    expect(dup.errors[0]).toMatch(/\/paths\/1 duplicates the identity of \/paths\/0 \(paid_listing:https:\/\/example.com\/join\)/);
+    expect(validateInvestigation(verdictOf([modelPath(), modelPath({ submission_url: 'https://example.com/join-plus' })])).valid).toBe(true);
+    // …and the repair retry carries the message: a duplicate verdict is repaired, never written twice
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const prompts = [];
+    const llm = async (route, payload) => {
+      prompts.push(payload.text);
+      return { ok: true, json: prompts.length === 1 ? verdictOf([modelPath(), modelPath({ submission_url: 'https://www.example.com/join/' })]) : verdictOf([modelPath()]) };
+    };
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    expect(r.llmCalls).toBe(2);
+    expect(prompts[1]).toMatch(/duplicates the identity/);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(1);
   });
 });
