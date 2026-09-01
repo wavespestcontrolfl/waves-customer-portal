@@ -3209,6 +3209,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   const customerId = svc?.customer_id;
   const achStatus = svc?.ach_status;
   const needsWallet = billingLane?.prediction?.kind === 'invoice'
+    || billingLane?.prediction?.kind === 'payer'
     || !!unbilledCompletionGap({ prediction: billingLane?.prediction });
   if (!needsWallet) return billingLane;
   let hasChargeableMethod = true;
@@ -3260,8 +3261,10 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   const typedOneTimeBilling = profileKnown
     && String(completionContext.completionProfile?.billingType || '').toLowerCase() === 'one_time'
     && svc?.followup_included !== true;
+  const pricedPayer = billingLane.prediction?.kind === 'payer'
+    && Number(billingLane.prediction.amount) > 0;
   if (!fromAttachedInvoice && profileKnown
-    && ['invoice', 'auto_charge'].includes(billingLane.prediction?.kind)) {
+    && (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind) || pricedPayer)) {
     try {
       const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
       willMint = shouldAutoInvoiceCompletion({
@@ -3327,6 +3330,13 @@ function recurringWithoutBillableAmount({
   recurringFloorPrice,
   customer,
   createInvoiceOnComplete,
+  // One of completion's own mint triggers (admin-dispatch.js:5508 — a
+  // completion profile whose billing_type is 'one_time'). Omitting it made
+  // the gate 409 a priced service that completion WOULD invoice (Codex P1).
+  // Defaults FALSE to match shouldAutoInvoiceCompletion's own default:
+  // defaulting true would let ANY priced visit satisfy the typed-one-time
+  // branch and silently undo the round-16 fix. Callers resolve it.
+  typedOneTimeBilling = false,
   isCallback,
   serviceType,
 }) {
@@ -3401,6 +3411,7 @@ function recurringWithoutBillableAmount({
     serviceType,
     isCallback,
     visitPerformed: true,
+    typedOneTimeBilling,
   });
   if (willMint) return null;
 
@@ -5255,11 +5266,17 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const recurringFloorPrice = zeroCallbackPrice
         ? 0
         : gateDates.reduce((min, d) => Math.min(min, floorForDate(d)), Infinity);
+      // Completion's typed-one-time mint trigger, resolved from the same
+      // authority admin-dispatch reads (Codex P1).
+      const gateProfile = await resolveCompletionProfileForScheduledService(
+        { service_id: serviceId || null, service_type: serviceType },
+      ).catch(() => null);
       const unbillable = recurringWithoutBillableAmount({
         isRecurring,
         recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
         customer,
         createInvoiceOnComplete: createInvoiceStamp,
+        typedOneTimeBilling: String(gateProfile?.billingType || '').toLowerCase() === 'one_time',
         isCallback: resolvedIsCallback,
         serviceType,
       });
@@ -9507,11 +9524,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               );
               return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
             }, Infinity);
+            const spawnProfile = await resolveCompletionProfileForScheduledService(parent, trx)
+              .catch(() => null);
             const unbillableSpawn = gateCustomer && recurringWithoutBillableAmount({
               isRecurring: true,
               recurringFloorPrice: Number.isFinite(spawnFloor) ? spawnFloor : 0,
               customer: gateCustomer,
               createInvoiceOnComplete: memberSeriesCovered ? false : spawnInv,
+              typedOneTimeBilling: String(spawnProfile?.billingType || '').toLowerCase() === 'one_time'
+                && parent.followup_included !== true,
               isCallback: !!parent.is_callback,
               serviceType: parent.service_type,
             });

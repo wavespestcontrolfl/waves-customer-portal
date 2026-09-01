@@ -656,10 +656,19 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
   // decision; the warning must too, or the sheet stays silent on the one
   // shape it exists to surface. `willMint` null = the caller could not ask —
   // never treated as a gap.
-  if (willMint === false && ['invoice', 'auto_charge'].includes(prediction.kind)) {
+  // A PRICED payer prediction is judged the same way: it can carry an amount
+  // and still lack every mint trigger, in which case completion creates no AP
+  // invoice at all and the warning must not stay silent (Codex P1). The
+  // service customer's wallet is irrelevant to it, so no wallet verdict is
+  // reported — offering to text THIS customer a card link would be wrong.
+  const payerWithAmount = prediction.kind === 'payer' && Number(prediction.amount) > 0;
+  if (willMint === false && (['invoice', 'auto_charge'].includes(prediction.kind) || payerWithAmount)) {
     return {
       reason: 'no_invoice_will_mint',
-      noPaymentMethod: hasChargeableMethod == null ? null : hasChargeableMethod === false,
+      noPaymentMethod: payerWithAmount || hasChargeableMethod == null
+        ? null
+        : hasChargeableMethod === false,
+      ...(payerWithAmount ? { payerBilled: true } : {}),
     };
   }
   // A payer says WHO owes, never HOW MUCH. Completion still derives the

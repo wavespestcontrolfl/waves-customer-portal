@@ -217,17 +217,17 @@ describe('a priced visit that will never mint an invoice (Codex GH P1)', () => {
     expect(unbilledCompletionGap({ prediction: p, willMint: null })).toBeNull();
   });
 
-  test('willMint never manufactures a gap on a covered or payer visit', () => {
-    // The new arm only reads invoice/auto_charge predictions, so coverage and
-    // payer AR are untouched by a false mint verdict.
-    for (const shape of [
-      { ...priced, lane: 'monthly_membership', billingMode: 'monthly_membership', monthlyRate: 46.33, autopayActive: true, estimatedPrice: null },
-      { ...priced, payerBilled: true },
-    ]) {
-      const p = predictCompletionBilling(shape);
-      expect(['invoice', 'auto_charge']).not.toContain(p.kind);
-      expect(unbilledCompletionGap({ prediction: p, willMint: false })).toBeNull();
-    }
+  test('willMint never manufactures a gap on a COVERED visit', () => {
+    // Dues coverage is not a mint question — a false mint verdict must not
+    // turn a covered membership visit into a warning. (A priced PAYER visit
+    // is a different case and IS judged by the mint decision — see the
+    // payer describe below.)
+    const p = predictCompletionBilling({
+      ...priced, lane: 'monthly_membership', billingMode: 'monthly_membership',
+      monthlyRate: 46.33, autopayActive: true, estimatedPrice: null,
+    });
+    expect(p.kind).toBe('covered_membership');
+    expect(unbilledCompletionGap({ prediction: p, willMint: false })).toBeNull();
   });
 
   test('a PRICED callback that mints nothing IS a gap', () => {
@@ -262,5 +262,21 @@ describe('willMint provenance guards (Codex GH P1)', () => {
     const p = predictCompletionBilling({ ...unbilledShape, estimatedPrice: 129 });
     expect(p.kind).toBe('invoice');
     expect(unbilledCompletionGap({ prediction: p, willMint: null })).toBeNull();
+  });
+});
+
+describe('a PRICED payer visit that mints nothing (Codex P1)', () => {
+  test('is a gap, and never consults the service customer wallet', () => {
+    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true, estimatedPrice: 183 });
+    expect(p).toMatchObject({ kind: 'payer', amount: 183 });
+    const gap = unbilledCompletionGap({ prediction: p, willMint: false, hasChargeableMethod: false });
+    expect(gap).toMatchObject({ reason: 'no_invoice_will_mint', payerBilled: true });
+    // The AP invoice is the payer's — offering THIS customer a card link is wrong.
+    expect(gap.noPaymentMethod).toBeNull();
+  });
+
+  test('a payer visit that DOES mint is not a gap', () => {
+    const p = predictCompletionBilling({ ...unbilledShape, payerBilled: true, estimatedPrice: 183 });
+    expect(unbilledCompletionGap({ prediction: p, willMint: true })).toBeNull();
   });
 });

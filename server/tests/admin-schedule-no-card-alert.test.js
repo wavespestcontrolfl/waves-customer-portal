@@ -165,3 +165,32 @@ describe('recurringWithoutBillableAmount (booking gate)', () => {
     expect(perApp.error).toMatch(/per-application fee/i);
   });
 });
+
+describe('recurringWithoutBillableAmount — typed one-time profile (Codex P1)', () => {
+  const { recurringWithoutBillableAmount } = adminScheduleRouter._test;
+  const C = (patch) => ({ billing_mode: null, monthly_rate: 0, waveguard_tier: null, per_application_fee: null, ...patch });
+  const base = {
+    isRecurring: true,
+    recurringFloorPrice: 89,
+    createInvoiceOnComplete: false,
+    isCallback: false,
+    serviceType: 'Monthly Pest Control Service',
+    customer: C({}),
+  };
+
+  test('a one_time completion profile IS a mint trigger, so the booking clears', () => {
+    // Without it the gate 409s a priced service completion would invoice.
+    expect(recurringWithoutBillableAmount(base)).toBeTruthy();
+    expect(recurringWithoutBillableAmount({ ...base, typedOneTimeBilling: true })).toBeNull();
+  });
+
+  test('the trigger still needs a price — it is not a blanket exemption', () => {
+    expect(recurringWithoutBillableAmount({ ...base, recurringFloorPrice: 0, typedOneTimeBilling: true })).toBeTruthy();
+  });
+
+  test('it defaults FALSE, matching completion — never a blanket pass', () => {
+    // Defaulting true would let any priced visit satisfy the typed-one-time
+    // branch and silently undo the mint-decision fix.
+    expect(recurringWithoutBillableAmount(base)).toBeTruthy();
+  });
+});
