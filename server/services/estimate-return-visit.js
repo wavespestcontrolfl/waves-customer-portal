@@ -10,6 +10,8 @@
 // recognized stamp fired, never that the price or plan are unchanged — the
 // page's empty-state copy must not claim equality (pre-push codex P1).
 
+const { SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
+
 function toDate(value) {
   if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
@@ -50,18 +52,28 @@ function extensionChange(extensionAutoGrantedAt, since) {
  *           extensionAutoGrantedAt?: string|Date|null }} args
  * @returns {{ visitNumber: number, lastVisitAt: string, changes: Array } | null}
  */
-function buildReturnVisitPayload({ sessions, estimateData = {}, extensionAutoGrantedAt = null } = {}) {
+function buildReturnVisitPayload({
+  sessions, estimateData = {}, extensionAutoGrantedAt = null, sessionGapMinutes = SESSION_GAP_MINUTES,
+} = {}) {
   const list = Array.isArray(sessions) ? sessions.filter((s) => s && toDate(s.endedAt)) : [];
   if (list.length < 2) return null;
   const previous = list[list.length - 2];
-  const since = toDate(previous.endedAt);
+  const previousEnd = toDate(previous.endedAt);
+  // Boundary = the END of the previous 30-minute session window, not its last
+  // counted open. The page's own /data?refresh=1 re-fetches after a removal or
+  // restore are deliberately NOT estimate_views rows, so a mutation the
+  // customer made — and saw — during that sitting lands after endedAt; naming
+  // it as "changed since your last visit" would re-announce their own click
+  // (GH codex P2 on #3708). Anything inside the gap window belongs to the
+  // sitting it happened in.
+  const since = new Date(previousEnd.getTime() + sessionGapMinutes * 60000);
   const changes = [
     ...serviceOptOutChanges(estimateData, since),
     ...extensionChange(extensionAutoGrantedAt, since),
   ].sort((a, b) => a.at.localeCompare(b.at));
   return {
     visitNumber: list.length,
-    lastVisitAt: since.toISOString(),
+    lastVisitAt: previousEnd.toISOString(),
     changes,
   };
 }

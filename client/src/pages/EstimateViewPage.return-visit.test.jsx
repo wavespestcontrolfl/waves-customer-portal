@@ -53,6 +53,12 @@ describe('ReturnVisitStrip', () => {
     vi.unstubAllGlobals();
   });
 
+  it('drops the Ask action when the page renders no Ask bar (regulated certificate surfaces, review-before-booking)', () => {
+    render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} showAsk={false} />);
+    expect(screen.queryByRole('button', { name: 'Ask a question' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Text this to someone' })).toBeInTheDocument();
+  });
+
   it('"Ask a question" hands off to the ask scroll', () => {
     const onAsk = vi.fn();
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} onAsk={onAsk} />);

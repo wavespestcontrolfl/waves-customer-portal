@@ -1118,7 +1118,11 @@ const ESTIMATE_ASK_PROMPTS = [
 // empty list proves nothing). The empty state just says the page is current. "Text this to someone" is the
 // CUSTOMER'S share sheet (navigator.share, else an sms: draft on their phone)
 // — never a Waves-sent message.
-export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection }) {
+// `showAsk` — the page passes whether an Ask Waves bar actually renders on
+// this presentation: regulated certificate surfaces (WDO / pre-treatment)
+// carry no ask bar by contract, and the review-before-booking branch renders
+// none, so the action would scroll nowhere (GH codex P1 on #3708).
+export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, showAsk = true }) {
   if (!returnVisit || Number(returnVisit.visitNumber) < 2) return null;
   const lastDate = returnVisit.lastVisitAt ? new Date(returnVisit.lastVisitAt) : null;
   const lastDisplay = lastDate && !Number.isNaN(lastDate.getTime())
@@ -1156,7 +1160,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection }) {
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
         <a href={`sms:?&body=${encodeURIComponent(pageUrl)}`} onClick={share} style={actionStyle}>Text this to someone</a>
-        <button type="button" onClick={onAsk} style={actionStyle}>Ask a question</button>
+        {showAsk ? <button type="button" onClick={onAsk} style={actionStyle}>Ask a question</button> : null}
       </div>
     </section>
   );
@@ -6656,6 +6660,13 @@ function EstimateViewPageInner() {
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* Returning-visitor strip: the server projects it for any accept-active
+            row, which includes quote-required presentations that land here
+            (GH codex P2 on #3708). The Ask action follows this branch's own
+            ask-bar condition below. */}
+        {data.returnVisit
+          ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={showAskBar && !isRegulatedCertificateSurface} />
+          : null}
         {/* Commercial proposal: the what-happens-next card sits directly under
             the hero identity block (owner 2026-08-08) — at the bottom it
             repeated the hero's "your formal proposal is ready" and read as a
@@ -6782,6 +6793,8 @@ function EstimateViewPageInner() {
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* No Ask bar renders on this branch, so the strip drops that action. */}
+        {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={false} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -6807,7 +6820,7 @@ function EstimateViewPageInner() {
 
       {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
 
-      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} /> : null}
+      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner

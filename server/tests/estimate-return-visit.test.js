@@ -78,6 +78,23 @@ describe('buildReturnVisitPayload', () => {
     expect(out.changes).toEqual([]);
   });
 
+  test('a mutation made during the previous sitting (inside the 30-minute gap) is NOT re-announced', () => {
+    // The customer removed Mosquito 10 minutes after their last counted open —
+    // the page's refresh re-fetch is not a view row, so endedAt predates it.
+    const out = buildReturnVisitPayload({
+      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
+      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-30T10:30:00Z' }] } },
+    });
+    expect(out.changes).toEqual([]);
+    expect(out.lastVisitAt).toBe('2026-08-30T10:20:00.000Z');
+    // One minute past the gap window is a new sitting's change.
+    const later = buildReturnVisitPayload({
+      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
+      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-30T10:51:00Z' }] } },
+    });
+    expect(later.changes).toHaveLength(1);
+  });
+
   test('malformed sessions and events are dropped, not thrown', () => {
     const out = buildReturnVisitPayload({
       sessions: [s('2026-08-30T10:00:00Z'), null, { endedAt: 'garbage' }, s('2026-09-01T12:00:00Z')],
