@@ -878,70 +878,62 @@ router.post('/:id/send', async (req, res, next) => {
 // customer's own "Add it" tap on the page. Returns the fresh row (or the
 // input row untouched when nothing applied).
 async function applyLeadServiceForSend(estimate) {
+  const untouched = { estimate, parkedKey: null };
   const featureGates = require('../config/feature-gates');
-  if (!featureGates.isEnabled('estimateLeadServiceSend')) return estimate;
-  if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return estimate;
+  if (!featureGates.isEnabled('estimateLeadServiceSend')) return untouched;
+  if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
   try {
-    if (!estimate || estimate.estimate_group_id || estimate.price_locked_at) return estimate;
-    if (String(estimate.category || 'RESIDENTIAL').toUpperCase() !== 'RESIDENTIAL') return estimate;
+    if (!estimate || estimate.estimate_group_id || estimate.price_locked_at) return untouched;
+    // The category COLUMN is the scope — never default a missing one to
+    // residential (same fail-closed rule as the add resolver).
+    if (String(estimate.category || '').toUpperCase() !== 'RESIDENTIAL') return untouched;
     // The caller's object predates its own send claim (the route stamps
     // status='sending' + updated_at before calling in), and the rail's CAS
     // compares updated_at to the millisecond — a stale version would 409
     // every commit and silently send the full bundle (pre-push codex P1).
     // Work from the row as it is NOW; keep only the caller's in-flight status.
     const claimedRow = await db('estimates').where({ id: estimate.id }).first();
-    if (!claimedRow || claimedRow.archived_at || claimedRow.price_locked_at) return estimate;
+    if (!claimedRow || claimedRow.archived_at || claimedRow.price_locked_at) return untouched;
     let current = { ...claimedRow, status: estimate.status };
     let estData = {};
     try { estData = typeof current.estimate_data === 'string' ? JSON.parse(current.estimate_data) : (current.estimate_data || {}); }
-    catch { return estimate; }
-    if (estData?.serviceOptOut) return estimate; // already shaped once — never re-park on a resend
-    // Member exclusion (security-critical, AGENTS.md): EVERY member-evidence
-    // carrier the opt-out rail and reconcileFrozenMembershipSnapshot
-    // recognize — snapshot flag, priors in any carrier, and the recurring-
-    // customer flag in any replay shape (same truthy coercion) — PLUS a
-    // live active-plan check that fails CLOSED (a lookup error keeps the
-    // full bundle). A member's combined tier is theirs to keep.
-    if (estData?.membershipSnapshot?.isExistingCustomer === true) return estimate;
-    const evidenceCarriers = [estData, estData.engineInputs, estData.inputs, estData.engineRequest?.options]
-      .filter((c) => c && typeof c === 'object');
-    if (evidenceCarriers.some((c) => Array.isArray(c.priorQualifyingServices) && c.priorQualifyingServices.length)) return estimate;
-    const recurringFlagged = evidenceCarriers.some((c) => {
-      const v = c.recurringCustomer ?? c.isRecurringCustomer;
-      if (v == null || v === false) return false;
-      const normalized = String(v).trim().toLowerCase();
-      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
-    });
-    if (recurringFlagged) return estimate;
+    catch { return untouched; }
+    if (estData?.serviceOptOut) return untouched; // already shaped once — never re-park on a resend
+    const OptOut = require('../services/estimate-service-opt-out');
+    // Member exclusion (security-critical, AGENTS.md): the ONE shared
+    // evidence reader (snapshot flag, priors in any carrier, recurring flag
+    // in any replay shape) PLUS a live active-plan check that fails CLOSED
+    // (a lookup error keeps the full bundle). A member's combined tier is
+    // theirs to keep.
+    if (OptOut.memberEvidenceInEstimateData(estData)) return untouched;
     if (current.customer_id) {
       const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
       let activeMember = true;
       try { activeMember = await isActivePlanCustomer(db, current.customer_id); } catch (_) { activeMember = true; }
-      if (activeMember) return estimate;
+      if (activeMember) return untouched;
     }
     const estimatePublic = require('./estimate-public');
-    const OptOut = require('../services/estimate-service-opt-out');
     const bundle = await estimatePublic.buildPricingBundle(current).catch(() => null);
     const sections = Array.isArray(bundle?.services) ? bundle.services : [];
     const removable = OptOut.serviceOptOutRemovableKeys(estData, sections, current.waveguard_tier);
-    if (removable.size < 1) return estimate;
+    if (removable.size < 1) return untouched;
     const recurringKeys = sections.filter((s) => s && s.isRecurring === true).map((s) => String(s.key || ''));
     // EXACTLY two recurring lines: one lead, one parked. A three-line
     // estimate would need a multi-step park that can refuse midway and send
     // a partial mix — neither the full bundle nor the single-service quote
     // (pre-push codex P0). Those go out as the full bundle, as today.
-    if (recurringKeys.length !== 2) return estimate;
+    if (recurringKeys.length !== 2) return untouched;
     // Lead: first selected recurring token in the estimator's own order.
     const tokenToKey = Object.fromEntries(Object.entries(OptOut.SERVICE_OPT_OUT_KEYS)
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
     const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
       .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
     const leadKey = [...selectedOrder, ...recurringKeys].find((k) => recurringKeys.includes(k));
-    if (!leadKey) return estimate;
+    if (!leadKey) return untouched;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
-    if (toPark.length !== 1) return estimate;
+    if (toPark.length !== 1) return untouched;
 
-    let parked = 0;
+    let parkedKey = null;
     for (const serviceKey of toPark) {
       // The rail's own resolver re-runs on every step (removability shrinks
       // as lines leave — the last recurring line is never removable).
@@ -959,17 +951,47 @@ async function applyLeadServiceForSend(estimate) {
         logger.warn(`[admin-estimates] lead-service send: commit for ${serviceKey} refused on estimate ${estimate.id} (${commit.body?.error || commit.status})`);
         continue;
       }
-      parked += 1;
+      parkedKey = serviceKey;
       const fresh = await db('estimates').where({ id: estimate.id }).first();
       if (!fresh) break;
       // Keep the caller's in-flight status (the route-level 'sending' claim)
       // while taking every parked total from the row.
       current = { ...fresh, status: estimate.status };
     }
-    return parked ? current : estimate;
+    return parkedKey ? { estimate: current, parkedKey } : untouched;
   } catch (err) {
     logger.warn(`[admin-estimates] lead-service send skipped for estimate ${estimate?.id}: ${err.message}`);
-    return estimate;
+    return untouched;
+  }
+}
+
+// Compensation for a send that delivered on NO channel: the parked line is
+// restored through the same rail (actor 'staff', dry run → commit), against
+// the row as it is now. Runs after the delivery claim is released.
+async function revertLeadServiceForSend(estimateId, serviceKey) {
+  try {
+    const row = await db('estimates').where({ id: estimateId }).first();
+    if (!row || row.archived_at || row.price_locked_at) return false;
+    const estimatePublic = require('./estimate-public');
+    const preview = await estimatePublic.applyServiceMixChange({
+      estimate: row, body: { serviceKey, included: true, dryRun: true }, actor: 'staff',
+    });
+    if (preview.status !== 200 || !preview.body?.previewBasis) {
+      logger.warn(`[admin-estimates] lead-service revert: preview refused for ${serviceKey} on estimate ${estimateId} (${preview.body?.error || preview.status})`);
+      return false;
+    }
+    const commit = await estimatePublic.applyServiceMixChange({
+      estimate: row, body: { serviceKey, included: true, previewBasis: preview.body.previewBasis }, actor: 'staff',
+    });
+    if (commit.status !== 200) {
+      logger.warn(`[admin-estimates] lead-service revert: commit refused for ${serviceKey} on estimate ${estimateId} (${commit.body?.error || commit.status})`);
+      return false;
+    }
+    logger.info(`[admin-estimates] lead-service revert: ${serviceKey} restored on estimate ${estimateId} after an undelivered send`);
+    return true;
+  } catch (err) {
+    logger.warn(`[admin-estimates] lead-service revert failed for estimate ${estimateId}: ${err.message}`);
+    return false;
   }
 }
 
@@ -1195,11 +1217,22 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // MUST be released on every exit — success, partial failure, or throw —
   // or legitimate linkage corrections stay blocked until the TTL expires.
   const deliveryClaimToken = crypto.randomUUID();
+  let result;
   try {
-    return await sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken);
+    result = await sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken);
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
   }
+  // Send-time lead service (GATE_ESTIMATE_LEAD_SERVICE_SEND) parks a line
+  // BEFORE delivery. When NO channel delivered, the customer never saw the
+  // single-service shape, so the park is compensated — the line is restored
+  // through the same rail — after the delivery claim is released (the rail's
+  // write refuses while a claim is live). Best-effort: a failed revert is
+  // logged and the row keeps the offer shape a resend would carry anyway.
+  if (result && result.sent === false && result.leadServiceParkedKey) {
+    await revertLeadServiceForSend(estimate?.id, result.leadServiceParkedKey);
+  }
+  return result;
 }
 
 async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken) {
@@ -1223,7 +1256,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // design — a refusal or engine miss sends the full bundle exactly as today
   // (never a blocked send), and the row is re-read so the message text and
   // the delivery claim below see the parked totals.
-  estimate = await applyLeadServiceForSend(estimate);
+  const leadShape = await applyLeadServiceForSend(estimate);
+  estimate = leadShape.estimate;
 
   // Group pre-flight runs before ANY channel delivery (see helper above).
   let claimedGroupSiblings = [];
@@ -1527,6 +1561,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       channels,
       sentChannels,
       failedChannels,
+      // The wrapper compensates the send-time park once the claim clears.
+      ...(leadShape.parkedKey ? { leadServiceParkedKey: leadShape.parkedKey } : {}),
     };
   }
 
@@ -3740,3 +3776,4 @@ module.exports = router;
 // one. Lazy-required by services to avoid load-order cycles.
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
+module.exports.revertLeadServiceForSend = revertLeadServiceForSend;

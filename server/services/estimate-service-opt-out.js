@@ -371,6 +371,25 @@ function serviceAddBuildable(estData, serviceKey) {
   return Number(ei.lawnSqFt) > 0 || Number(ei.lotSqFt) > 0;
 }
 
+// EVERY member-evidence carrier the rail and reconcileFrozenMembershipSnapshot
+// recognize: the frozen snapshot flag, priors in any replay carrier, and the
+// recurring-customer flag in any replay shape (same truthy coercion). One
+// reader for the add resolver and the send-time lead-service scope, so the
+// two can never disagree about who is a member (pre-push codex P0 x2).
+function memberEvidenceInEstimateData(estData = {}) {
+  if (!isPlainObject(estData)) return false;
+  if (estData.membershipSnapshot?.isExistingCustomer === true) return true;
+  const carriers = [estData, estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+    .filter(isPlainObject);
+  if (carriers.some((c) => Array.isArray(c.priorQualifyingServices) && c.priorQualifyingServices.length)) return true;
+  return carriers.some((c) => {
+    const v = c.recurringCustomer ?? c.isRecurringCustomer;
+    if (v == null || v === false) return false;
+    const normalized = String(v).trim().toLowerCase();
+    return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+  });
+}
+
 // `category` is the estimates.category column — the authoritative scope, not
 // the rendered section keys (a commercial or legacy row can carry generic
 // keys). Fails CLOSED unless RESIDENTIAL (pre-push codex P1).
@@ -384,10 +403,7 @@ function serviceOptOutAddableKeys(estData = {}, sections = [], rowTier = null, {
   // seasonal / member ladder (a different program than the fresh-quote
   // default this rail would plant — pre-push codex P0), and their combined
   // tier is the office's to extend. The mirror inquiry stays for them.
-  if (estData.membershipSnapshot?.isExistingCustomer === true) return empty;
-  for (const carrier of [estData, estData.engineInputs, estData.inputs, estData.engineRequest?.options]) {
-    if (isPlainObject(carrier) && Array.isArray(carrier.priorQualifyingServices) && carrier.priorQualifyingServices.length) return empty;
-  }
+  if (memberEvidenceInEstimateData(estData)) return empty;
   const list = Array.isArray(sections) ? sections : [];
   // Residential, engine-priced recurring plans only: a commercial line or a
   // quote-required section takes the whole page out of self-serve adds.
@@ -495,4 +511,5 @@ module.exports = {
   buildServiceAddInputs,
   staffOfferedKeys,
   latestOptOutEventIsStaff,
+  memberEvidenceInEstimateData,
 };

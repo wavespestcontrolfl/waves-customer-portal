@@ -15055,12 +15055,14 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         customer_id: estimate.customer_id || null,
         estimate_id: estimate.id,
         action: actor === 'staff'
-          ? 'estimate_service_offered_as_addon'
+          ? (mode === 'remove' ? 'estimate_service_offered_as_addon' : 'estimate_service_offer_reverted')
           : mode === 'remove' ? 'estimate_service_removed'
             : mode === 'add' ? 'estimate_service_added'
               : 'estimate_service_restored',
         description: actor === 'staff'
-          ? `Waves sent this estimate leading with one service; ${label} was parked as a one-tap add-on.`
+          ? (mode === 'remove'
+            ? `Waves sent this estimate leading with one service; ${label} was parked as a one-tap add-on.`
+            : `The send did not deliver on any channel; Waves restored ${label} to the estimate.`)
           : mode === 'remove'
             ? `Customer removed ${label} from their estimate.`
             : mode === 'add'

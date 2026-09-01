@@ -14,6 +14,7 @@ const {
   recordServiceOptOutEvent,
   staffOfferedKeys,
   latestOptOutEventIsStaff,
+  memberEvidenceInEstimateData,
   currentlyOptedOutKeys,
 } = require('../services/estimate-service-opt-out');
 const { optOutImpact, recurringServiceKeysOf } = require('../routes/estimate-public');
@@ -73,6 +74,16 @@ describe('serviceOptOutAddableKeys', () => {
     expect(serviceOptOutAddableKeys(priors, pestSection, null, RES).size).toBe(0);
     const linkedNew = { ...requestOnly(), membershipSnapshot: { isExistingCustomer: false } };
     expect(serviceOptOutAddableKeys(linkedNew, pestSection, null, RES).size).toBe(2);
+    // The recurring-customer flag in any replay shape is member evidence too.
+    const flagged = requestOnly();
+    flagged.engineRequest.options.recurringCustomer = 'yes';
+    expect(serviceOptOutAddableKeys(flagged, pestSection, null, RES).size).toBe(0);
+    const flaggedInputs = { ...inputsOnly(), engineInputs: { ...inputsOnly().engineInputs, isRecurringCustomer: true } };
+    expect(serviceOptOutAddableKeys(flaggedInputs, pestSection, null, RES).size).toBe(0);
+    expect(memberEvidenceInEstimateData({ inputs: { recurringCustomer: 'no' } })).toBe(false);
+    expect(memberEvidenceInEstimateData({ inputs: { recurringCustomer: 'false' } })).toBe(false);
+    expect(memberEvidenceInEstimateData({ inputs: { recurringCustomer: 1 } })).toBe(true);
+    expect(memberEvidenceInEstimateData(null)).toBe(false);
   });
 
   it('offers nothing on commercial, quote-required, proposal, tier-selected or non-replayable estimates', () => {

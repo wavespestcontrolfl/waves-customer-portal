@@ -32,7 +32,7 @@ jest.mock('../services/waveguard-existing-services', () => ({
   isActivePlanCustomer: jest.fn(async () => { if (mockPlan.throws) throw new Error('lookup down'); return mockPlan.active; }),
 }));
 
-const { applyLeadServiceForSend } = require('../routes/admin-estimates');
+const { applyLeadServiceForSend, revertLeadServiceForSend } = require('../routes/admin-estimates');
 
 const newCustomerRow = (overrides = {}) => ({
   id: 'est-1',
@@ -63,7 +63,8 @@ beforeEach(() => {
 });
 
 test('parks the non-lead line as actor staff — dry run, then commit bound to that preview, on the CLAIMED row version — and returns the fresh row with the send status kept', async () => {
-  const out = await applyLeadServiceForSend(newCustomerRow());
+  const { estimate: out, parkedKey } = await applyLeadServiceForSend(newCustomerRow());
+  expect(parkedKey).toBe('lawn_care');
   expect(mockMixCalls.map((c) => [c.actor, c.body.serviceKey, c.body.included, c.body.dryRun === true, c.body.previewBasis || null])).toEqual([
     ['staff', 'lawn_care', false, true, null],
     ['staff', 'lawn_care', false, false, 'digest-1'],
@@ -89,7 +90,7 @@ test('lead follows the estimator\'s selection order', async () => {
 test('gate off → untouched, no rail call', async () => {
   mockGates.estimateLeadServiceSend = false;
   const row = newCustomerRow();
-  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   expect(mockMixCalls).toHaveLength(0);
 });
 
@@ -105,7 +106,7 @@ test('members, grouped, commercial, locked, already-shaped and single-line rows 
   ];
   for (const row of cases) {
     mockRows.queue = [claimedRowFor(row), parkedRow];
-    expect(await applyLeadServiceForSend(row)).toBe(row);
+    expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   }
   expect(mockMixCalls).toHaveLength(0);
 });
@@ -113,16 +114,16 @@ test('members, grouped, commercial, locked, already-shaped and single-line rows 
 test('member evidence in any carrier — the recurring-customer flag included — and a live active plan are never parked; a lookup failure fails CLOSED', async () => {
   const run = async (row) => { mockRows.queue = [claimedRowFor(row), parkedRow]; return applyLeadServiceForSend(row); };
   const flagged = newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: { recurringCustomer: 'yes' } } }) });
-  expect(await run(flagged)).toBe(flagged);
+  expect(await run(flagged)).toEqual({ estimate: flagged, parkedKey: null });
   const flaggedInputs = newCustomerRow({ estimate_data: JSON.stringify({ engineInputs: { isRecurringCustomer: true, services: { pest: {}, lawn: {} } }, engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: {} } }) });
-  expect(await run(flaggedInputs)).toBe(flaggedInputs);
+  expect(await run(flaggedInputs)).toEqual({ estimate: flaggedInputs, parkedKey: null });
   mockPlan.active = true;
   const live = newCustomerRow({ customer_id: 'cust-1' });
-  expect(await run(live)).toBe(live);
+  expect(await run(live)).toEqual({ estimate: live, parkedKey: null });
   mockPlan.active = false;
   mockPlan.throws = true;
   const broken = newCustomerRow({ customer_id: 'cust-1' });
-  expect(await run(broken)).toBe(broken);
+  expect(await run(broken)).toEqual({ estimate: broken, parkedKey: null });
   expect(mockMixCalls).toHaveLength(0);
   // A linked NON-member still gets the lead-service shape.
   mockPlan.throws = false;
@@ -133,7 +134,7 @@ test('member evidence in any carrier — the recurring-customer flag included �
 test('a refused preview never blocks the send — the full bundle goes out as today, untouched object', async () => {
   mockMix.responder = () => ({ status: 409, body: { error: 'reprice_unavailable' } });
   const row = newCustomerRow();
-  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   expect(mockMixCalls).toHaveLength(1);
 });
 
@@ -144,19 +145,40 @@ test('a three-line estimate is never shaped — one atomic park or nothing (pre-
   });
   const row = newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN', 'MOSQUITO'], options: {} }, inputs: { services: { pest: {}, lawn: {}, mosquito: {} } } }) });
   mockRows.queue = [claimedRowFor(row), parkedRow];
-  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   expect(mockMixCalls).toHaveLength(0);
 });
 
 test('an archived or locked claimed row is left alone', async () => {
   const row = newCustomerRow();
   mockRows.queue = [{ ...claimedRowFor(row), archived_at: 'x' }, parkedRow];
-  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
   expect(mockMixCalls).toHaveLength(0);
 });
 
 test('a throwing rail is swallowed, not surfaced to the send', async () => {
   mockMix.responder = () => { throw new Error('boom'); };
   const row = newCustomerRow();
-  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
+});
+
+test('an undelivered send is compensated: the parked line is restored through the rail as actor staff, dry run then commit', async () => {
+  mockRows.queue = [parkedRow];
+  expect(await revertLeadServiceForSend('est-1', 'lawn_care')).toBe(true);
+  expect(mockMixCalls.map((c) => [c.actor, c.body.serviceKey, c.body.included, c.body.dryRun === true, c.body.previewBasis || null])).toEqual([
+    ['staff', 'lawn_care', true, true, null],
+    ['staff', 'lawn_care', true, false, 'digest-1'],
+  ]);
+  for (const call of mockMixCalls) expect(call.estimate).toBe(parkedRow);
+});
+
+test('a refused or throwing revert is logged, never thrown, and reports false', async () => {
+  mockRows.queue = [parkedRow];
+  mockMix.responder = () => ({ status: 409, body: { error: 'estimate_changed_since_preview' } });
+  expect(await revertLeadServiceForSend('est-1', 'lawn_care')).toBe(false);
+  mockMix.responder = () => { throw new Error('boom'); };
+  expect(await revertLeadServiceForSend('est-1', 'lawn_care')).toBe(false);
+  mockRows.queue = [{ ...parkedRow, archived_at: 'x' }];
+  mockMix.responder = () => ({ status: 200, body: { previewBasis: 'd' } });
+  expect(await revertLeadServiceForSend('est-1', 'lawn_care')).toBe(false);
 });
