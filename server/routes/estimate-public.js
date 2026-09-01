@@ -13628,7 +13628,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
     }
 
-    res.json(buildAcceptSuccessPayload({
+    // The success screen renders from THIS payload without a /data refetch,
+    // so the referral card rides here too (same gate + program check as
+    // /data; the row is accepted by construction at this point).
+    const acceptReferral = await estimateReferralCardFor({ id: estimate.id, status: 'accepted', customer_id: customerId || estimate.customer_id });
+
+    res.json({
+      ...(acceptReferral ? { referral: acceptReferral } : {}),
+      ...buildAcceptSuccessPayload({
       invoiceMode,
       invoiceLinkDelivered,
       invoiceId,
@@ -13659,7 +13666,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ? prepayChargePlan.quote.totalCents / 100
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
-    }));
+      }),
+    });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
     // (e.g. reservation expiring between the pre-tx check and the commit).
@@ -15252,6 +15260,73 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 // legacy admin slug tokens (nameSlug-8hex) AND the 64-hex format every
 // post-estimate-versions token uses. Malformed tokens 404 before any DB read.
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
+// Referral card eligibility on the estimate screens (GATE_ESTIMATE_SUCCESS_
+// REFERRAL): an ACCEPTED estimate with a linked customer. The render payload
+// (/data, the accept response, the already-accepted retry) carries only the
+// static headline + CTA; the customer's code is fetched on the tap. Null on
+// any settings failure — never advertise a reward the program cannot honor.
+async function estimateReferralCardFor(estimate) {
+  if (!featureGates.isEnabled('estimateSuccessReferral')) return null;
+  if (!estimate || estimate.status !== 'accepted' || !estimate.customer_id) return null;
+  try {
+    return await require('../services/referral-share').composeReferralCard();
+  } catch (err) {
+    logger.warn(`[estimate-public] referral card suppressed for estimate ${estimate.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Mirrors extensionRequestLimiter: gate-aware skip so a dark gate answers the
+// generic 404 on every probe, shared IPv6-safe key.
+const referralLinkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimateSuccessReferral'),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// POST /api/estimates/:token/referral-link — the referral card's "Send My
+// Referral Link" tap on an accepted estimate (GATE_ESTIMATE_SUCCESS_REFERRAL).
+// A POST on the TAP, not part of the /data render: enrolling the promoter is
+// a durable write and a public GET must stay read-only. Same composer as the
+// service report's tap (services/referral-share.js). 404 covers dark gate /
+// malformed token / unknown token / not-accepted / no customer / inactive
+// program uniformly.
+router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
+  if (!featureGates.isEnabled('estimateSuccessReferral')) {
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
+  if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Same viewability contract as /data plus the accepted-only rule the
+    // card composer applies, so the tap can never enroll from a row whose
+    // page does not render the card.
+    if (!estimate || !isEstimateCustomerViewable(estimate) || estimate.status !== 'accepted' || !estimate.customer_id) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const share = await require('../services/referral-share').buildReferralShareForCustomer(estimate.customer_id);
+    if (!share) return res.status(404).json({ error: 'Estimate not found' });
+    if (share.unavailable) {
+      return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+    }
+    return res.json(share);
+  } catch (err) {
+    // err.code only, never err.message: PG constraint violations quote the
+    // conflicting phone number (AGENTS.md PII-in-logs rule).
+    logger.warn(`[estimate-public] referral-link failed (code=${err?.code || 'none'}, token=${String(req.params.token).slice(0, 8)}…)`);
+    return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+  }
+});
 
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
@@ -17916,7 +17991,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     }
   }
 
+  const retryReferral = await estimateReferralCardFor(estimate);
   return {
+    ...(retryReferral ? { referral: retryReferral } : {}),
     ...buildAcceptSuccessPayload({
       // A settled invoice is not an open payable — invoiceMode stays false so
       // no consumer (including the client's legacy invoiceMode fallback) can
@@ -24726,9 +24803,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // Strict on the headless document pass: the rendered PDF must carry the
     // record or fail the render (which then fails the pdfkit fallback too).
     const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
+    // Referral card (GATE_ESTIMATE_SUCCESS_REFERRAL): accepted estimates only;
+    // include-when-present so every other response stays byte-identical.
+    const successReferral = await estimateReferralCardFor(estimate);
 
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
+      ...(successReferral ? { referral: successReferral } : {}),
+      // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): the page draws
+      // the strip from visitsPerYear already in the section payload, so this
+      // is a render flag only. Include-when-true; a recurring lawn section
+      // must exist or there is nothing to draw.
+      ...(featureGates.isEnabled('estimateLawnCalendar')
+        && (Array.isArray(pricingBundle.services) ? pricingBundle.services : [])
+          .some((section) => section && section.key === 'lawn_care' && section.isRecurring === true)
+        ? { lawnCalendar: true } : {}),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
@@ -25190,6 +25279,7 @@ module.exports.estimateInvoicePayUrlParams = estimateInvoicePayUrlParams;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
+module.exports.estimateReferralCardFor = estimateReferralCardFor;
 module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;

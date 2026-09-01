@@ -57,6 +57,7 @@ import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
+import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -3317,81 +3318,30 @@ function CrossSellCard({ data, token, mode }) {
 
 // Referral card (owner-approved 2026-08-11; redesigned per owner 2026-08-13:
 // headline + button only, and the click reveals the same share module the
-// portal's Refer tab uses — code, prefilled text and email). Every word and
-// amount is COMPOSED SERVER-SIDE from live referral program settings
-// (headline/cta/shareText ride data.referral) so the card never promises a
-// benefit the program no longer grants and no dollar figure is ever
-// hardcoded client-side. Rides the same GATE_REPORT_CROSS_SELL payload —
-// dark gate keeps reports byte-identical.
+// portal's Refer tab uses — code, prefilled text and email). The card itself
+// is the shared ReferralShareCard (also on the estimate's accepted screens);
+// this wrapper owns the report-specific parts: the analytics beacon on the
+// tap, the report endpoint, and the staff-QA suppression. Rides the same
+// GATE_REPORT_CROSS_SELL payload — dark gate keeps reports byte-identical.
 function ReferralCard({ data, token, mode }) {
-  // idle → loading → open | failed. The customer's code and share copy come
-  // from POST /:token/referral-link ON THE TAP — the render payload carries
-  // only headline + CTA, because fetching the code enrolls the customer as
-  // a promoter (a durable row) and a report VIEW must never do that.
-  const [shareState, setShareState] = useState('idle');
-  const [share, setShare] = useState(null);
   const referral = data?.referral;
   if (mode !== 'live' || !referral?.headline) return null;
-  const openShare = async () => {
-    if (shareState === 'loading' || shareState === 'open') return;
-    trackReportEvent(token, 'referral_cta_clicked', {});
-    // Staff QA views never enroll the customer or fetch their code — the
-    // same suppression contract as every other report interaction.
-    if (staffViewTokens.has(token)) {
-      setShare(null);
-      setShareState('staff');
-      return;
-    }
-    setShareState('loading');
-    try {
-      const response = await fetch(`${API_BASE}/reports/${token}/referral-link`, { method: 'POST' });
-      if (!response.ok) throw new Error(`referral link ${response.status}`);
-      const body = await response.json();
-      if (!body?.code) throw new Error('referral link empty');
-      setShare(body);
-      setShareState('open');
-    } catch {
-      setShareState('failed');
-    }
-  };
-  const copyCode = async () => {
-    try { await navigator.clipboard?.writeText?.(share.code); } catch { /* clipboard unavailable */ }
+  const fetchLink = async () => {
+    const response = await fetch(`${API_BASE}/reports/${token}/referral-link`, { method: 'POST' });
+    if (!response.ok) throw new Error(`referral link ${response.status}`);
+    return response.json();
   };
   return (
-    <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
-      <h2>{referral.headline}</h2>
-      {shareState === 'open' && share ? (
-        <div className="referral-share">
-          <div className="referral-code-chip">
-            <span className="referral-code">{share.code}</span>
-            <button type="button" className="referral-copy" onClick={copyCode}>Copy</button>
-          </div>
-          <div className="referral-share-row">
-            <a data-glass-accent="" className="review-cta cross-sell-cta" href={`sms:?&body=${encodeURIComponent(share.smsBody || '')}`}>Text it</a>
-            <a data-glass-accent="" className="review-cta cross-sell-cta" href={`mailto:?subject=${encodeURIComponent(share.emailSubject || '')}&body=${encodeURIComponent(share.emailBody || '')}`}>Email it</a>
-          </div>
-        </div>
-      ) : shareState === 'staff' ? (
-        <p className="cross-sell-confirm">Staff view — the share module renders for customers.</p>
-      ) : (
-        <div className="cross-sell-cta-row">
-          <button
-            type="button"
-            data-glass-accent=""
-            className="review-cta cross-sell-cta"
-            disabled={shareState === 'loading'}
-            onClick={openShare}
-          >
-            {shareState === 'loading' ? 'One moment…' : referral.cta || 'Refer a friend'}
-          </button>
-        </div>
-      )}
-      {shareState === 'failed' && (
-        <p className="cross-sell-fine cross-sell-error">
-          That didn&apos;t go through — please try again, or call (941) 297-5749.
-        </p>
-      )}
-    </section>
+    <ReferralShareCard
+      referral={referral}
+      className="report-card cross-sell-card referral-card"
+      // The beacon fires on every tap, staff QA included — the same event
+      // contract as before the extraction; only the enrolling fetch is
+      // suppressed for staff views.
+      onTap={() => trackReportEvent(token, 'referral_cta_clicked', {})}
+      staffView={staffViewTokens.has(token)}
+      fetchLink={fetchLink}
+    />
   );
 }
 

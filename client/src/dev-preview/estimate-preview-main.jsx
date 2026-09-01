@@ -833,7 +833,14 @@ window.fetch = async (input, init) => {
     // documentRender affirmation mirrors the server's gated pdf-pass payload
     // so ?mode=pdf previews render the print document.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
-    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...(pdfPass ? { documentRender: true } : {}) });
+    // lawnCalendar / referral mirror the GATE_ESTIMATE_LAWN_CALENDAR and
+    // GATE_ESTIMATE_SUCCESS_REFERRAL /data flags so both blocks render in preview.
+    const payload = PAYLOADS[scenario]();
+    const referral = scenario === 'accepted' ? { referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' } } : {};
+    return respond({ ...payload, glassDefault: true, lawnCalendar: true, ...referral, ...(pdfPass ? { documentRender: true } : {}) });
+  }
+  if (url.includes('/referral-link')) {
+    return respond({ code: 'WAVES-PREVIEW1', link: 'https://wavespestcontrol.com/r/WAVES-PREVIEW1', smsBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1. wavespestcontrol.com/r/WAVES-PREVIEW1', emailSubject: '$25 off Waves Pest Control', emailBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1.\n\nhttps://wavespestcontrol.com/r/WAVES-PREVIEW1' });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
