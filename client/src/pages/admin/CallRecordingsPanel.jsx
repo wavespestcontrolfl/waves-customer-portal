@@ -87,13 +87,20 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       // Surface the server's message (e.g. the 409 already-processing
-      // explanation) instead of a bare status code.
+      // explanation) instead of a bare status code, and carry the parsed
+      // BODY on the error: a 409 blocked claim is still a classifiable
+      // result, and describeProcessResult turns it into the precise
+      // "nothing ran, wait and hit Process again" line rather than a
+      // generic failure.
       let message = `HTTP ${r.status}`;
+      let payload = null;
       try {
-        const body = await r.json();
-        message = body?.error || body?.message || message;
+        payload = await r.json();
+        message = payload?.error || payload?.message || message;
       } catch { /* non-JSON error body */ }
-      throw new Error(message);
+      const error = new Error(message);
+      error.body = payload;
+      throw error;
     }
     return r.json();
   });
@@ -271,7 +278,11 @@ export default function CallRecordingsPanel() {
       showToast(verdict.text, verdict.severity);
       loadData();
     } catch (e) {
-      showToast(`Failed: ${e.message}`, "failed");
+      // A 409 arrives here as a thrown error but is a real, classifiable
+      // outcome — read it as one rather than reporting a bare failure.
+      const verdict = e?.body ? describeProcessResult(e.body) : null;
+      if (verdict) showToast(verdict.text, verdict.severity);
+      else showToast(`Failed: ${e.message}`, "failed");
     }
   };
 
@@ -707,7 +718,9 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
       }
     } catch (e) {
       if (!stillShowing()) return;
-      setProcessVerdict({
+      // Same as processOne: a 409 blocked claim is a classifiable outcome,
+      // not a bare failure.
+      setProcessVerdict(e?.body ? describeProcessResult(e.body) : {
         didWork: false,
         severity: "failed",
         text: `Process failed — ${e.message || "unknown error"}`,

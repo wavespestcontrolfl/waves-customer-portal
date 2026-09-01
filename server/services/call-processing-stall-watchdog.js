@@ -72,6 +72,14 @@ const GRACE_MINUTES = 20;
 // P1). At 8 the watchdog calls a claim dead two minutes before the pipeline
 // does, which is safe because the bell is no longer permanent — see the
 // per-day dedupe below.
+//
+// A claim is aged from its HEARTBEAT, matching every reclaim predicate in
+// processAllPending: the owning pass bumps processing_heartbeat_at while it
+// works, so "stale" means STOPPED BEATING, not "started long ago". Without
+// that, a healthy five-minute transcription aged past this threshold on
+// processing_started_at alone and rang a false stall on a pass that was
+// working perfectly. Falls back to processing_started_at for rows claimed
+// before the column existed.
 const CLAIM_STALE_MINUTES = 8;
 // One bell per call per DAY, not one per call forever. Permanence was what
 // made an aggressive staleness threshold dangerous: a single false positive
@@ -128,7 +136,8 @@ function computeStalledCalls(rows, { now = new Date() } = {}) {
     // the grace window: measured against the grace window a crash-reclaim
     // loop refreshed the claim faster than it could ever look stale.
     if (status === 'processing') {
-      const claimed = r.processing_started_at ? new Date(r.processing_started_at) : null;
+      const beat = r.processing_heartbeat_at || r.processing_started_at;
+      const claimed = beat ? new Date(beat) : null;
       if (claimed && !Number.isNaN(claimed.getTime()) && claimed > claimCutoff) continue;
     }
     const hasRecording = !!String(r.recording_url || '').trim();
@@ -230,7 +239,8 @@ async function runInner({ now = new Date() } = {}) {
     .modify((b) => excludeSettledSids(b, today))
     .select(
       'id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'created_at',
-      'processing_status', 'processing_started_at', 'updated_at', 'metadata', 'recording_url',
+      'processing_status', 'processing_started_at', 'processing_heartbeat_at',
+      'updated_at', 'metadata', 'recording_url',
       'recording_duration_seconds', 'duration_seconds',
       'transcription', 'transcription_metadata',
     )

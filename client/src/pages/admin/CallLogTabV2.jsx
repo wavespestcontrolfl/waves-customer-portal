@@ -85,11 +85,17 @@ async function adminFetch(path, options = {}) {
 
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
+    let payload = null;
     try {
-      const body = await response.json();
-      message = body?.error || body?.message || message;
+      payload = await response.json();
+      message = payload?.error || payload?.message || message;
     } catch {}
-    throw new Error(message);
+    // Carry the parsed body: a 409 from the process route is a blocked
+    // claim, which is a classifiable OUTCOME rather than a bare failure —
+    // describeProcessResult turns it into the actionable line.
+    const error = new Error(message);
+    error.body = payload;
+    throw error;
   }
 
   return response.json();
@@ -489,12 +495,12 @@ export default function CallLogTabV2() {
       setProcessResult({ ...verdict, callSid });
       await loadCalls(callLogSearch.trim());
     } catch (err) {
-      setProcessResult({
+      const verdict = err?.body ? describeProcessResult(err.body) : {
         didWork: false,
         severity: "failed",
-        callSid,
         text: `Process failed — ${err.message || "unknown error"}`,
-      });
+      };
+      setProcessResult({ ...verdict, callSid });
     } finally {
       setProcessingCallSid(null);
     }

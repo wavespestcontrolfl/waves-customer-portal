@@ -186,6 +186,30 @@ describe('computeStalledCalls', () => {
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
   });
 
+  test('a healthy long pass is judged by its HEARTBEAT, not its start time', () => {
+    // A five-minute transcription is a pass working perfectly; aging it from
+    // processing_started_at alone rang a false stall on it.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 30),
+      processing_status: 'processing',
+      processing_started_at: mins(25),
+      processing_heartbeat_at: mins(1),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
+  });
+
+  test('a claim whose heartbeat STOPPED is wedged, however recently it started', () => {
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 30),
+      processing_status: 'processing',
+      processing_started_at: mins(2),
+      processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 2),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
+  });
+
   test('a claim the processor still considers live is honoured', () => {
     const rows = [{
       ...base,
