@@ -6196,7 +6196,12 @@ function EstimateViewPageInner() {
           {/* Services this customer removed, with the way back. Sits directly
               under the remaining service boxes so the reversal is where the
               removal happened. */}
-          {!readOnly && (data?.serviceOptOut?.removedKeys || []).length ? (
+          {/* restoreBlocked: the server still ships removedKeys (they suppress
+              the mirror add-service offer above) but the write refuses
+              restores — an itemized proposal or a standing tier selection —
+              so the "Add it back" control must not render. */}
+          {!readOnly && data?.serviceOptOut?.restoreBlocked !== true
+            && (data?.serviceOptOut?.removedKeys || []).length ? (
             <div style={{ marginTop: 12 }}>
               {data.serviceOptOut.removedKeys.map((key, i) => {
                 const label = data.serviceOptOut.removedLabels?.[i] || key;

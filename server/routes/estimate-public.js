@@ -24169,17 +24169,23 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           serviceOptOutTierSelectionActive,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
-        // A proposal that gained itemization after a removal — or a standing
-        // /select-tier choice — refuses restores (same guards as the PUT), so
-        // don't advertise "Add it back" either.
-        if (serviceOptOutBlockedByProposal(projected)
-          || serviceOptOutTierSelectionActive(projected, estimate.waveguard_tier)) return {};
         const removedKeys = currentlyOptedOutKeys(projected);
         if (!removedKeys.length) return {};
+        // A proposal that gained itemization after a removal — or a standing
+        // /select-tier choice — refuses restores (same guards as the PUT), so
+        // the "Add it back" control must not render. But the removed keys
+        // STILL ship: they also suppress the mirror add-service offer, and
+        // dropping the whole block would re-advertise "Add Lawn Care and save
+        // more" for the very service the customer removed (pre-push codex P1
+        // on 89ab43c). Suppression state and restore eligibility are
+        // independent facts.
+        const restoreBlocked = serviceOptOutBlockedByProposal(projected)
+          || serviceOptOutTierSelectionActive(projected, estimate.waveguard_tier);
         return {
           serviceOptOut: {
             removedKeys,
             removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
+            ...(restoreBlocked ? { restoreBlocked: true } : {}),
           },
         };
       })()),
