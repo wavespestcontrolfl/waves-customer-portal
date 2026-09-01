@@ -9,7 +9,7 @@ import {
 } from "./service-completion-presets";
 import observationAllowlist from "../../../shared/specialty-service-observations";
 
-const { observationsForSpecialtyService } = observationAllowlist;
+const { observationsForSpecialtyService, specialtyServiceKey } = observationAllowlist;
 
 describe("specialty pest completion configuration", () => {
   test("every dropdown observation is server-approved for customer report egress", () => {
@@ -62,6 +62,10 @@ describe("specialty pest completion configuration", () => {
       .toBe(SERVICE_COMPLETION_PRESETS.bee_wasp_removal);
     expect(specialtyCompletionFor({ serviceType: "Bed Bug Heat Treatment" }))
       .toBe(SERVICE_COMPLETION_PRESETS.bed_bug_treatment);
+    expect(specialtyServiceKey({ serviceType: "Bed Bug Heat Treatment" }))
+      .toBe("bed_bug_treatment");
+    expect(specialtyServiceKey({ serviceType: "Yellowjacket Removal" }))
+      .toBe("bee_wasp_removal");
   });
 
   test("replaces only the prior choice from the same finding group", () => {

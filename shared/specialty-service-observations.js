@@ -21,4 +21,24 @@ function observationsForSpecialtyService(serviceKey) {
   return SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY[SPECIALTY_SERVICE_KEY_ALIASES[key] || key] || [];
 }
 
-module.exports = { SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY, observationsForSpecialtyService };
+function specialtyServiceKey({ serviceKey, serviceType } = {}) {
+  const key = String(serviceKey || '').trim();
+  const canonical = SPECIALTY_SERVICE_KEY_ALIASES[key] || key;
+  if (SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY[canonical]) return canonical;
+  const text = String(serviceType || '').toLowerCase();
+  if (/mosquito/.test(text)) return 'mosquito';
+  if (/dethatch/.test(text)) return 'dethatching';
+  if (/lawn\s*plugg|sod\s*plugg/.test(text)) return 'plugging';
+  if (/bed\s*bug/.test(text)) return 'bed_bug_treatment';
+  if (/fire\s*ant/.test(text)) return 'fire_ant';
+  if (/\btick/.test(text)) return 'tick_control';
+  if (/mud\s*dauber/.test(text)) return 'mud_dauber_removal';
+  if (/\bbee\b|\bwasp\b|yellow\s*jacket|yellowjacket|hornet/.test(text)) return 'bee_wasp_removal';
+  return null;
+}
+
+module.exports = {
+  SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY,
+  observationsForSpecialtyService,
+  specialtyServiceKey,
+};

@@ -3947,8 +3947,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       epaReg: app.product?.epa_reg,
     });
   const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
-    || parseJsonArray(parseJsonObject(service.structured_notes).protocolActionScopesCompleted)
-      .some((s) => s && s.treatmentApplied === true);
+    || structuredActionScope(service).hasTreatment;
   const storedAdvisory = parseJsonObject(service.advisory);
   // Legacy no-spray termite records (bait/monitoring/inspection completed
   // before the 0/0 rule) persisted the old 30/120 line defaults, and the
