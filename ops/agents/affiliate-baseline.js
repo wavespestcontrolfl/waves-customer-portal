@@ -83,11 +83,19 @@ const classifyExclusion = (path) => {
   return null;
 };
 
-const fmt = (d) => d.toISOString().slice(0, 10);
+// In --json mode the snapshot goes to stdout, so anything the services log
+// through Winston's console transport would corrupt it. Quiet the logger BEFORE
+// requiring them, and hard-redirect stray stdout writes to stderr while the
+// APIs are being called — `--json > baseline.json` must yield parseable JSON.
+if (JSON_ONLY) process.env.LOG_LEVEL = 'error';
 
 (async () => {
+  const { etDateString, addETDays } = require('../../server/utils/datetime-et');
   const gsc = require('../../server/services/seo/search-console');
   const ga4 = require('../../server/services/analytics/google-analytics');
+
+  const realStdoutWrite = process.stdout.write.bind(process.stdout);
+  if (JSON_ONLY) process.stdout.write = process.stderr.write.bind(process.stderr);
 
   const ok = await gsc.init();
   if (!ok || !gsc.webmasters) {
@@ -95,8 +103,12 @@ const fmt = (d) => d.toISOString().slice(0, 10);
     process.exit(1);
   }
 
-  const endDate = flag('end') || fmt(new Date(Date.now() - 3 * 86400000));
-  const startDate = fmt(new Date(new Date(endDate).getTime() - (DAYS - 1) * 86400000));
+  // Calendar dates are ET, via the canonical helpers. toISOString() would roll
+  // to the next day between 8pm and midnight ET and silently shorten the GSC
+  // lag from 3 days to 2, changing the window depending on when it was run.
+  // Anchoring a --end value at midday UTC keeps addETDays off a DST boundary.
+  const endDate = flag('end') || etDateString(addETDays(new Date(), -3));
+  const startDate = etDateString(addETDays(new Date(`${endDate}T12:00:00Z`), -(DAYS - 1)));
   const siteUrl = process.env.GSC_SITE_URL || 'https://wavespestcontrol.com';
 
   // ── Search Console: per-page totals over the window (read-only query) ──
@@ -181,31 +193,20 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   // rows when its title changed inside the window. Summing is required —
   // keying a Map by path alone would keep whichever row happened to come last
   // and understate the baseline in an order-dependent way.
+  // Pageviews are additive, so summing across title variants is correct. Bounce
+  // rate and session duration are SESSION-scoped and cannot be recombined with
+  // pageview weights without distorting them — they are taken from the
+  // landing-page report below, which carries the session counts to weight by.
   const ga4ByPath = new Map();
   for (const r of ga4Rows) {
     const prev = ga4ByPath.get(r.pagePath);
     const views = r.pageviews || 0;
     if (!prev) {
-      ga4ByPath.set(r.pagePath, {
-        pageviews: views,
-        bounceWeighted: (r.bounceRate || 0) * views,
-        durWeighted: (r.avgSessionDuration || 0) * views,
-        pageTitle: r.pageTitle,
-        titleVariants: 1,
-      });
+      ga4ByPath.set(r.pagePath, { pageviews: views, pageTitle: r.pageTitle, titleVariants: 1 });
     } else {
       prev.pageviews += views;
-      prev.bounceWeighted += (r.bounceRate || 0) * views;
-      prev.durWeighted += (r.avgSessionDuration || 0) * views;
       prev.titleVariants += 1;
     }
-  }
-  // Collapse the weighted sums into pageview-weighted averages.
-  for (const v of ga4ByPath.values()) {
-    v.bounceRate = v.pageviews ? +(v.bounceWeighted / v.pageviews).toFixed(4) : null;
-    v.avgSessionDuration = v.pageviews ? +(v.durWeighted / v.pageviews).toFixed(2) : null;
-    delete v.bounceWeighted;
-    delete v.durWeighted;
   }
 
   // ── GA4 landing pages: SESSIONS, users and key events ──
@@ -221,17 +222,25 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   const landingByPath = new Map();
   for (const r of landingRows) {
     const prev = landingByPath.get(r.landingPage);
+    const sess = r.sessions || 0;
     if (!prev) {
       landingByPath.set(r.landingPage, {
-        sessions: r.sessions || 0,
+        sessions: sess,
         users: r.users || 0,
         keyEvents: r.conversions || 0,
+        bounceWeighted: (r.bounceRate || 0) * sess,
       });
     } else {
-      prev.sessions += r.sessions || 0;
+      prev.sessions += sess;
       prev.users += r.users || 0;
       prev.keyEvents += r.conversions || 0;
+      prev.bounceWeighted += (r.bounceRate || 0) * sess;
     }
+  }
+  // Session-weighted, matching the metric's own scope.
+  for (const v of landingByPath.values()) {
+    v.bounceRate = v.sessions ? +(v.bounceWeighted / v.sessions).toFixed(4) : null;
+    delete v.bounceWeighted;
   }
 
   // ── Merge, filter, rank ──
@@ -243,9 +252,8 @@ const fmt = (d) => d.toISOString().slice(0, 10);
       sessions: l ? l.sessions : null,
       users: l ? l.users : null,
       keyEvents: l ? l.keyEvents : null,
+      bounceRate: l ? l.bounceRate : null,
       pageviews: g ? g.pageviews : null,
-      bounceRate: g ? g.bounceRate : null,
-      avgSessionDuration: g ? g.avgSessionDuration : null,
       title: g ? g.pageTitle : null,
       topQueries: queriesByUrl.get(p.url) || [],
     };
@@ -322,7 +330,9 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   };
 
   if (JSON_ONLY) {
-    console.log(JSON.stringify(payload, null, 2));
+    // Restore the real stdout only now, so the snapshot is the ONLY thing on it.
+    process.stdout.write = realStdoutWrite;
+    realStdoutWrite(`${JSON.stringify(payload, null, 2)}\n`);
     return;
   }
 
