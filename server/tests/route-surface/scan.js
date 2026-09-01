@@ -122,6 +122,20 @@ function patternNames(node, out) {
   return out;
 }
 
+
+/**
+ * Join condition labels UNAMBIGUOUSLY: each component is parenthesized when
+ * two or more combine, so nested `if (a) { if (b || c) ... }` can never key
+ * identically to the flat `if (a && b || c)`. Single conditions keep their
+ * bare spelling.
+ */
+function joinConds(parts) {
+  const list = parts.filter(Boolean);
+  if (!list.length) return null;
+  if (list.length === 1) return list[0];
+  return list.map((c) => `(${c})`).join(' && ');
+}
+
 function stringLiteralArray(node) {
   if (!node || node.type !== 'ArrayExpression') return null;
   const out = [];
@@ -322,6 +336,7 @@ class ModuleAnalysis {
     this.directExternalRegs = []; // require('./x').<verb>() registrations
     this.importMemberWrites = []; // auth.guardA = ... on a require() binding
     this.externalRouterPasses = []; // required module handed to an unanalysed fn
+    this.externalAppPasses = []; // required module handed to an appOnly consumer
     this.bindingWrites = new Map(); // name -> count of value-bearing writes
     this.reassignedNames = new Set(); // written more than once — ambiguous
     const callsWithIdentifierArgs = [];
@@ -367,6 +382,19 @@ class ModuleAnalysis {
       if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
         && (node.callee.name === 'eval' || node.callee.name === 'Function')) {
         this.pushSweepProblem(`${this.loc(node)}: dynamic code (${node.callee.name}) in a server module — the scanner cannot see what it registers`);
+      }
+      if (node.type === 'CallExpression' && node.callee.type === 'Import') {
+        // import() hands back the CACHED module — a mounted router mutated
+        // through it never crosses the static require graph. Fail closed.
+        this.pushSweepProblem(`${this.loc(node)}: dynamic import() in a server module — the scanner cannot follow it; use a static require/import`);
+      }
+      if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+        && ['on', 'addListener', 'prependListener', 'once', 'removeAllListeners'].includes(memberPropName(node.callee))
+        && node.arguments[0] && node.arguments[0].type === 'StringLiteral'
+        && node.arguments[0].value === 'request') {
+        // Post-construction 'request' listener surgery swaps what the port
+        // serves away from the reviewed factory's app. Fail closed.
+        this.pushSweepProblem(`${this.loc(node)}: '${memberPropName(node.callee)}' on the 'request' event — replacing a server's request listener serves surface the scanner never walks`);
       }
       if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'Function') {
         this.pushSweepProblem(`${this.loc(node)}: dynamic code (new Function) in a server module — the scanner cannot see what it registers`);
@@ -590,7 +618,7 @@ class ModuleAnalysis {
               const mod = this.resolveModule(inner.object.arguments[0].value);
               if (mod) this.directExternalRegs.push({ module: mod, name: memberPropName(inner), method, loc: this.loc(node) });
             }
-            this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
+            this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: joinConds(ctx.conds), node });
           }
           return;
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')
@@ -606,7 +634,7 @@ class ModuleAnalysis {
           }
           if (base && base.type === 'Identifier') objName = base.name;
           else if (base && base.type === 'MemberExpression') {
-            this.registrations.push({ object: null, objectNode: base, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
+            this.registrations.push({ object: null, objectNode: base, method, args: node.arguments, topLevel: ctx.topLevel, cond: joinConds(ctx.conds), node });
             return;
           } else if (base && this.isRouterFactory(base)) {
             this.problems.push(`${this.loc(node)}: ${method}() chained on an inline Router() call — bind the router to a const so its routes can be attributed`);
@@ -620,9 +648,9 @@ class ModuleAnalysis {
         if (objName === null) {
           // not a chain we can attribute (or not a registration shape at all)
         } else if (unresolvedMethod) {
-          this.registrations.push({ object: objName, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
+          this.registrations.push({ object: objName, method: '<computed>', args: node.arguments, topLevel: ctx.topLevel, cond: joinConds(ctx.conds), node });
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
-          this.registrations.push({ object: objName, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
+          this.registrations.push({ object: objName, method, args: node.arguments, topLevel: ctx.topLevel, cond: joinConds(ctx.conds), node });
         }
       }
     }, { topLevel: true, conds: [], src: this.src });
@@ -760,9 +788,27 @@ class ModuleAnalysis {
     // router, its return value may BE that router; never drop it silently.
     for (const cr of callReceiverRegs) {
       const b = this.bindings.get(this.canonName(cr.name));
-      if (b && b.kind === 'function' && b.node && this.routerReferencedIn(b.node)) {
+      if (!b || b.kind !== 'function' || !b.node) continue;
+      if (this.routerReferencedIn(b.node)) {
         this.problems.push(`${this.loc(cr.node)}: ${cr.method}() on the return value of ${cr.name}() — the helper references a router, so this registration cannot be attributed; register through the router identifier`);
+        continue;
       }
+      // A helper RETURNING an imported module hands back the cached export —
+      // `current().get(...)` mutates that module; judged in the sweep, which
+      // only fires when the module is a mounted router (config objects with
+      // a .get() stay silent).
+      walk(b.node, (n) => {
+        if (n.type !== 'ReturnStatement' || !n.argument) return;
+        if (isRequireCall(n.argument)) {
+          const mod = this.resolveModule(n.argument.arguments[0].value);
+          if (mod) this.directExternalRegs.push({ module: mod, name: null, method: cr.method, loc: this.loc(cr.node) });
+        } else if (n.argument.type === 'Identifier') {
+          const rb = this.cleanBinding(this.canonName(n.argument.name));
+          if (rb && (rb.kind === 'require' || rb.kind === 'requireMember') && rb.module !== null) {
+            this.directExternalRegs.push({ module: rb.module, name: rb.kind === 'requireMember' ? rb.name : null, method: cr.method, loc: this.loc(cr.node) });
+          }
+        }
+      }, { topLevel: false, conds: [], src: this.src });
     }
     // Object.defineProperty(auth, 'guardA', ...) — a descriptor/property API
     // rewriting an imported module's members is an import write like any
@@ -842,6 +888,17 @@ class ModuleAnalysis {
     for (const r of this.registrations) {
       if (r.objectNode) r.object = this.resolveMemberChain(r.objectNode) || '<member>';
       else r.object = this.canonName(r.object);
+      if (r.object === '<member>' && r.objectNode
+        && (r.objectNode.type === 'MemberExpression' || r.objectNode.type === 'OptionalMemberExpression')) {
+        // `holder.api.get(...)` where holder = { api: require('./routes/x') }
+        // — the required module IS the receiver; route it through the sweep.
+        const hp = memberPropName(r.objectNode);
+        const hbName = this.resolveMemberChain(r.objectNode.object);
+        const hb = hbName ? this.bindings.get(hbName) : null;
+        if (hp && hb && hb.kind === 'object' && hb.requireProps && hb.requireProps.has(hp)) {
+          this.externalRouterRegs.push({ module: hb.requireProps.get(hp), name: null, method: r.method, loc: this.loc(r.node) });
+        }
+      }
       if (r.object === '<member>' && r.objectNode) {
         // `app._router.get('/leak', h)` — an unresolved member chain ROOTED
         // at a known app/router registers real surface through internal
@@ -1003,6 +1060,12 @@ class ModuleAnalysis {
           // away from what scan() walks. A side-effect module can do this
           // too, so the finding is sweep-visible.
           this.pushSweepProblem(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got ${passed.join(', ')} — the scanner walks the app, so the process must serve it`);
+        }
+        if (entry.appOnly && importedArgs.length) {
+          // An IMPORTED binding handed to an app-only consumer may be a
+          // second exported app — judged in the sweep once mounted surface
+          // is known (an imported options object stays silent).
+          for (const ia of importedArgs) this.externalAppPasses.push({ ...ia, consumer: entry.name, loc: this.loc(call) });
         }
         return true;
       };
@@ -1219,13 +1282,16 @@ class ModuleAnalysis {
       // `const holder = { router }` — model identifier-valued properties so
       // holder.router.get(...) can be attributed to the router.
       const props = new Map();
+      const requireProps = new Map(); // key -> module: { api: require('./x') }
       for (const p of init.properties) {
-        if (p.type === 'ObjectProperty' && !p.computed
-          && p.key.type === 'Identifier' && p.value.type === 'Identifier') {
-          props.set(p.key.name, p.value.name);
+        if (p.type !== 'ObjectProperty' || p.computed || p.key.type !== 'Identifier') continue;
+        if (p.value.type === 'Identifier') props.set(p.key.name, p.value.name);
+        else if (isRequireCall(p.value)) {
+          const mod = this.resolveModule(p.value.arguments[0].value);
+          if (mod) requireProps.set(p.key.name, mod);
         }
       }
-      this.setBinding(name, { kind: 'object', props, node: init, topLevel });
+      this.setBinding(name, { kind: 'object', props, requireProps, node: init, topLevel });
     } else if (init && init.type === 'MemberExpression' && !init.computed && isRequireCall(init.object)) {
       this.setBinding(name, {
         kind: 'requireMember',
@@ -1578,6 +1644,13 @@ class ModuleAnalysis {
           // but one delegating to a captured router is never plain middleware.
           const delegated = b.node ? this.routerReferencedIn(b.node) : null;
           if (delegated) return [{ type: 'opaque', desc: `${node.name} (delegates to router ${delegated})` }];
+          // Named or not, the BODY is identity — editing an approved
+          // responder must break its allowlist key (same rule as inline).
+          if (b.node) {
+            const h = crypto.createHash('sha256')
+              .update(this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ')).digest('hex').slice(0, 8);
+            return [{ type: 'middleware', desc: `${node.name}#${h}` }];
+          }
           return [{ type: 'middleware', desc: node.name }];
         }
         if (b.kind === 'call') {
@@ -1618,7 +1691,15 @@ class ModuleAnalysis {
           // what anonymous requests can retrieve, so changing them must
           // force allowlist re-review like changing the root.
           for (const opt of node.arguments.slice(1)) {
-            desc += `, ${predicateLabel(this.src.slice(opt.start, opt.end))}`;
+            // An identifier-bound options object resolves to its INITIALIZER
+            // — editing `opts` must break the key like editing an inline
+            // object literal would.
+            if (opt.type === 'Identifier') {
+              const ob = this.cleanBinding(this.canonName(opt.name));
+              desc += `, ${opt.name} = ${ob && ob.node ? predicateLabel(this.src.slice(ob.node.start, ob.node.end)) : '<unresolved>'}`;
+            } else {
+              desc += `, ${predicateLabel(this.src.slice(opt.start, opt.end))}`;
+            }
           }
           return [{ type: 'static', desc }];
         }
@@ -1930,6 +2011,30 @@ class Scanner {
           this.problems.push(`${x.loc}: the router exported by ${x.module} is passed to an unanalysed function — the scanner cannot see routes the helper may register; register them in ${x.module} (or add a reviewed routerConsumers entry)`);
         }
       }
+      // An IMPORTED binding handed to an app-only consumer is a problem when
+      // the module's export resolves to a tracked express() application —
+      // the process would serve a second app the walk never opens.
+      for (const x of m.externalAppPasses || []) {
+        let t = this.modules.has(x.module) ? this.modules.get(x.module) : null;
+        if (!t && this.exists(x.module)) {
+          // The exporting module need not be mounted — analyze it directly.
+          try { t = new ModuleAnalysis(x.module, this.read(x.module), this); } catch {
+            this.problems.push(`${x.loc}: ${x.consumer} received an import from ${x.module}, which the scanner cannot analyze — fail closed`);
+            continue;
+          }
+        }
+        if (!t) continue;
+        let exported = null;
+        if (x.name) {
+          const exp = t.exportLookup(x.name);
+          exported = exp.kind === 'ident' ? t.canonName(exp.name) : null;
+        } else {
+          exported = t.exportedRouter;
+        }
+        if (exported && t.apps.has(exported)) {
+          this.problems.push(`${x.loc}: ${x.consumer} received the application exported by ${x.module} — only the scanned root app may be served`);
+        }
+      }
       // A consumer overwriting a REGISTERED guard/passthrough export rewrites
       // what every other importer receives — reject the write itself.
       for (const w of m.importMemberWrites || []) {
@@ -2098,7 +2203,7 @@ class Scanner {
             this.routes.push(this.makeRoute({
               method: 'USE', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...ownGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
-              resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
+              resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: joinConds([ctx.mountCond, reg.cond]), extra: middlewareDescs.join(' + '), loc: m.loc(reg.node),
             }));
           }
           if (routerRefs.length === 0 && statics.length === 0) {
@@ -2120,7 +2225,7 @@ class Scanner {
             this.routes.push(this.makeRoute({
               method: 'STATIC', fullPath: scope, routerFile: m.file, mountPrefix: ctx.mountLabel,
               guards: [...ctx.mountGuards, ...s.precedingGuards.map((g) => ({ ...g, baseScope: scope })), ...inEffectFor(scope)],
-              resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, extra: s.desc, loc: m.loc(reg.node),
+              resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: joinConds([ctx.mountCond, reg.cond]), extra: s.desc, loc: m.loc(reg.node),
             }));
           }
           for (const ref of routerRefs) {
@@ -2135,7 +2240,7 @@ class Scanner {
               // the predicate chain rides into their identities so moving or
               // re-predicating the mount forces re-review.
               mountConditional: ctx.mountConditional || !reg.topLevel,
-              mountCond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null,
+              mountCond: joinConds([ctx.mountCond, reg.cond]),
               mountLabel: scope,
               mountRouter: ref.type === 'router' ? ref.module : m.file,
             };
@@ -2168,7 +2273,7 @@ class Scanner {
             ...(paramVoided ? [] : ownGuards).map((g) => ({ ...g, baseScope: ctx.prefix })),
             ...(reg.topLevel ? inEffectGuards(inEffect, fullPath) : []),
           ],
-          resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: [ctx.mountCond, reg.cond].filter(Boolean).join(' && ') || null, loc: m.loc(reg.node),
+          resolved: pathResolved, conditional: ctx.mountConditional || !reg.topLevel, cond: joinConds([ctx.mountCond, reg.cond]), loc: m.loc(reg.node),
         }));
       }
     }

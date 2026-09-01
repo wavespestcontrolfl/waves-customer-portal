@@ -2002,6 +2002,129 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
   });
 
+  test('a REQUIRE-VALUED holder property (holder.api = require(...)) routes through the sweep', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "const holder = { api: require('../routes/x') };",
+        "holder.api.get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test("REPLACING a server's 'request' listener is a problem", () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          'const server = http.createServer(app);',
+          "server.removeAllListeners('request');",
+          "server.on('request', (req, res) => { res.end('leak'); });",
+          'server.listen(3000);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes("on the 'request' event"))).toBe(true);
+  });
+
+  test('a NAMED local responder carries a body digest in its identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'function responder(req, res, next) { next(); }',
+        "app.use('/a', responder);",
+      ].join('\n')),
+    });
+    const a = res.publicRoutes.find((r) => r.path === '/a');
+    expect(a.extra).toMatch(/responder#[0-9a-f]{8}/);
+  });
+
+  test('a helper RETURNING a required module (return require(...)) routes through the sweep', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "function current() { return require('../routes/x'); }",
+        "current().get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a DYNAMIC import() in a server module is a problem, never silence', () => {
+    const res = scanOf({
+      'server/index.js': app("require('./services/installer');"),
+      'server/services/installer.js': "import('./routes/x.js').then((m) => m.default.get('/leak', (req, res) => res.json({})));",
+    });
+    expect(res.problems.some((p) => p.includes('dynamic import()'))).toBe(true);
+  });
+
+  test('an IMPORTED second app handed to an appOnly consumer is caught by the sweep', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app("require('./services/side');"),
+        'server/apps/live.js': [
+          "const express2 = require('express');",
+          'const live = express2();',
+          "live.get('/leak', (req, res) => res.json({}));",
+          'module.exports = live;',
+        ].join('\n'),
+        'server/services/side.js': [
+          "const http = require('http');",
+          "const live = require('../apps/live');",
+          'http.createServer(live);',
+        ].join('\n'),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('received the application exported by'))).toBe(true);
+  });
+
+  test('NESTED conditions serialize unambiguously (never colliding with a flat spelling)', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const a = process.env.A;',
+        'const b = process.env.B;',
+        'const c = process.env.C;',
+        "if (a) { if (b || c) { app.get('/debug', (req, res) => res.json({})); } }",
+        "if (a && b || c) { app.get('/debug2', (req, res) => res.json({})); }",
+      ].join('\n')),
+    });
+    const nested = res.publicRoutes.find((r) => r.path === '/debug');
+    const flat = res.publicRoutes.find((r) => r.path === '/debug2');
+    expect(nested.cond).toBe('(a) && (b || c)');
+    expect(flat.cond).toBe('a && b || c');
+  });
+
+  test('an IDENTIFIER-BOUND static options object resolves to its initializer in the identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const opts = { dotfiles: 'allow' };",
+        "app.use('/files', express.static('public', opts));",
+      ].join('\n')),
+    });
+    const st = res.publicRoutes.find((r) => r.path === '/files');
+    expect(st.extra).toContain("opts = { dotfiles: 'allow' }");
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',
