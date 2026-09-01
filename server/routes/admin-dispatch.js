@@ -5357,8 +5357,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const techTipsFreeze = gateEnvValue('GATE_TECH_TIPS')
       ? freezeTechTips(req.body?.techTips)
       : { tips: [], dropped: [] };
-    for (const drop of techTipsFreeze.dropped) {
-      logger.warn(`[tech-tips] custom tip dropped on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
+    // A custom line the customer-copy screen refuses (or one over the cap
+    // from a client that didn't count it) is an actionable 400 BEFORE any
+    // write: the tech was told the tip goes on the report, so it must not
+    // quietly vanish from the freeze.
+    if (techTipsFreeze.dropped.length) {
+      const drop = techTipsFreeze.dropped[0];
+      logger.warn(`[tech-tips] custom tip rejected on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
+      const overCap = drop.violations.includes('over_cap');
+      return res.status(400).json({
+        error: overCap
+          ? 'Your own tip needs a free slot — three tips is the limit. Remove one, then complete.'
+          : `Your own tip needs different wording before the report can print it (flagged: ${drop.violations.join(', ')}). Reword it, then complete.`,
+        code: overCap ? 'TECH_TIP_OVER_CAP' : 'TECH_TIP_COPY_REJECTED',
+        techTip: { copy: drop.copy, violations: drop.violations },
+      });
     }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),

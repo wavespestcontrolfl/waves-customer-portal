@@ -168,6 +168,12 @@ describe('completion freeze contract', () => {
     const block = source.slice(start, source.indexOf("\nrouter.", start + 1));
     expect(block).toContain('freezeTechTips(req.body?.techTips)');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
+    // a rejected custom line is an actionable 400 before any write, never a silent drop
+    const reject = block.indexOf('if (techTipsFreeze.dropped.length) {');
+    expect(reject).toBeGreaterThan(-1);
+    expect(block.slice(reject, reject + 900)).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_COPY_REJECTED/);
+    // …and it happens before the completion transaction / idempotency claim
+    expect(reject).toBeLessThan(block.indexOf('rawIdempotencyKey'));
     // the kill switch holds on the write path too
     expect(block).toMatch(/gateEnvValue\('GATE_TECH_TIPS'\)\s*\n?\s*\? freezeTechTips/);
     // ids resolve server-side — the client's copy never reaches the freeze
