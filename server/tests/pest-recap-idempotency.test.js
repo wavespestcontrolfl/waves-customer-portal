@@ -122,7 +122,7 @@ function makeKnex(store) {
       // columnInfo probe still throws, keeping the tier snapshot in its
       // legacy (empty) shape for these tests.
       ...(table === 'service_records'
-        ? { columnInfo: jest.fn(async () => ({ structured_notes: {}, recap_sms_sent_at: {} })) }
+        ? { columnInfo: jest.fn(async () => ({ structured_notes: {}, recap_sms_sent_at: {}, service_id: {}, service_type: {} })) }
         : {}),
       del: jest.fn(() => {
         if (table === 'service_products') {
@@ -151,6 +151,9 @@ function makeKnex(store) {
             id: latest.id,
             recap_sms_sent_at: latest.recap_sms_sent_at,
             structured_notes: latest.structured_notes || null,
+            status: latest.status || null,
+            service_id: latest.service_id || null,
+            service_type: latest.service_type || null,
           }
           : undefined;
       }
@@ -225,6 +228,9 @@ function makeKnex(store) {
   });
 
   knex.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+  // The atomic guarded snapshot merge passes a raw jsonb expression as the
+  // update value; visit-group seams also probe raw (advisory locks).
+  knex.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 
   knex.transaction = jest.fn(async (cb) => {
     const result = await cb(knex);
@@ -1196,11 +1202,12 @@ describe('pest-recap: closeout requirements freeze wiring', () => {
     };
     const result = await submit(baseArgs(makeKnex(store)));
     expect(result.ok).toBe(true);
+    // ATOMIC guarded jsonb key merge (GH codex r2 P1) — never a
+    // whole-column rewrite that could erase a concurrent writer's keys.
     const patch = (store.recordUpdates || []).find((p) => p.structured_notes);
     expect(patch).toBeTruthy();
-    const notes = JSON.parse(patch.structured_notes);
-    expect(notes.visitOutcome).toBe('performed');
-    expect(notes.closeoutRequirements).toMatchObject({ frozenAt: '2026-08-31T12:00:00.000Z' });
+    expect(patch.structured_notes.sql).toContain("jsonb_build_object('closeoutRequirements'");
+    expect(JSON.parse(patch.structured_notes.bindings[0])).toMatchObject({ frozenAt: '2026-08-31T12:00:00.000Z' });
   });
 
   test('an existing freeze (e.g. from /complete) is NEVER overwritten', async () => {
@@ -1217,5 +1224,49 @@ describe('pest-recap: closeout requirements freeze wiring', () => {
     const result = await submit(baseArgs(makeKnex(store)));
     expect(result.ok).toBe(true);
     expect((store.recordUpdates || []).some((p) => p.structured_notes)).toBe(false);
+  });
+});
+
+describe('pest-recap: freeze identity (GH codex r2 P2)', () => {
+  const { submitRecap: submit } = require('../services/pest-recap');
+  const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
+  const baseArgs = (knex) => ({
+    serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1',
+    technicianNotes: 'Treated.', products: [], customerRecap: 'Service complete.',
+    sendSms: false, knex,
+  });
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test("a re-recap of a COMPLETED record freezes the record's historical identity, not the repointed scheduled row", async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{
+        id: 'rec-old',
+        recap_sms_sent_at: null,
+        structured_notes: JSON.stringify({ visitOutcome: 'performed' }),
+        status: 'completed',
+        service_id: 'cat-historical',
+        service_type: 'WDO Inspection Service',
+      }],
+    };
+    const result = await submit(baseArgs(makeKnex(store)));
+    expect(result.ok).toBe(true);
+    expect(resolveCloseoutRequirementsSnapshotForCompletion).toHaveBeenCalledWith(expect.objectContaining({
+      catalogServiceId: 'cat-historical',
+      serviceType: 'WDO Inspection Service',
+    }));
+  });
+
+  test('a recap that IS the completion freezes the locked visit identity (no prior record)', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const result = await submit(baseArgs(makeKnex(store)));
+    expect(result.ok).toBe(true);
+    // No completed record ⇒ the locked/scheduled row's identity decides
+    // (the harness's lock read carries no service fields, so both null —
+    // the point pinned is that it did NOT come from a record).
+    expect(resolveCloseoutRequirementsSnapshotForCompletion).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: SERVICE_ID,
+    }));
   });
 });

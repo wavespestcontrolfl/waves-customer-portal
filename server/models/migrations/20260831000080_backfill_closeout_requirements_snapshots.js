@@ -24,6 +24,16 @@
  *
  * down(): removes ONLY backfilled snapshots (source guard) — a true
  * completion-time freeze is never deleted.
+ *
+ * Rollout-window note (GH codex r2): migrations run pre-deploy, so an OLD
+ * pod can commit a snapshot-less completion between this pass and the pod
+ * cutover. Such rows stay on the explicitly labeled `current_catalog`
+ * fallback (visible, not silent) and are healed by any later
+ * recap/project retry's merge-if-absent. Because up() is a guarded
+ * idempotent fixed point, it can also simply be RE-RUN post-rollout as
+ * the catch-up — e.g. `railway run --service Postgres node -e
+ * "require('./server/models/migrations/20260831000080_backfill_closeout_requirements_snapshots').up(<knex>)"`
+ * — with no risk to rows already frozen.
  */
 const {
   resolveCloseoutRequirementsForJobs,

@@ -161,6 +161,11 @@ function frozenCloseoutRequirements(structuredNotes) {
     requiresLicense: snap.requiresLicense,
     licenseCategory: snap.licenseCategory || null,
     source: snap.source,
+    // Backfilled snapshots record the original verdict's provenance here
+    // (migration 20260831000080) — passed through so status classification
+    // can still tell a catalog-backed rule from a fallback guess
+    // (GH codex r2 P2).
+    catalogSource: snap.catalogSource || null,
     frozen: true,
     frozenAt: snap.frozenAt || null,
   };

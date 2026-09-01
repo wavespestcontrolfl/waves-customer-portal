@@ -798,6 +798,23 @@ async function completeProjectBackedService({
       }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
     } else {
+      // Visit lock FIRST (repo lock order: scheduled_services →
+      // service_records — /complete and recap do the same, and inverting
+      // it can deadlock a concurrent completion), then a FRESH re-read of
+      // the record (GH codex r2 P1): a /complete that committed while we
+      // waited on this lock wrote its own structured_notes freeze, and an
+      // update built from the pre-lock row would serialize stale notes
+      // back over it.
+      const lockedVisit = await trx('scheduled_services')
+        .where({ id: scheduledService.id })
+        .forUpdate()
+        .first('id', 'service_id', 'service_type')
+        .catch(() => null);
+      const freshRecord = await trx('service_records')
+        .where({ id: serviceRecord.id })
+        .first()
+        .catch(() => null);
+      if (freshRecord) serviceRecord = freshRecord;
       const update = buildServiceRecordProjectCompletionUpdate({
         serviceRecord,
         project: { ...project, report_token: token },
@@ -808,23 +825,22 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
-      // Visit lock + snapshot resolution BEFORE any service_records write
-      // (pre-push P1): /complete and recap take scheduled_services →
-      // service_records; writing the record first here inverts that order
-      // and can deadlock a concurrent completion.
       let closeoutSnap = null;
       if (serviceRecordCols.structured_notes
         && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {
-        const lockedVisit = await trx('scheduled_services')
-          .where({ id: scheduledService.id })
-          .forUpdate()
-          .first('id', 'service_id', 'service_type')
-          .catch(() => null);
+        // Identity (GH codex r2 P2): a retry on a record that already
+        // completed freezes the RECORD's own historical identity —
+        // update-details may have repointed the scheduled row after the
+        // original completion. A first completion uses the LOCKED row.
+        const identity = (String(serviceRecord.status || '') === 'completed'
+          && (serviceRecord.service_id || serviceRecord.service_type))
+          ? serviceRecord
+          : (lockedVisit || scheduledService);
         closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
           trx,
           serviceId: scheduledService.id,
-          catalogServiceId: (lockedVisit || scheduledService).service_id || null,
-          serviceType: (lockedVisit || scheduledService).service_type || null,
+          catalogServiceId: identity.service_id || null,
+          serviceType: identity.service_type || null,
         });
       }
       if (Object.keys(update).length) {
@@ -839,20 +855,18 @@ async function completeProjectBackedService({
       // row value — never a serialization of a pre-lock read — so a
       // concurrent /complete freeze wins and is never overwritten
       // (first-freeze-wins; pre-push codex P1).
-      {
-        if (closeoutSnap) {
-          const [refreshed] = await trx('service_records')
-            .where({ id: serviceRecord.id })
-            .whereRaw(`(structured_notes -> 'closeoutRequirements') IS NULL`)
-            .update({
-              structured_notes: trx.raw(
-                `COALESCE(structured_notes, '{}'::jsonb) || jsonb_build_object('closeoutRequirements', ?::jsonb)`,
-                [JSON.stringify(closeoutSnap)],
-              ),
-            })
-            .returning('*');
-          if (refreshed) serviceRecord = refreshed;
-        }
+      if (closeoutSnap) {
+        const [refreshed] = await trx('service_records')
+          .where({ id: serviceRecord.id })
+          .whereRaw(`(structured_notes -> 'closeoutRequirements') IS NULL`)
+          .update({
+            structured_notes: trx.raw(
+              `COALESCE(structured_notes, '{}'::jsonb) || jsonb_build_object('closeoutRequirements', ?::jsonb)`,
+              [JSON.stringify(closeoutSnap)],
+            ),
+          })
+          .returning('*');
+        if (refreshed) serviceRecord = refreshed;
       }
     }
 

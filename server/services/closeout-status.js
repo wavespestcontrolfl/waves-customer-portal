@@ -546,6 +546,12 @@ function deriveCloseoutFacts(inputs) {
   // it replays the completion-time snapshot, 'catalog' when the live catalog
   // still decides (pre-freeze records). Reasons stay stable either way.
   const requirementsRuleSource = requirements?.frozen ? 'frozen_record' : 'catalog';
+  // A backfilled snapshot's own source is the generic backfill marker; the
+  // ORIGINAL verdict provenance rides in catalogSource (GH codex r2 P2) —
+  // low-confidence classification must see through the wrapper.
+  const underlyingRequirementsSource = requirements
+    ? (requirements.catalogSource || requirements.source)
+    : null;
   const visitCompleted = Boolean(visit && COMPLETED_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()));
   const visitInactive = Boolean(visit && INACTIVE_VISIT_STATUSES.has(String(visit.status || '').toLowerCase()));
   const isBackfill = notes.backfill === true;
@@ -637,7 +643,7 @@ function deriveCloseoutFacts(inputs) {
   }
   else if (inputs.activeApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed');
   else if (inputs.activeApplicationCount > 0) application = fact('done', 'active_application_rows', { activeCount: inputs.activeApplicationCount, retractedCount: inputs.retractedApplicationCount ?? 0 });
-  else if (requirements.source === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: requirements.source });
+  else if (underlyingRequirementsSource === 'fallback_inference' && inputs.retractedApplicationCount === 0) application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0, lowConfidence: true, requirementsSource: underlyingRequirementsSource });
   else if (inputs.retractedApplicationCount == null) application = fact('unknown', 'application_history_lookup_failed', { activeCount: 0, detail: 'retracted-row lookup unavailable; cannot tell empty from all-retracted' });
   else if (inputs.retractedApplicationCount > 0) application = fact('failed', 'all_application_rows_retracted', { activeCount: 0, retractedCount: inputs.retractedApplicationCount });
   else application = fact('pending', 'no_application_rows', { activeCount: 0, retractedCount: 0 });
