@@ -1954,6 +1954,45 @@ function blankMarkdownImages(text) {
   return out.join('');
 }
 
+// Balanced blank of every element whose class/className is STATICALLY
+// hidden (hidden/invisible/sr-only with no viewport-breakpoint override —
+// quoted literal or escape-free static string expression), mirroring the
+// vendored astro predicate: a CTA a reader cannot see is no CTA
+// (Codex #3646 r27 P1). Length-preserving; dynamic classes stay visible
+// (historic posture); tag walking is expression-string-safe.
+function blankStaticHiddenClassElements(text) {
+  const s = String(text || '');
+  const out = s.split('');
+  const balanceSrc = blankExpressionStringLiterals(s);
+  const openRe = /<([A-Za-z][\w-]*)\b/g;
+  let m;
+  while ((m = openRe.exec(balanceSrc)) !== null) {
+    const name = m[1];
+    const attrs = tagAttrsAt(s, m.index);
+    if (attrs === null || /\/\s*$/.test(attrs)) continue;
+    let cls = null;
+    for (const a of eachJsxAttr(attrs)) {
+      const n = a.name.toLowerCase();
+      if (n !== 'class' && n !== 'classname') continue;
+      cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
+    }
+    if (cls === null) continue;
+    if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) continue;
+    if (/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls)) continue;
+    const tagRe = new RegExp('<(\\/?)' + name + '\\b', 'gi');
+    tagRe.lastIndex = m.index + 1 + name.length + attrs.length + 1;
+    let depth = 1; let t; let closeEnd = -1;
+    while ((t = tagRe.exec(balanceSrc)) !== null) {
+      if (t[1] === '/') { depth -= 1; if (depth === 0) { const gt = balanceSrc.indexOf('>', t.index); closeEnd = gt === -1 ? balanceSrc.length - 1 : gt; break; } }
+      else { const a2 = tagAttrsAt(s, t.index); if (a2 !== null && !/\/\s*$/.test(a2)) depth += 1; }
+    }
+    if (closeEnd === -1) continue;
+    for (let k = m.index; k <= closeEnd; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    openRe.lastIndex = closeEnd + 1;
+  }
+  return out.join('');
+}
+
 // True when the body already carries a Waves service CTA — an allowlisted
 // CTA route or a real /{service}-{city}-fl/ page (validated against the
 // published-city set, same as internalRouteFinding).
@@ -1974,7 +2013,9 @@ function hasServiceCtaLink(body) {
   // MDX expressions are blanked from the structural view too (parity with
   // the astro validator): {true && <InlineCTA/>} can only render a
   // component, never a Markdown CTA, and must not satisfy the rule.
-  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(prefix))))))
+  // Static-hidden-class blanking runs FIRST: it must read attr
+  // expressions ({'sr-only'}) before blankExpressions erases them.
+  const rendered = blankMarkdownImages(blankLinkDefinitionsAndTitles(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(blankStaticHiddenClassElements(prefix)))))))
     .replace(/<img\b[^>]*>/gi, (m) => ' '.repeat(m.length));
   // Attr-masked view: link- or tag-shaped text inside a JSX attribute
   // (title="[q](/quote/)", title="<InlineCTA />") renders nothing — the
@@ -2243,10 +2284,27 @@ function tolerantStaticJson(text) {
         out += ch;
       }
     }
-    // Ordinary JS identifier keys ({ name: 'x' }) become quoted JSON keys
-    // (astro parity — Codex #3646 r25).
-    const keyed = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
-    return { value: JSON.parse(keyed.replace(/,\s*([\]}])/g, '$1')) };
+    // Identifier keys become quoted JSON keys — OUTSIDE string spans only
+    // (astro segmenter parity, Codex #3646 r27): key-shaped prose inside a
+    // value ({foo: bar} in a name) is never rewritten. Trailing commas
+    // dropped the same way.
+    const segs = [];
+    let seg = '';
+    let inStr = false;
+    for (let k = 0; k < out.length; k += 1) {
+      const ch2 = out[k];
+      if (inStr) {
+        seg += ch2;
+        if (ch2 === '\\') { seg += out[k + 1] || ''; k += 1; continue; }
+        if (ch2 === '"') { inStr = false; segs.push(seg); seg = ''; }
+        continue;
+      }
+      if (ch2 === '"') { segs.push(seg); seg = ch2; inStr = true; continue; }
+      seg += ch2;
+    }
+    segs.push(seg);
+    const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/,\s*([\]}])/g, '$1'))).join('');
+    return { value: JSON.parse(keyed) };
   } catch (_) { return undefined; }
 }
 

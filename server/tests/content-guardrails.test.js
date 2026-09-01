@@ -805,6 +805,24 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('string-safe key quoting; statically hidden Tailwind CTAs never count (Codex #3646 r27)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // Key-shaped prose INSIDE a string value never corrupts the parse —
+      // the invalid risk still flags.
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: '{foo: bar}', risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      // A CTA inside a statically hidden Tailwind wrapper never satisfies
+      // the rule; a responsive-visible wrapper still does.
+      for (const hid of ['<div class="hidden">[quote](/quote/)</div>', '<div className="invisible">[quote](/quote/)</div>', "<div className={'sr-only'}><InlineCTA /></div>"]) {
+        const b = `Intro.\n\n## Sec\n\n${hid}\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+      const responsive = `Intro.\n\n## Sec\n\n<div class="hidden md:block">[quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: responsive, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+    });
+  });
+
   test('escape decoding; SpiderIdBoard citations via exact required sources (Codex #3646 r26)', () => {
     const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
     const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
