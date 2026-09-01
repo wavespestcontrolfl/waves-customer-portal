@@ -2164,7 +2164,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips.slice(0, 3)).toEqual([
       'How do you get rid of German roaches?',
       'How long until the roaches are gone?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ]);
     expect(payload.askChips).not.toContain('How do you handle ants?');
     expect(payload.askChips).not.toContain('Can you treat inside?');
@@ -2261,6 +2261,15 @@ describe('public estimate one-time breakdown', () => {
       .toBe('mosquito');
     expect(deriveServiceCategory({}, [{ service: 'lawn_care', name: 'Lawn Care' }], [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }]))
       .toBe('bundle');
+  });
+
+  test.each([
+    [{ service: 'wdo_inspection', name: 'WDO Inspection' }, 'wdo_inspection'],
+    [{ service: 'termite_foam', name: 'Termidor Foam Spot Treatment' }, 'termite_foam'],
+    [{ service: 'trap_only_retainer', name: 'Standard Trap-Only Monitoring Retainer' }, 'trap_only'],
+    [{ service: 'trap_only_setup', name: 'Trap-Only Setup / Inspection' }, 'trap_only'],
+  ])('specialty estimate row receives explicit customer category', (item, category) => {
+    expect(deriveServiceCategory({}, [], [item])).toBe(category);
   });
 
   test('quote-required frequencies preserve null pricing and roll up to pricing quote state', async () => {
@@ -3652,8 +3661,8 @@ describe('public estimate one-time breakdown', () => {
     // (so clicking it routes to the borate answer); never the bait/pest chips it
     // used to fall back to, and not the generic safety chip on a Bora-Care-only quote.
     expect(html).toContain('data-estimate-ask-prompt="What does Bora-Care treat?"');
-    expect(html).toContain('data-estimate-ask-prompt="Is Bora-Care safe for pets &amp; kids?"');
-    expect(html).not.toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).toContain('data-estimate-ask-prompt="What precautions should I follow with Bora-Care around pets and children?"');
+    expect(html).not.toContain('data-estimate-ask-prompt="What precautions should I follow for pets and children?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How do you handle ants?"');
 
@@ -3986,8 +3995,8 @@ describe('public estimate one-time breakdown', () => {
 
   test('buildEstimateAskPrompts uses the Bora-Care safety chip only for a Bora-Care-only quote', () => {
     const boraOnly = buildEstimateAskPrompts([], [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }]);
-    expect(boraOnly).toContain('Is Bora-Care safe for pets & kids?');
-    expect(boraOnly).not.toContain('Are pets and kids safe?');
+    expect(boraOnly).toContain('What precautions should I follow with Bora-Care around pets and children?');
+    expect(boraOnly).not.toContain('What precautions should I follow for pets and children?');
 
     // A positive non-Bora billable row (one_time_adjustment) makes it not
     // Bora-Care-only, so the generic safety chip is used instead.
@@ -3995,15 +4004,15 @@ describe('public estimate one-time breakdown', () => {
       { service: 'bora_care', name: 'Bora-Care', price: 1051 },
       { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
     ]);
-    expect(mixed).toContain('Are pets and kids safe?');
-    expect(mixed).not.toContain('Is Bora-Care safe for pets & kids?');
+    expect(mixed).toContain('What precautions should I follow for pets and children?');
+    expect(mixed).not.toContain('What precautions should I follow with Bora-Care around pets and children?');
 
     // A negative discount row does NOT block Bora-Care-only.
     const withDiscount = buildEstimateAskPrompts([], [
       { service: 'bora_care', name: 'Bora-Care', price: 1051 },
       { service: 'one_time_adjustment', name: 'WaveGuard Member Discount', price: -157.65 },
     ]);
-    expect(withDiscount).toContain('Is Bora-Care safe for pets & kids?');
+    expect(withDiscount).toContain('What precautions should I follow with Bora-Care around pets and children?');
   });
 
   test('React pricing contract surfaces the Bora-Care chip and friendly label for a recurring estimate with a Bora-Care add-on', () => {
@@ -6458,7 +6467,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Pick your first mosquito control visit');
     expect(html).toContain('One-Time Mosquito Treatment');
     expect(html).toContain('data-estimate-ask-prompt="How long does it last?"');
-    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).toContain('data-estimate-ask-prompt="What precautions should I follow for pets and children?"');
     expect(html).not.toContain('custom quote');
     expect(html).not.toContain('Find a date &amp; time that works for you');
     expect(html).not.toContain('What WaveGuard members get');
@@ -6674,7 +6683,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
-    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).toContain('data-estimate-ask-prompt="What precautions should I follow for pets and children?"');
     expect(html).toContain('data-estimate-ask-prompt="When am I charged?"');
   });
 

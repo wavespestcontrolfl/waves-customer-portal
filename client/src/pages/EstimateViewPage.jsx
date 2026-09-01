@@ -1753,11 +1753,15 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
     ? Number(breakdown.total)
     : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
   const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
+  const hasTrapOnlyMonitoring = items.some((item) => String(item?.service || '').startsWith('trap_only_'));
+  const sectionTitle = hasTrapOnlyMonitoring
+    ? (items.every((item) => String(item?.service || '').startsWith('trap_only_')) ? 'Trap-only monitoring plan' : 'Plan services and one-time work')
+    : 'One-time services';
 
   return (
     <div style={estimateCard({ padding: 16 })}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
-        One-time services
+        {sectionTitle}
       </div>
       <div style={{ display: 'grid', gap: 12 }}>
         {items.map((item, i) => {
@@ -3592,6 +3596,8 @@ function customerOneTimeLabel(item = {}) {
   const isTermiteInstall = item.service === 'termite_bait_installation'
     || /\b(advance|trelona)\s+installation\b/i.test(label);
   if (isTermiteInstall) return 'Termite Bait Installation';
+  if (item.service === 'wdo_inspection' || item.service === 'wdo') return 'WDO Inspection';
+  if (item.service === 'termite_foam' || item.service === 'foam_drill') return 'Termite Foam Treatment';
   return label || 'One-time service';
 }
 
@@ -5943,8 +5949,12 @@ function EstimateViewPageInner() {
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
   // Review-gated quotes get the confirm-with-you variant instead of
   // "approve online and pick a day" (codex P2 r3).
+  const serviceSpecificOneTimeHero = new Set([
+    'termite_trenching', 'pre_slab_termiticide', 'bora_care',
+    'wdo_inspection', 'termite_foam', 'trap_only',
+  ]).has(serviceCategory);
   const glassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
     : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via

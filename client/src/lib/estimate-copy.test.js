@@ -13,4 +13,14 @@ describe('estimate-copy', () => {
     expect(estimateCopyFor('not_a_category')).toBe(SERVICE_COPY.pest_control);
     expect(estimateCopyFor('bora_care')).toBe(SERVICE_COPY.bora_care);
   });
+
+  it.each(['wdo_inspection', 'termite_foam', 'trap_only'])('%s has dedicated customer copy', (category) => {
+    expect(estimateCopyFor(category)).toBe(SERVICE_COPY[category]);
+    expect(estimateCopyFor(category)).not.toBe(SERVICE_COPY.pest_control);
+  });
+
+  it('customer-facing quick questions make no blanket treatment-safety claim', () => {
+    const chips = Object.values(SERVICE_COPY).flatMap((copy) => copy.askChips || []);
+    expect(chips.join(' ')).not.toMatch(/\b(?:pet|kid|child).*safe|safe.*\b(?:pet|kid|child)/i);
+  });
 });

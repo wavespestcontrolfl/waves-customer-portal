@@ -298,10 +298,9 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
   });
 
   test('r2b: unclassifiable estimates fail closed under a scoped release', () => {
-    // e.g. a one-time WDO inspection: no engine-input mapping and the item
-    // classifier returns null — the derived default would be pest_control.
+    // WDO has explicit customer copy, but remains outside a pest/lawn release.
     const wdoItem = [{ service: 'wdo_inspection', name: 'WDO Inspection' }];
-    expect(deriveServiceCategory({}, [], wdoItem)).toBe('pest_control');
+    expect(deriveServiceCategory({}, [], wdoItem)).toBe('wdo_inspection');
     expect(glassCategoryEligible({}, [], wdoItem, PEST_LAWN_SCOPE)).toBe(false);
     expect(glassCategoryEligible({}, [], [], PEST_LAWN_SCOPE)).toBe(false);
   });

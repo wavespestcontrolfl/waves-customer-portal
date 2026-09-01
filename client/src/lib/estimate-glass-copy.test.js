@@ -8,6 +8,7 @@ import {
   glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
+  glassOneTimeHeroOverlay,
   glassPestInclusions,
   glassRewriteSlotSummary,
   glassRowInclusions,
@@ -109,6 +110,15 @@ describe('glassCtaMicroFor', () => {
     // Row-slug spelling of rodent resolves to the rodent pack's line.
     expect(glassCtaMicroFor('rodent_bait')).toBe(glassCtaMicroFor('rodent'));
     expect(glassCtaMicroFor('rodent')).not.toMatch(/callbacks/);
+  });
+});
+
+describe('glassOneTimeHeroOverlay', () => {
+  it('preserves explicit specialty-service headers while generic one-time work stays terms-neutral', () => {
+    setGlassDefault(true);
+    const wdo = glassEstimateCopyFor('wdo_inspection');
+    expect(glassOneTimeHeroOverlay(wdo, { preserveServiceHero: true }).heroH1).toMatch(/WDO inspection/i);
+    expect(glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control')).heroH1).toMatch(/service quote/i);
   });
 });
 

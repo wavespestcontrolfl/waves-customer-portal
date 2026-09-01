@@ -359,6 +359,25 @@ describe('ServiceSection', () => {
 });
 
 describe('OneTimeBreakdownCard', () => {
+  it('presents trap-only recurring monitoring as a monitoring plan', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 694, items: [
+      { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495 },
+      { service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection', amount: 199 },
+    ] }} />);
+    expect(screen.getByText('Trap-only monitoring plan')).toBeInTheDocument();
+    expect(screen.queryByText('One-time services')).not.toBeInTheDocument();
+  });
+
+  it('uses customer-friendly labels for WDO and termite foam keys', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 305, items: [
+      { service: 'wdo_inspection', label: 'wdo_inspection', amount: 125 },
+      { service: 'termite_foam', label: 'Termidor Foam Spot Treatment', amount: 180 },
+    ] }} />);
+    expect(screen.getByText('WDO Inspection')).toBeInTheDocument();
+    expect(screen.getByText('Termite Foam Treatment')).toBeInTheDocument();
+    expect(screen.queryByText('wdo_inspection')).not.toBeInTheDocument();
+  });
+
   it('shows quote-required specialty reasons instead of only the blocked price', () => {
     render(
       <OneTimeBreakdownCard

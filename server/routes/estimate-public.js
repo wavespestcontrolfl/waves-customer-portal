@@ -1962,7 +1962,7 @@ const SERVICE_COPY = {
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
     askChips: [
       'How long does each visit last?',
-      'Pet & kid safe?',
+      'What precautions should I follow for pets and children?',
       'When does the season start?',
       'What about my pool area?',
     ],
@@ -2043,7 +2043,7 @@ const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets & kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'What product is used for Bora-Care?',
       'When should this be done?',
     ],
@@ -2066,6 +2066,30 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for lawn care.",
     },
   },
+  wdo_inspection: {
+    headline: "Hey {first}, here's your WDO inspection quote.",
+    aiEyebrow: 'Your inspection',
+    aiTitle: 'Your WDO inspection was prepared for this property',
+    aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
+    askChips: ['What does the inspection cover?', 'When will I receive the report?', 'Is this the Florida WDO form?', 'How do I schedule the inspection?'],
+    priceWording: {},
+  },
+  termite_foam: {
+    headline: "Hey {first}, here's your termite foam treatment quote.",
+    aiEyebrow: 'Your treatment plan',
+    aiTitle: 'This quote was prepared for the targeted termite treatment area',
+    aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow?', 'How do I schedule the treatment?'],
+    priceWording: {},
+  },
+  trap_only: {
+    headline: "Hey {first}, here's your trap-only monitoring plan.",
+    aiEyebrow: 'Your monitoring plan',
+    aiTitle: 'This trap-only plan was prepared for your property',
+    aiBody: 'The plan separates the initial setup and inspection from the ongoing trap-monitoring service and its scheduled cadence.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',
@@ -2075,7 +2099,7 @@ const SERVICE_COPY = {
       'What is included in this plan?',
       'How do you handle ants?',
       'How does your lawn assessment tech work?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
@@ -2219,10 +2243,10 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
-const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+const SAFETY_ASK_CHIP = 'What precautions should I follow for pets and children?';
 // Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
 // borate-specific answer instead of the generic label-direction safety copy.
-const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+const BORA_CARE_SAFETY_ASK_CHIP = 'What precautions should I follow with Bora-Care around pets and children?';
 // Bora-Care service chip — shared between the SSR prompt builder and the React
 // pricing contract so a Bora-Care add-on surfaces it on both paths.
 const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
@@ -3174,6 +3198,9 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
@@ -18327,6 +18354,9 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'bundle': return 'Recurring services';
     default: return fallback || recurringServiceDisplayName(category) || 'Service';
   }
@@ -18358,6 +18388,9 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
+  if (service === 'wdo' || service === 'wdo_inspection' || service === 'termite_inspection') return 'wdo_inspection';
+  if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
+  if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
