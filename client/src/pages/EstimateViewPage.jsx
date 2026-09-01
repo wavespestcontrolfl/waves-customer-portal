@@ -4726,14 +4726,19 @@ function EstimateViewPageInner() {
   // server stamped its key addable — same optOut state and rail as a restore.
   // Never on a terminal/accepted page (the accept-time reprice is frozen);
   // the server never stamps `addable` on a staff draft preview.
+  // serviceOptOut.addable is the eligibility truth: the legacy ladder's pick
+  // is used only when the stamp covers it; otherwise the priced offer is
+  // built from the stamp — a ladder pick the server did not stamp must
+  // never hide a priced add-on behind the office inquiry (pre-push codex P1).
   const addableStamp = data?.serviceOptOut?.addable || [];
   const pricedAddOffer = data?.cta?.terminalState == null && addableStamp.length
     ? (addServiceOffer && addableStamp.some((a) => a?.key === addServiceOffer.serviceKey)
       ? addServiceOffer
-      : (addServiceOffer ? null : offerFromAddable(addableStamp)))
+      : offerFromAddable(addableStamp))
     : null;
-  // The card renders the priced offer even when the legacy ladder is silent.
-  const offerCardOffer = addServiceOffer || pricedAddOffer;
+  // The priced offer wins the card whenever one exists; the inquiry card is
+  // the fallback for mixes with no stamped add.
+  const offerCardOffer = pricedAddOffer || addServiceOffer;
   // Download PDF / Share / Print / Portal Login at the top of every estimate
   // render (owner ask 2026-07-09, live review screen) — the same shared bar
   // as the report/pay/receipt/contract pages. The PDF endpoint streams the
