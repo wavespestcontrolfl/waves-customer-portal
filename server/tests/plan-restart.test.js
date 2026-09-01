@@ -586,8 +586,33 @@ describe('mintRestartEstimate', () => {
     expect(stale).toEqual({ families: [], caseId: 'case-old', requestId: null, source: 'none' });
 
     // The portal attempt's own transition (stamped within the processor's
-    // slack of the request) stays live.
+    // slack of the request, carrying the processor's churn_reason literal)
+    // stays live.
     tables.customers[0].pipeline_stage_changed_at = '2026-08-23T12:30:00Z';
+    tables.customers[0].churn_reason = 'Customer cancellation request';
+    const live = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(live.families).toEqual(['pest_control']);
+  });
+
+  test('a reactivate + admin re-churn INSIDE the slack hour still refuses the portal attempt — the transition must be the processor\'s own (codex GH r24 P1)', async () => {
+    // Portal cancellation at noon, staff reactivate and re-churn through
+    // the editor at 12:30 — timestamps alone cannot tell the transitions
+    // apart, but the admin path stamps its own reason (or NULL), never the
+    // processor's literal.
+    tables.customers[0].churned_at = '2026-08-23';
+    tables.customers[0].pipeline_stage_changed_at = '2026-08-23T12:30:00Z';
+    tables.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-23T12:00:00Z',
+    }];
+    for (const adminReason of [null, 'Moved out of state']) {
+      tables.customers[0].churn_reason = adminReason;
+      const stale = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+      expect(stale).toEqual({ families: [], caseId: 'case-old', requestId: null, source: 'none' });
+    }
+
+    // The same instant stamped by the processor itself carries the literal
+    // — live.
+    tables.customers[0].churn_reason = 'Customer cancellation request';
     const live = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(live.families).toEqual(['pest_control']);
   });

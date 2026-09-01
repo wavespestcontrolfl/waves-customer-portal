@@ -113,7 +113,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   const anchorTs = current ? current.created_at : (latestRequest ? latestRequest.created_at : null);
   if (anchorTs) {
     try {
-      const row = await dbh('customers').where({ id: customerId }).first('churned_at', 'pipeline_stage_changed_at');
+      const row = await dbh('customers').where({ id: customerId }).first('churned_at', 'pipeline_stage_changed_at', 'churn_reason');
       const staleAttempt = () => ({ families: [], caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'none' });
       const transitionMs = row && row.pipeline_stage_changed_at ? new Date(row.pipeline_stage_changed_at).getTime() : NaN;
       if (!Number.isNaN(transitionMs)) {
@@ -125,6 +125,23 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
         // churned row it IS the current transition. The attempt must land
         // within the processor's stamping slack of that instant, or later.
         if (new Date(anchorTs).getTime() < transitionMs - ATTEMPT_SLACK_MS) return staleAttempt();
+        // PROVENANCE binding (codex GH r24 P1 — the slack hour still
+        // admitted a reactivate + admin re-churn inside it): the transition
+        // must be the PROCESSOR'S OWN. The processor is the only writer of
+        // the literal CHURN_REASON on customers.churn_reason, and it writes
+        // it exactly when IT performs the churn transition (never on an
+        // already-churned row); the admin stage paths and the IB bulk move
+        // write the admin's text or NULL on a fresh churn, and every
+        // reactivation (stageLifecycleStamps, promoteCustomerOnBooking, the
+        // bulk mirror) clears it. So a churned row without the literal was
+        // churned by staff, not by the latest portal attempt — FAIL CLOSED.
+        // Deliberately also closed: a portal request filed against an
+        // account staff had ALREADY churned (the processor leaves the
+        // admin's reason in place), and a same-stage admin annotation that
+        // overwrote the literal — both are staff-quoted through normal
+        // tooling.
+        const { CHURN_REASON: processorChurnReason } = require('../cancellation-processor');
+        if (row.churn_reason !== processorChurnReason) return staleAttempt();
       } else {
         // Legacy rows without the stamp: churned_at (a pg DATE) allows
         // only day-level proximity — one-day tolerance for a request
