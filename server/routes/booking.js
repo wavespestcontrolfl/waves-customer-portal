@@ -2698,8 +2698,15 @@ async function createSelfBooking(payload = {}) {
       // stamps at scheduling, same as the seeded series rows below.
       // Gate-checked + best-effort + self-refusing inside maybeGroupRow
       // (savepoint on the trx — a grouping failure never poisons the
-      // booking); inert until property linkage stamps property_id, then
-      // completed by the estimate-property-linkage regroup pass.
+      // booking). Automatic grouping needs BOTH a catalog identity
+      // (services.groupable / group_family via service_id) and a property
+      // anchor: estimate-backed rows gain both downstream (converter
+      // catalog relink + the estimate-property-linkage regroup pass);
+      // non-estimate self-books carry no service_id by design — the
+      // catalog resolver refuses to guess a row from a funnel label
+      // (wrong identity = wrong billing/completion profile) — so they
+      // stay ungrouped until a catalog-linkage lane stamps them
+      // (GH codex #3699 r6 P2: a deliberate skip, not an oversight).
       {
         const { maybeGroupRow } = require('../services/visit-groups');
         await maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });

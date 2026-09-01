@@ -180,8 +180,11 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     );
     expect(cardHoldReminderLine).toHaveBeenCalledWith('svc-1');
     expect(cardHoldReminderLine).toHaveBeenCalledWith('svc-2');
-    // Both rows closed their own 24h flag (owner post-send, loser covered).
-    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(2);
+    // After the send the owner closes EVERY member row of the occurrence
+    // (both visitMemberRows — GH codex r6 P2: an armed sibling split off
+    // before its own iteration would otherwise resend), then its own flag;
+    // the covered loser still runs its own guarded close.
+    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(4);
     cardHoldReminderLine.mockImplementation(async () => '');
   });
 
@@ -270,6 +273,39 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
       { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
     );
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+  });
+
+  test('retryable provider failure on the grouped send, no fallback delivery: claim released as retryable, row unmarked — never suppressed (GH codex r6 P1)', async () => {
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
+    // Twilio 5xx-shaped outcome; the customer has no email on file, so the
+    // fallback email cannot deliver either.
+    sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'PROVIDER_ERROR' });
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(result.sent24h).toBe(0);
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledTimes(1);
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+      VISIT, 'reminder_24h', 'retry', expect.any(Date), 'tok-1',
+      { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
+    );
+    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+  });
+
+  test('deterministic non-delivery (not retryable) still finalizes suppressed and closes the row', async () => {
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'OPTED_OUT' });
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+      VISIT, 'reminder_24h', 'suppressed', expect.any(Date), 'tok-1',
+      { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
+    );
+    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(1);
   });
 
   test('grouped copy inputs read SENDABLE members only: a pending-rebook sibling cannot set the advertised arrival (GH codex r5 P1)', async () => {

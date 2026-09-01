@@ -1117,12 +1117,15 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
 // appointment moved out from under this scan), and on any error: a
 // reminder with yesterday's label beats no reminder.
 /**
- * Durable sent-state fallback (pre-push codex P1): when the visit-effect
- * finalize FAILED after a real send, the effect stays `claimed` and a
- * sibling could reclaim-and-resend once the lease expires. Closing every
- * live member row for the tier removes the resend path entirely — no armed
- * row, no claim, no duplicate. Each close is appointment_time-guarded like
- * every other flag write, so a concurrent move's re-arm is never stomped.
+ * Close every live member row of the claimed occurrence after the visit's
+ * ONE send. Two resend paths this removes: a finalize that FAILED after a
+ * real send leaves the effect `claimed` and reclaimable once the lease
+ * expires (pre-push codex P1); and an armed sibling row split off the
+ * visit before its own loop iteration (canSplit permits splits after
+ * reminder effects) bypasses the claim entirely and texts the same tier
+ * again (GH codex r6 P2). No armed row, no claim, no duplicate. Each
+ * close is appointment_time-guarded like every other flag write, so a
+ * concurrent move's re-arm is never stomped.
  */
 async function closeVisitTierRows(visitId, tierCol, tierAtCol, { occurrenceDate = null } = {}) {
   try {
@@ -1143,7 +1146,7 @@ async function closeVisitTierRows(visitId, tierCol, tierAtCol, { occurrenceDate 
         .where('appointment_time', row.appointment_time)
         .update({ [tierCol]: true, [tierAtCol]: new Date() });
     }
-    logger.info(`[appt-remind] visit ${visitId}: effect finalize failed after send — closed ${rows.length} member row(s) for ${tierCol} as the durable sent state`);
+    logger.info(`[appt-remind] visit ${visitId}: closed ${rows.length} member row(s) for ${tierCol} after the grouped send`);
   } catch (err) {
     logger.error(`[appt-remind] visit ${visitId}: durable ${tierCol} close failed after finalize failure — manual check needed: ${err.message}`);
   }
@@ -3022,9 +3025,24 @@ const AppointmentReminders = {
             // lease-expiry resend sends once, never silences. A successful
             // FALLBACK EMAIL is a real delivery too (GH codex r2 P1).
             const delivered72 = reached72 || smsOutcome72.fallbackEmailOk === true;
+            // Retryable provider failure with no delivery on either channel
+            // (Twilio 429/5xx/timeout — GH codex r6 P1): the grouped visit
+            // made its ONE attempt through this owner, so a terminal
+            // `suppressed` would silence every member for a blip that the
+            // ungrouped path survives by each row's own attempt. Release
+            // the claim as retryable and leave the row unmarked — the next
+            // tick reclaims and tries again (no-channel alert is 24h-deduped).
+            if (ownsVisit72 && !delivered72 && smsOutcome72.retryable === true) {
+              await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', 'retry', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — retryable provider failure on the grouped send; claim released, row left unmarked`);
+              continue;
+            }
             if (ownsVisit72) {
-              const fin72 = await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', delivered72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
-              if (delivered72 && fin72 && fin72.ok === false) {
+              await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', delivered72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              // After a delivery, every member row of the claimed occurrence
+              // closes now — see closeVisitTierRows (finalize-failure
+              // durability + the split-before-own-iteration resend).
+              if (delivered72) {
                 await closeVisitTierRows(svcVisitId, 'reminder_72h_sent', 'reminder_72h_sent_at', { occurrenceDate: claim72.dedupeKey.slice(claim72.dedupeKey.lastIndexOf(':') + 1) });
               }
             }
@@ -3162,8 +3180,10 @@ const AppointmentReminders = {
                   continue;
                 }
                 if (ownsNight) {
-                  const finNight = await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
-                  if (emailRes?.ok && finNight && finNight.ok === false) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  // Every member row closes after the delivery — see the
+                  // 24h twin / closeVisitTierRows.
+                  if (emailRes?.ok) {
                     await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: nightClaim.dedupeKey.slice(nightClaim.dedupeKey.lastIndexOf(':') + 1) });
                   }
                 }
@@ -3281,9 +3301,15 @@ const AppointmentReminders = {
             // durable sent state; a successful fallback email counts as a
             // real delivery — see the 72h twin.
             const delivered24 = reached24 || smsOutcome24.fallbackEmailOk === true;
+            // Retryable provider failure, no delivery — see the 72h twin.
+            if (ownsVisit24 && !delivered24 && smsOutcome24.retryable === true) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — retryable provider failure on the grouped send; claim released, row left unmarked`);
+              continue;
+            }
             if (ownsVisit24) {
-              const fin24 = await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', delivered24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
-              if (delivered24 && fin24 && fin24.ok === false) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', delivered24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              if (delivered24) {
                 await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: claim24.dedupeKey.slice(claim24.dedupeKey.lastIndexOf(':') + 1) });
               }
             }

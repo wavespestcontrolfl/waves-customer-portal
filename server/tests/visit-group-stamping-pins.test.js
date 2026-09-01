@@ -37,6 +37,9 @@ describe('every booking path stamps or deliberately skips', () => {
   test('admin-dispatch follow-up booking stamps inside the comms-lock trx', () => {
     const src = read('routes/admin-dispatch.js');
     expect(src).toMatch(/const inserted = await trx\('scheduled_services'\)\.insert\(insertData\)\.returning\('\*'\);[\s\S]{0,600}maybeGroupRow\(inserted\[0\]\.id, \{ database: trx, createdBy: 'dispatch' \}\)/);
+    // The follow-up carries the source visit's property anchor, or the
+    // stamp is a permanent no-op (GH codex r6 P2).
+    expect(src).toContain("if (cols.property_id && svc.property_id) insertData.property_id = svc.property_id;");
   });
 
   test('call pipeline: main booking stamps only on a fresh insert, never on the idempotency-conflict reuse', () => {
