@@ -137,6 +137,18 @@ const ALLOWLIST = [
     // candidate set); membership itself is decided per row in JS.
     reason: 'OR arm keeping converted label rows repair-eligible; not a lane selection',
   },
+  {
+    file: 'services/intelligence-bar/authorization-contract.js',
+    match: 'Number(params?.updates?.monthly_rate) > 0',
+    context: 'isCustomerUpdate',
+    count: 1,
+    // Confirm-card DISCLOSURE predicate (#3648): it inspects the UPDATE
+    // PAYLOAD — "does this write set a positive monthly rate?" — to decide
+    // whether to disclose the executor's billing_mode stamp on the pending
+    // card. It selects no customers and defines no lane; the stamp itself
+    // is applied by the executor under its own documented contract.
+    reason: 'update-payload disclosure trigger on the confirm card, not a customer lane selection',
+  },
 ];
 
 const SKIP_DIRS = new Set(['node_modules', 'tests', 'migrations', '__tests__', 'coverage', 'dist']);
