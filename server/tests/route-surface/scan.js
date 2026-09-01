@@ -100,6 +100,17 @@ function isRequireCall(node) {
 // in-repo helper is NOT a router (it could be terminal middleware wearing
 // the name), so there is deliberately no context-free syntactic version.
 
+/**
+ * Property name of a member expression, honoring BOTH spellings: `obj.prop`
+ * and `obj['prop']` are the same access at runtime. Null when computed with
+ * anything but a string literal.
+ */
+function memberPropName(member) {
+  if (!member.computed && member.property.type === 'Identifier') return member.property.name;
+  if (member.computed && member.property.type === 'StringLiteral') return member.property.value;
+  return null;
+}
+
 function stringLiteralArray(node) {
   if (!node || node.type !== 'ArrayExpression') return null;
   const out = [];
@@ -110,12 +121,21 @@ function stringLiteralArray(node) {
   return out;
 }
 
-/** Resolve a module specifier relative to the file that requires it. */
-function resolveModulePath(fromFile, spec) {
+/**
+ * Resolve a module specifier relative to the file that requires it. With an
+ * `exists` probe it follows Node's resolution order (explicit extension,
+ * `<spec>.js`, `<spec>/index.js`, `<spec>.cjs`) so `require('./routes/x')`
+ * and `require('./routes/x/index')` name the SAME module identity; without
+ * one it keeps the bare `<spec>.js` shape.
+ */
+function resolveModulePath(fromFile, spec, exists) {
   if (!spec.startsWith('.')) return null; // node_modules
-  let target = path.normalize(path.join(path.dirname(fromFile), spec));
-  if (!target.endsWith('.js')) target += '.js';
-  return target.split(path.sep).join('/');
+  const target = path.normalize(path.join(path.dirname(fromFile), spec)).split(path.sep).join('/');
+  const explicit = /\.(js|cjs|mjs|json)$/.test(target);
+  if (!exists) return explicit ? target : `${target}.js`;
+  const candidates = explicit ? [target] : [`${target}.js`, `${target}/index.js`, `${target}.cjs`];
+  for (const c of candidates) if (exists(c)) return c;
+  return candidates[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +167,20 @@ function walk(node, visit, ctx) {
     const label = node.operator === '&&' ? t : (node.operator === '||' ? `!(${t})` : `nullish(${t})`);
     walk(node.left, visit, ctx); // the left operand evaluates unconditionally
     walk(node.right, visit, { ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
+    return;
+  }
+  if (node.type === 'SwitchStatement') {
+    // The discriminant AND the matched case value are identity: changing
+    // `case 'development'` to `case 'production'` must break the key.
+    const d = predicateLabel(ctx.src ? ctx.src.slice(node.discriminant.start, node.discriminant.end) : '?');
+    walk(node.discriminant, visit, ctx); // evaluates unconditionally
+    for (const cs of node.cases) {
+      const label = cs.test
+        ? `switch (${d}) case ${predicateLabel(ctx.src ? ctx.src.slice(cs.test.start, cs.test.end) : '?')}`
+        : `switch (${d}) default`;
+      if (cs.test) walk(cs.test, visit, ctx);
+      for (const st of cs.consequent) walk(st, visit, { ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
+    }
     return;
   }
   if (node.type === 'IfStatement' || node.type === 'ConditionalExpression') {
@@ -217,6 +251,7 @@ class ModuleAnalysis {
     this.bindings = new Map(); // name -> descriptor
     this.shadowedNames = new Set(); // bound at top level AND inside a block
     this.routers = new Set(); // identifiers bound to express.Router()
+    this.apps = new Set(); // identifiers bound to express() — full applications
     this.exportedRouter = null;
     this.registrations = []; // ordered { object, method, args, topLevel, loc }
     this.problems = [];
@@ -227,6 +262,11 @@ class ModuleAnalysis {
     // Line AND column: two anonymous responders on one line must never
     // collapse to a single location (the duplicate-identity check keys on it).
     return `${this.file}:${node.loc ? `${node.loc.start.line}:${node.loc.start.column}` : '?'}`;
+  }
+
+  /** Node-order module resolution against the scanned tree (see resolveModulePath). */
+  resolveModule(spec) {
+    return resolveModulePath(this.file, spec, (rel) => this.scanner.exists(rel));
   }
 
   collect() {
@@ -243,6 +283,8 @@ class ModuleAnalysis {
     const mutatedNames = new Set(); // .push()/.unshift()/[i]= targets
     const callArgArrays = []; // { arr, call } — exemption decided post-walk
     const memberAssignments = [];
+    const computedMemberWrites = []; // obj[<non-literal>] = ...
+    const listenCalls = []; // <app>.listen(...) receivers, checked post-walk
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
         && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
@@ -254,10 +296,21 @@ class ModuleAnalysis {
       }
       if (node.type === 'ObjectExpression') objectLiterals.push(node);
       if (node.type === 'CallExpression'
-        && node.callee.type === 'MemberExpression' && !node.callee.computed
-        && node.callee.object.type === 'Identifier' && node.callee.property.type === 'Identifier'
-        && ['push', 'unshift', 'splice', 'pop', 'shift', 'reverse', 'sort', 'fill', 'copyWithin'].includes(node.callee.property.name)) {
-        mutatedNames.add(node.callee.object.name);
+        && node.callee.type === 'MemberExpression'
+        && memberPropName(node.callee) === 'listen') {
+        listenCalls.push(node);
+      }
+      if (node.type === 'CallExpression'
+        && node.callee.type === 'MemberExpression'
+        && node.callee.object.type === 'Identifier') {
+        // `chain['unshift'](mw)` mutates like the dot form; a computed method
+        // the scanner cannot resolve could be ANY mutator — taint the name
+        // conservatively (only array bindings consult mutatedNames).
+        const mname = memberPropName(node.callee);
+        if (mname === null && node.callee.computed) mutatedNames.add(node.callee.object.name);
+        else if (['push', 'unshift', 'splice', 'pop', 'shift', 'reverse', 'sort', 'fill', 'copyWithin'].includes(mname)) {
+          mutatedNames.add(node.callee.object.name);
+        }
       }
       if (node.type === 'AssignmentExpression'
         && node.left.type === 'MemberExpression' && node.left.computed
@@ -271,7 +324,7 @@ class ModuleAnalysis {
       if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
         this.recordBinding(node.id.name, node.init, ctx.topLevel);
       } else if (node.type === 'VariableDeclarator' && node.id.type === 'ObjectPattern' && isRequireCall(node.init)) {
-        const mod = resolveModulePath(this.file, node.init.arguments[0].value);
+        const mod = this.resolveModule(node.init.arguments[0].value);
         for (const prop of node.id.properties) {
           if (prop.type !== 'ObjectProperty' || prop.key.type !== 'Identifier') continue;
           const local = prop.value.type === 'Identifier' ? prop.value.name : null;
@@ -319,22 +372,26 @@ class ModuleAnalysis {
         this.exportObjectNode = node.right.type === 'ObjectExpression' ? node.right : null;
         this.exportProps.clear(); // a wholesale assignment replaces prior props
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
-        && node.left.type === 'MemberExpression' && !node.left.computed
-        && node.left.property.type === 'Identifier'
-        && node.left.object.type === 'MemberExpression' && !node.left.object.computed
-        && node.left.object.object.type === 'Identifier' && node.left.object.object.name === 'module'
-        && node.left.object.property.type === 'Identifier' && node.left.object.property.name === 'exports') {
-        // `module.exports.name = value` — the export MAPPING is what a
-        // requiring module actually receives; recorded per name.
+        && node.left.type === 'MemberExpression' && memberPropName(node.left) !== null
+        && node.left.object.type === 'MemberExpression'
+        && memberPropName(node.left.object) === 'exports'
+        && node.left.object.object.type === 'Identifier' && node.left.object.object.name === 'module') {
+        // `module.exports.name = value` (the computed string-literal spelling
+        // included) — the export MAPPING is what a requiring module actually
+        // receives; recorded per name.
         if (!ctx.topLevel) this.exportUnstable = true;
-        this.exportProps.set(node.left.property.name,
+        this.exportProps.set(memberPropName(node.left),
           node.right.type === 'Identifier' ? node.right.name : false);
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
-        && node.left.type === 'MemberExpression' && !node.left.computed
-        && node.left.property.type === 'Identifier') {
-        // `holder.api = router` — modeled post-walk (props may involve
-        // bindings declared later in the file).
-        memberAssignments.push({ objectNode: node.left.object, prop: node.left.property.name, right: node.right, node });
+        && node.left.type === 'MemberExpression' && memberPropName(node.left) !== null) {
+        // `holder.api = router` / `router['use'] = fn` — modeled post-walk
+        // (props may involve bindings declared later in the file).
+        memberAssignments.push({ objectNode: node.left.object, prop: memberPropName(node.left), right: node.right, node });
+      } else if (node.type === 'AssignmentExpression' && node.operator === '='
+        && node.left.type === 'MemberExpression' && node.left.computed) {
+        // A computed NON-literal member write — the target property is
+        // unknowable; resolved post-walk and rejected on a router/app.
+        computedMemberWrites.push({ objectNode: node.left.object, node });
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
         && node.left.type === 'Identifier') {
         // `let api; api = router;` — an assignment binds exactly like a
@@ -376,7 +433,7 @@ class ModuleAnalysis {
             if (!inner.computed && inner.property.type === 'Identifier' && isRequireCall(inner.object)) {
               // require('./routers').api.get('/leak', h) — an inline named
               // export mutation; recorded for the external-mutation sweep.
-              const mod = resolveModulePath(this.file, inner.object.arguments[0].value);
+              const mod = this.resolveModule(inner.object.arguments[0].value);
               if (mod) this.directExternalRegs.push({ module: mod, name: inner.property.name, method, loc: this.loc(node) });
             }
             this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
@@ -386,7 +443,7 @@ class ModuleAnalysis {
           && isRequireCall(node.callee.object)) {
           // require('./shared-router').get('/leak', h) — a registration on
           // another module's export; resolved and rejected in the sweep.
-          const mod = resolveModulePath(this.file, node.callee.object.arguments[0].value);
+          const mod = this.resolveModule(node.callee.object.arguments[0].value);
           if (mod) this.directExternalRegs.push({ module: mod, name: null, method, loc: this.loc(node) });
         } else if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
           let base = node.callee.object;
@@ -450,7 +507,7 @@ class ModuleAnalysis {
       if (b && (b.kind === 'require' || b.kind === 'requireMember') && b.module !== null) {
         this.importMemberWrites.push({ module: b.module, prop: a.prop, loc: this.loc(a.node) });
       } else if (!base && isRequireCall(a.objectNode)) {
-        const mod = resolveModulePath(this.file, a.objectNode.arguments[0].value);
+        const mod = this.resolveModule(a.objectNode.arguments[0].value);
         if (mod) this.importMemberWrites.push({ module: mod, prop: a.prop, loc: this.loc(a.node) });
       }
       if (b && b.kind === 'object' && a.right.type === 'Identifier') {
@@ -471,6 +528,40 @@ class ModuleAnalysis {
       if (base && (this.routers.has(base) || APP_IDENTIFIERS.has(base))
         && (VERBS.has(a.prop) || ['use', 'route', 'param', 'handle', 'stack', '_router'].includes(a.prop))) {
         this.problems.push(`${this.loc(a.node)}: assignment to ${base}.${a.prop} — overwriting a router/app registration method is not supported by the scanner`);
+      }
+    }
+    // `const api = holder.router` — a member-expression alias resolves to a
+    // plain alias once every binding and modeled property is known, so
+    // registrations through it are attributed to the router.
+    for (const [name, b] of [...this.bindings]) {
+      if (b.kind !== 'memberAlias') continue;
+      const target = this.resolveMemberChain(b.node);
+      if (target && this.routers.has(this.canonName(target))) {
+        this.bindings.set(name, { kind: 'alias', target, topLevel: b.topLevel });
+        this.routers.add(name);
+        if (this.apps.has(this.canonName(target))) this.apps.add(name);
+      }
+    }
+    // `router[verb] = ...` — a computed non-literal write to a router/app
+    // could overwrite ANY registration method; unknowable, so rejected.
+    for (const w of computedMemberWrites) {
+      const base = this.resolveMemberChain(w.objectNode);
+      if (base && (this.routers.has(base) || APP_IDENTIFIERS.has(base))) {
+        this.problems.push(`${this.loc(w.node)}: computed assignment to ${base}[...] — the scanner cannot tell which method or state is overwritten; use a literal property`);
+      }
+    }
+    // `live.listen(3000)` — an application serving traffic directly IS the
+    // runtime surface; only the scanned root may listen.
+    for (const call of listenCalls) {
+      const obj = call.callee.object;
+      if (obj.type === 'CallExpression' && this.isAppFactory(obj)) {
+        this.problems.push(`${this.loc(call)}: listen() on an inline express() application — bind the app to a const so its routes can be attributed`);
+        continue;
+      }
+      const base = this.resolveMemberChain(obj);
+      const canon = base ? this.canonName(base) : null;
+      if (canon && this.apps.has(canon) && !APP_IDENTIFIERS.has(canon)) {
+        this.problems.push(`${this.loc(call)}: listen() on application ${canon} — an app other than the scanned root serving traffic hides its routes from the allowlist`);
       }
     }
     this.mutatedImportMembers = new Set(this.importMemberWrites.map((w) => `${w.module}#${w.prop}`));
@@ -656,14 +747,14 @@ class ModuleAnalysis {
     if (!node || node.type !== 'CallExpression') return false;
     const c = node.callee;
     if (c.type === 'Identifier') {
-      const b = this.cleanBinding(c.name);
+      const b = this.cleanCanonBinding(c.name);
       return Boolean(b && b.kind === 'requireMember' && b.module === null
         && b.spec === 'express' && b.name === 'Router');
     }
     if (c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier' && c.property.name === 'Router') {
       if (isRequireCall(c.object)) return c.object.arguments[0].value === 'express';
       if (c.object.type === 'Identifier') {
-        const b = this.cleanBinding(c.object.name);
+        const b = this.cleanCanonBinding(c.object.name);
         return Boolean(b && b.kind === 'require' && b.module === null && b.spec === 'express');
       }
     }
@@ -774,7 +865,7 @@ class ModuleAnalysis {
     // Direct factory spelling: `require('express')()`.
     if (isRequireCall(c)) return c.arguments[0].value === 'express';
     if (c.type !== 'Identifier') return false;
-    const b = this.cleanBinding(c.name);
+    const b = this.cleanCanonBinding(c.name);
     return Boolean(b && b.kind === 'require' && b.module === null && b.spec === 'express');
   }
 
@@ -782,9 +873,10 @@ class ModuleAnalysis {
     if (init) this.countWrite(name);
     if (this.isRouterFactory(init) || this.isAppFactory(init)) {
       this.routers.add(name);
+      if (this.isAppFactory(init)) this.apps.add(name);
       this.setBinding(name, { kind: 'router', topLevel });
     } else if (isRequireCall(init)) {
-      this.setBinding(name, { kind: 'require', module: resolveModulePath(this.file, init.arguments[0].value), spec: init.arguments[0].value, topLevel });
+      this.setBinding(name, { kind: 'require', module: this.resolveModule(init.arguments[0].value), spec: init.arguments[0].value, topLevel });
     } else if (init && init.type === 'StringLiteral') {
       this.setBinding(name, { kind: 'string', value: init.value, topLevel });
     } else if (init && init.type === 'ArrayExpression') {
@@ -820,13 +912,19 @@ class ModuleAnalysis {
     } else if (init && init.type === 'MemberExpression' && !init.computed && isRequireCall(init.object)) {
       this.setBinding(name, {
         kind: 'requireMember',
-        module: resolveModulePath(this.file, init.object.arguments[0].value),
+        module: this.resolveModule(init.object.arguments[0].value),
         spec: init.object.arguments[0].value,
         name: init.property.name,
         topLevel,
       });
+    } else if (init && init.type === 'MemberExpression' && memberPropName(init) !== null) {
+      // `const api = holder.router` — resolvable only after every binding is
+      // known; converted to a plain alias post-walk when it names a router.
+      this.setBinding(name, { kind: 'memberAlias', node: init, topLevel });
     } else {
-      this.setBinding(name, { kind: 'other', topLevel });
+      // The initializer NODE is retained: a static() root bound to a template
+      // or binary expression keeps its real source in the identity.
+      this.setBinding(name, { kind: 'other', node: init || null, topLevel });
     }
   }
 
@@ -1000,12 +1098,23 @@ class ModuleAnalysis {
   }
 
   /**
+   * cleanBinding through alias chains: `const makeApp = express` must carry
+   * express's provenance to `makeApp()` — but only when neither the alias
+   * name nor the canonical name is shadowed/reassigned.
+   */
+  cleanCanonBinding(name) {
+    if (this.shadowedNames.has(name) || this.reassignedNames.has(name)) return null;
+    const canon = this.canonName(name);
+    return canon === name ? this.bindings.get(name) || null : this.cleanBinding(canon);
+  }
+
+  /**
    * True when `node` (an Identifier or require() call) resolves to a
    * node_modules import — i.e. code that cannot construct one of OUR routers.
    */
   isNodeModulesRef(node) {
     if (!node) return false;
-    if (isRequireCall(node)) return resolveModulePath(this.file, node.arguments[0].value) === null;
+    if (isRequireCall(node)) return this.resolveModule(node.arguments[0].value) === null;
     if (node.type === 'Identifier') {
       const b = this.cleanBinding(node.name);
       return Boolean(b && (b.kind === 'require' || b.kind === 'requireMember') && b.module === null);
@@ -1100,7 +1209,7 @@ class ModuleAnalysis {
       }
       case 'CallExpression': {
         if (isRequireCall(node)) {
-          return [this.scanner.moduleRef(resolveModulePath(this.file, node.arguments[0].value), node.arguments[0].value)];
+          return [this.scanner.moduleRef(this.resolveModule(node.arguments[0].value), node.arguments[0].value)];
         }
         if (this.isRouterFactory(node)) return [{ type: 'opaque', desc: 'inline Router() call' }];
         const c = node.callee;
@@ -1119,7 +1228,10 @@ class ModuleAnalysis {
           if (arg && arg.type === 'Identifier') {
             const b = this.cleanBinding(arg.name);
             if (b && b.kind === 'string') desc = `${arg.name} = '${b.value}'`;
-            else if (b && b.kind === 'call' && b.node) {
+            else if (b && b.node) {
+              // Any retained initializer (call, template, binary, ...) binds
+              // its full source into the identity — repointing the directory
+              // anywhere in the expression forces allowlist re-review.
               desc = `${arg.name} = ${predicateLabel(this.src.slice(b.node.start, b.node.end))}`;
             } else desc = `${arg.name} = <unresolved>`;
           }
@@ -1161,7 +1273,7 @@ class ModuleAnalysis {
         }
         if (c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier'
           && (this.isNodeModulesRef(c.object)
-            || (isRequireCall(c.object) && resolveModulePath(this.file, c.object.arguments[0].value) === null))) {
+            || (isRequireCall(c.object) && this.resolveModule(c.object.arguments[0].value) === null))) {
           // express.json(...), bodyParser.raw(...) — node_modules member call.
           const spec = isRequireCall(c.object) ? c.object.arguments[0].value : (this.cleanBinding(c.object.name) || {}).spec;
           if (spec && registry.lookupPackagePassthrough(spec, c.property.name)) {
@@ -1176,7 +1288,7 @@ class ModuleAnalysis {
         let mod = null;
         let modKnown = false;
         let spec = null;
-        if (isRequireCall(node.object)) { spec = node.object.arguments[0].value; mod = resolveModulePath(this.file, spec); modKnown = true; }
+        if (isRequireCall(node.object)) { spec = node.object.arguments[0].value; mod = this.resolveModule(spec); modKnown = true; }
         else if (node.object.type === 'Identifier') {
           const b = this.cleanBinding(node.object.name);
           if (b && b.kind === 'require') { mod = b.module; spec = b.spec; modKnown = true; }
@@ -1427,7 +1539,7 @@ class Scanner {
         if (e.isDirectory()) {
           if (e.name === 'node_modules' || rel === 'server/tests') continue;
           walkDir(rel);
-        } else if (e.name.endsWith('.js')) out.push(rel);
+        } else if (/\.(js|cjs|mjs)$/.test(e.name)) out.push(rel);
       }
     };
     walkDir('server');

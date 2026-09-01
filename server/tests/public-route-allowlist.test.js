@@ -132,8 +132,12 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
           .map((x) => x[1]).filter((v) => v !== g.name);
         const wholesale = (src.match(/module\.exports\s*=[^=]/g) || []).length;
         const assignOver = /Object\.assign\(\s*module\.exports/.test(src);
-        expect({ guard: g.name, module: g.module, memberRewrites, wholesale, assignOver })
-          .toEqual({ guard: g.name, module: g.module, memberRewrites: [], wholesale: 1, assignOver: false });
+        // A COMPUTED export write (`module.exports['name'] = noop`) is the
+        // same rewrite in a spelling the regexes above cannot see — a guard
+        // module may not contain one at all (fail closed).
+        const computedExportWrites = (src.match(/module\.exports\s*\[/g) || []).length;
+        expect({ guard: g.name, module: g.module, memberRewrites, wholesale, assignOver, computedExportWrites })
+          .toEqual({ guard: g.name, module: g.module, memberRewrites: [], wholesale: 1, assignOver: false, computedExportWrites: 0 });
         // ...and the BINDING itself must never be reassigned before export
         // (`adminAuthenticate = noop; module.exports = { adminAuthenticate }`
         // would pass every check above while exporting the no-op).
@@ -1401,6 +1405,141 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     }).scan();
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}${r.extra ? ` (${r.extra})` : ''}`))
       .toEqual(['ALL /api/open (exempt: GET)']);
+  });
+
+  test("a COMPUTED overwrite of a registration method (router['use'] = fn) is a problem", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const { guardA } = require('../middleware/a');",
+        "const router = require('express').Router();",
+        "router['use'] = () => router;",
+        'router.use(guardA);',
+        "router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('overwriting a router/app registration method'))).toBe(true);
+  });
+
+  test("a middleware array mutated via COMPUTED access (chain['unshift']) is tainted", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'const chain = [guardA];',
+        "chain['unshift']((req, res) => res.json({ secret: 1 }));",
+        "router.get('/leak', chain, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('an alias assigned from a MODELED object member (const api = holder.router) registers', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const holder = { router };',
+        'const api = holder.router;',
+        "api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a TEMPLATE-bound static root keeps its real initializer in the identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const root = `${__dirname}/public-a`;',
+        "app.use('/files', express.static(root));",
+      ].join('\n')),
+    });
+    const st = res.publicRoutes.find((r) => r.path === '/files');
+    expect(st).toBeDefined();
+    expect(st.extra).toContain('public-a');
+    expect(st.extra).not.toContain('<unresolved>');
+  });
+
+  test('a route registered under a SWITCH carries discriminant and case in its identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'switch (process.env.NODE_ENV) {',
+        "case 'development':",
+        "  app.get('/debug', (req, res) => res.json({}));",
+        '  break;',
+        'default:',
+        '  break;',
+        '}',
+      ].join('\n')),
+    });
+    const r = res.publicRoutes.find((x) => x.path === '/debug');
+    expect(r).toBeDefined();
+    expect(r.cond).toContain('switch (process.env.NODE_ENV)');
+    expect(r.cond).toContain("case 'development'");
+  });
+
+  test('a .cjs side-effect module mutating a mounted router is swept like a .js one', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/installer.cjs': "require('./routes/x').get('/leak', (req, res) => res.json({}));",
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('directory modules resolve like Node (require(./routes/x) → routes/x/index.js)', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x/index.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': "require('../routes/x').get('/leak', (req, res) => res.json({}));",
+    });
+    // The mounted directory module is walked AND the side-effect mutation
+    // resolves to the same module identity.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toContain('GET /api/x/thing');
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('listen() on an application other than the scanned root is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const live = express();',
+        "live.get('/leak', (req, res) => res.json({}));",
+        'live.listen(3000);',
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('listen() on application live'))).toBe(true);
+  });
+
+  test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          'const makeApp = express;',
+          'const live = makeApp();',
+          "live.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(live);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
