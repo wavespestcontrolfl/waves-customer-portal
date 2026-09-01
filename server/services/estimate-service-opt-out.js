@@ -106,6 +106,10 @@ function serviceOptOutTierSelectionActive(estData = {}, rowTier = null) {
   const engineRef = estData?.serviceOptOut?.engineTier
     || estData?.result?.recurring?.waveGuardTier
     || estData?.result?.recurring?.tier
+    // Engine-only estimates store the tier in the raw carrier — without this
+    // a select-tier override on one is not recognized, /data advertises the
+    // controls, and the PUT overwrites the selection (codex #3684 r2 P1).
+    || estData?.engineResult?.waveGuard?.tier
     || null;
   if (rank(engineRef) < 0) return false;
   return rank(rowTier) !== rank(engineRef);

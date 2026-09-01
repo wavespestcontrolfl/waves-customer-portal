@@ -14083,6 +14083,24 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
     });
   }
 
+  // Restore mode: the restored line itself is AFTER-only, so the loop above
+  // never prices it — and after multiple removals it can come back under a
+  // different tier/mix than its original quote. Its effective per-application
+  // amount must be on the panel before the customer confirms (codex #3684 r2
+  // P1).
+  if (restoring) {
+    const beforeKeys = new Set(svcRows(beforeResult).map((r) => String(r.service || r.name || '')));
+    for (const after of svcRows(afterResult)) {
+      if (beforeKeys.has(String(after.service || after.name || ''))) continue;
+      const pa = effectivePerApplication(after);
+      if (!pa) continue;
+      disclosures.push({
+        code: 'restored_per_application',
+        message: `${after.name || after.service} comes back at $${pa.toFixed(2)} per application.`,
+      });
+    }
+  }
+
   // Every other one-time line whose price moved as a side effect (e.g. top
   // dressing re-prices on a 65% area basis without a recurring lawn program —
   // it moves in the customer's favour, and it is still disclosed).
@@ -14229,7 +14247,23 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     // non-member. Copying that here would reprice an EXISTING member as a brand
     // new customer on every removal: combined tier stripped, $99 re-added,
     // prepay restored — a large wrong price change with no removal-related cause.
-    const priors = Array.isArray(parsedData.priorQualifyingServices) ? parsedData.priorQualifyingServices : [];
+    // Priors live top-level on modern blobs, but legacy rows predating the
+    // save-time sanitizer nest them in a replay shape — the SAME carriers the
+    // membership reconciler recognizes and (for lapsed members) just cleaned.
+    // Anything still here survived the active-plan check, so it is a verified
+    // member's frozen list; reading only the top-level field would reprice a
+    // legacy member off the remaining cart and collapse the earned combined
+    // tier (codex #3684 r2 P1).
+    const priors = [];
+    for (const carrier of [
+      parsedData, parsedData.engineInputs, parsedData.inputs, parsedData.engineRequest?.options,
+    ]) {
+      if (!carrier || typeof carrier !== 'object') continue;
+      if (!Array.isArray(carrier.priorQualifyingServices)) continue;
+      for (const p of carrier.priorQualifyingServices) {
+        if (p != null && !priors.includes(p)) priors.push(p);
+      }
+    }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
@@ -14270,6 +14304,34 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       onetimeTotal: reprice.serverTotals.onetimeTotal ?? 0,
       waveGuardTier: afterResult?.recurring?.waveGuardTier || afterResult?.recurring?.tier || null,
     };
+
+    // Stored /preferences discounts (declined interior spray / exterior
+    // sweep) are a ROUTE-level overlay, not an engine input — the recompute
+    // knows nothing of them, but the renderer and accept path re-derive
+    // computePrefDiscount from the same stored preferences over whatever
+    // totals this write persists. Persisting the raw engine totals would
+    // drop the discount from the row while the page re-applies it, and the
+    // two would disagree forever (codex #3684 r2 P1). Same derivation as the
+    // /preferences write, run against the NEW result.
+    {
+      const prefs = normalizePrefs(parsedData.preferences || {});
+      const prefRecurringRows = recurringServicesWithSupplements(afterResult || {});
+      const prefOneTimeRows = oneTimeItemsForRender(afterResult || {}, parsedData);
+      const prefPestRecurring = detectPestRecurring(prefRecurringRows);
+      const prefHasPestOneTime = detectPestOneTime(prefOneTimeRows);
+      const prefPestOneTimeTotal = prefHasPestOneTime ? pestOneTimeBase(prefOneTimeRows) : 0;
+      const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(
+        prefs, prefPestRecurring, prefHasPestOneTime, prefPestOneTimeTotal,
+      );
+      if (prefMonthlyOff > 0) {
+        next.monthlyTotal = Math.max(0, Math.round((next.monthlyTotal - prefMonthlyOff) * 100) / 100);
+        // Same anchoring as the /preferences write, against the new result.
+        next.annualTotal = anchoredAnnualTotal({ ...parsedData, result: afterResult }, next.monthlyTotal);
+      }
+      if (prefOneTimeOff > 0) {
+        next.onetimeTotal = Math.max(0, Math.round((next.onetimeTotal - prefOneTimeOff) * 100) / 100);
+      }
+    }
 
     if (dryRun) {
       return res.json({

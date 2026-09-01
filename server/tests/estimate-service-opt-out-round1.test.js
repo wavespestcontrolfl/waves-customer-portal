@@ -109,6 +109,35 @@ describe('optOutImpact per-application disclosures (owner price-copy rule — no
     expect(tier.message).toMatch(/^Adding Lawn Care back moves your WaveGuard tier from Silver to Gold/);
   });
 
+  it('restore mode prices the restored line itself — the after-only row (r2 P1)', () => {
+    const impact = optOutImpact({
+      beforeResult: {
+        recurring: { waveGuardTier: 'Silver', services: [{ service: 'pest_control', name: 'Pest Control', perTreatment: 114 }] },
+      },
+      afterResult: {
+        recurring: {
+          waveGuardTier: 'Gold',
+          services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 114 },
+            { service: 'lawn_care', name: 'Lawn Care', perTreatment: 120, visitsPerYear: 6, annualAfterDiscount: 636 },
+          ],
+        },
+      },
+      beforeData: {}, afterData: {}, label: 'Lawn Care', mode: 'restore',
+    });
+    const restored = impact.disclosures.find((d) => d.code === 'restored_per_application');
+    expect(restored.message).toBe('Lawn Care comes back at $106.00 per application.');
+  });
+
+  it('remove mode never emits a restored-line disclosure', () => {
+    const impact = optOutImpact({
+      beforeResult: { recurring: { services: [] } },
+      afterResult: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', perTreatment: 114 }] } },
+      beforeData: {}, afterData: {}, label: 'Lawn Care',
+    });
+    expect(impact.disclosures.filter((d) => d.code === 'restored_per_application')).toHaveLength(0);
+  });
+
   it('restore mode discloses the setup fee going away', () => {
     const impact = optOutImpact({
       beforeResult: { ...mk('Silver', 114), oneTime: { membershipFee: 99 } },
@@ -135,6 +164,12 @@ describe('serviceOptOutTierSelectionActive (pre-push P0 — a hand-picked tier e
     // row Bronze vs stamped engine Silver = selection active.
     expect(serviceOptOutTierSelectionActive(data, 'Bronze')).toBe(true);
     expect(serviceOptOutTierSelectionActive(data, 'Silver')).toBe(false);
+  });
+
+  it('reads the raw engineResult tier when no mapped result exists (r2 P1)', () => {
+    const engineOnly = { engineResult: { waveGuard: { tier: 'Gold' } } };
+    expect(serviceOptOutTierSelectionActive(engineOnly, 'Silver')).toBe(true);
+    expect(serviceOptOutTierSelectionActive(engineOnly, 'Gold')).toBe(false);
   });
 
   it('never blocks on unknown or missing tiers', () => {
