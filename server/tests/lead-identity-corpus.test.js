@@ -142,8 +142,12 @@ describe('lead identity corpus — shape and PII hygiene', () => {
         while (k < raw.length && /\s/.test(raw[k])) k += 1;
         if (raw[k] === ':' && stack.length && stack[stack.length - 1].keys) {
           const top = stack[stack.length - 1];
-          if (top.keys.has(str)) dupes.push(str);
-          top.keys.add(str);
+          // Compare DECODED keys — "email" and "email" are the same
+          // JSON key even though their source spellings differ.
+          let decoded = str;
+          try { decoded = JSON.parse(`"${str}"`); } catch (e) { /* raw fallback */ }
+          if (top.keys.has(decoded)) dupes.push(decoded);
+          top.keys.add(decoded);
         }
         i = j + 1;
         continue;

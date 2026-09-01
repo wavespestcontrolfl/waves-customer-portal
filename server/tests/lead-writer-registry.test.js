@@ -73,7 +73,7 @@ function knexInsertPatterns(token) {
 // textual scanning.)
 const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s+)`;
 const RAW_SQL_INSERT_RE = new RegExp(
-  String.raw`\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
+  String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
   'gi'
 );
 
@@ -132,7 +132,7 @@ function aliasInsertPatterns(src, token) {
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
   // idiom). Parenthesized or bare parameter lists both count.
   const factoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{[^{}]*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
     'g'
   );
   let fac;
@@ -389,7 +389,7 @@ function scanSourceForDynamicTableInserts(src) {
   // Arrow FACTORY over a dynamic table — `const q = (t) => db(t); …
   // q(x).insert(row)` — the dynamic mirror of the literal factory pass.
   const dynFactoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{[^{}]*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   let fac;
@@ -420,16 +420,16 @@ function scanSourceForDynamicTableInserts(src) {
     // Optional literal schema qualifier and/or identifier quote around the
     // interpolated target — `INSERT INTO public.${table}` and
     // `INSERT INTO "${table}"` are both valid PostgreSQL.
-    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?["'`]?\$\{([^}]+)\}/gi,
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:["'\x60]?[\w$]+["'\x60]?\s*\.\s*)?["'\x60]?\$\{([^}]+)\}`, 'gi'),
     // Concatenated target — a bare identifier/member OR a parenthesized
     // expression (`'INSERT INTO ' + (kind ? 'leads' : 'audit')`).
-    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:[\w$]+\.)?['"`]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)/gi,
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:[\w$]+\.)?['"\x60]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)`, 'gi'),
     // Knex identifier bindings at the table position — positional (??) or
     // named (:table:), with an optional literal schema qualifier
     // (`public.??`) — the bound value is runtime data, so it is dynamic by
     // definition (never resolvable).
-    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(\?\?)/gi,
-    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(:[\w$]+:)/gi,
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:["'\x60]?[\w$]+["'\x60]?\s*\.\s*)?(\?\?)`, 'gi'),
+    new RegExp(String.raw`\b(?:insert|merge(?=[^;]*?\bwhen\s+not\s+matched\b[^;]*?\bthen\s+insert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:["'\x60]?[\w$]+["'\x60]?\s*\.\s*)?(:[\w$]+:)`, 'gi'),
   ];
   // Comment-blanked but STRING-PRESERVING view (offsets identical): the SQL
   // text lives in strings, but a COMMENT mentioning `INSERT INTO ${table}`
@@ -560,6 +560,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['raw MERGE with insert action', "await db.raw('MERGE INTO leads USING src ON leads.id = src.id WHEN NOT MATCHED THEN INSERT (a) VALUES (src.a)');"],
     ['SQL comment between INSERT and INTO', "await db.raw('INSERT /* audit */ INTO leads (a) VALUES (?)', [a]);"],
     ['stored from-builder', "const target = db.from('leads');\nawait target.insert(row);"],
+    ['block-bodied arrow factory', "const baseQuery = () => { audit(); return db('leads'); };\nawait baseQuery().insert(row);"],
     ['transitive stored-builder alias', "const base = db('leads');\nconst target = base;\nawait target.insert(row);"],
     ['raw SQL behind a leading SQL comment', 'await db.raw("/* audit */ INSERT INTO leads (status) VALUES (\'new\')");'],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
@@ -578,6 +579,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
     ['computed table name is not the constant form', "const t = 'leads' + suffix;\nawait audit(t);"],
     ['update-only MERGE cannot create a lead', "await db.raw('MERGE INTO leads USING src ON leads.id = src.id WHEN MATCHED THEN UPDATE SET a = src.a');"],
+    ['update-only MERGE mentioning insert in a value', "await db.raw('MERGE INTO leads USING src ON leads.id = src.id WHEN MATCHED THEN UPDATE SET note = insert_reviewed');"],
   ])('ignores: %s', (_name, src) => {
     expect(found(src)).toEqual([]);
   });
@@ -718,6 +720,10 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(dynArrowFactory).toHaveLength(1);
     const insertThenTable = scanSourceForDynamicTableInserts('await db.insert(row).table(target);');
     expect(insertThenTable).toHaveLength(1);
+    const rawCommentSep = scanSourceForDynamicTableInserts(
+      "await db.raw('INSERT /* audit */ INTO ' + table + ' (a) VALUES (?)', [a]);"
+    );
+    expect(rawCommentSep).toHaveLength(1);
     const rawCommentMention = scanSourceForDynamicTableInserts(
       '// legacy shape: INSERT INTO ${table} (a) VALUES (?)\nconst x = 1;'
     );
