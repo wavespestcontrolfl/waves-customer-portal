@@ -103,9 +103,11 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {
       return genericChain(hold ? { move_hold_until: hold } : null);
     }
     if (table === 'appointment_reminders as ar') {
-      // closeVisitTierRows' member-row scan (member rows to close).
+      // Reminder-row-sourced scans (closeVisitTierRows' member close; the
+      // legacy exact-slot label merge): a member with NO reminder row
+      // (appointment_time null) is invisible here, as in the real table.
       const c = genericChain();
-      c.select = jest.fn().mockResolvedValue(state.visitMemberRows || []);
+      c.select = jest.fn(async () => (state.visitMemberRows || []).filter((r) => r.appointment_time != null));
       state.arChains.push(c);
       return c;
     }
