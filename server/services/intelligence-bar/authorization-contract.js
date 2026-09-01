@@ -39,8 +39,12 @@ const PREVIEW_NOISE_KEYS = new Set([
   'pinned_recipient', 'pinned_technician', 'pinned_lead', 'matches', 'action', 'cancellation',
 ]);
 // Keys that legitimately differ between two identical previews (clocks,
-// timings) — excluded from both the card and the fingerprint.
-const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|duration|took|_ms$|latency|request_id|trace)/i;
+// runtime timing metrics) — excluded from both the card and the
+// fingerprint. Deliberately NARROW (pre-push P1): business durations
+// (duration_minutes, estimated_duration_minutes) are scheduling state that
+// alters occupancy/window effects and MUST stay hash-bound — only actual
+// request-timing fields are volatile.
+const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|took_ms|_ms$|latency|request_id|trace)/i;
 const PREVIEW_EFFECT_LINES = 12;
 const PREVIEW_EFFECT_CHARS = 200;
 
