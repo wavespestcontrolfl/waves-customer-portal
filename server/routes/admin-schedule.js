@@ -9431,9 +9431,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // minimum across the dates it will actually write.
           {
             const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first().catch(() => null);
+            // Seeded from the SAME seenChildDates the insert loop walks with
+            // (a copy, so planning cannot mutate it). A fresh Set made the
+            // gate price early occurrences the loop then skips as already
+            // occupied — on a top-up it would check one date and insert
+            // another, and with cadence-sensitive add-ons the checked date
+            // can carry an amount the inserted one does not (Codex P0).
             const gateDates = [baseDateStr, ...planSpawnChildDates({
               baseDateStr, pattern: recurringPattern, rOpts, skip: skipChild, dir: dirChild,
-              seen: new Set(), spawnCount, spawnTarget, blackoutDates: spawnBlackoutDates,
+              seen: new Set(seenChildDates), spawnCount, spawnTarget, blackoutDates: spawnBlackoutDates,
             })];
             const spawnInv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
             const spawnFloor = gateDates.reduce((min, d) => {
