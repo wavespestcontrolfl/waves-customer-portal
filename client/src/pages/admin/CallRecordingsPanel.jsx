@@ -706,7 +706,10 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
     setProcessVerdict(null);
     try {
       const res = await adminFetch(
-        `/admin/call-recordings/process/${r.twilio_call_sid}`,
+        // force: a human is asking on purpose, which selects the shorter
+        // quiet window. The heartbeat still protects a live pass — reclaim is
+        // on silence, not on age (codex #3677 P1).
+        `/admin/call-recordings/process/${r.twilio_call_sid}?force=true`,
         { method: "POST" },
       );
       if (!stillShowing()) return;

@@ -480,17 +480,21 @@ export default function CallLogTabV2() {
     window.location.assign(`/admin/communications?${params.toString()}#tab=sms`);
   };
 
-  const handleProcessCall = async (callSid, alreadyProcessed) => {
+  const handleProcessCall = async (callSid) => {
     if (!callSid || processingCallSid) return;
     setProcessingCallSid(callSid);
     setProcessResult(null);
-    // force=true only on Reprocess (alreadyProcessed=true) — the user is
-    // explicitly asking to re-run extraction on a completed row. For the
-    // default Process path, defer to the backend claim guard: it lets
-    // pending/null/no_transcription/stale-'processing' (>10min) through,
-    // and correctly blocks an actively-processing row so a concurrent
-    // run can't duplicate side effects (e.g. extra scheduled_services).
-    const force = alreadyProcessed === true;
+    // EVERY click here is force=true, because every click here is a human
+    // asking on purpose. That used to be reserved for Reprocess, so a stuck
+    // 'processing' row — the exact case this button exists for — got the
+    // conservative 10-minute window and the 3-minute operator recovery was
+    // unreachable from this screen (codex #3677 P1).
+    //
+    // What makes it safe is the heartbeat: the claim guard reclaims on
+    // SILENCE, not on age, so a live pass mid-transcription keeps beating and
+    // is still protected from a concurrent run. force no longer means
+    // "ignore the guard" — it means "the shorter quiet window applies".
+    const force = true;
     try {
       const res = await adminFetch(
         `/admin/call-recordings/process/${callSid}${force ? "?force=true" : ""}`,
@@ -828,7 +832,7 @@ export default function CallLogTabV2() {
                         {!isProcessing && c.twilio_call_sid && (
                           <button
                             type="button"
-                            onClick={() => handleProcessCall(c.twilio_call_sid, false)}
+                            onClick={() => handleProcessCall(c.twilio_call_sid)}
                             disabled={!!processingCallSid || !!autoProcessingSid}
                             className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
                           >
@@ -1263,7 +1267,7 @@ export default function CallLogTabV2() {
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleProcessCall(c.twilio_call_sid, false)
+                                    handleProcessCall(c.twilio_call_sid)
                                   }
                                   disabled={
                                     !!processingCallSid || !!autoProcessingSid
@@ -1279,7 +1283,7 @@ export default function CallLogTabV2() {
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleProcessCall(c.twilio_call_sid, true)
+                                    handleProcessCall(c.twilio_call_sid)
                                   }
                                   disabled={
                                     !!processingCallSid || !!autoProcessingSid
