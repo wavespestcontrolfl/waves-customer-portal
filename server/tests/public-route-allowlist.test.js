@@ -2307,6 +2307,78 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
   });
 
+  test('a Reflect.apply borrowed registration with a WRAPPED receiver is rejected', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "Reflect.apply(router.get, (0, router), ['/leak', (req, res) => res.json({})]);",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('borrowed registration methods are not supported'))).toBe(true);
+  });
+
+  test('switch FALL-THROUGH accumulates every reachable case in the identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'switch (process.env.NODE_ENV) {',
+        "case 'production':",
+        "case 'development':",
+        "  app.get('/debug', (req, res) => res.json({}));",
+        '  break;',
+        'default:',
+        '  break;',
+        '}',
+      ].join('\n')),
+    });
+    const r = res.publicRoutes.find((x) => x.path === '/debug');
+    expect(r.cond).toContain("case 'production'|case 'development'");
+  });
+
+  test('a CONST-STRING require (require(spec)) resolves like the literal spelling', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "const spec = '../routes/x';",
+        "require(spec).get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a registration through a truly DYNAMIC require is a problem, never silence', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        'const target = require(process.env.TARGET_MODULE);',
+        "target.get('/leak', (req, res) => res.json({}));",
+        "require(process.env.OTHER)['use']((req, res) => res.json({}));",
+        "const router = require('express').Router();",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('dynamically required module'))).toBe(true);
+    // A lazy loader that never registers stays LEGAL.
+    const ok = scanOf({
+      'server/index.js': app("require('./services/lazy');"),
+      'server/services/lazy.js': [
+        'let mod;',
+        'function load(path) { if (mod === undefined) { mod = require(path); } return mod; }',
+        'module.exports = { load };',
+      ].join('\n'),
+    });
+    expect(ok.problems).toEqual([]);
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',

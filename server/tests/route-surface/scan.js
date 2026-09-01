@@ -136,6 +136,16 @@ function joinConds(parts) {
   return list.map((c) => `(${c})`).join(' && ');
 }
 
+/** Value-preserving unwrap: sequences yield their last operand, plain
+ * chained assignments their right side. */
+function unwrapValue(node) {
+  for (;;) {
+    if (node && node.type === 'SequenceExpression') node = node.expressions[node.expressions.length - 1];
+    else if (node && node.type === 'AssignmentExpression' && node.operator === '=') node = node.right;
+    else return node;
+  }
+}
+
 function stringLiteralArray(node) {
   if (!node || node.type !== 'ArrayExpression') return null;
   const out = [];
@@ -212,12 +222,17 @@ function walk(node, visit, ctx) {
     // `case 'development'` to `case 'production'` must break the key.
     const d = predicateLabel(ctx.src ? ctx.src.slice(node.discriminant.start, node.discriminant.end) : '?');
     walk(node.discriminant, visit, ctx); // evaluates unconditionally
+    // FALL-THROUGH accumulates: stacked `case 'a': case 'b':` both reach the
+    // shared body, so every entry label since the last break joins the key.
+    let pending = [];
     for (const cs of node.cases) {
-      const label = cs.test
-        ? `switch (${d}) case ${predicateLabel(ctx.src ? ctx.src.slice(cs.test.start, cs.test.end) : '?')}`
-        : `switch (${d}) default`;
+      pending.push(cs.test
+        ? `case ${predicateLabel(ctx.src ? ctx.src.slice(cs.test.start, cs.test.end) : '?')}`
+        : 'default');
+      const label = `switch (${d}) ${pending.join('|')}`;
       if (cs.test) walk(cs.test, visit, ctx);
       for (const st of cs.consequent) walk(st, visit, { ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
+      if (cs.consequent.some((st) => ['BreakStatement', 'ReturnStatement', 'ThrowStatement'].includes(st.type))) pending = [];
     }
     return;
   }
@@ -356,6 +371,34 @@ class ModuleAnalysis {
     const factoryOptionCalls = []; // Router(<options>) — options need vetting
     const memberMutatorCalls = []; // router.stack.push(...) — internal-state mutation
     const computedMethodCalls = []; // obj[method](...) — const-string methods resolved post-walk
+    // PRE-PASS: `require(spec)` where spec resolves to a const string is the
+    // literal spelling in disguise — rewrite the argument so every consumer
+    // sees a literal (top-level requires execute in source order, so a
+    // source-order pass matches runtime); any other non-literal require
+    // fails closed.
+    {
+      const stringConsts = new Map(); // name -> value | null (ambiguous)
+      walk(this.ast.program, (n) => {
+        if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init) {
+          const init = unwrapValue(n.init);
+          if (init.type === 'StringLiteral' && !stringConsts.has(n.id.name)) stringConsts.set(n.id.name, init.value);
+          else stringConsts.set(n.id.name, null);
+        }
+        if (n.type === 'AssignmentExpression' && n.left.type === 'Identifier') stringConsts.set(n.left.name, null);
+        if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'require'
+          && n.arguments.length >= 1 && n.arguments[0].type !== 'StringLiteral') {
+          const a = unwrapValue(n.arguments[0]);
+          const v = a.type === 'StringLiteral' ? a.value
+            : (a.type === 'Identifier' ? stringConsts.get(a.name) : null);
+          if (typeof v === 'string') {
+            n.arguments[0] = { type: 'StringLiteral', value: v, start: a.start, end: a.end, loc: a.loc };
+          }
+          // Still non-literal: legal for lazy service loaders — but any use
+          // of the RESULT as a registration receiver fails closed below
+          // (dynamicRequire bindings + the inline require(x).verb() path).
+        }
+      }, { topLevel: true, conds: [], src: this.src });
+    }
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
         && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
@@ -416,6 +459,24 @@ class ModuleAnalysis {
         && ((node.callee.object.name === 'Object' && ['defineProperty', 'defineProperties', 'assign', 'setPrototypeOf'].includes(memberPropName(node.callee)))
           || (node.callee.object.name === 'Reflect' && ['set', 'defineProperty'].includes(memberPropName(node.callee))))) {
         descriptorCalls.push(node);
+      }
+      if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+        && node.callee.object.type === 'Identifier' && node.callee.object.name === 'Reflect'
+        && memberPropName(node.callee) === 'apply') {
+        // Reflect.apply(router.get, thisArg, args) is a borrowed
+        // registration — BOTH the method's home object and the (unwrapped)
+        // receiver are judged.
+        const fnArg = node.arguments[0] ? unwrapValue(node.arguments[0]) : null;
+        if (fnArg && (fnArg.type === 'MemberExpression' || fnArg.type === 'OptionalMemberExpression')) {
+          const verb = memberPropName(fnArg);
+          if (verb && (VERBS.has(verb) || ['use', 'route', 'param'].includes(verb))) {
+            borrowedRegCalls.push({ objectNode: fnArg.object, method: verb, node });
+            const recv = node.arguments[1] ? unwrapValue(node.arguments[1]) : null;
+            if (recv && (recv.type === 'Identifier' || recv.type === 'MemberExpression')) {
+              borrowedRegCalls.push({ objectNode: recv, method: verb, node });
+            }
+          }
+        }
       }
       if (node.type === 'ImportDeclaration') {
         // ESM imports bind exactly like require(): a default/namespace import
@@ -850,6 +911,12 @@ class ModuleAnalysis {
     // `current().get('/leak', h)` — when the helper's body references a
     // router, its return value may BE that router; never drop it silently.
     for (const cr of callReceiverRegs) {
+      if (cr.name === 'require') {
+        // require(<non-literal>).<verb>(...) — literal spellings were
+        // captured as external registrations; this one is unresolvable.
+        this.problems.push(`${this.loc(cr.node)}: ${cr.method}() on a dynamically required module — the scanner cannot resolve the receiver; use a literal require`);
+        continue;
+      }
       const b = this.bindings.get(this.canonName(cr.name));
       if (!b || b.kind !== 'function' || !b.node) continue;
       if (this.routerReferencedIn(b.node)) {
@@ -983,6 +1050,9 @@ class ModuleAnalysis {
         }
       }
       const ob = this.cleanBinding(r.object);
+      if (ob && ob.kind === 'dynamicRequire') {
+        this.problems.push(`${this.loc(r.node)}: ${r.method}() on a dynamically required module — the scanner cannot resolve the receiver; use a literal require`);
+      }
       if (ob && (ob.kind === 'require' || ob.kind === 'requireMember') && ob.module !== null) {
         // `const shared = require('./shared-router'); shared.get('/leak', h)`
         // mutates a router OWNED BY ANOTHER MODULE — recorded so the scanner
@@ -1092,8 +1162,9 @@ class ModuleAnalysis {
     // (http.createServer, the Sentry error handler).
     for (const call of callsWithIdentifierArgs) {
       const resolvedArgs = [];
-      for (const a of call.arguments) {
-        if (!a) continue;
+      for (const raw of call.arguments) {
+        if (!raw) continue;
+        const a = unwrapValue(raw);
         if (a.type === 'Identifier') resolvedArgs.push(this.canonName(a.name));
         else if (a.type === 'MemberExpression') {
           const n = this.resolveMemberChain(a);
@@ -1354,6 +1425,12 @@ class ModuleAnalysis {
       this.setBinding(name, { kind: 'array', elements: init.elements, topLevel });
     } else if (init && (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression')) {
       this.setBinding(name, { kind: 'function', node: init, topLevel });
+    } else if (init && init.type === 'CallExpression'
+      && init.callee.type === 'Identifier' && init.callee.name === 'require') {
+      // A require() that stayed non-literal after the pre-pass — its result
+      // may be ANY module (a mounted router included); registrations through
+      // it are rejected rather than dropped.
+      this.setBinding(name, { kind: 'dynamicRequire', topLevel });
     } else if (init && init.type === 'CallExpression') {
       // Express registration calls RETURN the router, so
       // `const api = router.get('/x', h)` aliases the router — later
