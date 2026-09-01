@@ -460,7 +460,7 @@ describe('mintRestartEstimate', () => {
       // rows are still THIS attempt (slack window).
       { id: 's6', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Lawn Care Program', cancelled_at: '2026-08-21T23:30:00' },
     ];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found.caseId).toBe('case-1');
     expect(found.source).toBe('cancelled_rows');
     expect([...found.families].sort()).toEqual(['lawn_care', 'mosquito', 'pest_control']);
@@ -478,7 +478,7 @@ describe('mintRestartEstimate', () => {
       { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-8', service_type: 'Lawn Care Program', cancelled_at: '2026-08-23T12:00:00Z' },
       { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Monthly Mosquito Program', cancelled_at: '2026-08-23T12:05:00Z' },
     ];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-2', requestId: null, source: 'cancelled_rows' });
   });
 
@@ -492,7 +492,7 @@ describe('mintRestartEstimate', () => {
     tables.scheduled_services = [
       { id: 'anchor-1', customer_id: 'cust-1', status: 'completed', is_recurring: true, recurring_ongoing: false, cancellation_reason: 'Portal cancellation request req-5', service_type: 'Quarterly Pest Control', cancelled_at: null },
     ];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-3', requestId: null, source: 'cancelled_rows' });
   });
 
@@ -508,7 +508,7 @@ describe('mintRestartEstimate', () => {
       id: 'term-1', customer_id: 'cust-1', status: 'active', term_start: '2026-01-01', term_end: '2026-12-31',
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
     }];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-5', requestId: null, source: 'cancelled_rows' });
   });
 
@@ -524,11 +524,31 @@ describe('mintRestartEstimate', () => {
       id: 'term-4', customer_id: 'cust-1', status: 'cancelled', term_start: '2026-01-01', term_end: '2026-12-31',
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
     }];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-8', requestId: null, source: 'cancelled_rows' });
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
     expect(tables.estimates).toHaveLength(1);
+  });
+
+  test('a failing prepay evidence read only NARROWS — the savepoint keeps the outer transaction usable (codex GH r18 P2)', async () => {
+    // The prepay lookup is best-effort, but without a savepoint a pg
+    // statement error aborts the OUTER mint transaction — the catch would
+    // swallow it and every later read still fails.
+    tables.cancellation_cases = [{
+      id: 'case-11', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-20',
+    }];
+    tables.scheduled_services = [
+      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-20', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-23' },
+    ];
+    const t = fakeTrx(null, (table) => {
+      const b = builder(table);
+      if (table.startsWith('annual_prepay_terms')) { b.then = () => { throw new Error('schema skew boom'); }; }
+      return b;
+    });
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', t);
+    expect(found.families).toEqual(['pest_control']);
+    expect(found.source).toBe('cancelled_rows');
   });
 
   test('a NEVER-PAID pending term whose voided invoice cancelled it is NOT purchase evidence (codex pre-push r18 P1)', async () => {
@@ -544,7 +564,7 @@ describe('mintRestartEstimate', () => {
       id: 'term-5', customer_id: 'cust-1', status: 'cancelled', term_start: '2026-01-01', term_end: '2026-12-31',
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: 'inv-void-1',
     }];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: [], caseId: 'case-9', requestId: null, source: 'none' });
   });
 
@@ -561,7 +581,7 @@ describe('mintRestartEstimate', () => {
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: 'inv-paid-1',
       paid_at: '2026-01-02T00:00:00Z',
     }];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-10', requestId: null, source: 'cancelled_rows' });
   });
 
@@ -607,7 +627,7 @@ describe('mintRestartEstimate', () => {
       { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-new', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-25' },
       { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-old', service_type: 'Tree & Shrub Program', cancelled_at: '2026-07-01' },
     ];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: null, requestId: 'req-new', source: 'cancelled_rows' });
   });
 
@@ -623,7 +643,7 @@ describe('mintRestartEstimate', () => {
       // A staff cancellation with its own reason is still not plan evidence.
       { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'duplicate booking', service_type: 'Monthly Mosquito Program', cancelled_at: '2026-08-23' },
     ];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found.source).toBe('cancelled_rows');
     expect([...found.families].sort()).toEqual(['lawn_care', 'pest_control']);
   });
@@ -639,7 +659,7 @@ describe('mintRestartEstimate', () => {
       { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-23' },
       { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Lawn Care Program', cancelled_at: '2026-07-02' },
     ];
-    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-new', requestId: null, source: 'cancelled_rows' });
   });
 
@@ -651,14 +671,14 @@ describe('mintRestartEstimate', () => {
     tables.customer_interactions = [{
       customer_id: 'cust-1', interaction_type: 'note', subject: 'Cancelled Lawn Care — plan continues with Pest Control', created_at: '2026-08-23T11:30:00Z',
     }];
-    expect(await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table)))
+    expect(await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx()))
       .toEqual({ families: [], caseId: 'case-4', requestId: null, source: 'none' });
   });
 
   test('falls back to the scoped churn note, then reports nothing to restart', async () => {
     tables.cancellation_cases = [];
     tables.customer_interactions = [{ customer_id: 'cust-1', interaction_type: 'note', subject: 'Cancelled Lawn Care, Mosquito — plan continues with Pest Control', created_at: '2026-08-01' }];
-    expect(await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table))).toEqual({ families: ['lawn_care', 'mosquito'], caseId: null, requestId: null, source: 'churn_note' });
+    expect(await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx())).toEqual({ families: ['lawn_care', 'mosquito'], caseId: null, requestId: null, source: 'churn_note' });
 
     tables.customer_interactions = [];
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });

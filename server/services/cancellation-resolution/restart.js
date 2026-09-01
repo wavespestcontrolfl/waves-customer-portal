@@ -175,7 +175,15 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   try {
     const { etDateString } = require('../../utils/datetime-et');
     const attemptDate = etDateString(attemptAnchor ? new Date(attemptAnchor) : new Date());
-    for (const key of await prepayTermFamilyKeys(dbh, customerId, attemptDate, { historical: true })) {
+    // Savepoint-isolated (codex GH r18 P2): dbh is usually the mint's
+    // outer transaction, and a pg statement error here (schema skew, a
+    // partial deploy) would abort IT — the catch would swallow the error
+    // yet every later ownership/pricing query still fails, making Restart
+    // unavailable instead of merely narrowing the evidence. A nested
+    // transaction scopes the abort to this optional lookup, same shape as
+    // the mint's seed lookup.
+    const prepayKeys = await dbh.transaction((sp) => prepayTermFamilyKeys(sp, customerId, attemptDate, { historical: true }));
+    for (const key of prepayKeys) {
       if (!keys.includes(key)) keys.push(key);
     }
   } catch (err) {
