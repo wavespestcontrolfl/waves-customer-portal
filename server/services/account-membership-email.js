@@ -391,6 +391,21 @@ async function sendCancellationReceived({
           ? ', and our office waived the scheduled-visit fee'
           : ', and a visit already inside its late-cancellation window keeps its scheduled-visit fee'}.`))
     : 'Our office is closing out your plan by hand and will confirm exactly what has stopped within 1 business day.';
+  // Legacy-key compat: sends recorded before the class-suffixed key deployed
+  // live under the unsuffixed key, and the old behavior deduped EVERY retry
+  // for the request. Honor that for existing rows — the received→completed
+  // upgrade applies to new requests only. Best-effort: an unreadable table
+  // falls through to the class-keyed send.
+  if (!idempotencyKey) {
+    try {
+      const legacy = await db('email_messages')
+        .where({ idempotency_key: `account.cancellation_received:${request.id}` })
+        .first('id');
+      if (legacy) return { ok: true, deduped: true, legacyKey: true };
+    } catch (probeErr) {
+      logger.warn(`[account-membership-email] legacy cancellation-key probe failed for ${request.id}: ${probeErr.message}`);
+    }
+  }
   return sendTemplate({
     customerId,
     templateKey: 'account.cancellation_received',
