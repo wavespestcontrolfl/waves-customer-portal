@@ -14373,11 +14373,17 @@ const CallRecordingProcessor = {
           // STAMPED_LEAD_RESTORE_FIELDS, so that loss is not even rollback-able.
           const synopsisIsGateRefusal = /^\s*\**\s*not a new lead/i.test(synopsis);
           // The gate above ran BEFORE this provider await, so ownership can
-          // have moved while the synopsis was generating. Re-check before
-          // writing rather than letting a superseded pass overwrite the new
-          // owner's synopsis (codex #3677 P1).
-          if (!(await stillOwnsClaim())) return abandonToPeer('the synopsis write');
-          await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+          // have moved while the synopsis was generating. The write itself is
+          // TOKEN-FENCED rather than preceded by a check: a check-then-write
+          // still lets a peer reclaim between the two and a superseded pass
+          // overwrite the new owner's synopsis (codex #3677 P1). Zero rows
+          // means the claim moved; a thrown DB error still reaches the
+          // non-blocking catch below, as before.
+          const synopsisRows = await db('call_log')
+            .where({ id: call.id })
+            .where('processing_token', procToken)
+            .update({ lead_synopsis: synopsis });
+          if (!synopsisRows) return abandonToPeer('the synopsis write');
           await updateUnifiedVoiceMessage(call, { ai_summary: synopsis });
           // Also write to lead if one was created — never the gate refusal.
           if (leadId && !synopsisIsGateRefusal) {

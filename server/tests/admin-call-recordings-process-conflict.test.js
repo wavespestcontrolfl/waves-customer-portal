@@ -336,6 +336,17 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(checkpoint).toContain("if (!checkpointRows) return abandonToPeer(");
   });
 
+  test('the synopsis write is token-fenced, not check-then-write', () => {
+    // A check immediately before an id-only UPDATE is still a TOCTOU window.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const start = source.indexOf('const synopsisRows = await db(');
+    const end = source.indexOf('updateUnifiedVoiceMessage(call, { ai_summary: synopsis })', start);
+    const write = source.slice(start, end);
+    expect(write).toContain(".where('processing_token', procToken)");
+    expect(write).toContain('lead_synopsis: synopsis');
+    expect(write).toContain("if (!synopsisRows) return abandonToPeer(");
+  });
+
   test('an ownership loss reported by CSR scoring abandons the pass', () => {
     // scoreCall returns { skipped, reason: 'ownership_lost' } from its own
     // post-await check; reading that as "no score" and carrying on reached
