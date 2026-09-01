@@ -805,6 +805,25 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('expression-literal InlineCTA props and unknown AffiliateLink props fail closed (Codex #3646 r17)', () => {
+    withAffiliateEnv(() => {
+      const propCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_PROPS').length;
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      // Simple-literal expressions are parsed by the astro prop validator
+      // and rejected against the string schemas.
+      for (const bad of ['<InlineCTA tel={false} />', '<InlineCTA headline={42} />', '<InlineCTA description={null} />', '<InlineCTA ctaLabel={["a"]} />']) {
+        expect(propCodes(guardrails.evaluate({ body: wrap(bad), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBeGreaterThan(0);
+      }
+      // Opaque expressions stay unvalidated astro-side, so they pass here.
+      expect(propCodes(guardrails.evaluate({ body: wrap('<InlineCTA headline={someVar} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }))).toBe(0);
+      // An extra AffiliateLink prop is rejected before the park exists.
+      const extraProp = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec" foo="bar">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: extraProp, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:INVALID_AFFILIATELINK_PROPS');
+      const clean = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`;
+      expect(affiliateCodes(guardrails.evaluate({ body: clean, frontmatter: fm() }, { targetIsBlog: true }))).toEqual([]);
+    });
+  });
+
   test('the FULL InlineCTA prop contract holds: unknown props and invalid tel block every draft (Codex #3646 r16)', () => {
     const propCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_PROPS').length;
     const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
@@ -849,7 +868,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
-      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS',
+      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }

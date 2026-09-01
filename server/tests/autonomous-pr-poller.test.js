@@ -354,6 +354,14 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     expect((await belt({}, null)).ok).toBe(false);
     expect((await belt({}, { content: '---\ntitle: Service page\n---\nplain' })).ok).toBe(true);
   });
+
+  test('tag-shaped text ONLY in frontmatter is not rendered affiliate material — never withheld (Codex #3646 r17)', async () => {
+    const fmOnly = '---\ntitle: x\nnote: documenting <AffiliateLink product="rain-gauge" placement="primary-rec"> here\n---\n\nplain body, no components';
+    expect((await belt({}, fmOnly)).ok).toBe(true);
+    // ...while the same tag in the BODY still requires approval.
+    const inBody = '---\ntitle: x\n---\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    expect((await belt({}, inBody)).ok).toBe(false);
+  });
 });
 
 describe('helpers', () => {

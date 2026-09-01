@@ -693,7 +693,12 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       }
       const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
       const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
-        || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
+        || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null)
+        // A continuation fence at a nested item's content column (>= 4
+        // absolute spaces) is still a fence once the list indent is
+        // stripped (CommonMark) — the absolute {0,3} match cannot see it.
+        || (!marker && depth === topDepth() && topCol() > 0 && indent >= topCol()
+          ? strippedLine.slice(topCol()).match(/^ {0,3}(`{3,}|~{3,})(.*)$/) : null);
       if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
         if (!marker && depth === topDepth() && indent < topCol()) { while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop(); }
         openCh = opener[1][0]; openLen = opener[1].length; start = pos;
@@ -829,11 +834,28 @@ function blankExpressionStrings(src: string): string {
   const out = src.split('');
   let depth = 0;
   let prevSig = ''; // last significant char inside the current brace span
+  // Depth-0 context tracking: inside a TAG a quoted attribute value is
+  // opaque (title="{" must not open an expression — its brace once paired
+  // a later real prop quote and blanked a counted component's opener:
+  // fail open); in prose only braces matter.
+  let inTag = false; let attrQ: string | null = null;
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
+    if (depth === 0) {
+      if (attrQ) { if (c === attrQ) attrQ = null; continue; }
+      if (inTag) {
+        if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
+        if (c === '>') { inTag = false; continue; }
+        if (c === '{') { depth = 1; prevSig = '{'; continue; }
+        continue;
+      }
+      if (c === '<' && /[A-Za-z/!]/.test(src[i + 1] || '')) { inTag = true; continue; }
+      if (c === '{') { depth = 1; prevSig = '{'; continue; }
+      continue;
+    }
     if (c === '{') { depth += 1; prevSig = '{'; continue; }
-    if (c === '}') { if (depth > 0) depth -= 1; prevSig = '}'; continue; }
+    if (c === '}') { depth -= 1; prevSig = '}'; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
@@ -1218,7 +1240,11 @@ function maskJsxAttrQuotes(src: string): string {
         // (regex/string/comment-aware) and blank it.
         const e = closeOfExpressionAt(src, j);
         if (e > 0) {
-          for (let t = j; t <= e; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          // JSX inside an attr EXPRESSION renders (description={<AffiliateLink …/>}
+          // is emitted by the component) — keep it visible; blank only the
+          // expression's string/regex/comment literals via the shared lexer.
+          const lexed = blankExpressionStrings(src.slice(j, e + 1));
+          for (let t = j; t <= e; t += 1) if (out[t] !== '\n' && lexed[t - j] !== src[t]) out[t] = lexed[t - j];
           j = e; continue;
         }
       }
@@ -1407,7 +1433,7 @@ export function validateAffiliateUsage(
 function extractMdxComponentNames(mdx: string): Set<string> {
   // A component name spelled inside an expression string is text (same
   // rule as extractComponentInvocations) — scan the string-blanked view.
-  const cleaned = maskJsxAttrQuotes(blankExpressionStrings(blankNonRenderedCode(mdx)));
+  const cleaned = maskJsxAttrQuotes(blankExpressionStrings(blankNonRenderedCode(mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length))));
 
   const names = new Set<string>();
   const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
@@ -1457,7 +1483,9 @@ export function validateMarkdownComponentProps(
   // Same non-rendered-code semantics as validateAffiliateUsage (backtick AND
   // tilde fences, inline spans, indented code) — a code example never
   // needs valid props.
-  const cleaned = blankNonRenderedCode(body_mdx);
+  // Comments never render — an example in <!-- --> or {/* */} needs no
+  // valid props (same masking as validateAffiliateUsage).
+  const cleaned = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
   const invocations = extractComponentInvocations(cleaned);
 
   const issues: ComponentPropIssue[] = [];

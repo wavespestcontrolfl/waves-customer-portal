@@ -1690,11 +1690,28 @@ function blankExpressionStringLiterals(text) {
   const out = s.split('');
   let depth = 0;
   let prevSig = ''; // last significant char — decides regex vs division
+  // Depth-0 context: inside a TAG a quoted attribute value is opaque
+  // (title="{" must not open a phantom expression that pairs a later real
+  // prop quote and blanks a counted component's opener — astro parity,
+  // Codex #504 r19); in prose only braces matter.
+  let inTag = false; let attrQ = null;
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
+    if (depth === 0) {
+      if (attrQ) { if (c === attrQ) attrQ = null; continue; }
+      if (inTag) {
+        if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
+        if (c === '>') { inTag = false; continue; }
+        if (c === '{') { depth = 1; prevSig = '{'; continue; }
+        continue;
+      }
+      if (c === '<' && /[A-Za-z/!]/.test(s[i + 1] || '')) { inTag = true; continue; }
+      if (c === '{') { depth = 1; prevSig = '{'; continue; }
+      continue;
+    }
     if (c === '{') { depth += 1; prevSig = '{'; continue; }
-    if (c === '}') { if (depth > 0) depth -= 1; prevSig = '}'; continue; }
+    if (c === '}') { depth -= 1; prevSig = '}'; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
@@ -1788,7 +1805,11 @@ function maskJsxAttrQuotes(src) {
       if (c === '{') {
         const e = closeOfExpressionAt(s, j);
         if (e > 0) {
-          for (let t = j; t <= e; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          // JSX inside an attr EXPRESSION renders (description={<AffiliateLink …/>})
+          // — keep it visible; blank only string/regex/comment literals
+          // (astro parity, Codex #504 r19).
+          const lexed = blankExpressionStringLiterals(s.slice(j, e + 1));
+          for (let t = j; t <= e; t += 1) if (out[t] !== '\n' && lexed[t - j] !== s[t]) out[t] = lexed[t - j];
           j = e; continue;
         }
       }
@@ -1829,7 +1850,7 @@ function collectAffiliateLinkTags(text) {
     if (strView[tag.start] === ' ') continue; // quoted JSX text
     const productId = literalAttribute(tag.attrs, 'product');
     const placement = literalAttribute(tag.attrs, 'placement');
-    tags.push({ start: tag.start, productId: productId || null, placement: placement || null });
+    tags.push({ start: tag.start, attrs: tag.attrs, productId: productId || null, placement: placement || null });
   }
   return tags;
 }
@@ -1956,7 +1977,7 @@ function eachJsxAttr(attrs) {
   re.lastIndex = 0;
   while (re.lastIndex < s.length && (m = re.exec(s)) !== null) {
     if (m[0].length === 0) break;
-    out.push({ name: m[1], literal: m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null });
+    out.push({ name: m[1], literal: m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null, expr: m[4] !== undefined ? m[4] : null });
   }
   return out;
 }
@@ -1982,9 +2003,17 @@ function inlineCtaContractFinding(body) {
     }
     // The FULL vendored prop contract, not just ctaHref: unknown props and
     // an invalid literal tel are astro publish blockers (Codex #3646 r16).
-    for (const { name, literal } of eachJsxAttr(tag.attrs)) {
+    for (const { name, literal, expr } of eachJsxAttr(tag.attrs)) {
       if (!INLINE_CTA_PROP_NAMES.has(name)) {
         return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA> with unknown prop "${name}" — the component accepts only ${[...INLINE_CTA_PROP_NAMES].join(', ')}; the astro publish gate rejects unknown props.`);
+      }
+      // Every InlineCTA prop is a STRING schema — a simple-literal or
+      // JSON-container expression ({false}, {42}, {null}, {[…]}, {{…}}) is
+      // parsed by the astro prop validator and rejected against it
+      // (Codex #3646 r17 P1); opaque expressions ({someVar}) stay
+      // unvalidated there, so they pass here too.
+      if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA ${name}=${expr}> — a boolean/number/null/container expression never satisfies the component's string prop schema; use a quoted literal.`);
       }
       if (name === 'tel' && literal !== null && !INLINE_CTA_TEL_RE.test(literal)) {
         return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA tel="${literal}"> that is not a phone number (optionally tel:-prefixed) — the astro publish gate rejects it.`);
@@ -2042,6 +2071,14 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   const postType = String(frontmatter?.post_type || '').trim().toLowerCase();
 
   for (const tag of tags) {
+    // EXACTLY product + placement (the vendored AffiliateLink prop schema)
+    // — an unknown prop is rejected by the astro prop validator after
+    // owner review, so it blocks before the park exists (Codex #3646 r17).
+    for (const { name } of eachJsxAttr(tag.attrs)) {
+      if (name !== 'product' && name !== 'placement') {
+        push('P0', 'INVALID_AFFILIATELINK_PROPS', name, `Draft contains an <AffiliateLink> with unknown prop "${name}" — the component accepts exactly product and placement; the astro publish gate rejects anything else.`);
+      }
+    }
     if (!tag.productId) {
       push('P0', 'UNREGISTERED_AFFILIATE_LINK', '(no-product)', 'Draft contains an <AffiliateLink> without a literal product="…" id — the component resolves ONLY registry product ids; never compute, omit, or paste a URL into it.');
       continue;

@@ -335,13 +335,26 @@ async function headRefreshFileContent(run, pr) {
 async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
   if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
+  // Frontmatter is parsed FIRST and every affiliate scan runs on the BODY:
+  // tag-shaped text in YAML (a comment documenting <AffiliateLink>) is not
+  // rendered affiliate material and must not withhold an affiliate-free PR
+  // forever (Codex #3646 r17 P1). Unparseable frontmatter → scan the raw
+  // file (over-detects: the safe, withholding direction).
+  let fmHead = {};
+  let bodyHead = content;
+  try {
+    const { parse: parseFmEarly } = require('../content-astro/frontmatter');
+    const parsed = parseFmEarly(content);
+    fmHead = parsed?.data || {};
+    bodyHead = typeof parsed?.content === 'string' ? parsed.content : content;
+  } catch (_) { /* unparseable — raw scan below fails closed */ }
   // A RENDERED <AffiliateLink> only — the guardrails counting view masks
   // code fences and comments, so a code-fenced example must not withhold an
   // affiliate-free PR forever. Guardrails unavailable → the raw scan
   // over-detects, which is the safe (withholding) direction.
   let hasAffiliate;
-  try { hasAffiliate = require('./content-guardrails').affiliateProductIdsIn(content).length > 0; }
-  catch (_) { hasAffiliate = /<AffiliateLink\b/.test(content); }
+  try { hasAffiliate = require('./content-guardrails').affiliateProductIdsIn(bodyHead).length > 0; }
+  catch (_) { hasAffiliate = /<AffiliateLink\b/.test(bodyHead); }
   if (!hasAffiliate) return { ok: true };
   // The kill switch is re-checked at MERGE time: an approval taken while the
   // lane was open must not publish affiliate material after
@@ -368,7 +381,7 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   let ids;
   try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
   const approved = new Set(ids(dp?.body || ''));
-  const headIds = ids(content);
+  const headIds = ids(bodyHead);
   const extra = headIds.filter((id) => !approved.has(id));
   if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
   // The FULL affiliate guardrail contract is re-run on the HEAD file at
@@ -390,18 +403,10 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   if (!liveRegistry || typeof liveRegistry !== 'object') {
     return { ok: false, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
   }
-  let guard; let parseFm;
+  let guard;
   try {
     guard = require('./content-guardrails');
-    ({ parse: parseFm } = require('../content-astro/frontmatter'));
-  } catch (_) { return { ok: false, reason: 'guardrails/frontmatter unavailable for the merge-time affiliate recheck' }; }
-  let fmHead = {};
-  let bodyHead = content;
-  try {
-    const parsed = parseFm(content);
-    fmHead = parsed?.data || {};
-    bodyHead = typeof parsed?.content === 'string' ? parsed.content : content;
-  } catch (_) { /* unparseable frontmatter → scan raw; missing post_type fails closed below */ }
+  } catch (_) { return { ok: false, reason: 'guardrails unavailable for the merge-time affiliate recheck' }; }
   const hard = guard._internals
     .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true, registry: liveRegistry })
     .filter((f) => f.severity === 'P0');
