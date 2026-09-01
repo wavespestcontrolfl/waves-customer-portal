@@ -601,19 +601,13 @@ describe('full run', () => {
     const fetcher = jest.fn(okFetch);
     const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([injected]) }) }));
     for (const [url] of fetcher.mock.calls) expect(url).not.toContain('evil.example.net');
-    const p = db._tables.seo_link_acquisition_paths[0];
-    expect(p.submission_url).toBeNull();
-    expect(p.path_key).toBe('paid_listing:-');
-    expect(p.legal_terms_hash).toBeNull();
-    const evidence = JSON.parse(p.investigation);
-    expect(evidence.offhost_urls).toEqual({ submission_url: 'https://evil.example.net/join', legal_terms_url: 'https://evil.example.net/terms' });
-    expect(r.pathsWritten).toBe(1);
-    // a stripped submission URL is a rejected claim — never model-confidence
-    // riding the null-URL exemption into best_path_id (Codex r10 P1)
-    expect(p.confidence).toBe(0);
-    expect(evidence.submission_verification).toBe('offhost_submission_url');
+    // a deterministic rejection never becomes a row (writing it under
+    // `paid_listing:-` could overwrite a legitimate URL-less identity —
+    // Codex PR r4 P1); the qualified verdict downgrades with nothing left
+    expect(r.pathsWritten).toBe(0);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(0);
     expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
-    expect(db._tables.seo_link_domains[0].agent_state).toBe('watching'); // qualified downgrades with no executable path
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('watching');
     // a subdomain of the investigated host IS bound
     expect(_internals.hostBound('example.com', 'https://members.example.com/join')).toBe(true);
     expect(_internals.hostBound('example.com', 'https://notexample.com/join')).toBe(false);
@@ -1091,6 +1085,80 @@ describe('full run', () => {
     expect(db._tables.seo_link_acquisition_paths).toHaveLength(1); // nothing written
     expect(db._tables.seo_link_acquisition_paths[0].last_investigated_at).toBeNull(); // nothing stamped
     expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected');
+  });
+
+  test('a rejected off-host claim can never overwrite a legitimate URL-less path of the same type (Codex PR r4 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const outreach = {
+      id: uid(), domain_id: d.id, acquisition_type: 'editorial_outreach', submission_url: null,
+      path_key: 'editorial_outreach:-', superseded_by: null, baseline: false, confidence: 0.8,
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({ reasons: 'legit' }),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [outreach] });
+    const bare = { payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null };
+    const legit = modelPath({ acquisition_type: 'editorial_outreach', link_type: 'editorial', submission_url: null, confidence: 0.8, ...bare });
+    const injected = modelPath({ acquisition_type: 'editorial_outreach', link_type: 'editorial', submission_url: 'https://evil.example.net/pitch', confidence: 0.1, ...bare });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([legit, injected]) }) }));
+    const kept = db._tables.seo_link_acquisition_paths.find((p) => p.id === outreach.id);
+    expect(Number(kept.confidence)).toBe(0.8); // the discarded claim never took the ':-' identity
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(1);
+  });
+
+  test('a page longer than the prompt excerpt is existence, not coverage (Codex PR r4 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const stalePath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [stalePath] });
+    const longPage = `<html><body>${'Long page content. '.repeat(500)}</body></html>`; // > 6000 canonical chars
+    const longFetch = async (url) => (url.includes('/join')
+      ? { status: 200, finalUrl: url, html: longPage, blocked: false, truncated: false }
+      : okFetch(url));
+    const other = modelPath({ acquisition_type: 'business_claim', submission_url: 'https://example.com/register', payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null });
+    await investigatePaths(db, runOpts(db, { fetchPage: longFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([other]) }) }));
+    const stale = db._tables.seo_link_acquisition_paths.find((p) => p.id === stalePath.id);
+    expect(Number(stale.confidence)).toBe(0.7); // the model saw only a prefix — no disproof
+    expect(stale.last_investigated_at).toEqual(new Date('2026-05-01'));
+  });
+
+  test('investigator-owned aggregates re-decide on refresh: disproven qualified closes; rediscovered not_reproducible reopens (Codex PR r4 P1)', async () => {
+    const d = domainRow({ agent_state: 'qualified' });
+    const stale = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [stale] });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible');
+    expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
+
+    const d2 = domainRow({ domain: 'other.com', agent_state: 'not_reproducible' });
+    const old2 = {
+      id: uid(), domain_id: d2.id, acquisition_type: 'paid_listing', submission_url: 'https://other.com/join',
+      path_key: 'paid_listing:https://other.com/join', superseded_by: null, baseline: false, confidence: 0,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db2 = makeDb({ seo_link_domains: [d2], seo_link_acquisition_paths: [old2] });
+    const found = modelPath({ submission_url: 'https://other.com/join', price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null });
+    await investigatePaths(db2, runOpts(db2, { llmDispatch: async () => ({ ok: true, json: verdictOf([found]) }) }));
+    expect(db2._tables.seo_link_domains[0].agent_state).toBe('qualified');
+    expect(db2._tables.seo_link_domains[0].best_path_id).toBeTruthy();
+  });
+
+  test('composite provenance details yield their embedded URLs as candidates (Codex PR r4 P1)', () => {
+    const { candidateUrls } = _internals;
+    const urls = candidateUrls('example.com', {
+      touches: [{ source_detail: 'paste:2026-09-01 https://example.com/custom-apply' }],
+      competitorUrls: [], existingPaths: [],
+    });
+    expect(urls).toContain('https://example.com/custom-apply');
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {

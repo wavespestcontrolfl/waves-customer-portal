@@ -100,8 +100,8 @@ const USD_MARKER_RE = /\bUSD\b|US\$/i;
 // words (TRY, ALL) are matched case-SENSITIVELY so ordinary copy ("try",
 // "all plans") can never mark a quote foreign.
 const FOREIGN_SYMBOL_RE = /€|£|¥|₹|₩|C\$|CA\$|A\$|AU\$|NZ\$|R\$/;
-const FOREIGN_ISO_RE = /\b(CAD|AUD|EUR|GBP|NZD|MXN|JPY|CNY|CHF|SEK|NOK|DKK|ZAR|BRL|INR|PLN|SGD|HKD|AED|THB|PHP|MYR|IDR|VND|KRW|TWD|CZK|HUF|RON|ILS|SAR|QAR|KWD|BHD|OMR|EGP|CLP|COP|PEN|ARS|RUB|UAH|BGN|ISK)\b/i;
-const FOREIGN_AMBIGUOUS_ISO_RE = /\b(TRY|ALL)\b/; // case-sensitive on purpose
+const FOREIGN_ISO_RE = /\b(CAD|AUD|EUR|GBP|NZD|MXN|JPY|CNY|CHF|SEK|NOK|DKK|ZAR|BRL|INR|PLN|SGD|HKD|AED|THB|PHP|MYR|IDR|VND|KRW|TWD|CZK|HUF|RON|ILS|SAR|QAR|KWD|BHD|OMR|EGP|CLP|COP|PEN|ARS|RUB|UAH|BGN|ISK|NGN|PKR|BDT|KES|LKR|GHS|TZS|UGX|MAD|DZD|TND|JOD|LBP|IQD|NPR|MMK|KHR|LAK|MNT|KZT|UZS|AZN|GEL|AMD|BYN|MDL|MKD|RSD|BAM|HRK|CRC|DOP|GTQ|HNL|NIO|PAB|PYG|BOB|UYU|VES|JMD|TTD|BSD|BBD|XCD|BZD|GYD|SRD|FJD|PGK|WST|SBD|VUV|XOF|XAF|XPF|ETB|RWF|BIF|MWK|ZMW|MZN|AOA|NAD|BWP|SZL|LSL|MUR|SCR|MVR|BND|MOP)\b/i;
+const FOREIGN_AMBIGUOUS_ISO_RE = /\b(TRY|ALL|TOP)\b/; // case-sensitive on purpose — English words in lowercase copy
 const isForeignMarker = (s) => FOREIGN_SYMBOL_RE.test(s) || FOREIGN_ISO_RE.test(s) || FOREIGN_AMBIGUOUS_ISO_RE.test(s);
 
 /**
@@ -174,7 +174,12 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   push(`https://${host}`);
   for (const p of existingPaths) push(p.submission_url);
   for (const u of competitorUrls) push(u);
-  for (const t of touches) push(t.source_detail);
+  // provenance details can be COMPOSITE ("paste:2026-09-01 https://…/apply",
+  // CSV context + resolved URL) — extract every embedded URL rather than
+  // requiring the whole string to be one
+  for (const t of touches) {
+    for (const m of String(t.source_detail || '').match(/https?:\/\/[^\s"'<>]+/g) || []) push(m);
+  }
   for (const p of PROBE_PATHS) push(`https://${host}${p}`);
   return out;
 }
@@ -723,13 +728,20 @@ async function investigatePaths(db, {
               }
             }
             // A stripped submission URL is a REJECTED claim, not a genuinely
-            // URL-less outreach path — it must not keep its model confidence
-            // and ride the null-URL exemption into best_path_id. The same
-            // holds for a site-executed type with no URL at all (the schema
-            // demands one; this is the belt for drift).
-            if (clean.offhost.submission_url) clean.submissionUnverified = 'offhost_submission_url';
-            else if (!clean.submission_url && URL_REQUIRED_ACQUISITION_TYPES.includes(clean.acquisition_type)) clean.submissionUnverified = 'missing_submission_url';
+            // URL-less outreach path — writing it would take the `${type}:-`
+            // identity and could OVERWRITE (and zero) a legitimate URL-less
+            // path of the same type. Deterministic rejections are therefore
+            // DISCARDED entirely (the model's claim simply does not become a
+            // row); the same holds for a site-executed type with no URL at
+            // all (the schema demands one; this is the belt for drift).
+            if (clean.offhost.submission_url) clean.rejectedClaim = 'offhost_submission_url';
+            else if (!clean.submission_url && URL_REQUIRED_ACQUISITION_TYPES.includes(clean.acquisition_type)) clean.rejectedClaim = 'missing_submission_url';
             return clean;
+          })
+          .filter((p) => {
+            if (!p.rejectedClaim) return true;
+            logger.info(`[link-investigator] ${host}: discarded model path (${p.rejectedClaim}) ${JSON.stringify(p.offhost)}`);
+            return false;
           });
 
         // A submission URL is EXECUTABLE only when this pass observed it: the
@@ -746,7 +758,12 @@ async function investigatePaths(db, {
         // Coverage additionally requires SUBSTANTIVE canonical text — a
         // client-rendered script shell proves the URL exists but the model
         // observed nothing on it, so its omissions disprove nothing.
-        const coverageKeys = new Set(pages.filter((pg) => !pg.truncated && pg.text.length >= MIN_COVERAGE_TEXT_CHARS).map((pg) => registry.normalizeSubmissionUrl(pg.url)));
+        // …and the model must have SEEN the whole page: the prompt carries at
+        // most PAGE_EXCERPT_CHARS of canonical text, so a longer page is only
+        // partially observed — existence, not coverage.
+        const coverageKeys = new Set(pages
+          .filter((pg) => !pg.truncated && pg.text.length >= MIN_COVERAGE_TEXT_CHARS && pg.text.length <= PAGE_EXCERPT_CHARS)
+          .map((pg) => registry.normalizeSubmissionUrl(pg.url)));
         let verifyAttempts = 0;
         for (const p of writable) {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
@@ -935,9 +952,15 @@ async function investigatePaths(db, {
           // feeders can still be running at :20) must not leave a freshly
           // qualified domain scored on superseded quality inputs.
           const { score, reasons } = scoreDomain({ ...domain, ...fresh }, best);
-          const watchNote = claimState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
+          // qualified/not_reproducible are INVESTIGATOR-owned aggregates: a
+          // refresh that disproves a qualified domain's last path, or finds a
+          // real one on a not_reproducible domain, re-decides them like a
+          // claim run. Only ready_to_acquire/acquiring/acquired (and admin
+          // watch/reject) stay lane-/owner-owned.
+          const decideState = claimState || ['qualified', 'not_reproducible'].includes(domain.agent_state);
+          const watchNote = decideState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
           const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: null };
-          if (claimState) {
+          if (decideState) {
             // Defensive downgrades, both directions: a qualified verdict with
             // no executable best path parks `watching` (never a qualified
             // domain nothing can act on), and a TERMINAL not_reproducible

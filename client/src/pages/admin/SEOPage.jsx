@@ -2946,8 +2946,12 @@ function BacklinkRegistryCard() {
   const [runBusy, setRunBusy] = useState(false);
   const [runResult, setRunResult] = useState(null);
   const [error, setError] = useState(null);
+  const loadGen = useRef(0);
 
   const load = async (state = stateFilter, q = search, p = page) => {
+    // request generation: a superseded load (filter/page changed while it was
+    // in flight) must never write its rows under the newer controls
+    const gen = ++loadGen.current;
     setLoading(true);
     setError(null);
     try {
@@ -2955,12 +2959,14 @@ function BacklinkRegistryCard() {
       if (state) params.set("agent_state", state);
       if (q.trim()) params.set("q", q.trim());
       const r = await adminFetch(`/admin/backlink-agent/registry?${params}`);
+      if (gen !== loadGen.current) return;
       setRows(r?.items || []);
       setPage(p);
     } catch (e) {
+      if (gen !== loadGen.current) return;
       setError(e?.message || "Registry load failed");
     } finally {
-      setLoading(false);
+      if (gen === loadGen.current) setLoading(false);
     }
   };
   useEffect(() => {
