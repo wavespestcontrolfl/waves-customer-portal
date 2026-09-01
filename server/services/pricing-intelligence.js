@@ -9,6 +9,7 @@
  */
 
 const db = require('../models/db');
+const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const logger = require('./logger');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 
@@ -331,13 +332,23 @@ class PricingIntelligence {
       .first()
       .catch(() => ({ total: 0 }));
 
-    // Stage 2: Core — WaveGuard recurring revenue
+    // Stage 2: Core — WaveGuard recurring revenue. MEMBERSHIP audience
+    // (real tier OR explicit monthly lane), deliberately NOT the
+    // monthly-dues lane alone: per-application and annual-prepay members
+    // are still recurring WaveGuard members and must stay in the money
+    // model's core stage (Codex #3669 r7 P2), and an explicit
+    // monthly_membership row with a null/sentinel tier is a dues-paying
+    // member the cron charges, so the tier arm alone must not drop it
+    // (Codex r10). Sentinel tiers without the explicit lane stay excluded
+    // (#3140); rate > 0 narrows to rate-bearing rows, it doesn't define
+    // the lane.
     const recurringCustomers = await db('customers')
       .where('active', true)
       // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
       .whereNull('deleted_at')
       .whereNotNull('monthly_rate')
       .where('monthly_rate', '>', 0)
+      .where(function membershipOrExplicitMonthly() { this.whereRaw(MEMBERSHIP_TIER_SQL).orWhere('billing_mode', 'monthly_membership'); })
       .select('monthly_rate', 'waveguard_tier');
 
     const monthlyRecurring = recurringCustomers.reduce((sum, c) => sum + parseFloat(c.monthly_rate || 0), 0);

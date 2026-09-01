@@ -330,7 +330,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                 <span className="hidden sm:inline">Refresh</span>
               </button>
             </div>
-            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Content Review</h1>
+            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Content review</h1>
             <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
               The engine drafts the posts — you approve what goes live. Every named-competitor comparison lands here first.
             </p>

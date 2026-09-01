@@ -141,6 +141,85 @@ describe('buildBridgeMonths — degraded months (pre-snapshot)', () => {
   });
 });
 
+describe('buildBridgeMonths — lane-definition boundary (#3669: history preserved, never diffed across)', () => {
+  test('a pair CROSSING the boundary degrades even with both snapshots present; pairs on either side still diff', () => {
+    const out = buildBridgeMonths({
+      monthKeys: ['2026-08-01', '2026-09-01', '2026-10-01'],
+      snapshotsByMonth: new Map([
+        ['2026-07-01', snap({ a: 100, residue: 80 })], // old wide population
+        ['2026-08-01', snap({ a: 100, residue: 80 })],
+        ['2026-09-01', snap({ a: 100 })], // corrected narrow population
+        ['2026-10-01', snap({ a: 100 })],
+      ]),
+      conversionMonthById: new Map(),
+      degradedByMonth: new Map([
+        ['2026-09-01', { newMrr: 30, newCount: 1, churnedMrr: 0, churnedCount: 0 }],
+      ]),
+    });
+    // Aug: wide-vs-wide inside history — internally consistent, exact diff.
+    expect(out[0].degraded).toBe(false);
+    expect(out[0].churned).toEqual({ mrr: 0, count: 0 });
+    // Sep: narrow-vs-wide crosses the boundary — the residue row must NOT
+    // read as churned MRR; the month uses the customers-table approximation.
+    expect(out[1].degraded).toBe(true);
+    expect(out[1].net).toBe(30);
+    expect(out[1].churned).toEqual({ mrr: 0, count: 0 });
+    // Oct: narrow-vs-narrow post-boundary — exact diffs resume.
+    expect(out[2].degraded).toBe(false);
+    expect(out[2].churned).toEqual({ mrr: 0, count: 0 });
+  });
+
+  test('a live customer who left the population by SWITCHING lanes books as contraction, never churn (r10)', () => {
+    const out = buildBridgeMonths({
+      monthKeys: ['2026-10-01'],
+      snapshotsByMonth: new Map([
+        ['2026-09-01', snap({ a: 100, switcher: 80, gone: 50 })],
+        ['2026-10-01', snap({ a: 100 })],
+      ]),
+      conversionMonthById: new Map(),
+      // live on annual_prepay now, and the switch explains THIS exit month
+      laneSwitchedIdsByMonth: new Map([['2026-10-01', new Set(['switcher'])]]),
+    });
+    expect(out[0].degraded).toBe(false);
+    expect(out[0].contraction).toEqual({ mrr: 80, count: 1 }); // dues → 0, customer kept
+    expect(out[0].churned).toEqual({ mrr: 50, count: 1 }); // genuinely gone
+    // Additivity holds either way: start + Σbuckets = end.
+    expect(out[0].startMrr - out[0].contraction.mrr - out[0].churned.mrr).toBe(out[0].endMrr);
+  });
+
+  test('the switch set is PER EXIT MONTH: an earlier real churn is not retroactively relabeled (r10 follow-up)', () => {
+    // reactivator churned in Oct (real churn), came back later on prepay:
+    // the caller resolves the Oct exit as NOT a switch, so no entry for
+    // Oct — the churn stands even though the customer is live now.
+    const out = buildBridgeMonths({
+      monthKeys: ['2026-10-01', '2026-11-01'],
+      snapshotsByMonth: new Map([
+        ['2026-09-01', snap({ a: 100, reactivator: 60 })],
+        ['2026-10-01', snap({ a: 100 })],
+        ['2026-11-01', snap({ a: 100 })],
+      ]),
+      conversionMonthById: new Map(),
+      laneSwitchedIdsByMonth: new Map([['2026-11-01', new Set(['reactivator'])]]),
+    });
+    expect(out[0].churned).toEqual({ mrr: 60, count: 1 }); // Oct churn stands
+    expect(out[0].contraction).toEqual({ mrr: 0, count: 0 });
+  });
+
+  test('laneBoundaryKey: null disables the boundary (pure-core callers can opt out)', () => {
+    const out = buildBridgeMonths({
+      monthKeys: ['2026-09-01'],
+      snapshotsByMonth: new Map([
+        ['2026-08-01', snap({ a: 100, residue: 80 })],
+        ['2026-09-01', snap({ a: 100 })],
+      ]),
+      conversionMonthById: new Map(),
+      laneBoundaryKey: null,
+    });
+    expect(out[0].degraded).toBe(false);
+    expect(out[0].churned).toEqual({ mrr: 80, count: 1 });
+  });
+});
+
 describe('overlayLiveCurrentMonth — in-progress month uses live rates', () => {
   const { overlayLiveCurrentMonth } = require('../services/mrr-bridge');
 

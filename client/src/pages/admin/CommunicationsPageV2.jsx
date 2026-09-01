@@ -2338,7 +2338,7 @@ function SmsTab() {
               </span>
               <div className="flex-1 min-w-0">
                 <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
-                  Agent Review Draft
+                  Agent review draft
                 </div>
                 {agentDraft?.workflow && (
                   <div className="text-12 md:text-11 text-ink-tertiary truncate">
@@ -2922,7 +2922,7 @@ function SmsTab() {
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             {" "}
             <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
-              SMS Log
+              SMS log
             </div>{" "}
             <div className="flex gap-2">
               {" "}

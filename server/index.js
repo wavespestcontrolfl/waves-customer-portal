@@ -169,7 +169,17 @@ const cspDirectives = {
   workerSrc: ["'self'", "blob:"],
 };
 
-const strictHelmet = helmet({ contentSecurityPolicy: { directives: cspDirectives } });
+// Helmet's default COOP (same-origin) severs window.opener when a cross-origin
+// popup returns, which breaks Stripe Financial Connections bank-OAuth flows
+// (Capital One's popup could never hand its result back to the Payment Element).
+// same-origin-allow-popups keeps isolation for our own windows while letting
+// popups we open retain the opener link — Stripe's deployment-checklist value.
+const crossOriginOpenerPolicy = { policy: 'same-origin-allow-popups' };
+
+const strictHelmet = helmet({
+  contentSecurityPolicy: { directives: cspDirectives },
+  crossOriginOpenerPolicy,
+});
 const embedHelmet = helmet({
   contentSecurityPolicy: {
     directives: {
@@ -178,6 +188,7 @@ const embedHelmet = helmet({
     },
   },
   frameguard: false, // disable X-Frame-Options so frame-ancestors governs embedding
+  crossOriginOpenerPolicy,
 });
 
 app.use((req, res, next) => {

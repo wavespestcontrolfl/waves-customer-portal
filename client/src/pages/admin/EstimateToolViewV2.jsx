@@ -547,7 +547,7 @@ class EstimateErrorBoundary extends Component {
         <Card className="p-10 text-center border-alert-fg">
           {" "}
           <div className="text-18 font-medium text-alert-fg mb-3">
-            Estimate Render Error
+            Estimate render error
           </div>{" "}
           <pre className="text-12 text-ink-secondary mb-4 whitespace-pre-wrap text-left max-h-48 overflow-auto">
             {this.state.error.message}
@@ -6743,7 +6743,7 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <div className="text-13 font-medium text-zinc-900 mb-2">
-                    Mosquito Estimate
+                    Mosquito estimate
                   </div>{" "}
                   <div
                     className={`grid ${form.svcMosquito ? "grid-cols-3" : "grid-cols-2"} gap-3`}

@@ -105,7 +105,7 @@ export default function CashSection({
       {/* AR aging — the 90+ buckets are the only place alert-fg */}
       <div className="mb-5">
         <ChartCard
-          title="Accounts Receivable Aging"
+          title="Accounts receivable aging"
           sub={
             aging?.invoice_count != null
               ? `${aging.invoice_count} open invoices`

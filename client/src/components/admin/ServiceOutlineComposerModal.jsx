@@ -312,7 +312,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
           <div>
             <div className="flex items-center gap-2">
               <Sprout size={18} strokeWidth={1.75} className="text-emerald-700" />
-              <h2 className="text-base font-medium text-zinc-950">Lawn Service Outline</h2>
+              <h2 className="text-base font-medium text-zinc-950">Lawn service outline</h2>
               {validation.status && (
                 <Badge tone={statusTone(validation.status)} className="inline-flex items-center gap-1">
                   {validationIcon(validation.status)}

@@ -99,7 +99,7 @@ export default function DesignSystemPage() {
         <div className="text-11 uppercase tracking-label text-ink-secondary">
           Internal
         </div>{" "}
-        <h1 className="text-28 font-normal tracking-tight">Design System</h1>{" "}
+        <h1 className="text-28 font-normal tracking-tight">Design system</h1>{" "}
         <p className="text-13 text-ink-secondary mt-1 max-w-2xl">
           Canonical reference for every primitive in the monochrome admin spec.
           When building a Tier 1 page, render the primitive here and match its

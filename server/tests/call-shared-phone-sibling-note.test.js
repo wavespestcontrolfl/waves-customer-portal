@@ -21,7 +21,7 @@ function makeDb({ sibling = null, siblings = null, byId = {}, failInsert = false
         return q;
       },
       whereNot: () => q,
-      whereNotIn: () => q,
+      whereNotIn: (col, vals) => { database._statusExclusions.push(vals); return q; },
       orderBy: () => q,
       limit: async () => {
         if (table !== 'leads') return [];
@@ -47,6 +47,7 @@ function makeDb({ sibling = null, siblings = null, byId = {}, failInsert = false
     return q;
   };
   database._inserts = inserts;
+  database._statusExclusions = [];
   return database;
 }
 
@@ -69,6 +70,15 @@ describe('noteSharedPhoneSibling', () => {
     expect(JSON.parse(rows[0].metadata).shared_phone_sibling_lead_id).toBe('lead-old');
     expect(rows[1].description).toContain('Dominic Calvert');
     expect(JSON.parse(rows[1].metadata).shared_phone_sibling_lead_id).toBe('lead-new');
+    // Dedicated type — excluded by the staleness sweep and the estimator
+    // evidence pack; and the id rides in the VISIBLE text (the timeline
+    // renders only descriptions).
+    expect(rows.every((r) => r.activity_type === 'shared_phone_note')).toBe(true);
+    expect(rows[0].description).toContain('lead-old');
+    expect(rows[1].description).toContain('lead-new');
+    // Sibling selection uses the repo's CLOSED set — an 'unresponsive'
+    // lead must never be elected as "work that lead instead".
+    for (const vals of db._statusExclusions) expect(vals).toContain('unresponsive');
   });
 
   test('a known sibling id wins over the newest open lead on the phone', async () => {

@@ -112,7 +112,7 @@ export default function ToolHealthPage() {
       <div style={{ maxWidth: 1300, margin: "0 auto" }}>
         {" "}
         <AdminCommandHeader
-          title="Tool Health"
+          title="Tool health"
           icon={Activity}
           sections={TOOL_HEALTH_WINDOWS}
           activeKey={hours}
@@ -131,7 +131,7 @@ export default function ToolHealthPage() {
       <div style={{ maxWidth: 1300, margin: "0 auto" }}>
         {" "}
         <AdminCommandHeader
-          title="Tool Health"
+          title="Tool health"
           icon={Activity}
           sections={TOOL_HEALTH_WINDOWS}
           activeKey={hours}
@@ -153,7 +153,7 @@ export default function ToolHealthPage() {
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
       <AdminCommandHeader
-        title="Tool Health"
+        title="Tool health"
         icon={Activity}
         sections={TOOL_HEALTH_WINDOWS}
         activeKey={hours}

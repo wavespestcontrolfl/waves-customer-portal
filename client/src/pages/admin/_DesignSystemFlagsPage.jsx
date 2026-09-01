@@ -166,7 +166,7 @@ export default function DesignSystemFlagsPage() {
         <div className="text-11 uppercase tracking-label text-ink-secondary">
           Internal · Design System
         </div>{" "}
-        <h1 className="text-28 font-normal tracking-tight">Feature Flags</h1>{" "}
+        <h1 className="text-28 font-normal tracking-tight">Feature flags</h1>{" "}
         <p className="text-13 text-ink-secondary mt-1 max-w-2xl">
           Per-user on/off switches for in-flight work. Toggling reflects on the
           user's next page load. Absence of a row = disabled.
@@ -316,7 +316,7 @@ function VisualServiceNotesSettingsCard({ settings, saving, message, onChange })
       {" "}
       <CardHeader>
         {" "}
-        <CardTitle>Visual Service Notes</CardTitle>{" "}
+        <CardTitle>Visual service notes</CardTitle>{" "}
       </CardHeader>{" "}
       <CardBody>
         {" "}

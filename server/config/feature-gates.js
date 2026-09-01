@@ -53,6 +53,7 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -1044,6 +1045,11 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Call-processing stall watchdog: recorded calls that never reach a
+  // terminal processing state (wedged claim, dead processor, provider
+  // outage) ring an admin bell instead of silently costing leads — the
+  // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
+  callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -1427,6 +1433,20 @@ const gates = {
   // No customer comms anywhere in the flow. Ships DARK.
   // Enable with GATE_ESTIMATE_MEASUREMENT_REVIEW=true.
   estimateMeasurementReview: isProd ? process.env.GATE_ESTIMATE_MEASUREMENT_REVIEW === 'true' : true,
+
+  // Customer-facing service opt-out on a sent estimate: the customer drops one
+  // recurring service line and the estimate re-prices through the canonical
+  // engine (PUT /:token/service-opt-out, with a dryRun preflight that shows
+  // the new numbers before anything is written). No customer comms anywhere in
+  // the flow; one activity_log row, no bell.
+  // STRICT opt-in in EVERY environment — deliberately not the dev-open
+  // `isProd ? … : true` shape the measurement-review gate above uses: this
+  // route rewrites monthly_total, annual_total and onetime_total, so a
+  // local/dev run must arm it explicitly (same posture as securePlanChoice
+  // and reserviceSelfServe). Dark = the /data payload omits the keys and the
+  // route answers the generic 404, indistinguishable from an unknown token.
+  // Enable with GATE_ESTIMATE_SERVICE_OPT_OUT=true.
+  estimateServiceOptOut: process.env.GATE_ESTIMATE_SERVICE_OPT_OUT === 'true',
 
   // The `lawn_area` block on POST /public/quote/calculate — the priced
   // treatable-area basis the website estimator renders as "Priced for N sq

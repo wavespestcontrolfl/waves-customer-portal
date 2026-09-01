@@ -3000,7 +3000,7 @@ export default function BlogPage() {
     return (
       <div>
         {" "}
-        <AdminCommandHeader title="Content Editor" icon={Newspaper} />{" "}
+        <AdminCommandHeader title="Content editor" icon={Newspaper} />{" "}
         <PostEditor
           post={selectedPost}
           onBack={() => setSelectedPost(null)}

@@ -236,7 +236,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
       {!embedded && (
         <AdminCommandHeader
           eyebrow="System"
-          title="Data Hygiene"
+          title="Data hygiene"
           description="Review proposed cleanup from customer communications before it updates live property data."
           icon={DatabaseZap}
         />

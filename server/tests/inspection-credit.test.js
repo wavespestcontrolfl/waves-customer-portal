@@ -319,6 +319,17 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  it('card-approved credit-free booking event is refused by the DIRECT redeemer too (GH r8 P1)', async () => {
+    // The card promised no credit; the event source excludes this booking
+    // from EVERY mint path — a recovered offer backdated before the event
+    // must not mint here either. Estimate-accept restamps the source.
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    mockEvents = [{ created_at: new Date('2026-08-10'), source: 'ib_card_credit_free' }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 0, reason: 'card_credit_free_booking' });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
   it('mints once, with the frozen amount and the inspection_credit source, and binds the ledger id', async () => {
     mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
     mockEvents = [{ created_at: new Date('2026-08-10') }];
@@ -771,6 +782,28 @@ describe('booking + redemption wiring — source contracts (routes too large to 
     expect(source).toContain("await require('./inspection-credit').markBookingForInspectionCredit(client, {");
   });
 
+  it('card-approved credit-free bookings stamp the dedicated event source and every adoption path excludes it (W0B #3648 r7 pre-push P0)', () => {
+    const { CREDIT_FREE_CARD_EVENT_SOURCE } = require('../services/inspection-credit');
+    expect(CREDIT_FREE_CARD_EVENT_SOURCE).toBe('ib_card_credit_free');
+    // The IB executor stamps the dedicated source ONLY on the pinned
+    // (card-approved credit-free) path — an unpinned direct call keeps the
+    // plain adoptable source.
+    const tools = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    expect(tools).toContain("source: input._inspection_credit_amount !== undefined");
+    expect(tools).toContain(".CREDIT_FREE_CARD_EVENT_SOURCE");
+    // All three adoption/mint paths carry the exclusion: the shared
+    // evidence probe (provenBookingInWindow), the hourly sweep's provable
+    // join, and the rebind-to-children anchor scan. A timestamp cannot
+    // encode serialized order (recovery backdates created_at to the
+    // promise moment), so the source predicate is the only thing standing
+    // between a late offer and a booking whose card said no credit.
+    const credit = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    const joined = credit.split("COALESCE(e.source, '') <> ?").length - 1;
+    const plain = credit.split("COALESCE(source, '') <> ?").length - 1;
+    expect(joined).toBe(2);
+    expect(plain).toBe(1);
+  });
+
   it('phone bookings earn evidence at the AI insert, in the booking transaction', () => {
     // The outbound office-review hold was removed (owner directive
     // 2026-08-11): every auto-booked phone sale writes durable evidence in
@@ -964,12 +997,16 @@ describe('closeout route wiring — source contracts (the completion route is to
     // seeders), permanently stranding any open offer.
     // #3109 rung-6 / #3454 rung-1: the tool opens db.transaction, takes the
     // (gated) occupancy lock, then the comms fence (lockCustomerComms), then
-    // inserts — the marker still rides that same trx as the insert.
-    const trxAt = ib.indexOf("await lockCustomerComms(trx, customer_id);\n    const [created] = await trx('scheduled_services').insert({");
-    const markerAt = ib.indexOf('markBookingForInspectionCredit(trx, {', trxAt);
+    // the credit-advisory/liveness block (GH r10), then inserts — the marker
+    // still rides that same trx as the insert. Located independently: the
+    // fence and the insert are no longer adjacent literals.
+    const trxAt = ib.indexOf('await lockCustomerComms(trx, customer_id);');
+    const insertAt = ib.indexOf("const [created] = await trx('scheduled_services').insert({", trxAt);
+    const markerAt = ib.indexOf('markBookingForInspectionCredit(trx, {', insertAt);
     const trxEndAt = ib.indexOf('\n  });', trxAt);
     expect(trxAt).toBeGreaterThan(-1);
-    expect(markerAt).toBeGreaterThan(trxAt);
+    expect(insertAt).toBeGreaterThan(trxAt); // insert under the comms fence
+    expect(markerAt).toBeGreaterThan(insertAt);
     expect(markerAt).toBeLessThan(trxEndAt); // marker rides the same trx
   });
 

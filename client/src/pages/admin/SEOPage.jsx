@@ -1661,9 +1661,9 @@ function RankingsMonitorTab() {
           sub={deltaSub(s.pages_tracked_delta)}
         />
       </div>
-      <MonitorTable title="Position Wins" rows={wins} accent={D.green} />
-      <MonitorTable title="Position Losses" rows={losses} accent={D.red} />
-      <MonitorTable title="New Pages" rows={fresh} />
+      <MonitorTable title="Position wins" rows={wins} accent={D.green} />
+      <MonitorTable title="Position losses" rows={losses} accent={D.red} />
+      <MonitorTable title="New pages" rows={fresh} />
       {wins.length + losses.length + fresh.length === 0 && (
         <Card style={{ padding: 40, textAlign: "center" }}>
           <div style={{ color: D.muted }}>

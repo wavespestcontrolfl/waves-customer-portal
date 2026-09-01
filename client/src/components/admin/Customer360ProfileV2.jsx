@@ -1294,7 +1294,7 @@ function ElectronicAuthorizationContractV2({
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-16 font-medium text-zinc-900">
-              Reusable Documents
+              Reusable documents
             </div>
             <div className="text-12 text-ink-secondary mt-1">
               Send service agreements, notices, prep forms, and WDO acknowledgements through the e-sign workflow.
@@ -1657,7 +1657,7 @@ function ElectronicAuthorizationContractV2({
               {" "}
               <PenLine size={16} strokeWidth={1.75} />{" "}
               <div className="text-14 font-medium text-zinc-900">
-                Signature Record
+                Signature record
               </div>{" "}
             </div>
             {latestContract?.signedAt ? (

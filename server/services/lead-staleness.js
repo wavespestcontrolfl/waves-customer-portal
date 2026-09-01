@@ -49,10 +49,15 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
       this.whereNull('leads.next_follow_up_at')
         .orWhere('leads.next_follow_up_at', '<=', now);
     })
-    // Any activity inside the window means someone/something is on it.
+    // Any activity inside the window means someone/something is on it —
+    // except shared-phone cross-notes: another caller minting a lead on a
+    // shared number says nothing about THIS lead being worked, and
+    // recurring calls on an office line would keep an abandoned lead
+    // active indefinitely.
     .whereNotExists(function () {
       this.select(1).from('lead_activities')
         .whereRaw('lead_activities.lead_id = leads.id')
+        .whereNot('lead_activities.activity_type', 'shared_phone_note')
         .where('lead_activities.created_at', '>=', cutoff);
     })
     // A lead linked to a customer with booked (or already-delivered) service

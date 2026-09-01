@@ -281,7 +281,7 @@ function SendHistoryPanel({ messages, loading, onRefresh }) {
       <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <History size={15} />
-          <CardTitle>Send History</CardTitle>
+          <CardTitle>Send history</CardTitle>
         </div>
         <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
           <RefreshCw size={14} /> Refresh
@@ -343,7 +343,7 @@ function TemplateIssuesPanel({ issues, loading, onRefresh, onOpenTemplate }) {
       <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <AlertTriangle size={15} />
-          <CardTitle>Template Issues</CardTitle>
+          <CardTitle>Template issues</CardTitle>
         </div>
         <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
           <RefreshCw size={14} /> Refresh
@@ -431,7 +431,7 @@ function SuppressionsPanel({
         <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <ShieldCheck size={15} />
-            <CardTitle>Preferences & Suppressions</CardTitle>
+            <CardTitle>Preferences & suppressions</CardTitle>
           </div>
           <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
             <RefreshCw size={14} /> Refresh
@@ -707,7 +707,7 @@ function CreateTemplateCard({ value, busy, onChange, onCreate, onCancel }) {
   return (
     <Card>
       <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
-        <CardTitle>New Email Template</CardTitle>
+        <CardTitle>New email template</CardTitle>
         <div className="flex gap-2 flex-wrap">
           <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
             Cancel
@@ -1030,7 +1030,7 @@ function AutomationRunsPanel({
       <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <History size={15} />
-          <CardTitle>Automation Runs</CardTitle>
+          <CardTitle>Automation runs</CardTitle>
           <Badge tone="neutral">{automationKey}</Badge>
         </div>
         <div className="flex gap-2 flex-wrap">
@@ -1414,7 +1414,7 @@ function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onTo
   return (
     <Card className="overflow-hidden">
       <CardHeader className="flex items-center justify-between gap-3">
-        <CardTitle>Email Templates</CardTitle>
+        <CardTitle>Email templates</CardTitle>
         <Select
           size="sm"
           value={filter}
@@ -2640,7 +2640,7 @@ export default function EmailTemplatesPanelV2() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <Card>
             <CardHeader>
-              <CardTitle>Preview Data</CardTitle>
+              <CardTitle>Preview data</CardTitle>
             </CardHeader>
             <CardBody className="space-y-3">
               <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-2">
@@ -2710,7 +2710,7 @@ export default function EmailTemplatesPanelV2() {
           <Card>
             <CardHeader className="flex items-center gap-2">
               <Mail size={15} />
-              <CardTitle>Rendered Email</CardTitle>
+              <CardTitle>Rendered email</CardTitle>
             </CardHeader>
             <CardBody>
               {preview ? (
