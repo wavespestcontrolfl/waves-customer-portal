@@ -1985,6 +1985,8 @@ function summarizeBatch(results) {
 // reclaiming a row it had processed before would have its live pass stolen at
 // once, skipping the legacy window entirely (pre-push audit P1).
 const LEGACY_CLAIM_QUIET_MINUTES = 10;
+// What a human forcing a reprocess waits for a claim that IS beating.
+const FORCE_CLAIM_QUIET_MINUTES = 3;
 // COALESCE, not a bare comparison: with a NULL processing_started_at the
 // comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
 // branch — permanently unreclaimable, the worst possible bug in a lock.
@@ -6261,7 +6263,7 @@ const CallRecordingProcessor = {
             // after looking at the row; the automatic paths keep the
             // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw(reclaimableClaim(3));
+              .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES));
           })
           .update({
             processing_status: 'processing',
@@ -6293,7 +6295,26 @@ const CallRecordingProcessor = {
     // it for a completed run. The owner hit exactly that on 2026-08-31: his
     // manual Process tap during a wedged claim returned success and the UI
     // said processed while the call sat unprocessed for 18 minutes.
-    if (claimBlocked) return { success: false, skipped: true, reason: 'already_processing' };
+    if (claimBlocked) {
+      // Which window applies depends on the claim we are blocked BEHIND: a
+      // beating claim frees up after the short quiet window, but one with no
+      // beat of its own — a legacy row, or a pod mid-rolling-deploy — keeps
+      // the conservative legacy window. Promising the short number for both
+      // sent the operator back to a conflict for several more minutes
+      // (codex P1).
+      const beat = call.processing_heartbeat_at ? new Date(call.processing_heartbeat_at) : null;
+      const startedAt = call.processing_started_at ? new Date(call.processing_started_at) : null;
+      const beating = beat && !Number.isNaN(beat.getTime())
+        && (!startedAt || Number.isNaN(startedAt.getTime()) || beat >= startedAt);
+      return {
+        success: false,
+        skipped: true,
+        reason: 'already_processing',
+        retryAfterMinutes: beating
+          ? (opts.force ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
+          : LEGACY_CLAIM_QUIET_MINUTES,
+      };
+    }
 
     logger.info(`[call-proc] Processing recording for ${callSid}`);
     // The claim is ours from here. Beat while we work: transcription of a
@@ -6466,7 +6487,17 @@ const CallRecordingProcessor = {
             ...(contactPassTranscript ? { contact_pass_transcript: contactPassTranscript } : {}),
           });
         }
-        await db('call_log').where({ id: call.id }).update(transcriptUpdate);
+        // Token-fenced like the terminal writes: this runs AFTER a
+        // multi-minute provider await, by which time a peer may have
+        // reclaimed the row. Writing by id alone let a superseded pass
+        // overwrite the replacement's transcript (codex P1).
+        const wroteTranscript = await db('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update(transcriptUpdate);
+        if (!wroteTranscript) {
+          logger.warn(`[call-proc] transcript write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+        }
         await updateUnifiedVoiceMessage(
           { ...call, transcription },
           { body: transcription }

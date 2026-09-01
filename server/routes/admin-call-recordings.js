@@ -145,7 +145,11 @@ router.post('/process/:callSid', async (req, res, next) => {
       // after it stops beating, an unforced one waits the conservative 10.
       // Telling every operator "ten minutes" cost about seven of them on a
       // hot call in the exact recovery flow this route exists for (codex P2).
-      const quietMinutes = force ? 3 : 10;
+      // The processor inspected the claim we are blocked behind and knows
+      // which window applies — a claim with no beat of its own (a legacy row,
+      // or a pod mid-rolling-deploy) keeps the conservative one whatever the
+      // caller asked for.
+      const quietMinutes = Number(result.retryAfterMinutes) || 10;
       return res.status(409).json({
         ...result,
         error: `Another pass is still working this call. If it has stalled, try again about ${quietMinutes} minutes after it goes quiet.`,

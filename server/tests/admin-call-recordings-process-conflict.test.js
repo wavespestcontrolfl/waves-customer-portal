@@ -78,9 +78,13 @@ describe('POST /process/:callSid skip semantics', () => {
 describe('the 409 names the retry window that actually applies', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  const conflictFor = (query) => {
+  // retryAfterMinutes null = the processor sent no window at all.
+  const conflictFor = (query, retryAfterMinutes = 3) => {
     CallRecordingProcessor.processRecording.mockResolvedValue({
-      success: false, skipped: true, reason: 'already_processing',
+      success: false,
+      skipped: true,
+      reason: 'already_processing',
+      ...(retryAfterMinutes === null ? {} : { retryAfterMinutes }),
     });
     return withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/process/${SID}${query}`, { method: 'POST' });
@@ -94,7 +98,18 @@ describe('the 409 names the retry window that actually applies', () => {
   });
 
   test('an unforced run is told 10', async () => {
-    expect(await conflictFor('')).toMatch(/about 10 minutes/);
+    expect(await conflictFor('', 10)).toMatch(/about 10 minutes/);
+  });
+
+  test('a forced run blocked behind a NON-beating claim is told the long window', async () => {
+    // A legacy row, or a pod mid-rolling-deploy, keeps the conservative
+    // window whatever the caller asked for — promising 3 sent the operator
+    // back into a conflict for several more minutes.
+    expect(await conflictFor('?force=true', 10)).toMatch(/about 10 minutes/);
+  });
+
+  test('a body with no window falls back to the conservative one', async () => {
+    expect(await conflictFor('?force=true', null)).toMatch(/about 10 minutes/);
   });
 });
 
