@@ -4366,6 +4366,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       protocolActionsCompleted,
       protocolActionScopesCompleted,
       observations,
+      structuredObservations,
       recommendations,
       formResponses,
       formStartedAt,
@@ -5280,7 +5281,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Provenance-kept copy of form/chip observations only. reportObservations
     // also contains [Found] technician-note lines, which must never egress.
     const formObservations = normalizeCompletionTextArray(
-      Array.isArray(observations) ? observations : [],
+      Array.isArray(structuredObservations) ? structuredObservations : [],
     );
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
