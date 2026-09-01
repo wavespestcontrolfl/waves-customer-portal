@@ -87,6 +87,19 @@ const ALLOWLIST = [
     reason: 'MEMBERSHIP_SQL definition: tier-first audience mirror; rate arm is the tierless fallback only',
   },
   {
+    file: 'services/intelligence-bar/authorization-contract.js',
+    match: 'Number(params?.updates?.monthly_rate) > 0',
+    context: 'if (isCustomerUpdate',
+    count: 1,
+    // Confirm-card disclosure predicate (#3648, merged 25 min before this
+    // guard — the two collided only on main): it checks whether the INCOMING
+    // update params touch the fields the executor's billing-mode stamp
+    // reads, to disclose that ripple on the card. It selects no customers
+    // and defines no lane — the stamp itself lives in the executor, which
+    // owns the lane semantics.
+    reason: 'disclosure trigger on incoming update params (#3648 confirm card), not a lane selection',
+  },
+  {
     file: 'scripts/audit-churned-accounts-live-state.js',
     match: 'Number(c.monthly_rate) > 0',
     context: 'flags.push',
@@ -136,6 +149,18 @@ const ALLOWLIST = [
     // converted auto-label row ELIGIBLE for repair (an OR arm widening the
     // candidate set); membership itself is decided per row in JS.
     reason: 'OR arm keeping converted label rows repair-eligible; not a lane selection',
+  },
+  {
+    file: 'services/intelligence-bar/authorization-contract.js',
+    match: 'Number(params?.updates?.monthly_rate) > 0',
+    context: 'params?.updates?.waveguard_tier !== undefined',
+    count: 1,
+    // Confirm-card DISCLOSURE trigger (W0B, #3648): fires when the pending
+    // UPDATE PAYLOAD touches waveguard_tier or sets a positive rate, and
+    // pushes the executor's documented lane-stamp disclosure. It classifies
+    // which FIELDS the update touches — no customer's lane; the stamp
+    // itself runs in the executors on the canonical lane rules.
+    reason: 'disclosure trigger on the update payload (fields touched), not a lane classification of any row',
   },
 ];
 

@@ -11,6 +11,7 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
+const { openInvoiceFacts } = require('../visit-context/balance');
 
 const TECH_TOOLS = [
   {
@@ -447,12 +448,10 @@ async function checkCustomerStatus(input, techId = null) {
   const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
 
-  const balance = await db('invoices')
-    .where({ customer_id: customer.id })
-    .whereIn('status', ['sent', 'viewed', 'overdue'])
-    // Amount due, not gross total — applied account credit reduces what's owed.
-    .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) as owed'))
-    .first();
+  // Shared feed-grade balance (visit-context/balance.js). The previous inline
+  // query omitted the payer_id exclusion, so third-party-billed AR showed up
+  // here as the homeowner's balance.
+  const openInvoices = await openInvoiceFacts(customer.id, { db });
 
   const health = await db('customer_health_scores')
     .where({ customer_id: customer.id })
@@ -466,7 +465,7 @@ async function checkCustomerStatus(input, techId = null) {
     name: `${customer.first_name} ${customer.last_name}`,
     tier: customer.waveguard_tier || 'None',
     active: customer.active,
-    balance_owed: parseFloat(balance?.owed || 0),
+    balance_owed: openInvoices.balance,
     health_score: health?.overall_score || null,
     churn_risk: health?.churn_risk || null,
     last_service: lastService ? { date: lastService.service_date, type: lastService.service_type } : null,
