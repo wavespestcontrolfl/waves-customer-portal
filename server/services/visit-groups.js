@@ -2984,6 +2984,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  // Pure key builder, exported for the reminder cron's visit-scoped email
+  // idempotency key (the undelivered-SMS recovery rebuilds it from the
+  // visit row — GH codex #3699 r7 P1).
+  dedupeKeyFor,
   windowedMembersConnected,
   liveStopStartHHMM,
   incompleteMoveMessage,

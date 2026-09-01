@@ -351,7 +351,10 @@ async function moveHoldActive(scheduledServiceId) {
 // the same occurrence will not double-deliver. Best-effort — never throws.
 // A held: true result means a grouped unit move holds the visit — a
 // deferral, not a delivery failure: no fallback, no no-channel alert.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null }) {
+// `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
+// claim owner sends under — see visitReminderEmailKey. Null keeps the
+// per-service key.
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // Callers that already minted the reschedule link for their SMS leg pass
@@ -375,7 +378,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -390,9 +393,9 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
 // the email handoff is recorded there as MOVE_HOLD so the notice defers
 // (row unmarked, visit claim released) instead of reading as suppressed.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
   if (res?.ok) {
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
     return true;
@@ -441,7 +444,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -464,7 +467,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return false;
   }
   const ch = apptChannel(channel);
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey };
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
@@ -1162,6 +1165,19 @@ async function closeVisitTierRows(visitId, tierCol, tierAtCol, { occurrenceDate 
  * row's own time/line on any read failure — a reminder with the owner's
  * window beats no reminder.
  */
+/**
+ * Email idempotency key for the ONE grouped reminder email (GH codex r7
+ * P1): the claim owner's email leg can go out while its SMS leg is held
+ * (quiet hours / move), the claim is then released as retryable, and a
+ * DIFFERENT sibling may own the retry — under the per-service key
+ * (appointment-email's default) that sibling would email the same stop
+ * again. Keyed by the visit-effect dedupe key (visit + tier + occurrence
+ * date) so every member's email leg for the occurrence dedupes together.
+ */
+function visitReminderEmailKey(kind, claimDedupeKey) {
+  return `appointment.reminder_${kind}:visit:${claimDedupeKey}`;
+}
+
 async function visitReminderCopyInputs(visitId, row) {
   const ownLine = () => require('./estimate-card-holds')
     .cardHoldReminderLine(row.scheduled_service_id).catch(() => '');
@@ -2992,6 +3008,7 @@ const AppointmentReminders = {
               scheduledServiceId: r.scheduled_service_id,
               apptTime: apptCopy72,
               cardHoldNote: copy72 ? copy72.holdNote : null,
+              emailIdempotencyKey: ownsVisit72 ? visitReminderEmailKey('72h', claim72.dedupeKey) : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsOutcome: smsOutcome72,
@@ -3168,6 +3185,7 @@ const AppointmentReminders = {
                   apptTime: nightCopy ? nightCopy.apptTime : apptTime,
                   serviceLabel: nightLabel,
                   cardHoldNote: nightCopy ? nightCopy.holdNote : null,
+                  emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
                 });
                 // A move-hold at the email handoff is a DEFERRAL (GH codex
                 // r2 P1): finalizing it terminally would mark the whole
@@ -3261,6 +3279,7 @@ const AppointmentReminders = {
               scheduledServiceId: r.scheduled_service_id,
               apptTime: apptCopy24,
               cardHoldNote: copy24 ? copy24.holdNote : null,
+              emailIdempotencyKey: ownsVisit24 ? visitReminderEmailKey('24h', claim24.dedupeKey) : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
@@ -3473,6 +3492,7 @@ const AppointmentReminders = {
         return;
       }
       let cardHoldNote = null;
+      let emailIdempotencyKey = null;
       if (reminderRow) {
         apptTime = new Date(reminderRow.appointment_time);
         serviceLabel = smsServiceLabelStored(reminderRow.service_type);
@@ -3481,8 +3501,9 @@ const AppointmentReminders = {
         // — rebuilding from the owner's row alone would email the owner's
         // time and service. Rebuild the grouped copy from the CURRENT
         // visit (earliest sendable member, merged member label, every
-        // held member's disclosure). Best-effort: a dissolved visit or a
-        // failed read falls through to the per-row copy above.
+        // held member's disclosure). Best-effort: a dissolved visit falls
+        // through to the per-row copy above; a failed read keeps whatever
+        // was rebuilt before it (each piece beats the owner's own).
         if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
           try {
             const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
@@ -3491,6 +3512,11 @@ const AppointmentReminders = {
               apptTime = copy.apptTime;
               cardHoldNote = copy.holdNote;
               serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: svc.visit_id });
+              // Same visit-scoped key the direct email leg used, so a
+              // 'both'-channel bounce recovery dedupes against the email
+              // that already went out (GH codex r7 P1).
+              const visit = await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date');
+              if (visit) emailIdempotencyKey = visitReminderEmailKey(kind, require('./visit-groups').dedupeKeyFor(visit, `reminder_${kind}`));
             }
           } catch (visitErr) {
             logger.warn(`[appt-remind] grouped copy rebuild failed for ${scheduledServiceId} — emailing the per-row copy: ${visitErr.message}`);
@@ -3498,7 +3524,7 @@ const AppointmentReminders = {
         }
       }
 
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote });
+      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }

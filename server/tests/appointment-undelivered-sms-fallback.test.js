@@ -358,6 +358,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       customers: [custReadChain],
       appointment_reminders: [chain({ first: ownerRow }), chain({})], // owner row + email-handoff move-hold recheck (no hold)
       scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
+      service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-22' } })],
       'appointment_reminders as ar': [membersChain, labelChain],
       'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
       scheduled_service_addons: [chain({}), chain({})],
@@ -376,6 +377,9 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       appointmentTime: new Date('2026-06-22T13:00:00.000Z'),
       serviceLabel: 'Quarterly Pest Control & Mosquito Treatment',
       cardHoldPolicyNote: 'Sibling hold note.',
+      // Visit-scoped key: dedupes against the direct email leg a
+      // 'both'-channel send already delivered for this occurrence.
+      idempotencyKey: 'appointment.reminder_24h:visit:visit-9:reminder_24h:2026-06-22',
     }));
     cardHoldReminderNote.mockImplementation(async () => '');
   });

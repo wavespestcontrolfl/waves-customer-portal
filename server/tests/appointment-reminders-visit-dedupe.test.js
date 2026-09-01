@@ -19,6 +19,10 @@ jest.mock('../services/estimate-card-holds', () => ({
   cardHoldReminderLine: jest.fn(async () => ''),
   cardHoldReminderNote: jest.fn(async () => ''),
 }));
+jest.mock('../services/appointment-email', () => ({
+  sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
+  sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
+}));
 jest.mock('../services/visit-groups', () => ({
   claimVisitNotification: jest.fn(),
   finalizeVisitNotification: jest.fn(async () => ({ ok: true })),
@@ -31,6 +35,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const VisitGroups = require('../services/visit-groups');
+const AppointmentEmail = require('../services/appointment-email');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 const fixedNow = new Date('2026-05-06T14:00:00.000Z'); // 10:00 AM ET
@@ -58,7 +63,7 @@ function reminderRow(overrides = {}) {
  * whose `first` resolves null (move-hold check) and whose updates are
  * recorded into `state.reminderUpdates` with the preceding where args.
  */
-function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
+function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {} }) {
   const state = { reminderUpdates: [], arChains: [] };
   let arCalls = 0;
   const genericChain = (firstValue = null) => {
@@ -117,7 +122,7 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
       return c;
     }
     if (table === 'notification_prefs') {
-      return genericChain({ sms_enabled: true, service_reminder_24h: true, service_reminder_72h: true });
+      return genericChain({ sms_enabled: true, service_reminder_24h: true, service_reminder_72h: true, ...prefsRow });
     }
     if (String(table).startsWith('customers')) {
       return genericChain({ id: 'customer-1', first_name: 'Ada', phone: '+19415551212' });
@@ -280,6 +285,7 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     // Twilio 5xx-shaped outcome; the customer has no email on file, so the
     // fallback email cannot deliver either.
     sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'PROVIDER_ERROR' });
+    AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
     VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
 
     const result = await AppointmentReminders.checkAndSendReminders();
@@ -297,6 +303,7 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
   test('deterministic non-delivery (not retryable) still finalizes suppressed and closes the row', async () => {
     const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'OPTED_OUT' });
+    AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValueOnce({ ok: false, skipped: true, reason: 'missing_email' });
     VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
 
     await AppointmentReminders.checkAndSendReminders();
@@ -306,6 +313,39 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
       { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
     );
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(1);
+  });
+
+  test("'both' channel, SMS held at the quiet-hours boundary AFTER the email leg went out: the email is sent under the VISIT-scoped key so a sibling's retry dedupes (GH codex r7 P1)", async () => {
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT }, prefsRow: { service_reminder_24h_channel: 'both', email_enabled: true } });
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD' });
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(result.sent24h).toBe(0);
+    // Email leg went out now, keyed by visit + tier + occurrence — NOT the
+    // owner's scheduled_service_id.
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledWith(expect.objectContaining({
+      kind: '24h',
+      scheduledServiceId: 'svc-1',
+      idempotencyKey: `appointment.reminder_24h:visit:${VISIT}:reminder_24h:2026-05-07`,
+    }));
+    // SMS leg deferred: claim released as retryable, row unmarked.
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+      VISIT, 'reminder_24h', 'retry', expect.any(Date), 'tok-1',
+      { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
+    );
+    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+  });
+
+  test('ungrouped row keeps the per-service email key (no visit override)', async () => {
+    installDb({ rows: [reminderRow()], prefsRow: { service_reminder_24h_channel: 'both', email_enabled: true } });
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0].idempotencyKey).toBeUndefined();
   });
 
   test('grouped copy inputs read SENDABLE members only: a pending-rebook sibling cannot set the advertised arrival (GH codex r5 P1)', async () => {
@@ -393,8 +433,8 @@ describe('round-3 wiring pins (source contracts)', () => {
   const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
 
   test('the SMS-fallback email carries the aggregated grouped hold note', () => {
-    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null })");
-    expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote })');
+    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null })");
+    expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey })');
   });
 
   test('the night-email leg rechecks the grouped date before sending', () => {
