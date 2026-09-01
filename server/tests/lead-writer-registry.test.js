@@ -126,9 +126,11 @@ function simpleAssignPairs(src) {
   let pairs = assignPairsCache.get(src);
   if (pairs) return pairs;
   pairs = [];
+  // Each pair carries the DECLARATION index (keyword start) when the
+  // alias is declared, so scope-aware consumers can bind it lexically.
   const re = /\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*[;,)\n]/g;
   let m;
-  while ((m = re.exec(src))) pairs.push([m[1], m[2]]);
+  while ((m = re.exec(src))) pairs.push([m[1], m[2], /^(?:const|let|var)\b/.test(m[0]) ? m.index : null]);
   assignPairsCache.set(src, pairs);
   return pairs;
 }
@@ -194,8 +196,17 @@ function inRawContext(code, idx) {
     for (const [a, b] of simpleAssignPairs(bare)) {
       if (names.has(b) && !names.has(a)) { names.add(a); grew = true; }
     }
+    // …and through a pg QueryConfig WRAPPER declared separately —
+    // `const cfg = { text: SQL, values }` — which then travels as a whole.
+    for (const n of [...names]) {
+      const wrapRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\{[^{}]*\btext\s*:\s*${escapeRe(n)}\b`, 'g');
+      let wr;
+      while ((wr = wrapRe.exec(bare))) if (!names.has(wr[1])) { names.add(wr[1]); grew = true; }
+    }
   }
-  return [...names].some((n) => new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(n)}\b${member}`).test(bare));
+  // The constant reaches the callee directly (`raw(SQL)`, `query(cfg)`) or
+  // as the `text` of an INLINE QueryConfig (`query({ text: SQL, values })`).
+  return [...names].some((n) => new RegExp(String.raw`${RAW_CALLEE}\s*(?:${escapeRe(n)}\b${member}|\{[^{}]*\btext\s*:\s*${escapeRe(n)}\b)`).test(bare));
 }
 
 // Every call site where `name` is passed as a WHOLE argument (`f(name)`,
@@ -344,17 +355,25 @@ function helperCallee(helper) {
 // `export default writeRow` naming an in-file inserting function.
 function defaultExportInserts(src) {
   const bare = blankCommentsAndStrings(src);
-  const fnRe = /(?:module\.exports|exports\.default)\s*=\s*(?:async\s+)?function\b[^(]*\(([^()]*)\)\s*\{|\bexport\s+default\s+(?:async\s+)?function\b[^(]*\(([^()]*)\)\s*\{/g;
+  // `function` forms end in `{` (block body, walked balanced); ARROW forms
+  // (`module.exports = (builder, row) => builder.insert(row)`) may have a
+  // block or an expression body — the latter runs to the statement end.
+  const fnRe = /(?:module\.exports|exports\.default|\bexport\s+default)\s*=?\s*(?:async\s+)?function\b[^(]*\(([^()]*)\)\s*\{|(?:module\.exports|exports\.default|\bexport\s+default)\s*=?\s*(?:async\s*)?(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*(\{)?/g;
   let f;
   while ((f = fnRe.exec(src))) {
-    let depth = 1;
-    let j = fnRe.lastIndex;
-    for (; j < bare.length && depth > 0; j += 1) {
-      if (bare[j] === '{') depth += 1;
-      else if (bare[j] === '}') depth -= 1;
+    let body;
+    if (f[1] !== undefined || f[4]) {
+      let depth = 1;
+      let j = fnRe.lastIndex;
+      for (; j < bare.length && depth > 0; j += 1) {
+        if (bare[j] === '{') depth += 1;
+        else if (bare[j] === '}') depth -= 1;
+      }
+      body = src.slice(fnRe.lastIndex, j);
+    } else {
+      body = src.slice(fnRe.lastIndex).match(/^[^;\n]*/)[0];
     }
-    const body = src.slice(fnRe.lastIndex, j);
-    const params = (f[1] ?? f[2] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    const params = (f[1] ?? f[2] ?? f[3] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
     if (params.some((param) => new RegExp(String.raw`\b${escapeRe(param)}${CHAIN}\s*${INSERT_CALL}`).test(body))) return true;
   }
   const named = src.match(/(?:module\.exports\s*=|\bexport\s+default)\s*([A-Za-z_$][\w$]*)\s*;/);
@@ -537,8 +556,17 @@ function aliasInsertPatterns(src, token, filePath) {
     let grew = true;
     while (grew) {
       grew = false;
-      for (const [a, b] of pairs) {
-        if (set.has(b) && !set.has(a)) { set.add(a); grew = true; }
+      for (const [a, b, declIdx] of pairs) {
+        if (!set.has(b)) continue;
+        if (!set.has(a)) { set.add(a); grew = true; }
+        // A transitive builder alias is bound where IT was declared — every
+        // such declaration is recorded (a name can be re-aliased in several
+        // functions), so a sibling scope's same-named `const target =
+        // db('audit')` does not inherit lead status.
+        if (set === builders && declIdx !== null) {
+          if (!leadDecls.has(a)) leadDecls.set(a, new Set());
+          if (!leadDecls.get(a).has(declIdx)) { leadDecls.get(a).add(declIdx); grew = true; }
+        }
       }
     }
   }
@@ -829,8 +857,13 @@ function scanSourceForDynamicTableInserts(src, filePath) {
   let grewDyn = true;
   while (grewDyn) {
     grewDyn = false;
-    for (const [a, b] of dynPairs) {
-      if (dynBuilders.has(b) && !dynBuilders.has(a)) { dynBuilders.set(a, dynBuilders.get(b)); grewDyn = true; }
+    for (const [a, b, declIdx] of dynPairs) {
+      if (!dynBuilders.has(b)) continue;
+      if (!dynBuilders.has(a)) { dynBuilders.set(a, dynBuilders.get(b)); grewDyn = true; }
+      if (declIdx !== null) {
+        if (!dynDecls.has(a)) dynDecls.set(a, new Set());
+        if (!dynDecls.get(a).has(declIdx)) { dynDecls.get(a).add(declIdx); grewDyn = true; }
+      }
     }
   }
   for (const [n, expr] of dynBuilders) {
@@ -1050,6 +1083,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['SQL constant as the text of an inline pg query config', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nawait client.query({ text: SQL, values: [a] });"],
+    ['SQL constant wrapped into a declared pg query config', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nconst cfg = { text: SQL, values: [a] };\nawait client.query(cfg);"],
     ['optional computed insert call', "await db('leads')?.['insert'](row);"],
     ['composed raw: inner call closed, outer still executing', "await db.raw(db.raw('WITH src AS (SELECT 1)').toString() + ' INSERT INTO leads (a) SELECT 1 FROM src');"],
     ['table-options argument', "await db('leads', { only: true }).insert(row);"],
@@ -1113,6 +1148,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(scanSourceForLeadInserts(src).map((s) => s.line)).toEqual([11]);
     const dyn = scanSourceForDynamicTableInserts("function a() {\n  const q = db(table);\n  return q.insert(x);\n}\nfunction b() {\n  const q = db('audit');\n  return q.insert(y);\n}");
     expect(dyn.map((d) => d.line)).toEqual([3]);
+    // Transitive aliases bind where THEY were declared.
+    const transitive = "function read() {\n  const base = db('leads');\n  const target = base;\n  return target.select();\n}\nfunction audit(row) {\n  const target = db('audit');\n  return target.insert(row);\n}\nfunction create(row) {\n  const base = db('leads');\n  const target = base;\n  return target.insert(row);\n}";
+    expect(scanSourceForLeadInserts(transitive).map((s) => s.line)).toEqual([13]);
+    const dynTransitive = scanSourceForDynamicTableInserts("function a() {\n  const base = db(table);\n  const target = base;\n  return target.insert(x);\n}\nfunction b() {\n  const target = db('audit');\n  return target.insert(y);\n}");
+    expect(dynTransitive.map((d) => d.line)).toEqual([4]);
   });
 
   test('insertion helpers imported from a sibling module register at the call site', () => {
@@ -1143,6 +1183,12 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(dynDefault).toHaveLength(1);
     const optionalDyn = scanSourceForDynamicTableInserts("await db(table)?.['insert'](row);");
     expect(optionalDyn).toHaveLength(1);
+    // Arrow-valued default exports, expression and block bodies.
+    fs.writeFileSync(path.join(dir, 'write-arrow.js'), "module.exports = (builder, row) => builder.insert(row);\n");
+    fs.writeFileSync(path.join(dir, 'write-arrow-block.mjs'), "export default async (builder, row) => {\n  audit();\n  return builder.insert(row);\n};\n");
+    expect(found("const write = require('./write-arrow');\nawait write(db('leads'), row);", route)).toEqual(["await write(db('leads'), row);"]);
+    const dynArrow = scanSourceForDynamicTableInserts("import write from './write-arrow-block.mjs';\nawait write(db(table), row);", route);
+    expect(dynArrow).toHaveLength(1);
   });
 
   test('var is function-scoped: a block-nested var shadows through its block, not past its function', () => {

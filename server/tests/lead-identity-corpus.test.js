@@ -326,8 +326,12 @@ describe('lead identity corpus — shape and PII hygiene', () => {
         && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
       expect({ where, email, ok }).toEqual({ where, email, ok: true });
     }
-    // Separator class includes `/` — `941/555/2091` is a phone spelling too.
-    for (const run of String(text).match(/\+?\d[\d\s().\/-]{5,}\d/g) || []) {
+    // Unicode dashes (en/em/figure/nonbreaking hyphen, minus) and
+    // nonbreaking/figure/narrow spaces normalize to ASCII first, and the
+    // separator class includes `/` — `941–555–2091` and `941/555/2091`
+    // are phone spellings too.
+    const normalized = String(text).replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[\u00A0\u2007\u202F]/g, ' ');
+    for (const run of normalized.match(/\+?\d[\d\s().\/-]{5,}\d/g) || []) {
       const digits = run.replace(/\D/g, '');
       if (digits.length < 7) continue;
       // Same +1 rule as the contact validator: a '+' not followed by the
