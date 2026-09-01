@@ -1580,6 +1580,34 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('through unresolved member'))).toBe(true);
   });
 
+  test('a public route registered inside a CLASS METHOD is rejected like any function', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'class Installer {',
+        '  install() {',
+        "    app.get('/leak', (req, res) => res.json({}));",
+        '  }',
+        '}',
+        'new Installer().install();',
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('registered inside a function'))).toBe(true);
+  });
+
+  test('a public route registered inside an OBJECT METHOD is rejected like any function', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const installer = {',
+        '  install() {',
+        "    app.get('/leak', (req, res) => res.json({}));",
+        '  },',
+        '};',
+        'installer.install();',
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('registered inside a function'))).toBe(true);
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',

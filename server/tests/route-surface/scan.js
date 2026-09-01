@@ -233,8 +233,13 @@ function condLabel(node, src) {
     if (node.test) return `loop while (${predicateLabel(src ? src.slice(node.test.start, node.test.end) : '?')})`;
     return 'loop';
   }
-  if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
-    return node.id && node.id.name ? `function ${node.id.name}` : 'function';
+  if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression'
+    || node.type === 'ClassMethod' || node.type === 'ClassPrivateMethod' || node.type === 'ObjectMethod') {
+    // Class/object methods are function contexts too — a route registered
+    // inside one is deferred exactly like one inside a plain function.
+    if (node.id && node.id.name) return `function ${node.id.name}`;
+    if (node.key && !node.computed && node.key.type === 'Identifier') return `function ${node.key.name}`;
+    return 'function';
   }
   return null;
 }
