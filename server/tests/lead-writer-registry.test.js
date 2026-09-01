@@ -43,6 +43,9 @@ const FROM_SEL = String.raw`(?:\??\.\s*from|\bfrom|\[\s*['"\x60]from['"\x60]\s*\
 // Optional schema qualifier INSIDE the literal too — knex accepts
 // `db('public.leads')` as a schema-qualified table name.
 const LITERAL_LEADS = String.raw`${Q}(?:[\w$]+\.)?leads${Q}`;
+// Knex's optional second TABLE-OPTIONS argument — `db('leads', { only:
+// true })` — after any table token or dynamic expression.
+const TABLE_OPTS = String.raw`\s*(?:,\s*\{[^{}]*\}\s*)?`;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // The knex builder shapes, built for a given "table token": the quoted
@@ -53,16 +56,16 @@ function knexInsertPatterns(token) {
   return [
     // Optional factory call between the identifier and the table argument —
     // the `getDb()('leads')` callable-factory style (routes/knowledge.js).
-    new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+    new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
     // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
-    new RegExp(String.raw`${TABLE_SEL}\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+    new RegExp(String.raw`${TABLE_SEL}\s*\(\s*${token}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
     // `.into` only AS PART OF an insert chain — `db.select('*').into(x)`
     // reads, it doesn't create. (Insert-FIRST forms, `insert(payload)
     // .into(x)`, are walked by insertFirstMatches below.)
-    new RegExp(String.raw`\.into\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
-    new RegExp(String.raw`\binsert\s*\(\s*${token}\s*\)`, 'g'),
+    new RegExp(String.raw`\.into\(\s*${token}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+    new RegExp(String.raw`\binsert\s*\(\s*${token}${TABLE_OPTS}\)`, 'g'),
     new RegExp(String.raw`\bbatchInsert\s*\(\s*${token}`, 'g'),
-    new RegExp(String.raw`${FROM_SEL}\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+    new RegExp(String.raw`${FROM_SEL}\s*\(\s*${token}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   ];
 }
 
@@ -175,7 +178,9 @@ function inRawContext(code, idx) {
     const opener = key ? enclosingOpener(bare, j) : -1;
     if (opener !== -1) {
       decl = code.slice(Math.max(0, opener - 200), opener).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
-      member = String.raw`\s*(?:\.\s*${escapeRe(key[1])}\b|\[\s*['"\x60]${escapeRe(key[1])}['"\x60]\s*\])`;
+      // `OBJ.key` / `OBJ['key']` — or, for pg's QueryConfig convention
+      // (`{ text, values }`), the WHOLE object (`client.query(cfg)`).
+      member = String.raw`\s*(?:\.\s*${escapeRe(key[1])}\b|\[\s*['"\x60]${escapeRe(key[1])}['"\x60]\s*\]${key[1] === 'text' ? String.raw`|(?![\s.\[])` : ''})`;
     }
   }
   if (!decl) return false;
@@ -293,10 +298,10 @@ const helperModuleCache = new Map();
 function importedInsertingHelpers(src, filePath) {
   const names = new Set();
   if (!filePath) return names;
-  const importRe = /\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
+  const importRe = /\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](\.{1,2}\/[^'"]+)['"]/g;
   let m;
   while ((m = importRe.exec(src))) {
-    const target = path.resolve(path.dirname(filePath), m[2] || m[4]);
+    const target = path.resolve(path.dirname(filePath), m[2] || m[4] || m[6] || m[8]);
     const resolved = [target, `${target}.js`, path.join(target, 'index.js')]
       .find((c) => fs.existsSync(c) && fs.statSync(c).isFile());
     if (!resolved) continue;
@@ -304,12 +309,28 @@ function importedInsertingHelpers(src, filePath) {
       helperModuleCache.set(resolved, insertingHelperNames(blankComments(fs.readFileSync(resolved, 'utf8'))));
     }
     const exported = helperModuleCache.get(resolved);
+    // NAMESPACE / default binding (`const writers = require('./writers')`,
+    // `import * as writers from …`): every inserting function is reachable
+    // as a MEMBER call, recorded as `writers.writeRow`.
+    const ns = m[5] || m[7];
+    if (ns) {
+      for (const fn of exported) names.add(`${ns}.${fn}`);
+      continue;
+    }
     for (const part of (m[1] || m[3]).split(',')) {
       const [orig, local] = part.split(/\s*(?::|\bas\b)\s*/).map((x) => x && x.trim());
       if (orig && exported.has(orig)) names.add(local || orig);
     }
   }
   return names;
+}
+
+// Regex source for a helper callee: a bare name, or `ns.fn` / `ns['fn']`
+// for a namespace-imported one.
+function helperCallee(helper) {
+  const [ns, fn] = helper.split('.');
+  if (!fn) return String.raw`\b${escapeRe(ns)}`;
+  return String.raw`\b${escapeRe(ns)}\s*(?:\.\s*${escapeRe(fn)}|\[\s*['"\x60]${escapeRe(fn)}['"\x60]\s*\])`;
 }
 
 function insertingHelperNames(src) {
@@ -387,6 +408,16 @@ function declVisibleAt(bare, declIdx, useIdx, isVar = false) {
   }
   return true;
 }
+// Index of the nearest declaration of `name` VISIBLE at `idx` (-1 if none).
+function nearestVisibleDecl(bare, name, idx) {
+  const re = new RegExp(String.raw`\b(const|let|var)\s+${escapeRe(name)}\b`, 'g');
+  let best = -1;
+  let m;
+  while ((m = re.exec(bare)) && m.index < idx) {
+    if (declVisibleAt(bare, m.index, idx, m[1] === 'var')) best = m.index;
+  }
+  return best;
+}
 function nearestDeclBindsLeads(code, name, idx) {
   const bare = blankCommentsAndStrings(code);
   const declRe = new RegExp(String.raw`\b(const|let|var)\s+${escapeRe(name)}\s*=\s*(['"\x60])([^'"\x60]*)\2`, 'g');
@@ -410,28 +441,39 @@ function aliasInsertPatterns(src, token, filePath) {
   // (`let target; target = db('leads');`) is the same stored-builder form.
   // Optional factory call after the head identifier — `getDb()('leads')`.
   const declRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*(?:\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*(?:\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   const patternsExtra = [];
   const builders = new Set();
   const factories = new Set();
+  // Declaration indices per builder name (the keyword start) — a use of
+  // the name is a lead write only if the nearest VISIBLE declaration before
+  // it is one of these: `function read() { const q = db('leads'); … }
+  // function audit() { const q = db('audit'); q.insert(row); }` must not
+  // attribute audit's insert to read's builder.
+  const leadDecls = new Map();
+  const noteDecl = (name, m) => {
+    if (!/^(?:const|let|var)\b/.test(m[0])) return;
+    if (!leadDecls.has(name)) leadDecls.set(name, new Set());
+    leadDecls.get(name).add(m.index);
+  };
   let decl;
-  while ((decl = declRe.exec(src))) builders.add(decl[1]);
+  while ((decl = declRe.exec(src))) { builders.add(decl[1]); noteDecl(decl[1], decl); }
   // Conditional/logical initializers — `const target = cond ? db('leads')
   // : db('audit');` — anything holding a leads builder anywhere in its
   // (non-awaited) initializer is a stored builder.
   const condDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   let cnd;
-  while ((cnd = condDeclRe.exec(src))) builders.add(cnd[1]);
+  while ((cnd = condDeclRe.exec(src))) { builders.add(cnd[1]); noteDecl(cnd[1], cnd); }
   // Builders stored in OBJECT PROPERTIES — `const queries = { lead:
   // db('leads') }; queries.lead.insert(row)`. The use pattern keys on the
   // property name reached through any object.
   const propDeclRe = new RegExp(
-    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   const props = new Set();
@@ -442,7 +484,7 @@ function aliasInsertPatterns(src, token, filePath) {
   // row)`): the construction site is the registered writer.
   for (const helper of new Set([...insertingHelperNames(src), ...importedInsertingHelpers(src, filePath)])) {
     patternsExtra.push(new RegExp(
-      String.raw`\b${escapeRe(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+      String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}${TABLE_OPTS}\)`,
       'g'
     ));
   }
@@ -450,14 +492,14 @@ function aliasInsertPatterns(src, token, filePath) {
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
   // idiom). Parenthesized or bare parameter lists both count.
   const factoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}${TABLE_OPTS}\)`,
     'g'
   );
   let fac;
   while ((fac = factoryRe.exec(src))) factories.add(fac[1]);
   // Function/block-arrow factories with BALANCED bodies of any depth —
   // `function baseQuery() { try { … } finally { … } return db('leads'); }`.
-  const returnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(\s*(${token})\s*\)`);
+  const returnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(\s*(${token})${TABLE_OPTS}\)`);
   for (const f of balancedBodyFactories(src, returnRe, [declRe, condDeclRe])) factories.add(f.name);
   // TRANSITIVE aliases: `const target = base;` makes `target` the same
   // builder (or factory), to a fixpoint. One pass collects every simple
@@ -473,8 +515,16 @@ function aliasInsertPatterns(src, token, filePath) {
     }
   }
   const patterns = [...patternsExtra];
+  const bare = blankCommentsAndStrings(src);
   for (const n of builders) {
-    patterns.push(new RegExp(String.raw`\b${escapeRe(n)}${CHAIN}\s*${INSERT_CALL}`, 'g'));
+    const re = new RegExp(String.raw`\b${escapeRe(n)}${CHAIN}\s*${INSERT_CALL}`, 'g');
+    if (leadDecls.has(n)) {
+      re.verify = (idx) => {
+        const d = nearestVisibleDecl(bare, n, idx);
+        return d === -1 || leadDecls.get(n).has(d);
+      };
+    }
+    patterns.push(re);
   }
   for (const pn of props) {
     patterns.push(new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*(?:\.\s*${escapeRe(pn)}|\[\s*['"\x60]${escapeRe(pn)}['"\x60]\s*\])${CHAIN}\s*${INSERT_CALL}`, 'g'));
@@ -635,14 +685,14 @@ const blankComments = (code) => cachedLex(code, true);
 // reads as one argument.
 const DYN_EXPR = String.raw`((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)`;
 const DYNAMIC_INSERT_PATTERNS = [
-  new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
-  new RegExp(String.raw`(?:${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+  new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+  new RegExp(String.raw`(?:${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   new RegExp(String.raw`\bbatchInsert\s*\(${DYN_EXPR},`, 'g'),
-  new RegExp(String.raw`\.into\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+  new RegExp(String.raw`\.into\(${DYN_EXPR}${TABLE_OPTS}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
 ];
 // Table selected AFTER the insert (dynamic) — `insert(payload).into(table)`
 // / `.table(table)` / `.from(table)`, payload walked balanced.
-const DYN_INSERT_FIRST_TAIL = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}\)`);
+const DYN_INSERT_FIRST_TAIL = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}${TABLE_OPTS}\)`);
 
 function scanSourceForDynamicTableInserts(src, filePath) {
   const lines = src.split('\n');
@@ -692,37 +742,45 @@ function scanSourceForDynamicTableInserts(src, filePath) {
   // A dynamic-table builder handed to an insertion helper, in-file or
   // imported (`writeRow(db(table), row)`) — the dynamic mirror.
   for (const helper of new Set([...insertingHelperNames(code), ...importedInsertingHelpers(src, filePath)])) {
-    const useRe = new RegExp(String.raw`\b${escapeRe(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`, 'g');
+    const useRe = new RegExp(String.raw`${helperCallee(helper)}\s*\((?:[^()]|\([^()]*\))*?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`, 'g');
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, use[1]);
   }
   // Stored builders over a dynamic table — `const target = db(table);
   // await target.insert(row);` — the dynamic mirror of the alias pass.
   const dynDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*(?:\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*(?:\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`,
     'g'
   );
   const dynBuilders = new Map(); // name -> table expr
+  const dynDecls = new Map(); // name -> declaration indices (keyword start)
+  const noteDynDecl = (name, m) => {
+    if (!/^(?:const|let|var)\b/.test(m[0])) return;
+    if (!dynDecls.has(name)) dynDecls.set(name, new Set());
+    dynDecls.get(name).add(m.index);
+  };
   let decl;
   while ((decl = dynDeclRe.exec(code))) {
     if (!decl[2].trim() || isResolved(decl[2])) continue;
     dynBuilders.set(decl[1], decl[2]);
+    noteDynDecl(decl[1], decl);
   }
   // Conditional OR logical initializers holding a dynamic builder anywhere
   // — `cond ? db(a) : db(b)`, `enabled && db(table)`, `cached || db(table)`.
   const dynCondDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?&|]{0,120}(?:\?|&&|\|\|)[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?&|]{0,120}(?:\?|&&|\|\|)[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`,
     'g'
   );
   let cnd;
   while ((cnd = dynCondDeclRe.exec(code))) {
-    if (!cnd[2].trim() || isResolved(cnd[2]) || dynBuilders.has(cnd[1])) continue;
-    dynBuilders.set(cnd[1], cnd[2]);
+    if (!cnd[2].trim() || isResolved(cnd[2])) continue;
+    if (!dynBuilders.has(cnd[1])) dynBuilders.set(cnd[1], cnd[2]);
+    noteDynDecl(cnd[1], cnd);
   }
   // Builders stored in OBJECT PROPERTIES over a dynamic table —
   // `const queries = { lead: db(table) }; queries.lead.insert(row)`.
   const dynPropDeclRe = new RegExp(
-    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`,
     'g'
   );
   const seenDynProps = new Set();
@@ -750,12 +808,20 @@ function scanSourceForDynamicTableInserts(src, filePath) {
   for (const [n, expr] of dynBuilders) {
     const useRe = new RegExp(String.raw`\b${escapeRe(n)}${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
-    while ((use = useRe.exec(code))) record(use.index, use[0].length, expr);
+    while ((use = useRe.exec(code))) {
+      // Same lexical rule as the literal pass: the nearest VISIBLE
+      // declaration of the name must be one of the dynamic-builder ones.
+      if (dynDecls.has(n)) {
+        const d = nearestVisibleDecl(code, n, use.index);
+        if (d !== -1 && !dynDecls.get(n).has(d)) continue;
+      }
+      record(use.index, use[0].length, expr);
+    }
   }
   // Arrow FACTORY over a dynamic table — `const q = (t) => db(t); …
   // q(x).insert(row)` — the dynamic mirror of the literal factory pass.
   const dynFactoryRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+)?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`,
     'g'
   );
   let fac;
@@ -766,7 +832,7 @@ function scanSourceForDynamicTableInserts(src, filePath) {
     while ((use = useRe.exec(code))) record(use.index, use[0].length, fac[2]);
   }
   // Function/block-arrow factories over a dynamic table, balanced bodies.
-  const dynReturnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(${DYN_EXPR}\)`);
+  const dynReturnRe = new RegExp(String.raw`\breturn\b[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(${DYN_EXPR}${TABLE_OPTS}\)`);
   for (const f of balancedBodyFactories(code, dynReturnRe, [dynDeclRe, dynCondDeclRe])) {
     if (!f.capture || !f.capture.trim() || isResolved(f.capture)) continue;
     const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(f.name)}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
@@ -855,7 +921,7 @@ function scanSourceForLeadInserts(src, filePath) {
     const group = [...knexInsertPatterns(token), ...aliasInsertPatterns(code, token, filePath)];
     if (name) for (const p of group) constOf.set(p, name);
     patterns.push(...group);
-    const tail = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(\s*(${token})\s*\)`);
+    const tail = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(\s*(${token})${TABLE_OPTS}\)`);
     for (const f of insertFirstMatches(code, tail)) {
       if (name && !nearestDeclBindsLeads(code, name, f.index)) continue;
       add(f.index, f.length);
@@ -867,6 +933,7 @@ function scanSourceForLeadInserts(src, filePath) {
     while ((m = pattern.exec(code))) {
       if (pattern === RAW_SQL_INSERT_RE && !inRawContext(code, m.index)) continue;
       if (constOf.has(pattern) && !nearestDeclBindsLeads(code, constOf.get(pattern), m.index)) continue;
+      if (pattern.verify && !pattern.verify(m.index)) continue;
       add(m.index, m[0].length);
     }
   }
@@ -955,6 +1022,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['table-options argument', "await db('leads', { only: true }).insert(row);"],
+    ['stored builder with table options', "const q = trx('leads', { only: true });\nawait q.insert(row);"],
+    ['pg query-config object passed whole', "const cfg = { text: 'INSERT INTO leads (a) VALUES ($1)', values: [a] };\nawait client.query(cfg);"],
     ['native pg query insert', "await client.query('INSERT INTO leads (a) VALUES ($1)', [a]);"],
     ['factory returning a conditionally initialized local alias', "function q() { const base = enabled ? db('leads') : db('audit'); return base; }\nawait q().insert(row);"],
     ['SQL held in an object property passed to raw', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)' };\nawait db.raw(SQL.create, [a]);"],
@@ -983,6 +1053,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['code-shaped doc string is not a writer', 'const example = "await db(\'leads\').insert(row)";'],
     ['SQL constant never executed is not a writer', "const example = 'INSERT INTO leads (a) VALUES (?)';"],
     ['select-into read is not a writer', "await db.select('*').into('leads');"],
+    ['other property of an SQL object executed, not the leads one', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)', other: 'SELECT 1' };\nawait db.raw(SQL.other);"],
     ['SQL object property never executed is not a writer', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)' };\nmodule.exports = { SQL };"],
     ['raw substring callee is not knex raw', "await draw('INSERT INTO leads (a) VALUES (?)', [a]);"],
     ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
@@ -1006,6 +1077,14 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(found(inner)).toEqual(['return db(TABLE).insert(row);']);
   });
 
+  test('a stored-builder name reused in a sibling scope binds per nearest visible declaration', () => {
+    const src = "function read() {\n  const q = db('leads');\n  return q.select();\n}\nfunction audit(row) {\n  const q = db('audit');\n  return q.insert(row);\n}\nfunction create(row) {\n  const q = db('leads');\n  return q.insert(row);\n}";
+    expect(found(src)).toEqual(['return q.insert(row);']);
+    expect(scanSourceForLeadInserts(src).map((s) => s.line)).toEqual([11]);
+    const dyn = scanSourceForDynamicTableInserts("function a() {\n  const q = db(table);\n  return q.insert(x);\n}\nfunction b() {\n  const q = db('audit');\n  return q.insert(y);\n}");
+    expect(dyn.map((d) => d.line)).toEqual([3]);
+  });
+
   test('insertion helpers imported from a sibling module register at the call site', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lead-writer-helpers-'));
     fs.writeFileSync(path.join(dir, 'writers.js'), "function writeRow(builder, row) { return builder.insert(row); }\nfunction scoped(qb) { return qb.where('active', true); }\nmodule.exports = { writeRow, scoped };\n");
@@ -1016,6 +1095,13 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     const dyn = scanSourceForDynamicTableInserts("import { writeRow } from './writers';\nawait writeRow(db(table), row);", route);
     expect(dyn).toHaveLength(1);
     expect(dyn[0].expr).toBe('table');
+    expect(found("const writers = require('./writers');\nawait writers.writeRow(db('leads'), row);", route))
+      .toEqual(["await writers.writeRow(db('leads'), row);"]);
+    expect(found("import * as writers from './writers';\nawait writers['writeRow'](db('leads'), row);", route))
+      .toEqual(["await writers['writeRow'](db('leads'), row);"]);
+    expect(found("const writers = require('./writers');\nawait writers.scoped(db('leads'));", route)).toEqual([]);
+    const dynNs = scanSourceForDynamicTableInserts("const writers = require('./writers');\nawait writers.writeRow(db(table, { only: true }), row);", route);
+    expect(dynNs).toHaveLength(1);
   });
 
   test('var is function-scoped: a block-nested var shadows through its block, not past its function', () => {
