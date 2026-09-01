@@ -5285,11 +5285,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
     );
-    // Provenance-kept copy of form/chip observations only. reportObservations
-    // also contains [Found] technician-note lines, which must never egress.
-    const formObservations = normalizeCompletionTextArray(
-      Array.isArray(structuredObservations) ? structuredObservations : [],
-    );
     const resolvedSpecialtyServiceKey = specialtyServiceKey({
       serviceKey: completionProfile?.serviceKey,
       serviceType: svc.service_type,
@@ -5297,6 +5292,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const allowedStructuredObservations = new Set(
       observationsForSpecialtyService(resolvedSpecialtyServiceKey),
     );
+    // New clients separate controlled dropdown values from free text. For an
+    // older specialty client that lacks that field, recover only exact values
+    // from this service lane's server-owned allowlist; arbitrary form text and
+    // [Found] technician-note markers remain internal.
+    const structuredObservationsProvided = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      'structuredObservations',
+    );
+    const formObservations = structuredObservationsProvided
+      ? normalizeCompletionTextArray(
+        Array.isArray(structuredObservations) ? structuredObservations : [],
+      )
+      : submittedObservations.filter((value) => allowedStructuredObservations.has(value));
     const invalidStructuredObservation = formObservations.find(
       (value) => !allowedStructuredObservations.has(value),
     );
