@@ -410,20 +410,22 @@ describe('still-deciding signal (soft exit)', () => {
       { id: 'e-quiet', status: 'expired', disposition: 'expired_viewed', expires_at: daysAgo(3), viewed_at: daysAgo(10), sent_at: daysAgo(12), created_at: daysAgo(12), updated_at: daysAgo(3), monthly_total: '40', onetime_total: '0', estimate_data: '{}' },
       { id: 'e-deciding', status: 'expired', disposition: 'expired_viewed', expires_at: daysAgo(3), viewed_at: daysAgo(10), sent_at: daysAgo(12), created_at: daysAgo(12), updated_at: daysAgo(3), monthly_total: '40', onetime_total: '0', estimate_data: '{}' },
       { id: 'e-won', status: 'accepted', accepted_at: daysAgo(2), viewed_at: daysAgo(4), sent_at: daysAgo(5), created_at: daysAgo(5), updated_at: daysAgo(2), monthly_total: '40', onetime_total: '0', estimate_data: '{}' },
+      // Converted through another path after signaling: NOT a loss.
+      { id: 'e-elsewhere', status: 'viewed', disposition: 'converted_other_path', disposition_at: daysAgo(1), archived_at: daysAgo(1), viewed_at: daysAgo(6), sent_at: daysAgo(7), created_at: daysAgo(7), updated_at: daysAgo(1), monthly_total: '40', onetime_total: '0', estimate_data: '{}' },
     ];
     const estimates = estimatesTable(rows, []);
     let activityCalls = 0;
     mockDbHandler = (table) => {
       if (table === 'activity_log') {
         activityCalls += 1;
-        const b = { whereIn: () => b, where: () => b, select: async () => [{ estimate_id: 'e-deciding' }, { estimate_id: 'e-won' }] };
+        const b = { whereIn: () => b, where: () => b, select: async () => [{ estimate_id: 'e-deciding' }, { estimate_id: 'e-won' }, { estimate_id: 'e-elsewhere' }] };
         return b;
       }
       return estimates(table);
     };
     const out = await winLossSlices({ days: 30 });
     expect(activityCalls).toBe(1);
-    expect(out.stillDeciding).toEqual({ signaled: 2, wonAfter: 1, lostAfter: 1, expiredViewedAfter: 1 });
+    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 1, lostAfter: 1, expiredViewedAfter: 1 });
     // The disposition vocabulary is untouched — the signal is a side channel.
     expect(out.byDisposition.find((d) => d.code === 'expired_viewed').count).toBe(2);
   });

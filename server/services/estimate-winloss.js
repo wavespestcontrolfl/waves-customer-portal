@@ -392,7 +392,10 @@ async function winLossSlices({ days = 90 } = {}) {
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
     if (stillDecidingIds.has(String(row.id))) {
       stillDeciding.signaled += 1;
-      if (isWon) stillDeciding.wonAfter += 1; else stillDeciding.lostAfter += 1;
+      // Only a REAL loss counts as lost — converted-elsewhere and dead
+      // dispositions leave every loss metric here too (GH codex r3 P2).
+      if (isWon) stillDeciding.wonAfter += 1;
+      else if (disposition && !excludedFromRates(disposition)) stillDeciding.lostAfter += 1;
       if (disposition === 'expired_viewed') stillDeciding.expiredViewedAfter += 1;
     }
     // Archived rows still drop from every RATE symmetrically (archived

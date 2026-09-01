@@ -1020,6 +1020,7 @@ window.fetch = async (input, init) => {
       // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
       // the "Not what you expected?" sheet is exercised in preview.
       softExit: true,
+      softExitChange: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
     });
   }

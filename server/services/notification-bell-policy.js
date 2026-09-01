@@ -67,6 +67,12 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // owner cannot re-enable is a dead letterbox. When adding a new admin
 // notification category, add it to one of the two lists (and to
 // BELL_CATEGORY_LABELS in client PushSettingsV2.jsx if it lands here).
+// Overridable categories that ring by DEFAULT (no saved override): direct
+// customer communication the owner can still silence. The settings page
+// reports these as enabled when no row exists, so a round-trip save never
+// silently creates an "off" override (GH codex r3 P1 on #3706).
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request']);
+
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer
   // ring by default (accepted estimates still ring via their explicit
@@ -176,6 +182,7 @@ async function bellAllowed({ category, triggerKey, options = {} } = {}) {
   // cannot silence), so an overridable category can default on and still
   // honor a saved "off" (GH codex P2 on #3706).
   if (options.bellDefault === true) return true;
+  if (category && DEFAULT_ON_CATEGORIES.has(category)) return true;
   if (category && CATEGORY_BELL_ALLOWLIST.has(category)) return true;
   return false;
 }
@@ -186,6 +193,7 @@ module.exports = {
   clearOverrideCache,
   OVERRIDABLE_CATEGORIES,
   OVERRIDABLE_CATEGORY_SET,
+  DEFAULT_ON_CATEGORIES,
   _private: {
     TRIGGER_BELL_ALLOWLIST,
     TRIGGER_BELL_DENYLIST,
