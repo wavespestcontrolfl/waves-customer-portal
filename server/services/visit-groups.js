@@ -469,9 +469,10 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // lock, matching the booking paths' customer → stop-advisory order
     // (booking.js locks the customer first, then stamps). A concurrent
     // enrollment either committed first (seen and refused here) or waits
-    // on this row lock until the grouping commits — enrollment AFTER a
-    // group exists is the documented Phase-2/gate-flip caveat, not this
-    // race.
+    // on this row lock until the grouping commits. Enrollment AFTER a
+    // group exists is NOT a double-charge path in Phase 1 (every row
+    // still bills once, per row — see customerExcludedByAutopay); it is
+    // the documented Phase-2 gate-flip precondition, owned by that lane.
     await t('customers').where({ id: stopCustomerId }).forUpdate().first('id');
     if (await customerExcludedByAutopay(stopCustomerId, t)) {
       throw new Error('rows not mutually groupable: autopay_enrolled');
@@ -1045,6 +1046,20 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * TRUE when grouping must be refused for this customer because they are on
  * autopay (or their autopay state cannot be read — fail closed). Shared by
  * the automatic stamping path and the office group route.
+ *
+ * WHAT THIS PROTECTS (and what it does not): Phase 1 has NO visit-level
+ * billing — service_visits.payment_intent_id / billing_strategy /
+ * billing_hold have no writers, no money code reads visit_id, and a
+ * grouped member completing through any existing path first dissolves
+ * its open visit (dissolveForLegacyCompletion) and then completes and
+ * bills PER ROW, once each — byte-identical to two ungrouped same-day
+ * services today. So a customer who enrolls in autopay AFTER a group
+ * forms is charged exactly as with no group: once per completed row,
+ * never twice. The exclusion protects the Phase-2 contract (one
+ * visit-level PaymentIntent, per-invoice receipt suppression): groups
+ * must not pre-exist for enrolled customers when that lane ships, and
+ * the enrollment-time refuse/dissolve seam belongs to that lane
+ * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
  */
 async function customerExcludedByAutopay(customerId, database = db) {
   try {
@@ -1132,9 +1147,10 @@ async function groupRowOn(database, rowId, createdBy) {
   if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
   if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
   // Autopay exclusion (spec rev-2 item: "autopay customers are not
-  // grouped until grouped autopay ships"; owner ruling 2026-08-31): the
-  // per-row autopay charger would charge each sibling separately under
-  // one visit. FAST PATH ONLY — the authoritative check runs inside
+  // grouped until grouped autopay ships"; owner ruling 2026-08-31) —
+  // see customerExcludedByAutopay for what it protects (the Phase-2
+  // visit-level PI contract; per-row billing today is once per row,
+  // group or not). FAST PATH ONLY — the authoritative check runs inside
   // createOrJoinVisit under the customer row lock (pre-push codex P0
   // TOCTOU); this unlocked read just avoids partner queries for a
   // customer that will be refused anyway. Unit moves of existing visits
