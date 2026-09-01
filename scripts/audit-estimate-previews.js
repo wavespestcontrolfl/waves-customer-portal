@@ -101,7 +101,9 @@ async function launchBrowser() {
         if (audit.clippedText.length) fail(scenario, viewportName, `clipped text: ${audit.clippedText.join(' | ')}`);
         if (/\b(?:pet|kid|child)[^\n.?!]{0,40}\bsafe\b|\bsafe\b[^\n.?!]{0,40}\b(?:pet|kid|child)/i.test(audit.bodyText)) fail(scenario, viewportName, 'blanket pet/child safety wording is visible');
         if (/\b(?:wdo_inspection|termite_foam|trap_only_retainer)\b/.test(audit.bodyText)) fail(scenario, viewportName, 'internal service key is visible');
-        if (scenario === 'wdo' && /Waves AI reviewed/i.test(audit.bodyText)) fail(scenario, viewportName, 'WDO incorrectly claims an AI review');
+        if (scenario === 'wdo' && /Waves AI reviewed|Ask Waves|prepared for the property shown/i.test(audit.bodyText)) {
+          fail(scenario, viewportName, 'WDO incorrectly renders AI narrative or an ask bar');
+        }
 
         observations.push({ scenario, viewport: viewportName, h1: audit.h1, actions: audit.buttons.slice(0, 8) });
         await page.screenshot({ path: path.join(artifactDir, `${scenario}-${viewportName}.png`), fullPage: true });

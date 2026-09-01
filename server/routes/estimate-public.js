@@ -2071,7 +2071,7 @@ const SERVICE_COPY = {
     aiEyebrow: 'Your inspection',
     aiTitle: 'Your WDO inspection was prepared for this property',
     aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
-    askChips: ['What does the inspection cover?', 'When will I receive the report?', 'Is this the Florida WDO form?', 'How do I schedule the inspection?'],
+    askChips: [],
     priceWording: {},
   },
   termite_foam: {
@@ -5652,7 +5652,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  const isRegulatedWdoSurface = deriveServiceCategory(estData, recurring, oneTimeItems) === 'wdo_inspection';
+  const intelligence = isRegulatedWdoSurface
+    ? null
+    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -5860,7 +5863,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     pestRecurring,
     hasPestOneTime,
   );
-  const estimateAskEnabled = isEstimateAskAnswerable({
+  const estimateAskEnabled = !isRegulatedWdoSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
   });
@@ -24357,29 +24360,33 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = buildWaveGuardIntelligencePayload(
-      {
-        ...estimate,
-        satelliteUrl: estimate.satellite_url || null,
-        tier: estimate.waveguard_tier || null,
-      },
-      estimateDataForIntelligence,
-      { pricingBundle, recurringServices: recurringServicesForIntelligence },
-    );
-    try {
-      const assistantContext = buildEstimateAssistantContext({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        selectedFrequency: '',
-        serviceMode: defaultServiceMode,
-      });
-      intelligence.supportSources = loadPublicEstimateSupportSources({
-        question: 'What is included in this WaveGuard estimate?',
-        context: assistantContext,
-      });
-    } catch (err) {
-      logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+    const intelligence = serviceCategory === 'wdo_inspection'
+      ? null
+      : buildWaveGuardIntelligencePayload(
+          {
+            ...estimate,
+            satelliteUrl: estimate.satellite_url || null,
+            tier: estimate.waveguard_tier || null,
+          },
+          estimateDataForIntelligence,
+          { pricingBundle, recurringServices: recurringServicesForIntelligence },
+        );
+    if (intelligence) {
+      try {
+        const assistantContext = buildEstimateAssistantContext({
+          estimate,
+          estData: estimateDataForIntelligence,
+          pricingBundle,
+          selectedFrequency: '',
+          serviceMode: defaultServiceMode,
+        });
+        intelligence.supportSources = loadPublicEstimateSupportSources({
+          question: 'What is included in this WaveGuard estimate?',
+          context: assistantContext,
+        });
+      } catch (err) {
+        logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+      }
     }
 
     const terminalState = (() => {

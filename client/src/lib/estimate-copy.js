@@ -153,7 +153,7 @@ export const SERVICE_COPY = {
     aiEyebrow: 'Your inspection',
     aiTitle: 'Your WDO inspection was prepared for this property',
     aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
-    askChips: ['What does the inspection cover?', 'When will I receive the report?', 'Is this the Florida WDO form?', 'How do I schedule the inspection?'],
+    askChips: [],
     priceWording: {},
   },
   termite_foam: {

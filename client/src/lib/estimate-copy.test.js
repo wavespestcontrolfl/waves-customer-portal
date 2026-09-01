@@ -19,6 +19,10 @@ describe('estimate-copy', () => {
     expect(estimateCopyFor(category)).not.toBe(SERVICE_COPY.pest_control);
   });
 
+  it('keeps the regulated WDO copy free of AI quick questions', () => {
+    expect(estimateCopyFor('wdo_inspection').askChips).toEqual([]);
+  });
+
   it('customer-facing quick questions make no blanket treatment-safety claim', () => {
     const chips = Object.values(SERVICE_COPY).flatMap((copy) => copy.askChips || []);
     expect(chips.join(' ')).not.toMatch(/\b(?:pet|kid|child).*safe|safe.*\b(?:pet|kid|child)/i);

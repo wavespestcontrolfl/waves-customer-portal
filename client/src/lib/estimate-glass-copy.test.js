@@ -53,6 +53,11 @@ describe('glassCopyActive', () => {
 });
 
 describe('glassEstimateCopyFor', () => {
+  it('keeps the regulated WDO glass copy free of AI quick questions', () => {
+    setGlassDefault(true);
+    expect(glassEstimateCopyFor('wdo_inspection').askChips).toEqual([]);
+  });
+
   it('returns a pack for every service category under glass, none when glass is off', () => {
     setGlassDefault(true);
     expect(glassEstimateCopyFor('pest_control').heroH1).toMatch(/pest-free \{city\} plan/);

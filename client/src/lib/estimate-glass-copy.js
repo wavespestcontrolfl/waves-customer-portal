@@ -347,7 +347,7 @@ const GLASS_PACKS = {
     eyebrow: 'Your WDO inspection quote',
     aiTitle: 'Prepared for the property shown on this estimate',
     aiBody: 'The inspection and reporting scope shown here applies to this property; it is not a pest-control treatment plan.',
-    askChips: ['What does the inspection cover?', 'When will I receive the report?', 'Is this the Florida WDO form?', 'How do I schedule the inspection?'],
+    askChips: [],
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
   termite_foam: {

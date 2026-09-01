@@ -5938,6 +5938,7 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
+  const isRegulatedWdoSurface = serviceCategory === 'wdo_inspection';
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic
@@ -5991,7 +5992,9 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  const intelligenceDisplay = glassPack && estimate.intelligence
+  const intelligenceDisplay = isRegulatedWdoSurface
+    ? null
+    : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
   const askChips = glassPack?.askChips || pricing.askChips;
@@ -6589,7 +6592,7 @@ function EstimateViewPageInner() {
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-        {showAskBar ? (
+        {showAskBar && !isRegulatedWdoSurface ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
@@ -6648,14 +6651,18 @@ function EstimateViewPageInner() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
-      <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-      <EstimateAskBar
-        token={token}
-        askToken={estimate.askToken}
-        selectedFrequency={selectedFrequency}
-        serviceMode={serviceMode}
-        chips={askChips}
-      />
+      {!isRegulatedWdoSurface ? (
+        <>
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <EstimateAskBar
+            token={token}
+            askToken={estimate.askToken}
+            selectedFrequency={selectedFrequency}
+            serviceMode={serviceMode}
+            chips={askChips}
+          />
+        </>
+      ) : null}
       <EstimateAddServiceRequestCard
         offer={addServiceOffer}
         requestState={addServiceRequestState}
@@ -7118,13 +7125,15 @@ function EstimateViewPageInner() {
                   — the standalone card read as a duplicate review section). */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <EstimateAskBar
-                token={token}
-                askToken={estimate.askToken}
-                selectedFrequency={selectedFrequency}
-                serviceMode={serviceMode}
-                chips={askChips}
-              />
+              {!isRegulatedWdoSurface ? (
+                <EstimateAskBar
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedFrequency={selectedFrequency}
+                  serviceMode={serviceMode}
+                  chips={askChips}
+                />
+              ) : null}
               <EstimateAddServiceRequestCard
                 offer={addServiceOffer}
                 requestState={addServiceRequestState}
