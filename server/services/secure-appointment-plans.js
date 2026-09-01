@@ -269,6 +269,48 @@ function frozenAnchorSetupStamp(anchor) {
   return Number.isFinite(stamp) && stamp > 0 ? cents(stamp) : null;
 }
 
+// The residential qualifying-family waiver, shared by the live derivation
+// and the booking-stamp re-evaluation.
+// STRICT (codex #3591 r69 P1): the default loader reads a failed
+// membership/catalog read as "no other family" and this resolver would
+// disclose or stamp a $99 the customer's other plan waives — a throw
+// reaches the callers' existing fail-closed handling instead.
+// planGate: false (codex #3591 r73 P1): the waiver is "any OTHER
+// qualifying family", not plan membership — a qualifying row whose
+// tier stamp has not landed yet (booking enrolls AFTER this resolver)
+// still waives.
+async function residentialSetupWaiverApplies(database, customerId) {
+  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, customerId, { strict: true, planGate: false }) || [])
+    .filter((key) => key !== 'rodent_bait');
+  return otherQualifiers.length > 0;
+}
+
+// Whether a frozen anchor stamp was DISCLOSED-AND-ACCEPTED (or restored
+// from a reversed accepted invoice), as opposed to the booking creator's
+// pre-acceptance bookkeeping stamp (codex #3591 r86 P1). Evidence, any of:
+// estimate provenance (the decision was made at accept), a claims-ledger
+// row on the anchor (an acceptance billed it, or a reversal restored it —
+// the restore paths keep the claim as provenance, r74), or a /secure card
+// request on the series with a plan actually selected.
+async function stampHasAcceptanceProvenance(database, row, anchor) {
+  if (row.source_estimate_id || anchor?.source_estimate_id) return true;
+  const claim = await database('setup_fee_claims')
+    .where({ scheduled_service_id: anchor.id })
+    .first('id');
+  if (claim) return true;
+  const seriesRows = await database('scheduled_services')
+    .where(function seriesOf() { this.where('id', anchor.id).orWhere('recurring_parent_id', anchor.id); })
+    .select('id');
+  const seriesIds = (seriesRows || []).map((r) => r.id).filter(Boolean);
+  if (seriesIds.length === 0) return false;
+  const selected = await database('appointment_card_requests')
+    .whereIn('scheduled_service_id', seriesIds)
+    .whereNotNull('plan_selected_at')
+    .first('id');
+  return !!selected;
+}
+
 async function directRodentSetupForRow(database, row) {
   if (!row || !row.customer_id) return 0;
   const programKey = await authoritativeServiceKey(database, row);
@@ -281,7 +323,29 @@ async function directRodentSetupForRow(database, row) {
   // the ORIGINAL decision was made at accept, not that a restored claim is
   // settled).
   const frozen = frozenAnchorSetupStamp(anchor);
-  if (frozen != null) return frozen;
+  if (frozen != null) {
+    // …but a BOOKING-TIME bookkeeping stamp is not an accepted figure
+    // (codex #3591 r86 P1): the direct-booking creator stamps the fee
+    // before the customer sees or accepts anything, and echoing it here
+    // would defeat the render/selection re-derivations that are supposed
+    // to waive a qualifying family gained since booking. A residential
+    // stamp with NO acceptance provenance re-evaluates the waiver; when
+    // another family now qualifies, the stale stamp is CAS-cleared (exact
+    // value — a mid-claim negative or a changed value is someone else's
+    // write) so the first completion cannot bill it either.
+    if (programKey === 'rodent_bait' && !(await stampHasAcceptanceProvenance(database, row, anchor))) {
+      if (await residentialSetupWaiverApplies(database, row.customer_id)) {
+        const cleared = await database('scheduled_services')
+          .where({ id: anchor.id, pending_setup_fee: anchor.pending_setup_fee })
+          .update({ pending_setup_fee: null, updated_at: new Date() });
+        if (cleared === 1) {
+          logger.info(`[secure-plans] booking-time setup stamp on series ${anchor.id} waived by a family gained since booking — stamp cleared before disclosure`);
+        }
+        return 0;
+      }
+    }
+    return frozen;
+  }
   // ALREADY COLLECTED / IN COLLECTION (codex #3591 r53 P1): the first
   // completion (or a prepay) billed this series' setup — the claims ledger
   // keeps the record while the stamp is cleared. A live (non-terminal)
@@ -318,20 +382,7 @@ async function directRodentSetupForRow(database, row) {
   // The qualifying-family waiver is RESIDENTIAL-only: commercial coverage
   // is never a WaveGuard member (owner ruling 2026-08-29), so its setup is
   // never waived by the account's other families.
-  if (programKey === 'rodent_bait') {
-    // STRICT (codex #3591 r69 P1): the default loader reads a failed
-    // membership/catalog read as "no other family" and this resolver would
-    // disclose or stamp a $99 the customer's other plan waives — a throw
-    // reaches the callers' existing fail-closed handling instead.
-    // planGate: false (codex #3591 r73 P1): the waiver is "any OTHER
-    // qualifying family", not plan membership — a qualifying row whose
-    // tier stamp has not landed yet (booking enrolls AFTER this resolver)
-    // still waives.
-    const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-    const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id, { strict: true, planGate: false }) || [])
-      .filter((key) => key !== 'rodent_bait');
-    if (otherQualifiers.length > 0) return 0;
-  }
+  if (programKey === 'rodent_bait' && (await residentialSetupWaiverApplies(database, row.customer_id))) return 0;
   return cents(Math.max(0, Number(RODENT.baitSetupFee) || 0));
 }
 

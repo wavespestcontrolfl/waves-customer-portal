@@ -208,15 +208,44 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '79.00' } });
     await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
     // The accepted figure is the obligation even after another family joined
-    // the account — it is what completion would bill and what the prepay
-    // retires; the waiver only decides when no claim was ever accepted.
+    // the account — ACCEPTANCE PROVENANCE (here the /secure selection)
+    // freezes the deal; the waiver decides only pre-acceptance (codex
+    // #3591 r86 P1).
     mockQualifyingKeys = async () => ['pest_control'];
+    mockTableHandlers.scheduled_services.select = () => [{ id: 'v1' }];
+    mockTableHandlers.appointment_card_requests = { first: () => ({ id: 'acr-1' }) };
     await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    delete mockTableHandlers.appointment_card_requests;
+    delete mockTableHandlers.scheduled_services.select;
     mockQualifyingKeys = async () => [];
     setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '-99.00' } });
     await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
     // A draft fragment carries no stamp → live constant.
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('a BOOKING-TIME stamp with no acceptance provenance re-evaluates the waiver — a family gained since booking clears it (codex #3591 r86 P1)', async () => {
+    // Direct booking stamped the fee pre-acceptance; the customer then
+    // added a qualifying family before the /secure page rendered.
+    const updates = [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '99.00' } });
+    mockTableHandlers.scheduled_services.select = () => [{ id: 'v1' }];
+    mockTableHandlers.scheduled_services.update = (chain, patch) => { updates.push(patch); return 1; };
+    mockQualifyingKeys = async () => ['pest_control'];
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    expect(updates).toEqual([expect.objectContaining({ pending_setup_fee: null })]);
+    // Same stamp, no family gained — the frozen figure stands, nothing cleared.
+    updates.length = 0;
+    mockQualifyingKeys = async () => [];
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
+    expect(updates).toEqual([]);
+    // A claims-ledger row on the anchor (restored/accept-billed stamp) is
+    // provenance — the figure stands even with the gained family.
+    mockQualifyingKeys = async () => ['pest_control'];
+    mockTableHandlers.setup_fee_claims = { first: () => ({ id: 'claim-1' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
+    expect(updates).toEqual([]);
+    delete mockTableHandlers.setup_fee_claims;
   });
 
   test('an UNRELATED per_application lane (palm) does not hide the rodent disclosure page; non-rodent visits stay hidden (codex #3591 r49 P1)', async () => {
