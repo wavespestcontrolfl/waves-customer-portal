@@ -372,6 +372,15 @@ describe('full run', () => {
     const kept = db._tables.seo_link_acquisition_paths.find((p) => p.id === uncovered.id);
     expect(Number(kept.confidence)).toBe(0.6); // untouched
     expect(JSON.parse(kept.investigation).disproven_at).toBeUndefined();
+    // and it is NOT stamped investigated — it stays eligible for a later pass (Codex r12 P1)
+    expect(kept.last_investigated_at).toEqual(new Date('2026-06-01'));
+  });
+
+  test('every caller is clamped to the run ceiling — a huge limit cannot order thousands of model calls (Codex r12 P1)', async () => {
+    const many = Array.from({ length: 520 }, (_, i) => domainRow({ domain: `d${i}.com` }));
+    const db = makeDb({ seo_link_domains: many });
+    const r = await investigatePaths(db, runOpts(db, { dryRun: true, limit: 100000 }));
+    expect(r.selected).toBe(500);
   });
 
   test('off-domain hint URLs are never fetched', async () => {

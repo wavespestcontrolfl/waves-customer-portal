@@ -43,9 +43,13 @@ const LOCK_KEY = 'link-path-investigator';
 const defaultExclusive = (name, fn) => require('../../utils/cron-lock').runExclusive(name, fn, { recordHealth: false });
 
 const DEFAULT_BATCH = 50;
+// Hard per-run ceiling — every caller (cron, admin route, tests) is clamped
+// to it inside investigatePaths, so no request shape can order thousands of
+// fetches + model calls past the pay-per-domain guardrail.
+const RUN_LIMIT_MAX = 500;
 const batchSize = () => {
   const n = Number(process.env.LINK_INVESTIGATOR_BATCH);
-  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 500) : DEFAULT_BATCH;
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), RUN_LIMIT_MAX) : DEFAULT_BATCH;
 };
 
 // §5 cost discipline: ~8 fetches + 1 LLM call per domain, plus a small
@@ -286,7 +290,7 @@ function scoreDomain(domain, bestPath) {
 async function selectTargets(db, { domainIds = null, limit, now = new Date() } = {}) {
   if (Array.isArray(domainIds)) {
     if (!domainIds.length) return [];
-    const rows = await db('seo_link_domains').whereIn('id', domainIds).select('*');
+    const rows = await db('seo_link_domains').whereIn('id', domainIds.slice(0, limit)).select('*');
     return (rows || []).map((domain) => ({ domain, claimState: CLAIMABLE_STATES.includes(domain.agent_state) || (domain.agent_state === 'watching') }));
   }
   const seen = new Set();
@@ -536,6 +540,7 @@ async function investigatePaths(db, {
   fetchPage: fetcher = fetchPage, llmDispatch = dispatch, exclusive = defaultExclusive,
 } = {}) {
   const gated = !isEnabled('linkInvestigator');
+  limit = Math.max(1, Math.min(Math.floor(Number(limit) || 0) || batchSize(), RUN_LIMIT_MAX));
   const targets = await selectTargets(db, { domainIds, limit, now });
   const out = {
     dryRun, gated, selected: targets.length, investigated: 0, qualified: 0,
@@ -720,10 +725,21 @@ async function investigatePaths(db, {
               if (replaces) out.superseded += 1;
             }
           }
-          // Every active path of the domain was an input to this pass — stamp
-          // them all so baselines leave the §5 selector even when the model
-          // proposed a different key for the real path.
-          await trx('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').update({ last_investigated_at: now, updated_at: now });
+          // Stamp last_investigated_at ONLY on paths this pass actually
+          // covered: the ones it wrote, the ones whose submission URL was
+          // among the fetched pages, and URL-less paths (fully represented by
+          // the domain-level pass — there is no page of theirs to miss). A
+          // path outside the fetch budget or whose page failed to load stays
+          // eligible for a later pass instead of hiding for 90 days.
+          const activeAll = await trx('seo_link_acquisition_paths')
+            .where({ domain_id: domain.id }).whereNull('superseded_by').select('id', 'submission_url');
+          const stampIds = new Set(writtenIds);
+          for (const ap of activeAll) {
+            if (!ap.submission_url || fetchedKeys.has(registry.normalizeSubmissionUrl(ap.submission_url))) stampIds.add(ap.id);
+          }
+          if (stampIds.size) {
+            await trx('seo_link_acquisition_paths').whereIn('id', [...stampIds]).update({ last_investigated_at: now, updated_at: now });
+          }
 
           // A re-investigation DISPROVES only what it actually COVERED: a
           // previously active, non-baseline path absent from this verdict is
