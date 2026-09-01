@@ -3205,7 +3205,7 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
 // Fails toward NOT flagging, like the reads it wraps: an unreadable wallet
 // yields noPaymentMethod null (never a false "no card on file"), and any
 // lookup error leaves the payload exactly as it was.
-async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts }) {
+async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, completionContext = null }) {
   const customerId = svc?.customer_id;
   const achStatus = svc?.ach_status;
   const needsWallet = billingLane?.prediction?.kind === 'invoice'
@@ -3246,7 +3246,22 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts }) {
   // even at its best, does this visit bill? Failure leaves willMint null,
   // which is never treated as a gap.
   let willMint = null;
-  if (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind)) {
+  // An ATTACHED non-void invoice already exists and completion reuses it —
+  // there is nothing left to mint, and asking the fresh-mint question would
+  // read its `false` as "nothing will bill" for work that is already billed
+  // (Codex GH P1). Provenance, not a re-derivation.
+  const fromAttachedInvoice = billingLane.prediction?.source === 'attached_invoice';
+  // The typed one-time completion profile is one of completion's own mint
+  // triggers, so a preview that omits it under-reports minting. When the
+  // profile could not be resolved we leave willMint null rather than guess:
+  // unknown is never a gap, so an unreadable profile stays silent instead of
+  // warning on a visit that will bill.
+  const profileKnown = !!completionContext && !completionContext.completionProfileLookupFailed;
+  const typedOneTimeBilling = profileKnown
+    && String(completionContext.completionProfile?.billingType || '').toLowerCase() === 'one_time'
+    && svc?.followup_included !== true;
+  if (!fromAttachedInvoice && profileKnown
+    && ['invoice', 'auto_charge'].includes(billingLane.prediction?.kind)) {
     try {
       const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
       willMint = shouldAutoInvoiceCompletion({
@@ -3268,6 +3283,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts }) {
         serviceType: svc?.service_type,
         isCallback: !!svc?.is_callback,
         visitPerformed: true,
+        typedOneTimeBilling,
       });
     } catch { willMint = null; }
   }
@@ -3735,7 +3751,7 @@ router.get('/', async (req, res, next) => {
       // just any payment_methods row. Fail toward NOT flagging, like the
       // reads above: a wrong badge on a covered customer teaches the tech
       // to ignore it.
-      await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts });
+      await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts, completionContext: projectCompletionContext });
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
@@ -4258,7 +4274,7 @@ router.get('/week', async (req, res, next) => {
         // Week rows open the SAME detail sheet as the day feed, so they get
         // the same wallet read and money-gap note (Codex P1). No alerts array
         // here — the propertyAlerts feed is a day-view concept.
-        await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts: null });
+        await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts: null, completionContext: projectCompletionContext });
         return {
           id: s.id,
           customerId: s.customer_id,

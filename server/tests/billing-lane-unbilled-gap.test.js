@@ -242,3 +242,25 @@ describe('a priced visit that will never mint an invoice (Codex GH P1)', () => {
     expect(unbilledCompletionGap({ prediction: p, willMint: true })).toBeNull();
   });
 });
+
+describe('willMint provenance guards (Codex GH P1)', () => {
+  test('an ATTACHED invoice is billed — the mint question is not asked', () => {
+    // predictionFromAttachedInvoice marks its verdicts source:'attached_invoice'.
+    // Completion REUSES that invoice, so a false fresh-mint answer would call
+    // already-billed work unbilled. The route skips the check entirely, which
+    // reaches the predicate as willMint null.
+    const attached = { kind: 'invoice', amount: 129, conflictStampedPrice: false, source: 'attached_invoice' };
+    expect(unbilledCompletionGap({ prediction: attached })).toBeNull();
+    expect(unbilledCompletionGap({ prediction: attached, willMint: null })).toBeNull();
+  });
+
+  test('an unknown mint verdict stays silent rather than warning', () => {
+    // An unresolved completion profile (its billing_type is one of
+    // completion's own mint triggers) leaves willMint null — unknown is never
+    // a gap, so the sheet says nothing instead of warning on a visit that
+    // will bill.
+    const p = predictCompletionBilling({ ...unbilledShape, estimatedPrice: 129 });
+    expect(p.kind).toBe('invoice');
+    expect(unbilledCompletionGap({ prediction: p, willMint: null })).toBeNull();
+  });
+});
