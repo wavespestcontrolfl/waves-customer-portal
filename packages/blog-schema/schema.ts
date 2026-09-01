@@ -676,7 +676,7 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       // A closer must sit at the OPENER's blockquote depth: inside a fence
       // opened at "> ~~~", a "> > ~~~" line is literal fence CONTENT (the
       // extra ">" is text), never the close (CommonMark).
-      if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; }
+      if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; prevBlank = true; /* a closed fence ends the block — the next line can start any list */ }
     } else {
       let marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
       // CommonMark: an ordered marker interrupts a paragraph only when it
@@ -754,14 +754,14 @@ const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'v
 // brace is not syntax; operator-position `/` starts one, char-class
 // aware), and // and /* */ comments.
 function closeOfExpressionAt(src: string, i: number): number {
-  let depth = 0; let q: string | null = null; let prevSig = ''; let word = '';
+  let depth = 0; let q: string | null = null; let prevSig = ''; let word = ''; let wordDot = false;
   for (let j = i; j < src.length; j += 1) {
     const c = src[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
     if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; word = ''; continue; }
     if (depth > 0 && c === '/' && src[j + 1] === '/') { while (j < src.length && src[j] !== '\n') j += 1; continue; }
     if (depth > 0 && c === '/' && src[j + 1] === '*') { const e = src.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
-    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
       let k = j + 1; let inClass = false; let closed = -1;
       for (; k < src.length && src[k] !== '\n'; k += 1) {
         const d = src[k];
@@ -774,7 +774,7 @@ function closeOfExpressionAt(src: string, i: number): number {
     }
     if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
-    if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
+    if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY, not the keyword — a / after it is division
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
   }
   return -1;
@@ -862,7 +862,7 @@ function blankExpressionStrings(src: string): string {
   // opaque (title="{" must not open an expression — its brace once paired
   // a later real prop quote and blanked a counted component's opener:
   // fail open); in prose only braces matter.
-  let inTag = false; let attrQ: string | null = null; let word = '';
+  let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false;
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
@@ -904,7 +904,7 @@ function blankExpressionStrings(src: string): string {
         for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
         i = j - 1; continue;
       }
-      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
         // Regex literal: scan to the unescaped closing `/`, honoring
         // character classes ([/] does not close).
         let j = i + 1; let inClass = false; let closed = -1;
@@ -917,7 +917,7 @@ function blankExpressionStrings(src: string): string {
         }
         if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
       }
-      if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
+      if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
       if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener; a / after return/throw/case/… IS one (word check above)
     }
   }
@@ -1660,13 +1660,16 @@ function extractComponentInvocations(cleaned: string): ParsedInvocation[] {
   // REAL expression-wrapped invocation's quoted props stay validatable).
   const strView = blankExpressionStrings(cleaned);
   const attrView = maskJsxAttrQuotes(cleaned);
-  // Matches opening tag up to closing `>`, capturing name + raw attr string.
-  // Handles self-closing (<Foo ... />) and paired (<Foo ...>…</Foo>).
-  const pattern = /<([A-Z][A-Za-z0-9]*)((?:\s+[^>]*?)?)\s*(\/?)>/g;
+  // Attrs come from the quote/brace-aware tagAttrsAt walk — a flat [^>]*
+  // matcher truncates at a `>` inside a quoted string or JSON expression,
+  // turning a malformed prop into an "opaque" one the validator then
+  // deliberately skips (Codex #3646 r20).
+  const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(cleaned)) !== null) {
     if (strView[match.index] === ' ' || attrView[match.index] === ' ') continue;
-    invocations.push({ name: match[1], attrs: match[2] ?? '' });
+    const attrs = tagAttrsAt(cleaned, match.index);
+    invocations.push({ name: match[1], attrs: attrs === null ? '' : attrs.replace(/\/\s*$/, '') });
   }
   return invocations;
 }

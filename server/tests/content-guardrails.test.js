@@ -805,6 +805,20 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('AffiliateLink nested in a prop expression is COUNTED; keyword properties are division (Codex #3646 r20)', () => {
+    withAffiliateEnv(() => {
+      // A component passed as a prop renders — it counts and parks.
+      const nested = '<InlineCTA description={<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>} />';
+      expect(guardrails.affiliateProductIdsIn(nested)).toEqual(['rain-gauge']);
+      const selfClosing = '<InlineCTA description={<AffiliateLink product="rain-gauge" placement="primary-rec" />} />';
+      expect(guardrails.affiliateProductIdsIn(selfClosing)).toEqual(['rain-gauge']);
+      // obj.return / total is division — the component after it stays counted.
+      expect(guardrails.affiliateProductIdsIn('{obj.return / total && <AffiliateLink product="rain-gauge" placement="primary-rec">y</AffiliateLink>}')).toEqual(['rain-gauge']);
+      // Quoted display text still never counts.
+      expect(guardrails.affiliateProductIdsIn('<div title="<AffiliateLink product=\u0022x\u0022 />">y</div>')).toEqual([]);
+    });
+  });
+
   test('spread AffiliateLink props; exact post_type; attr-text and stale-example routes (Codex #3646 r19)', () => {
     withAffiliateEnv(() => {
       // A spread can override product/placement — rejected outright.

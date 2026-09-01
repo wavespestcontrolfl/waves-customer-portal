@@ -1694,7 +1694,7 @@ function blankExpressionStringLiterals(text) {
   // (title="{" must not open a phantom expression that pairs a later real
   // prop quote and blanks a counted component's opener — astro parity,
   // Codex #504 r19); in prose only braces matter.
-  let inTag = false; let attrQ = null; let word = '';
+  let inTag = false; let attrQ = null; let word = ''; let wordDot = false;
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
@@ -1737,7 +1737,7 @@ function blankExpressionStringLiterals(text) {
       }
       // Regex literal (operator-position /, char-class aware) — its content
       // is text, and its quote/tag characters must not leak into pairing.
-      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
         let j = i + 1; let inClass = false; let closed = -1;
         for (; j < s.length && s[j] !== '\n'; j += 1) {
           const d = s[j];
@@ -1750,7 +1750,7 @@ function blankExpressionStringLiterals(text) {
       }
       // ++/-- end an operand (the / after n++ is DIVISION); a / after a
       // regex-allowing KEYWORD (return /x/) opens a regex (word check).
-      if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
+      if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
       if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
     }
   }
@@ -1764,14 +1764,14 @@ const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'v
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced) — string/regex/comment-aware (astro closeOfExpressionAt).
 function closeOfExpressionAt(s, i) {
-  let depth = 0; let q = null; let prevSig = ''; let word = '';
+  let depth = 0; let q = null; let prevSig = ''; let word = ''; let wordDot = false;
   for (let j = i; j < s.length; j += 1) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
     if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '/') { while (j < s.length && s[j] !== '\n') j += 1; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
-    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
       let k = j + 1; let inClass = false; let closed = -1;
       for (; k < s.length && s[k] !== '\n'; k += 1) {
         const d = s[k];
@@ -1784,7 +1784,7 @@ function closeOfExpressionAt(s, i) {
     }
     if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
-    if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
+    if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
   }
   return -1;
@@ -1830,6 +1830,27 @@ function maskJsxAttrQuotes(src) {
   return out.join('');
 }
 
+// Quote/brace-aware attribute text of the tag opening at `start` (index of
+// `<`), expressions consumed via the shared lexer — null = unterminated
+// (astro tagAttrsAt parity).
+function tagAttrsAt(text, start) {
+  const m = /^<[A-Za-z][\w.]*/.exec(text.slice(start, start + 64));
+  if (!m) return null;
+  let j = start + m[0].length; let q = null;
+  for (; j < text.length; j += 1) {
+    const c = text[j];
+    if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '{') {
+      const e = closeOfExpressionAt(text, j);
+      if (e < 0) return null;
+      j = e; continue;
+    }
+    if (c === '>') return text.slice(start + m[0].length, j);
+  }
+  return null;
+}
+
 // eachTag lowercases names; the astro contract is CASE-SENSITIVE
 // (tagsNamed) — MDX mounts <InlineCTA>, never <inlinecta>. True when the
 // tag at `start` spells the component name exactly.
@@ -1851,16 +1872,25 @@ function collectAffiliateLinkTags(text) {
   // Product/placement are the RAW literal values — no trimming: the astro
   // contract validates the exact string, so " rain-gauge " must fail
   // closed here (registry miss), never validate normalized.
+  // DIRECT position scan (case-sensitive, astro tagsNamed parity) rather
+  // than eachTag: a tag nested inside another component's prop expression
+  // (<InlineCTA description={<AffiliateLink …/>} />) RENDERS and must be
+  // counted — eachTag consumes the outer tag whole and never yields it,
+  // which let a refresh add a product with no park (Codex #3646 r20 P1).
+  // strView blanks expression strings AND quoted attr display text, so
+  // neither counts; attr-expression JSX survives it.
   const tags = [];
   const masked = blankNonRenderedMarkdown(blankComments(String(text || '')));
   const strView = blankExpressionStringLiterals(masked);
-  for (const tag of eachTag(masked)) {
-    // CASE-SENSITIVE (astro tagsNamed parity): <affiliatelink> never mounts.
-    if (tag.isClose || tag.name !== 'affiliatelink' || !isExactTagAt(masked, tag.start, 'AffiliateLink')) continue;
-    if (strView[tag.start] === ' ') continue; // quoted JSX text
-    const productId = literalAttribute(tag.attrs, 'product');
-    const placement = literalAttribute(tag.attrs, 'placement');
-    tags.push({ start: tag.start, attrs: tag.attrs, productId: productId || null, placement: placement || null });
+  const re = /<AffiliateLink(?=[\s/>])/g;
+  let m;
+  while ((m = re.exec(masked)) !== null) {
+    if (strView[m.index] === ' ') continue; // string/attr display text
+    const attrs = tagAttrsAt(masked, m.index);
+    if (attrs === null) { tags.push({ start: m.index, attrs: '', productId: null, placement: null }); continue; }
+    const productId = literalAttribute(attrs, 'product');
+    const placement = literalAttribute(attrs, 'placement');
+    tags.push({ start: m.index, attrs, productId: productId || null, placement: placement || null });
   }
   return tags;
 }
