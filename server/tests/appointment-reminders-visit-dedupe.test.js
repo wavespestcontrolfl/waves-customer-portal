@@ -131,15 +131,24 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
   });
   afterEach(() => jest.useRealTimers());
 
-  test('two grouped members, different rows: exactly ONE send; owner finalizes sent, loser closes its own row', async () => {
+  test('two grouped members, different rows: exactly ONE send with the EARLIEST window + every member\'s hold line; loser closes its own row', async () => {
+    // The LATER member (10:00 AM ET) wins the claim — the notice must
+    // still advertise the stop's earliest arrival (9:00 AM ET) and carry
+    // both members' card-hold disclosures (GH codex r1, two P1s).
     const rows = [
-      reminderRow({ id: 'rem-1', scheduled_service_id: 'svc-1' }),
-      reminderRow({ id: 'rem-2', scheduled_service_id: 'svc-2', appointment_time: new Date('2026-05-07T14:00:00.000Z') }),
+      reminderRow({ id: 'rem-1', scheduled_service_id: 'svc-1' }), // 9:00 AM ET
+      reminderRow({ id: 'rem-2', scheduled_service_id: 'svc-2', appointment_time: new Date('2026-05-07T14:00:00.000Z') }), // 10:00 AM ET
     ];
     const state = installDb({ rows, visitIdByService: { 'svc-1': VISIT, 'svc-2': VISIT } });
+    state.visitMemberRows = [
+      { appointment_time: new Date('2026-05-07T13:00:00.000Z'), scheduled_service_id: 'svc-1' },
+      { appointment_time: new Date('2026-05-07T14:00:00.000Z'), scheduled_service_id: 'svc-2' },
+    ];
+    const { cardHoldReminderLine } = require('../services/estimate-card-holds');
+    cardHoldReminderLine.mockImplementation(async (id) => (id === 'svc-1' ? 'Held booking fee clause.' : ''));
     VisitGroups.claimVisitNotification
-      .mockResolvedValueOnce({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` })
-      .mockResolvedValueOnce({ state: 'taken', token: null, dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+      .mockResolvedValueOnce({ state: 'taken', token: null, dedupeKey: `${VISIT}:reminder_24h:2026-05-07` })
+      .mockResolvedValueOnce({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
 
     const result = await AppointmentReminders.checkAndSendReminders();
 
@@ -147,14 +156,24 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(result.sent24h).toBe(1);
     expect(result.skipped).toBe(1);
     expect(VisitGroups.claimVisitNotification).toHaveBeenCalledTimes(2);
-    expect(VisitGroups.claimVisitNotification).toHaveBeenCalledWith({ id: 'svc-1', visit_id: VISIT }, 'reminder_24h');
+    expect(VisitGroups.claimVisitNotification).toHaveBeenCalledWith({ id: 'svc-2', visit_id: VISIT }, 'reminder_24h');
     expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledTimes(1);
     expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
       VISIT, 'reminder_24h', 'sent', expect.any(Date), 'tok-1',
       { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
     );
+    // The rendered copy carries the EARLIEST member's time and the held
+    // sibling's fee clause even though svc-2 owned the send.
+    expect(smsTemplatesRouter.getTemplate).toHaveBeenCalledWith(
+      'reminder_24h',
+      expect.objectContaining({ time: '9:00 AM', card_hold_policy_line: 'Held booking fee clause.' }),
+      expect.anything(),
+    );
+    expect(cardHoldReminderLine).toHaveBeenCalledWith('svc-1');
+    expect(cardHoldReminderLine).toHaveBeenCalledWith('svc-2');
     // Both rows closed their own 24h flag (owner post-send, loser covered).
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(2);
+    cardHoldReminderLine.mockImplementation(async () => '');
   });
 
   test('ungrouped row (visit_id null): the claim is never consulted — byte-identical per-row path', async () => {
