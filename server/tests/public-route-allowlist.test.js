@@ -880,6 +880,20 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       .toEqual(['GET /api/x/a', 'GET /api/x/leak']);
   });
 
+  test('an identifier-bound MIXED path array (regex + string) expands to its paths', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const PATHS = [/^\\/secret$/, '/other'];",
+        'router.get(PATHS, (req, res) => res.json({}));',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/other', 'GET /api/x<re:^\\/secret$>']);
+  });
+
   test('two anonymous responders on ONE source line are still distinct locations', () => {
     const res = scanOf({
       'server/index.js': app('app.use((req, res) => res.json({ a: 1 })); app.use((req, res) => res.json({ b: 2 }));'),

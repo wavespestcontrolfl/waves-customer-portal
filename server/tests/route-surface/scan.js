@@ -636,7 +636,15 @@ class ModuleAnalysis {
       }
       case 'Identifier': {
         const values = this.resolveStrings(node);
-        return values || null;
+        if (values) return values;
+        // An identifier bound to a MIXED path array ([/^\/secret$/, '/x'])
+        // resolves element-by-element like an inline array literal.
+        if (this.shadowedNames.has(node.name) || this.reassignedNames.has(node.name)) return null;
+        const b = this.bindings.get(node.name);
+        if (b && b.kind === 'array') {
+          return this.resolvePaths({ type: 'ArrayExpression', elements: b.elements });
+        }
+        return null;
       }
       default:
         return null;
@@ -696,10 +704,13 @@ class ModuleAnalysis {
       // UNRESOLVED path (a problem when public) rather than a wrong one.
       const b = this.bindings.get(node.name);
       if (b && b.kind === 'string') return true;
-      // A const bound to an all-string array is a path list, matching the
-      // support in resolveStrings() (`const PATHS = ['/a', '/b']`).
+      // A const bound to a path-shaped array (strings/regexes/templates/
+      // spreads) is a path list — resolvePaths() expands it, or refuses to
+      // an UNRESOLVED path, never a handler at the mount root.
       if (b && b.kind === 'array'
-        && stringLiteralArray({ type: 'ArrayExpression', elements: b.elements })) return true;
+        && b.elements.every((el) => el
+          && (['StringLiteral', 'RegExpLiteral', 'TemplateLiteral'].includes(el.type)
+            || (el.type === 'SpreadElement' && el.argument.type === 'Identifier')))) return true;
       return false;
     }
     return false;
