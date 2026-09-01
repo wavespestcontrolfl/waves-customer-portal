@@ -834,6 +834,15 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     expect(guardrails.blankNonRenderedMarkdown('Use `a | b` here.')).toBe('Use `\u0002\u0002|\u0002\u0002` here.'.replace(/`/g, '\u0002'));
   });
 
+  test('escaped ${ in a template-literal species string is literal text, not interpolation (Codex #3646 r34)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x\\${y}`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x\\${y}`, risk: `nuisance`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+    // A REAL interpolation stays opaque here (the executable-expression gate owns it).
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x${y}`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;

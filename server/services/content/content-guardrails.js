@@ -2303,7 +2303,14 @@ function tolerantStaticJson(text) {
           if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
           rawInner += trimmed[j]; j += 1;
         }
-        if (rawInner.includes('${')) return undefined;
+        // Only an UNESCAPED `${` interpolates — `\${` is literal text the
+        // decoder resolves (Codex #3646 r34).
+        let interp = false;
+        for (let k = 0; k < rawInner.length; k += 1) {
+          if (rawInner[k] === '\\') { k += 1; continue; }
+          if (rawInner[k] === '$' && rawInner[k + 1] === '{') { interp = true; break; }
+        }
+        if (interp) return undefined;
         const decodedInner = decodeJsStaticString(rawInner);
         if (decodedInner === null) return undefined;
         out += JSON.stringify(decodedInner);

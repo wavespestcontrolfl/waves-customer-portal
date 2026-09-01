@@ -2000,27 +2000,15 @@ function parseJsxProps(attrs: string): {
 }
 
 // Given the index of an opening `{`, returns the expression text between it
-// and its balancing `}` (exclusive), honoring nested braces/brackets and
-// quoted strings. Returns null when the braces never balance (e.g. the attr
-// string was truncated by the invocation-extraction regex).
+// and its balancing `}` (exclusive). Balanced by the shared expression
+// lexer (closeOfExpressionAt) so strings, regex literals, and // or /* */
+// comments never end it early — a quote-pairing walk read `/* owner's
+// note */` as an open string and left the prop opaque (Codex #508 r1).
+// Returns null when the braces never balance (e.g. the attr string was
+// truncated by the invocation-extraction regex).
 function extractBalancedExpression(text: string, openBraceIdx: number): string | null {
-  let depth = 0;
-  let quote: '"' | "'" | '`' | null = null;
-  for (let i = openBraceIdx; i < text.length; i++) {
-    const ch = text[i];
-    if (quote) {
-      if (ch === '\\') i++; // skip escaped char inside a string
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') quote = ch; // template literals are strings too (r31)
-    else if (ch === '{' || ch === '[') depth++;
-    else if (ch === '}' || ch === ']') {
-      depth--;
-      if (depth === 0) return text.slice(openBraceIdx + 1, i);
-    }
-  }
-  return null;
+  const end = closeOfExpressionAt(text, openBraceIdx);
+  return end === -1 ? null : text.slice(openBraceIdx + 1, end);
 }
 
 // Strict JSON.parse wrapper. Wrapped result distinguishes "parsed to a
@@ -2067,7 +2055,14 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
             if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
             rawInner += trimmed[j]; j += 1;
           }
-          if (rawInner.includes('${')) return undefined;
+          // Only an UNESCAPED `${` interpolates — `\${` is literal text
+          // the decoder resolves (Codex #3646 r34).
+          let interp = false;
+          for (let k = 0; k < rawInner.length; k += 1) {
+            if (rawInner[k] === '\\') { k += 1; continue; }
+            if (rawInner[k] === '$' && rawInner[k + 1] === '{') { interp = true; break; }
+          }
+          if (interp) return undefined;
           const decodedInner = decodeJsStaticString(rawInner);
           if (decodedInner === null) return undefined;
           out += JSON.stringify(decodedInner);
