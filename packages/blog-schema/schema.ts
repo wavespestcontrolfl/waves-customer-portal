@@ -2029,12 +2029,17 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
           out += trimmed.slice(i, j + 1);
           i = j;
         } else if (ch === "'") {
-          let j = i + 1; let inner = '';
+          // Single-quoted spans decode with REAL JS escape semantics —
+          // identity-stripping validated a value JS never produces
+          // ('\\beneficial' runs as backspace+eneficial; Codex #3646 r29).
+          let j = i + 1; let rawInner = '';
           while (j < trimmed.length && trimmed[j] !== "'") {
-            if (trimmed[j] === '\\') { inner += trimmed[j + 1]; j += 2; continue; }
-            inner += trimmed[j]; j += 1;
+            if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+            rawInner += trimmed[j]; j += 1;
           }
-          out += JSON.stringify(inner);
+          const decodedInner = decodeJsStaticString(rawInner);
+          if (decodedInner === null) return undefined; // unsupported escape — the prop stays opaque
+          out += JSON.stringify(decodedInner);
           i = j;
         } else {
           out += ch;
