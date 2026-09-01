@@ -162,7 +162,20 @@ function inRawContext(code, idx) {
   // declaration, then require that identifier to reach a raw callee.
   let j = idx;
   while (j > 0 && (bare[j - 1] === ' ' || bare[j - 1] === '\n' || code[j - 1] === '+')) j -= 1;
-  const decl = code.slice(Math.max(0, j - 200), j).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
+  const lead = code.slice(Math.max(0, j - 200), j);
+  let decl = lead.match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
+  // …or SQL held in an OBJECT PROPERTY — `const SQL = { create: 'INSERT …' };
+  // db.raw(SQL.create)`: the key's enclosing object literal is what must
+  // be declared, and raw must receive `OBJ.key` / `OBJ['key']`.
+  let member = '';
+  if (!decl) {
+    const key = lead.match(/([A-Za-z_$][\w$]*)\s*:\s*$/);
+    const opener = key ? enclosingOpener(bare, j) : -1;
+    if (opener !== -1) {
+      decl = code.slice(Math.max(0, opener - 200), opener).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
+      member = String.raw`\s*(?:\.\s*${escapeRe(key[1])}\b|\[\s*['"\x60]${escapeRe(key[1])}['"\x60]\s*\])`;
+    }
+  }
   if (!decl) return false;
   // The constant may reach raw through simple aliases (`const QUERY = SQL;
   // db.raw(QUERY)`), followed transitively to a fixpoint.
@@ -174,7 +187,42 @@ function inRawContext(code, idx) {
       if (names.has(b) && !names.has(a)) { names.add(a); grew = true; }
     }
   }
-  return [...names].some((n) => new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(n)}\b`).test(bare));
+  return [...names].some((n) => new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(n)}\b${member}`).test(bare));
+}
+
+// Every call site where `name` is passed as a WHOLE argument (`f(name)`,
+// `f(a, name)` — not `f(name.table)`): returns the callee text (bare
+// identifier or member path) and the zero-based argument position. Walks
+// the blanked view backward from each occurrence to the call's `(` at
+// depth 0, counting top-level commas; a `;`, `{`, `}` or `=` first means it
+// is not an argument. Control-keyword heads (`if (x)`) are not calls.
+function wholeArgumentPasses(bare, name) {
+  const out = [];
+  const occRe = new RegExp(String.raw`(?<![.\w$])${escapeRe(name)}\b(?!\s*[.\[(])`, 'g');
+  let o;
+  while ((o = occRe.exec(bare))) {
+    const after = bare.slice(o.index + name.length).match(/^\s*([,)])/);
+    if (!after) continue;
+    let depth = 0;
+    let position = 0;
+    let k = o.index - 1;
+    for (; k >= 0; k -= 1) {
+      const ch = bare[k];
+      if (ch === ')' || ch === ']' || ch === '}') depth += 1;
+      else if (ch === '(' || ch === '[' || ch === '{') {
+        if (depth === 0) break;
+        depth -= 1;
+      } else if (depth === 0 && ch === ',') position += 1;
+      else if (depth === 0 && (ch === ';' || ch === '=')) { k = -1; break; }
+    }
+    if (k < 0 || bare[k] !== '(') continue;
+    const head = bare.slice(Math.max(0, k - 120), k).match(/([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*$/);
+    if (!head) continue;
+    const callee = head[1].replace(/\s+/g, '');
+    if (/^(?:if|while|for|switch|catch|return|typeof|await|function)$/.test(callee)) continue;
+    out.push({ callee, position });
+  }
+  return out;
 }
 
 // Function-shaped factories with BALANCED bodies of any nesting depth: find
@@ -264,21 +312,56 @@ function leadsTableTokens(src) {
 // which sees the module-level constant. Braces are counted on the
 // string-blanked view. Among visible preceding declarations the nearest
 // (innermost) wins.
-function declVisibleAt(bare, declIdx, useIdx) {
+// The `{` of the innermost block enclosing `idx` (-1 at module level).
+function enclosingOpener(bare, idx) {
   let depth = 0;
+  for (let k = idx - 1; k >= 0; k -= 1) {
+    if (bare[k] === '}') depth += 1;
+    else if (bare[k] === '{') { if (depth === 0) return k; depth -= 1; }
+  }
+  return -1;
+}
+// Does the block opened at `openIdx` belong to a FUNCTION (declaration,
+// expression, arrow, method) rather than a control block / bare block?
+function isFunctionBodyOpener(bare, openIdx) {
+  let k = openIdx - 1;
+  while (k >= 0 && /\s/.test(bare[k])) k -= 1;
+  if (bare[k] === '>' && bare[k - 1] === '=') return true; // arrow body
+  if (bare[k] !== ')') return false; // `else {`, `try {`, `{`
+  let depth = 0;
+  for (; k >= 0; k -= 1) {
+    if (bare[k] === ')') depth += 1;
+    else if (bare[k] === '(') { depth -= 1; if (depth === 0) break; }
+  }
+  const kw = bare.slice(Math.max(0, k - 40), k).match(/([A-Za-z_$][\w$]*)\s*$/);
+  return !kw || !/^(?:if|for|while|switch|catch|with)$/.test(kw[1]);
+}
+// `var` is FUNCTION-scoped: a block closing does not end its visibility
+// unless that block is a function body.
+function declVisibleAt(bare, declIdx, useIdx, isVar = false) {
+  let depth = 0;
+  let opener = declIdx;
   for (let k = declIdx; k < useIdx; k += 1) {
     if (bare[k] === '{') depth += 1;
-    else if (bare[k] === '}') { depth -= 1; if (depth < 0) return false; }
+    else if (bare[k] === '}') {
+      depth -= 1;
+      if (depth < 0) {
+        if (!isVar) return false;
+        opener = enclosingOpener(bare, opener);
+        if (opener === -1 || isFunctionBodyOpener(bare, opener)) return false;
+        depth = 0;
+      }
+    }
   }
   return true;
 }
 function nearestDeclBindsLeads(code, name, idx) {
   const bare = blankCommentsAndStrings(code);
-  const declRe = new RegExp(String.raw`\b(?:const|let|var)\s+${escapeRe(name)}\s*=\s*(['"\x60])([^'"\x60]*)\1`, 'g');
+  const declRe = new RegExp(String.raw`\b(const|let|var)\s+${escapeRe(name)}\s*=\s*(['"\x60])([^'"\x60]*)\2`, 'g');
   let value = null;
   let d;
   while ((d = declRe.exec(code)) && d.index < idx) {
-    if (declVisibleAt(bare, d.index, idx)) value = d[2];
+    if (declVisibleAt(bare, d.index, idx, d[1] === 'var')) value = d[3];
   }
   return value === null || value === 'leads';
 }
@@ -547,7 +630,9 @@ function scanSourceForDynamicTableInserts(src) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(root)) return false; // shadowable name
     // The declaration must TERMINATE right after the literal — a computed
     // initializer (`const TABLE = 'lead' + suffix`) proves nothing.
-    if (!new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}\s*;?\s*$`, 'm').test(src)) return false;
+    // Checked on the COMMENT-BLANKED view (strings kept): a block-comment
+    // example `const TARGET_TABLE = 'audit'` is not a declaration.
+    if (!new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}\s*;?\s*$`, 'm').test(blankComments(src))) return false;
     // …and the name must not be REBOUND anywhere else in the file — an
     // indented declaration or a parameter shadowing the module const means
     // the insert may read a different binding, so it stays dynamic.
@@ -836,6 +921,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['SQL held in an object property passed to raw', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)' };\nawait db.raw(SQL.create, [a]);"],
     ['SQL constant reaching raw through an alias', "const SQL = 'INSERT INTO leads (a) VALUES (?)';\nconst QUERY = SQL;\nawait db.raw(QUERY, [a]);"],
     ['bracket raw callee', "await db['raw']('INSERT INTO leads (a) VALUES (?)', [a]);"],
     ['stored CTE constant passed to raw', "const SQL = 'WITH src AS (SELECT 1 AS a) INSERT INTO leads (a) SELECT a FROM src';\nawait db.raw(SQL);"],
@@ -861,6 +947,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['code-shaped doc string is not a writer', 'const example = "await db(\'leads\').insert(row)";'],
     ['SQL constant never executed is not a writer', "const example = 'INSERT INTO leads (a) VALUES (?)';"],
     ['select-into read is not a writer', "await db.select('*').into('leads');"],
+    ['SQL object property never executed is not a writer', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)' };\nmodule.exports = { SQL };"],
     ['raw substring callee is not knex raw', "await draw('INSERT INTO leads (a) VALUES (?)', [a]);"],
     ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
     ['builder passed into a read-only helper', "function scoped(qb) { return qb.where('active', true); }\nawait scoped(db('leads'));"],
@@ -881,6 +968,15 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(found(src)).toEqual(['return db(TABLE).insert(row);']);
     const inner = "const TABLE = 'audit';\nfunction create() {\n  const TABLE = 'leads';\n  if (x) {\n    return db(TABLE).insert(row);\n  }\n  return null;\n}";
     expect(found(inner)).toEqual(['return db(TABLE).insert(row);']);
+  });
+
+  test('var is function-scoped: a block-nested var shadows through its block, not past its function', () => {
+    const hoisted = "const TABLE = 'audit';\nfunction create() {\n  {\n    var TABLE = 'leads';\n  }\n  return db(TABLE).insert(row);\n}";
+    expect(found(hoisted)).toEqual(['return db(TABLE).insert(row);']);
+    const sibling = "const TABLE = 'leads';\nfunction audit() {\n  var TABLE = 'audit';\n  return TABLE;\n}\nfunction create() {\n  return db(TABLE).insert(row);\n}";
+    expect(found(sibling)).toEqual(['return db(TABLE).insert(row);']);
+    const control = "const TABLE = 'leads';\nfunction create() {\n  if (x) {\n    var TABLE = 'audit';\n  }\n  return db(TABLE).insert(entry);\n}";
+    expect(found(control)).toEqual([]);
   });
 
   test('two inserts sharing one line surface as TWO sites on that line', () => {
@@ -936,6 +1032,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     const deepPayload = scanSourceForDynamicTableInserts('await db.insert(rows.map(row => normalize(row, opts.get(k)))).into(table);');
     expect(deepPayload).toHaveLength(1);
     expect(deepPayload[0].expr).toBe('table');
+    const commentedConst = scanSourceForDynamicTableInserts("/* e.g. const TARGET_TABLE = 'audit'; */\nconst TARGET_TABLE = getConfiguredTable();\nawait db(TARGET_TABLE).insert(row);");
+    expect(commentedConst).toHaveLength(1);
+    expect(commentedConst[0].expr).toBe('TARGET_TABLE');
   });
 
   test('dynamic-table scan: computed expressions and shadowable lowercase constants stay dynamic', () => {
@@ -1157,6 +1256,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // alias.table = x` is caught because `alias` inherits governed
         // status from `cfg`, which inherits it from the object.
         const governed = new Set([cc.object]);
+        const inFileFunctions = new Map(balancedFunctionBodies(bare).map((f) => [f.name, f]));
         let grew = true;
         while (grew) {
           grew = false;
@@ -1176,6 +1276,18 @@ describe('lead-writer registry (#3137 groundwork)', () => {
                 const id = bound.trim().split(/[=\s]/)[0];
                 if (/^[A-Za-z_$][\w$]*$/.test(id) && !governed.has(id)) { governed.add(id); grew = true; }
               }
+            }
+            // PASSED AS A WHOLE ARGUMENT — `loadRow(config, id)` binds the
+            // callee's parameter at that position, which is then governed
+            // (its own property writes are checked). A callee this file
+            // cannot inspect (imported, or a member call) is an unverified
+            // escape and fails outright.
+            for (const { callee, position } of wholeArgumentPasses(bare, name)) {
+              const fn = inFileFunctions.get(callee);
+              expect({ file: w.file, governed: name, passedTo: callee, inspectable: Boolean(fn) })
+                .toEqual({ file: w.file, governed: name, passedTo: callee, inspectable: true });
+              const param = fn.params[position];
+              if (param && !governed.has(param)) { governed.add(param); grew = true; }
             }
           }
         }
