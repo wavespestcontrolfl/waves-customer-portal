@@ -87,6 +87,40 @@ async function revealWholePage(page) {
   await page.waitForTimeout(100);
 }
 
+// Runs inside the browser. Shared by the pre-selection and post-selection
+// passes so overflow/clipping/wording checks cover both states.
+const auditPageInBrowser = () => {
+  const bodyText = document.body.innerText;
+  const root = document.documentElement;
+  const clippedText = [...document.querySelectorAll('h1,h2,h3,p,a,button,strong,[data-gt]')]
+    .filter((el) => {
+      const style = getComputedStyle(el);
+      const clips = ['hidden', 'clip'].includes(style.overflowX) || ['hidden', 'clip'].includes(style.overflow);
+      return clips && el.scrollWidth > el.clientWidth + 2 && String(el.textContent || '').trim();
+    })
+    .slice(0, 8)
+    .map((el) => String(el.textContent || '').trim().slice(0, 120));
+  const overflowElements = [...document.querySelectorAll('body *')]
+    .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.width > 0 && (rect.right > window.innerWidth + 2 || rect.left < -2))
+    .slice(0, 8)
+    .map(({ el, rect }) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${el.className && typeof el.className === 'string' ? `.${el.className.trim().replace(/\s+/g, '.')}` : ''} [${Math.round(rect.left)},${Math.round(rect.right)}]`);
+  return {
+    h1: document.querySelector('h1')?.textContent?.trim() || '',
+    bodyText,
+    horizontalOverflow: Math.max(0, root.scrollWidth - root.clientWidth),
+    clippedText,
+    overflowElements,
+    buttons: [...document.querySelectorAll('button,a')].map((el) => el.textContent.trim()).filter(Boolean),
+    slots: {
+      offered: document.querySelectorAll('[data-estimate-slot]').length,
+      stale: document.querySelectorAll('[data-estimate-slot].gc-slot-stale').length,
+      selected: document.querySelectorAll('[data-estimate-slot][aria-pressed="true"]').length,
+      approveCta: /Approve — /.test(bodyText),
+    },
+  };
+};
+
 async function launchBrowser() {
   try {
     return await chromium.launch({ headless: true });
@@ -122,49 +156,39 @@ async function launchBrowser() {
         if (!response?.ok()) fail(scenario, viewportName, `HTTP ${response?.status() || 'no response'}`);
         runtimeErrors.forEach((message) => fail(scenario, viewportName, `page error: ${message}`));
 
-        const audit = await page.evaluate(() => {
-          const bodyText = document.body.innerText;
-          const root = document.documentElement;
-          const clippedText = [...document.querySelectorAll('h1,h2,h3,p,a,button,strong,[data-gt]')]
-            .filter((el) => {
-              const style = getComputedStyle(el);
-              const clips = ['hidden', 'clip'].includes(style.overflowX) || ['hidden', 'clip'].includes(style.overflow);
-              return clips && el.scrollWidth > el.clientWidth + 2 && String(el.textContent || '').trim();
-            })
-            .slice(0, 8)
-            .map((el) => String(el.textContent || '').trim().slice(0, 120));
-          const overflowElements = [...document.querySelectorAll('body *')]
-            .map((el) => ({ el, rect: el.getBoundingClientRect() }))
-            .filter(({ rect }) => rect.width > 0 && (rect.right > window.innerWidth + 2 || rect.left < -2))
-            .slice(0, 8)
-            .map(({ el, rect }) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${el.className && typeof el.className === 'string' ? `.${el.className.trim().replace(/\s+/g, '.')}` : ''} [${Math.round(rect.left)},${Math.round(rect.right)}]`);
-          return {
-            h1: document.querySelector('h1')?.textContent?.trim() || '',
-            bodyText,
-            horizontalOverflow: Math.max(0, root.scrollWidth - root.clientWidth),
-            clippedText,
-            overflowElements,
-            buttons: [...document.querySelectorAll('button,a')].map((el) => el.textContent.trim()).filter(Boolean),
-            slots: {
-              offered: document.querySelectorAll('[data-estimate-slot]').length,
-              stale: document.querySelectorAll('[data-estimate-slot].gc-slot-stale').length,
-            },
-          };
-        });
-        if (!audit.h1) fail(scenario, viewportName, 'missing customer-facing H1');
-        if (audit.horizontalOverflow > 2) fail(scenario, viewportName, `document overflows horizontally by ${audit.horizontalOverflow}px: ${audit.overflowElements.join(' | ')}`);
-        if (audit.clippedText.length) fail(scenario, viewportName, `clipped text: ${audit.clippedText.join(' | ')}`);
-        if (/\b(?:pet|kid|child)[^\n.?!]{0,40}\bsafe\b|\bsafe\b[^\n.?!]{0,40}\b(?:pet|kid|child)/i.test(audit.bodyText)) fail(scenario, viewportName, 'blanket pet/child safety wording is visible');
-        if (/\b(?:wdo_inspection|termite_foam|trap_only_retainer)\b/.test(audit.bodyText)) fail(scenario, viewportName, 'internal service key is visible');
-        if (['wdo', 'preslab'].includes(scenario) && /Waves AI reviewed|Ask Waves|prepared for the property shown/i.test(audit.bodyText)) {
-          fail(scenario, viewportName, `${scenario} incorrectly renders AI narrative or an ask bar`);
+        const audit = await page.evaluate(auditPageInBrowser);
+        const checkPage = (result, state) => {
+          if (!result.h1) fail(scenario, state, 'missing customer-facing H1');
+          if (result.horizontalOverflow > 2) fail(scenario, state, `document overflows horizontally by ${result.horizontalOverflow}px: ${result.overflowElements.join(' | ')}`);
+          if (result.clippedText.length) fail(scenario, state, `clipped text: ${result.clippedText.join(' | ')}`);
+          if (/\b(?:pet|kid|child)[^\n.?!]{0,40}\bsafe\b|\bsafe\b[^\n.?!]{0,40}\b(?:pet|kid|child)/i.test(result.bodyText)) fail(scenario, state, 'blanket pet/child safety wording is visible');
+          if (/\b(?:wdo_inspection|termite_foam|trap_only_retainer)\b/.test(result.bodyText)) fail(scenario, state, 'internal service key is visible');
+          if (['wdo', 'preslab'].includes(scenario) && /Waves AI reviewed|Ask Waves|prepared for the property shown/i.test(result.bodyText)) {
+            fail(scenario, state, `${scenario} incorrectly renders AI narrative or an ask bar`);
+          }
+          if (result.slots.stale > 0) fail(scenario, state, `${result.slots.stale} of ${result.slots.offered} offered slots are stale (fixture clock drifted)`);
+        };
+        checkPage(audit, viewportName);
+        if (SLOT_PICKER_SCENARIOS.includes(scenario) && audit.slots.offered - audit.slots.stale === 0) fail(scenario, viewportName, 'no bookable slot offered');
+        await page.screenshot({ path: path.join(artifactDir, `${scenario}-${viewportName}.png`), fullPage: true });
+
+        // Post-selection state: pick the first bookable slot and re-audit —
+        // selected-card styling, the slot-aware "Approve — <day time>" CTA,
+        // and any overflow the selection introduces are otherwise invisible
+        // to a pre-selection screenshot.
+        let selected = null;
+        if (audit.slots.offered - audit.slots.stale > 0) {
+          await page.locator('[data-estimate-slot]:not([disabled])').first().click();
+          await page.waitForTimeout(250);
+          await revealWholePage(page);
+          selected = await page.evaluate(auditPageInBrowser);
+          checkPage(selected, `${viewportName}-selected`);
+          if (selected.slots.selected !== 1) fail(scenario, `${viewportName}-selected`, `expected exactly one selected slot card, found ${selected.slots.selected}`);
+          if (!selected.slots.approveCta) fail(scenario, `${viewportName}-selected`, 'slot-aware Approve CTA did not appear after selecting a slot');
+          await page.screenshot({ path: path.join(artifactDir, `${scenario}-${viewportName}-selected.png`), fullPage: true });
         }
 
-        if (audit.slots.stale > 0) fail(scenario, viewportName, `${audit.slots.stale} of ${audit.slots.offered} offered slots are stale (fixture clock drifted)`);
-        if (SLOT_PICKER_SCENARIOS.includes(scenario) && audit.slots.offered - audit.slots.stale === 0) fail(scenario, viewportName, 'no bookable slot offered');
-
-        observations.push({ scenario, viewport: viewportName, h1: audit.h1, actions: audit.buttons.slice(0, 8), slots: audit.slots });
-        await page.screenshot({ path: path.join(artifactDir, `${scenario}-${viewportName}.png`), fullPage: true });
+        observations.push({ scenario, viewport: viewportName, h1: audit.h1, actions: audit.buttons.slice(0, 8), slots: audit.slots, selectedSlot: selected ? selected.slots : null });
         await page.close();
       }
 
@@ -183,7 +207,11 @@ async function launchBrowser() {
         return {
           document: Boolean(doc),
           pricingHeader: /Your services & pricing|Your proposal|Investment/i.test(text),
-          pricedLines: (text.match(/\$\d[\d,]*\.\d{2}/g) || []).length,
+          // Itemized service rows only (building line items, program price
+          // rows, corrective work) — the independently rendered totals block
+          // must not stand in for a missing pricing table.
+          pricedLines: [...document.querySelectorAll('.estimate-document-v1 [data-estimate-document-line]')]
+            .filter((row) => /\$\d[\d,]*\.\d{2}/.test(row.innerText)).length,
           h1: document.querySelector('h1')?.textContent?.trim() || '',
         };
       });
@@ -193,7 +221,7 @@ async function launchBrowser() {
       } else if (!print.document) {
         fail(scenario, 'print', 'pdf pass fell through to the normal page (documentRender withheld)');
       } else if (!print.pricingHeader || print.pricedLines === 0) {
-        fail(scenario, 'print', 'print document rendered without a pricing table');
+        fail(scenario, 'print', 'print document rendered without an itemized pricing table');
       }
       observations.push({ scenario, viewport: 'print', document: print.document, pricedLines: print.pricedLines });
       await printPage.emulateMedia({ media: 'print' });
