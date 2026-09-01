@@ -141,6 +141,11 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
     }
   }
   if (!insertData.scheduled_date) throw contractError('scheduled_date is required');
+  // Attribution is REQUIRED, so the column it lands in must be known: a
+  // cols map missing source_action (the repo's `columnInfo().catch(() =>
+  // ({}))` shape) would otherwise satisfy the requirement and then
+  // silently insert without provenance (GH Codex r11 P2).
+  if (!cols.source_action) throw contractError('cols has no source_action column — pass the real scheduled_services columnInfo()');
   // Attribution values are judged and stamped TRIMMED: null, '' and a
   // whitespace-only string all count as absent, so '   ' can neither
   // satisfy the requirement nor be persisted as provenance (pre-push Codex
@@ -167,7 +172,7 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   // NON-BLANK value always wins; a blank one counts as absent (a
   // fixed-shape payload carrying source_action: null must not persist
   // blank provenance past the requirement check — GH Codex P2).
-  if (cols.source_action) data.source_action = trimmed(data.source_action) || sourceAction;
+  data.source_action = trimmed(data.source_action) || sourceAction;
   if (cols.booking_source) {
     const bookingSource = trimmed(data.booking_source) || trimmed(source?.bookingSource);
     // Optional, so absent stays absent — but a blank payload value is

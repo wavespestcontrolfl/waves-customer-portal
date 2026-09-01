@@ -109,6 +109,11 @@ describe('validation (ungated)', () => {
     expect(absent.status).toBeUndefined(); // DB default applies
   });
 
+  test('a cols map without source_action fails closed (attribution has nowhere to land)', async () => {
+    const { source_action, ...colsNoSource } = COLS;
+    await expect(run(BASE, { cols: colsNoSource })).rejects.toThrow(/no source_action column/);
+  });
+
   test('source attribution is required (from opts or an already-stamped payload)', async () => {
     await expect(completeScheduledServiceInsert(BASE, { trx: makeConn(), cols: COLS }))
       .rejects.toThrow(/source attribution/);
