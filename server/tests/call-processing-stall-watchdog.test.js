@@ -219,7 +219,7 @@ describe('computeStalledCalls', () => {
       ...base,
       created_at: mins(GRACE_MINUTES + 60),
       processing_status: 'processing',
-      processing_started_at: mins(require('../utils/claim-ceiling').claimAbsoluteCeilingMinutes() + 5),
+      processing_started_at: mins(require('../utils/claim-ceiling').alertCeilingMinutes() + 5),
       processing_heartbeat_at: mins(1),
     }];
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);

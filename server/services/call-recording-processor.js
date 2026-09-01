@@ -1951,10 +1951,10 @@ function summarizeBatch(results) {
 // + extraction (primary and fallback) back to back, which at the shipped
 // defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
 // slow-but-working pass out from under itself (pre-push audit P1).
-const { claimAbsoluteCeilingMinutes } = require('../utils/claim-ceiling');
+const { reclaimCeilingMinutes } = require('../utils/claim-ceiling');
 const reclaimableClaim = (quietMinutes) => "("
   + `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`
-  + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${claimAbsoluteCeilingMinutes()} minutes'`
+  + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${reclaimCeilingMinutes()} minutes'`
   + ")";
 
 // A voicemail landing on the TERMINAL skip path despite concrete service

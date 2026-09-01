@@ -14,9 +14,10 @@
  * Computing from the same env vars the processor reads keeps the ceiling
  * above the budget automatically when an operator tunes a timeout up.
  *
- * The 1.5x factor covers what the provider budgets do not: the CDN-settle
- * retry between legs, database round trips, and event-loop pressure on a
- * shared instance.
+ * Two ceilings fall out of it — see the note above them: the stall watchdog
+ * rings well before a peer is allowed to take a still-beating claim away,
+ * because a premature bell costs a notification and a premature reclaim costs
+ * duplicate side effects on a customer's record.
  */
 
 function envMs(name, fallback) {
@@ -36,10 +37,44 @@ function providerBudgetMs() {
   return download + (2 * transcription) + label + (2 * extraction);
 }
 
-const HEADROOM = 1.5;
+// TWO ceilings, because alerting and stealing carry opposite risks.
+//
+// Ringing a bell early on a pass that turns out to be healthy costs one
+// notification. RECLAIMING a live claim costs duplicate side effects on a
+// customer's record, so it must never happen to a pass that is merely slow.
+// The bell therefore fires at 1.5x the measurable budget while the reclaim
+// waits for 3x.
+//
+// Neither number is an attempt to enumerate the call graph. The processor can
+// run more legs than the four timeouts describe — a second labeling attempt,
+// the contact-dictation transcription, the V2 extraction fallback chain, the
+// contact decoder — and any count of them is wrong the next time that graph
+// changes. These are MULTIPLES of what is measurable, chosen large enough
+// that an unenumerated leg cannot cross them. At the shipped defaults that is
+// a 30-minute bell and a 60-minute reclaim, against a 20-minute measured
+// budget and a worst case around 35.
+//
+// The complete answer is one end-to-end deadline enforced INSIDE the pass, so
+// no leg can outlive it and the ceiling becomes true by construction rather
+// than by margin. That needs cancellation threaded through every provider
+// await and is deliberately not attempted here.
+const ALERT_HEADROOM = 1.5;
+const RECLAIM_HEADROOM = 3;
 
-function claimAbsoluteCeilingMinutes() {
-  return Math.ceil((providerBudgetMs() * HEADROOM) / 60000);
+// When the stall watchdog should ring about a claim that is still beating.
+function alertCeilingMinutes() {
+  return Math.ceil((providerBudgetMs() * ALERT_HEADROOM) / 60000);
 }
 
-module.exports = { claimAbsoluteCeilingMinutes, providerBudgetMs, HEADROOM };
+// When a peer may take a still-beating claim away. Always later than the bell.
+function reclaimCeilingMinutes() {
+  return Math.ceil((providerBudgetMs() * RECLAIM_HEADROOM) / 60000);
+}
+
+module.exports = {
+  alertCeilingMinutes,
+  reclaimCeilingMinutes,
+  providerBudgetMs,
+  ALERT_HEADROOM,
+  RECLAIM_HEADROOM,
+};

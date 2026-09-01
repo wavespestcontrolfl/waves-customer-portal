@@ -96,7 +96,7 @@ describe('processAllPending counters', () => {
 // derivation mirrors the processor's own timeout map — pinned here so the two
 // cannot drift apart silently.
 describe('claim ceiling is derived from the provider budgets', () => {
-  const { claimAbsoluteCeilingMinutes, providerBudgetMs, HEADROOM } = require('../utils/claim-ceiling');
+  const { alertCeilingMinutes, reclaimCeilingMinutes, providerBudgetMs } = require('../utils/claim-ceiling');
   const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
 
   test('the mirrored budget matches the processor timeout map', () => {
@@ -107,8 +107,10 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(providerBudgetMs()).toBe(expected);
   });
 
-  test('the ceiling exceeds the worst-case healthy pass', () => {
-    expect(claimAbsoluteCeilingMinutes() * 60000).toBeGreaterThan(providerBudgetMs());
-    expect(HEADROOM).toBeGreaterThan(1);
+  test('the bell rings before a peer may steal a still-beating claim', () => {
+    // A premature bell costs a notification; a premature reclaim costs
+    // duplicate side effects on a customer's record.
+    expect(alertCeilingMinutes()).toBeLessThan(reclaimCeilingMinutes());
+    expect(alertCeilingMinutes() * 60000).toBeGreaterThan(providerBudgetMs());
   });
 });
