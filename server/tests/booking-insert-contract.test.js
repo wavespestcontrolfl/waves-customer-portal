@@ -334,7 +334,9 @@ function isContractCompleted(source, arg) {
   }
   if (!completed) return false;
   const mutated = new RegExp(
-    `\\b${text}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
+    // Any depth of property/index segments: `rows[0].source_action = …`
+    // is a mutation of the tracked value too (GH Codex r10 P2).
+    `\\b${text}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
     + `|\\bdelete\\s+${text}\\b`
     + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${text}\\b`,
   );
@@ -581,8 +583,14 @@ function collectInsertSites(source) {
       continue;
     }
     // The ref must be the argument of a call: the next non-trivia char
-    // closes it (this also catches a table string on its own line).
-    const chain = forwardChain(source, m.index + m[0].length);
+    // closes it (this also catches a table string on its own line) — or,
+    // in Knex's object-alias form `trx({ ss: 'scheduled_services' })`, the
+    // value of a single-entry object that is the call's argument
+    // (GH Codex r10 P2).
+    let afterRef = m.index + m[0].length;
+    const closeBrace = skipTrivia(source, afterRef);
+    if (source[closeBrace] === '}' && source[skipTrivia(source, closeBrace + 1)] === ')') afterRef = closeBrace + 1;
+    const chain = forwardChain(source, afterRef);
     if (chain === null) continue;
     const prefix = statementPrefix(source, m.index);
     if (/\.insert\s*\(/.test(chain)) {
@@ -638,6 +646,10 @@ describe('booking insert-site contract', () => {
     // A builder captured in a variable is followed through the alias
     // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // Knex's object-alias table form is a ref (GH Codex r10 P2)…
+    expect(collectInsertSites("await trx({ ss: 'scheduled_services' }).insert(data);")).toEqual(["await trx({ ss: scheduled_services').insert(data"]);
+    expect(collectInsertSites("const ss = trx({ ss: 'scheduled_services' });\nawait ss.insert(data);")).toEqual(["await alias:ss.insert(data"]);
+    expect(collectInsertSites("await trx({ ss: 'scheduled_services' }).where({ 'ss.id': id }).first();")).toEqual([]);
     // A constant bound to the table name is followed (GH Codex r9 P2)…
     expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait trx(TABLE).insert(data);")).toEqual(["await trx( scheduled_services').insert(data"]);
     expect(collectInsertSites("const TABLE = 'scheduled_services';\nconst visits = trx(TABLE);\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
@@ -648,6 +660,8 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx.batchInsert('scheduled_services', rows, 50);")).toEqual(["await trx.batchInsert( batchInsert:scheduled_services, rows"]);
     expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait knex.batchInsert(TABLE, [row]);")).toEqual(["await knex.batchInsert( batchInsert:scheduled_services, ["]);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …unless a completed row is mutated in place afterwards (r10 P2).
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows[0].source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
     expect(collectInsertSites("await trx.table('scheduled_services').insert(data);")).toEqual(["await trx.table( scheduled_services').insert(data"]);
     expect(collectInsertSites("const [row] = await trx\n  .into('scheduled_services')\n  .insert(data)\n  .returning('*');")).toEqual(["const [row] = await trx .into( scheduled_services').insert(data"]);
@@ -727,7 +741,7 @@ describe('booking insert-site contract', () => {
     // (a property read, a spread, or passing it as an argument is not an escape)
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst id = data.customer_id;\nconst copy = { ...data };\naudit(data);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
-    for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;']) {
+    for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;', 'data.meta.note = null;', "data[0]['source_action'] = null;"]) {
       expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     }
     // (a READ of a property, or a comparison, is not a mutation)
