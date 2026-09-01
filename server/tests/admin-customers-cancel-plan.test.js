@@ -1578,6 +1578,44 @@ describe('POST /:id/cancel-plan', () => {
       expect(arg.approvedScopedPricing).toMatch(/^tier=.*\|monthly=.*\|rates=.*\|perapp=/);
     }));
 
+    test('an OLD end_at_term case never echoes past a recorded end-now — the inverse refusal outranks the duplicate latch', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      // The transition run reused and RESOLVED the acceptance (clean run);
+      // both cases remain on the term.
+      mockState.service_requests = [{
+        id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [
+        // The original end_at_term acceptance…
+        {
+          id: 'case-term', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+          created_at: new Date(Date.now() - 2 * 60 * 60 * 1000),
+          snapshot: JSON.stringify({
+            prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+            outcome: { visitsPulled: 0, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [] },
+          }),
+        },
+        // …then the ACCEPTED transition to end-now pulled the visits and
+        // recorded the refund.
+        {
+          id: 'case-now', customer_id: 'cust-1', service_request_id: 'req-now', status: 'committed',
+          created_at: new Date(Date.now() - 30 * 60 * 1000),
+          snapshot: JSON.stringify({
+            prepayTermId: 'term-1', effectiveDate: 'now', prepayDisposition: 'end_now_refund',
+            refund: { amount: 360 },
+            outcome: { visitsPulled: 4, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [] },
+          }),
+        },
+      ];
+      const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('prepay_term_already_ended');
+      expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
     test('a decided-term duplicate with a CLEAN outcome repairs a lost acceptance close — the stale new request stops being reusable', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.service_requests = [{

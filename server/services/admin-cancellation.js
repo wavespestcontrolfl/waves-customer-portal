@@ -1019,15 +1019,21 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         .orderBy('created_at', 'desc')
         .limit(10)
         .select('id', 'service_request_id', 'status', 'snapshot');
-      prior = (recent || []).find((c) => {
-        const snap = typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {});
-        if (String(snap.prepayTermId || '') === String(term.id)
-          && String(snap.prepayDisposition || '') === 'end_now_refund') priorEndNow = true;
-        const match = String(snap.prepayTermId || '') === String(term.id)
-          && String(snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '');
-        if (match) priorSnap = snap;
-        return match;
-      }) || null;
+      // End-now history scans INDEPENDENTLY of the disposition match:
+      // find() short-circuits at the first matching case, so an
+      // end_now_refund case sitting after the match in the window would
+      // never set the flag — and the inverse refusal below must outrank
+      // any echo of an older end_at_term case.
+      const parsed = (recent || []).map((c) => ({
+        c,
+        snap: typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {}),
+      }));
+      priorEndNow = parsed.some(({ snap }) => String(snap.prepayTermId || '') === String(term.id)
+        && String(snap.prepayDisposition || '') === 'end_now_refund');
+      const hit = parsed.find(({ snap }) => String(snap.prepayTermId || '') === String(term.id)
+        && String(snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '')) || null;
+      prior = hit ? hit.c : null;
+      if (hit) priorSnap = hit.snap;
       // The echo is only for RETRIES of that run — proven by its acceptance
       // being still open, or resolved within the echo window (codex r16
       // P0). A historical case whose acceptance closed long ago must not
@@ -1062,8 +1068,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // end_at_term commit would re-run the engine and tell the customer
     // those visits remain through the term end. (The intentional
     // end_at_term → end_now_refund transition stays allowed — it still has
-    // kept visits to pull and a refund to record.)
-    if (!prior && priorEndNow && prepayPlan.prepayDisposition === 'end_at_term') {
+    // kept visits to pull and a refund to record.) UNCONDITIONAL on prior:
+    // after that allowed transition BOTH cases exist, and an older
+    // end_at_term case matching this request must not echo "paid visits
+    // remain" for visits the end-now run already pulled and refunded.
+    if (priorEndNow && prepayPlan.prepayDisposition === 'end_at_term') {
       throw new CancelPlanError(409, 'prepay_term_already_ended',
         'This term was already ended now with a recorded refund — its paid visits were pulled and the refund is in flight. End of paid coverage no longer applies; review the refund task instead.');
     }
