@@ -24727,8 +24727,34 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // record or fail the render (which then fails the pdfkit fallback too).
     const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
 
+    // Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Include-when-TRUE
+    // only: gate on, a live accept-active row, never a staff draft preview or
+    // the headless document pass. The current open's estimate_views row was
+    // inserted above (before this composition), so the sessionizer already
+    // counts this visit; an internal ?refresh=1 re-fetch inserts nothing and
+    // still lands inside the current session. Best-effort: a sessionizer
+    // failure never breaks the customer-facing endpoint.
+    let returnVisitBlock = {};
+    if (featureGates.isEnabled('estimateReturnVisit') && !adminDraftPreview && !isPdfRenderPass
+      && isEstimateAcceptActive(estimate)) {
+      try {
+        const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
+        const { buildReturnVisitPayload } = require('../services/estimate-return-visit');
+        const sessions = await sessionsForEstimate(estimate.id);
+        const returnVisit = buildReturnVisitPayload({
+          sessions,
+          estimateData: parseEstimateDataSafe(estimate),
+          extensionAutoGrantedAt: estimate.extension_auto_granted_at || null,
+        });
+        if (returnVisit) returnVisitBlock = { returnVisit };
+      } catch (e) {
+        logger.warn(`[estimate-data] return-visit projection skipped: ${e.message}`);
+      }
+    }
+
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
+      ...returnVisitBlock,
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

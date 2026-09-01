@@ -150,6 +150,7 @@ const SECTION_KICKER_STYLE = {
 const BOOKING_SECTION_ID = 'estimate-booking-section';
 const PRICE_SECTION_ID = 'estimate-price-section';
 const PAYMENT_SECTION_ID = 'estimate-payment-section';
+const ASK_SECTION_ID = 'estimate-ask-section';
 const REVIEW_SECTION_ID = 'estimate-review-section';
 
 function scrollToPriceSection() {
@@ -159,6 +160,11 @@ function scrollToPriceSection() {
 
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function scrollToAskSection() {
+  const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1104,6 +1110,56 @@ const ESTIMATE_ASK_PROMPTS = [
   'Who is Waves?',
 ];
 
+// Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Renders only when the
+// payload carries `returnVisit` (second or later VISIT, sessionized server-
+// side). Every change line is server-named from a durable stamp; the strip
+// never says "something changed" on its own. "Text this to someone" is the
+// CUSTOMER'S share sheet (navigator.share, else an sms: draft on their phone)
+// — never a Waves-sent message.
+export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection }) {
+  if (!returnVisit || Number(returnVisit.visitNumber) < 2) return null;
+  const lastDate = returnVisit.lastVisitAt ? new Date(returnVisit.lastVisitAt) : null;
+  const lastDisplay = lastDate && !Number.isNaN(lastDate.getTime())
+    ? formatETDate(lastDate, { month: 'long', day: 'numeric' })
+    : null;
+  const changes = Array.isArray(returnVisit.changes) ? returnVisit.changes.filter((c) => c && c.label) : [];
+  const since = lastDisplay ? ` since ${lastDisplay}` : '';
+  const pageUrl = typeof window !== 'undefined' ? window.location.href : '';
+  const share = async (e) => {
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      e.preventDefault();
+      try { await navigator.share({ title: 'My Waves estimate', url: pageUrl }); } catch { /* user dismissed */ }
+    }
+  };
+  const actionStyle = {
+    background: 'none', border: 'none', padding: '6px 10px', fontSize: 14, fontWeight: 600,
+    color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer',
+  };
+  return (
+    <section data-glass="card" aria-label="Welcome back" style={{ ...estimateCard(), display: 'grid', gap: 8 }}>
+      <div style={{ ...HEADER_EYEBROW_STYLE }}>Welcome back</div>
+      {changes.length ? (
+        <>
+          <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+            Back for another look &mdash; here&rsquo;s what&rsquo;s changed{since}:
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: COLORS.glassNavy, lineHeight: 1.5 }}>
+            {changes.map((c, i) => <li key={`${c.kind}-${c.at || i}`}>{c.label}</li>)}
+          </ul>
+        </>
+      ) : (
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+          Nothing has changed since you last looked{lastDisplay ? ` on ${lastDisplay}` : ''} &mdash; same price, same plan.
+        </div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+        <a href={`sms:?&body=${encodeURIComponent(pageUrl)}`} onClick={share} style={actionStyle}>Text this to someone</a>
+        <button type="button" onClick={onAsk} style={actionStyle}>Ask a question</button>
+      </div>
+    </section>
+  );
+}
+
 export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
@@ -1155,7 +1211,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
   return (
-    <section style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
           fontSize: 12,
@@ -6714,6 +6770,8 @@ function EstimateViewPageInner() {
       />
 
       {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+
+      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} /> : null}
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner

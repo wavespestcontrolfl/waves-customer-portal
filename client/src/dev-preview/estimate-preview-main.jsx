@@ -833,7 +833,20 @@ window.fetch = async (input, init) => {
     // documentRender affirmation mirrors the server's gated pdf-pass payload
     // so ?mode=pdf previews render the print document.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
-    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...(pdfPass ? { documentRender: true } : {}) });
+    // returnVisit mirrors the GATE_ESTIMATE_RETURN_VISIT projection on a
+    // second visit so the welcome-back strip is exercised in preview
+    // (?visit=first suppresses it).
+    const firstVisit = new URLSearchParams(window.location.search).get('visit') === 'first';
+    const returnVisit = firstVisit ? {} : {
+      returnVisit: {
+        visitNumber: 3,
+        lastVisitAt: '2026-07-10T15:30:00.000Z',
+        changes: scenario === 'lawn'
+          ? [{ kind: 'extension_granted', label: 'Your expiration date was extended.', at: '2026-07-11T12:00:00.000Z' }]
+          : [],
+      },
+    };
+    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...returnVisit, ...(pdfPass ? { documentRender: true } : {}) });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
