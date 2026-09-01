@@ -1754,6 +1754,9 @@ function buildEstimateInvoiceModeDraft({
   // invoice-mode draft bills it beside the first application exactly like
   // the standard accept leg (codex #3591 r15 P1).
   rodentSetupAmount = 0,
+  // Frozen unified setup fee (GATE_UNIFIED_SETUP_FEE quotes/accept-time
+  // freezes) — same first-invoice ride as the rodent setup.
+  unifiedSetupAmount = 0,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -1857,12 +1860,27 @@ function buildEstimateInvoiceModeDraft({
       unit_price: setupAmount,
     });
   }
+  // Unified accept-time setup fee (GATE_UNIFIED_SETUP_FEE, owner ruling
+  // 2026-09-01): an invoice-mode accept is still a new-customer recurring
+  // signup — the frozen unified fee rides this first invoice (ruling 6:
+  // no-instrument lanes bill it on the first invoice). NET-terms accounts
+  // keep their card exemption; the fee itself is not exempt.
+  const unifiedAmount = roundInvoiceAmount(unifiedSetupAmount) || 0;
+  if (unifiedAmount > 0) {
+    recurringLineItems.push({
+      description: 'Setup Fee — one-time',
+      quantity: 1,
+      unit_price: unifiedAmount,
+    });
+  }
 
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
-    amount: Math.round((amount + setupAmount) * 100) / 100,
-    title: setupAmount > 0 ? `${svcType} — first ${visitNoun} + bait station setup` : `${svcType} — first ${visitNoun}`,
+    amount: Math.round((amount + setupAmount + unifiedAmount) * 100) / 100,
+    title: setupAmount > 0
+      ? `${svcType} — first ${visitNoun} + bait station setup`
+      : (unifiedAmount > 0 ? `${svcType} — first ${visitNoun} + setup fee` : `${svcType} — first ${visitNoun}`),
     lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
@@ -11108,6 +11126,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           rodentSetupAmount: treatAsOneTime
             ? 0
             : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
+          // The frozen unified verdict (decided pre-seeding; nextEstimateData
+          // carries the accept-time freeze when acceptedEstDataForPricing
+          // predates it).
+          unifiedSetupAmount: (() => {
+            if (treatAsOneTime) return 0;
+            const d = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
+            const q = d?.setupFeeQuote;
+            return q?.kind === 'unified' && Number(q.amount) > 0
+              && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(d)
+              ? Math.round(Number(q.amount) * 100) / 100
+              : 0;
+          })(),
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own
