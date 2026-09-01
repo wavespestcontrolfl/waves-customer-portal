@@ -10,15 +10,6 @@
 const db = require('../../models/db');
 // Lazy: prospect-domain-lock requires this module (SIGNUP_TYPES) — resolve at call time.
 const locationKeyOf = (v) => require('./prospect-domain-lock').locationKeyOf(v);
-// Lazy for the same reason. Every lease release settles the placement onto
-// its live path: a placement claimed on a path the investigator superseded
-// mid-submission stays on that path (its attempt ledger names it) until the
-// lease clears — then it follows the successor here, never waiting for an
-// unrelated re-investigation. Best-effort: a settle failure only logs.
-const settleReleased = async (ids) => {
-  try { return await require('./link-registry').settleRetiredPlacements(db, { prospectIds: ids }); }
-  catch (err) { logger.warn(`[link-worker] placement settle after release failed: ${err.message}`); return 0; }
-};
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 
@@ -121,12 +112,26 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // contract and never strands rows until the stale sweep.
     if (preview) return (await base).map((r) => ({ ...r }));
 
-    const rows = await base.forUpdate().skipLocked();
+    let rows = await base.forUpdate().skipLocked();
 
     if (rows.length === 0) return [];
+    const ids = rows.map((r) => r.id);
+    // Settle BEFORE leasing, under the row locks just taken: a placement
+    // whose path the investigator superseded (while it was leased, or since
+    // its last release) is handed out on the LIVE path — never the retired
+    // path_id / obsolete target_url. Doing it here, atomically with the
+    // claim, is the one place every execution passes through; a release-
+    // then-settle sequence could always be raced by the next claim. Fails
+    // closed: a settlement error aborts the claim (nothing leased).
+    const settled = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: ids, now: new Date() });
+    if (settled) {
+      const moved = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url');
+      const byId = new Map((moved || []).map((m) => [m.id, m]));
+      rows = rows.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }));
+    }
     const now = new Date();
     await trx('seo_link_prospects')
-      .whereIn('id', rows.map((r) => r.id))
+      .whereIn('id', ids)
       .update({ claimed_at: now, claimed_by: WORKER, updated_at: now });
 
     // lease_token = the claim timestamp; the worker echoes it back in /report so
@@ -259,8 +264,6 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   if (updated === 0) {
     return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
   }
-  await settleReleased([prospect_id]); // the lease is released — a superseded path is followed now
-
   logger.info(`[link-worker] report ${prospect_id} outcome=${outcome} attempts=${attempts} -> ${patch.status || prospect.status}`);
   return { ok: true, status: patch.status || prospect.status, attempts };
 }
@@ -293,21 +296,12 @@ function businessProfile() {
 /** Reclaim leases older than maxHours back to the pool (stuck-worker recovery). */
 async function sweepExpiredClaims(maxHours = 6) {
   const cutoff = new Date(Date.now() - maxHours * 3600 * 1000);
-  // ONE atomic statement: the state predicate rides the UPDATE (a row that
-  // left `prospect` between a read and a write must keep its lease) and
-  // RETURNING hands back exactly the rows it released, for settlement.
-  const rows = await db('seo_link_prospects')
+  const released = await db('seo_link_prospects')
     .whereNotNull('claimed_at')
     .where('claimed_at', '<', cutoff)
     .where({ status: 'prospect' }) // only release ones still unworked
-    .update({ claimed_at: null, claimed_by: null, updated_at: new Date() })
-    .returning(['id']);
-  const ids = (rows || []).map((r) => (r && typeof r === 'object' ? r.id : r)).filter(Boolean);
-  const released = ids.length;
-  if (released) {
-    logger.info(`[link-worker] released ${released} stale claim(s)`);
-    await settleReleased(ids);
-  }
+    .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+  if (released) logger.info(`[link-worker] released ${released} stale claim(s)`);
   return { released };
 }
 
@@ -323,18 +317,16 @@ async function releaseClaims(claims = []) {
     if (!c || !c.id || !c.lease_token) continue;
     const leaseDate = new Date(c.lease_token);
     if (Number.isNaN(leaseDate.getTime())) continue;
-    const n = await db('seo_link_prospects')
+    released += await db('seo_link_prospects')
       .where({ id: c.id })
       .where('claimed_at', leaseDate)
       .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
-    released += n;
-    if (n) await settleReleased([c.id]);
   }
   return { released };
 }
 
 module.exports = {
-  claim, report, sweepExpiredClaims, releaseClaims, settleReleasedPlacements: settleReleased, mapReportToPatch, businessProfile, isValidEmail,
+  claim, report, sweepExpiredClaims, releaseClaims, mapReportToPatch, businessProfile, isValidEmail,
   effectiveAutomationPolicy,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
 };
