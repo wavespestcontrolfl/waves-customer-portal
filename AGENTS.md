@@ -1534,21 +1534,37 @@ violations at the severity noted.
   call-side linkage verdict; `isEstimateAcceptActive` + an explicit
   `price_locked_at` refusal; removability from ONE resolver shared with the
   `/data` projection, which refuses an itemized proposal on ITEMIZATION
-  PRESENCE (not `proposal.enabled`), the last remaining recurring line,
-  `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+  PRESENCE (not `proposal.enabled`) — the same refusal applies to RESTORES
+  and suppresses the add-back projection, because an itemization added after
+  a removal is the authoritative billed quote — plus the last remaining
+  recurring line, `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
   recompute cannot run; and a 400 refusal when the removal would turn a
   bundled-free one-time item into a charge (owner ruling — that one goes to
   the office; the before-state resolves through `result` OR the mapped raw
   `engineResult` so engine-only estimates never blind the guard). Membership
   identity is loaded EXPLICITLY — `membershipSnapshot.isExistingCustomer ===
   true`, never snapshot truthiness — or an existing member reprices as a
-  brand-new customer and a linked NEW customer steals the perk. A removal
-  commit must echo the dry run's `previewBasis` and is refused when the row
-  moved since the preview, so the number the customer confirmed is the number
-  that persists. The write carries the same six-predicate rails +
+  brand-new customer and a linked NEW customer steals the perk. EVERY commit
+  (removal AND restore) must echo its dry run's `previewBasis` and is refused
+  when the row moved since the preview, so the terms the customer confirmed
+  are the terms that persist — restores get the same preview-and-confirm
+  step, never a one-tap reprice. Confirm-panel copy is per-application only:
+  no combined plan totals ("$X/mo"/"$X/yr") per the standing price-copy rule;
+  the first-visit line is the invoice-preview exempt class. The write carries the same six-predicate rails +
   ms-truncated CAS as the bond/interior writes, refreshes BOTH stored result
   carriers (`result` and raw `engineResult`) from the same recompute, and
   stamps `serviceOptOut.engineTier` as the select-tier eligibility ceiling.
+  A standing /select-tier override (row tier differing from the engine tier)
+  REFUSES all self-serve mix changes — removals, restores, and both /data
+  projections — because an opt-out reprice persists the engine's tier and
+  totals, and honoring a hand-picked tier through that rewrite would either
+  discard the choice or persist totals that disagree with the stored result
+  rows every renderer and accept reads; that interplay is an owner ruling,
+  not a route default, so it routes to the office. A removal with no
+  trustworthy before-state (no pricing rows in `result` or the mapped raw
+  `engineResult`) fails closed, and per-application disclosures derive from
+  effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
+  never the pre-discount list `perTreatment`.
   NOTHING is sent to the customer and no bell rings: one `activity_log` row,
   written ATOMICALLY with the estimate update, is the whole audit surface.
   Treat the gate, the generic-404

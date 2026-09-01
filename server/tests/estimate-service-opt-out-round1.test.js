@@ -5,8 +5,9 @@
  * the raw carriers (engineResult / engineRequest) slipped past guards written
  * against the mapped `result`. Each test here fails on the pre-fix code.
  */
-const { resolveOptOutBeforeResult, optOutImpact } = require('../routes/estimate-public');
+const { resolveOptOutBeforeResult, optOutImpact, optOutResultHasPricingRows } = require('../routes/estimate-public');
 const { resolveStoredPestPricingVersion } = require('../services/estimate-pricing-bundle-utils');
+const { serviceOptOutBlockedByProposal } = require('../services/estimate-service-opt-out');
 
 describe('resolveOptOutBeforeResult (r1 P1 — bundled-charge guard blind on engine-only estimates)', () => {
   const rawWithBundledWasp = () => ({
@@ -20,8 +21,8 @@ describe('resolveOptOutBeforeResult (r1 P1 — bundled-charge guard blind on eng
     ],
   });
 
-  it('returns the mapped result verbatim when one is stored', () => {
-    const result = { recurring: { waveGuardTier: 'Gold' } };
+  it('returns a stored result with pricing rows verbatim', () => {
+    const result = { recurring: { waveGuardTier: 'Gold', services: [{ service: 'pest_control' }] } };
     expect(resolveOptOutBeforeResult({ result, engineResult: rawWithBundledWasp() })).toBe(result);
   });
 
@@ -49,6 +50,145 @@ describe('resolveOptOutBeforeResult (r1 P1 — bundled-charge guard blind on eng
     });
     expect(impact.wouldChargeBundled).toHaveLength(1);
     expect(impact.wouldChargeBundled[0].price).toBe(249);
+  });
+});
+
+describe('optOutImpact per-application disclosures (owner price-copy rule — no combined plan totals)', () => {
+  const mk = (tier, pestPA) => ({
+    recurring: {
+      waveGuardTier: tier,
+      services: [{ service: 'pest_control', name: 'Pest Control', perTreatment: pestPA }],
+    },
+  });
+
+  it('discloses a kept line whose per-application price moved', () => {
+    const impact = optOutImpact({
+      beforeResult: mk('Gold', 103), afterResult: mk('Silver', 114),
+      beforeData: {}, afterData: {}, label: 'Lawn Care',
+    });
+    const messages = impact.disclosures.map((d) => d.message);
+    expect(messages).toContain('Pest Control changes from $103.00 to $114.00 per application.');
+    expect(messages.some((m) => m.includes('/mo') || m.includes('/yr'))).toBe(false);
+  });
+
+  it('derives dollars from the effective post-discount amount, not the list perTreatment', () => {
+    // Tier collapse changes the DISCOUNT, not the list price — perTreatment is
+    // identical on both sides, and comparing it would report "no change" on
+    // the very move being confirmed (pre-push codex P0 on 9389704).
+    const withDiscount = (tier, annualAfterDiscount) => ({
+      recurring: {
+        waveGuardTier: tier,
+        services: [{
+          service: 'pest_control', name: 'Pest Control',
+          perTreatment: 120, visitsPerYear: 4, annualAfterDiscount,
+        }],
+      },
+    });
+    const impact = optOutImpact({
+      beforeResult: withDiscount('Gold', 412), afterResult: withDiscount('Silver', 456),
+      beforeData: {}, afterData: {}, label: 'Lawn Care',
+    });
+    const pa = impact.disclosures.find((d) => d.code === 'recurring_per_application');
+    expect(pa.message).toBe('Pest Control changes from $103.00 to $114.00 per application.');
+  });
+
+  it('stays silent on a line whose per-application price did not move', () => {
+    const impact = optOutImpact({
+      beforeResult: mk('Gold', 103), afterResult: mk('Gold', 103),
+      beforeData: {}, afterData: {}, label: 'Lawn Care',
+    });
+    expect(impact.disclosures.filter((d) => d.code === 'recurring_per_application')).toHaveLength(0);
+  });
+
+  it('restore mode flips the tier wording to "Adding … back"', () => {
+    const impact = optOutImpact({
+      beforeResult: mk('Silver', 114), afterResult: mk('Gold', 103),
+      beforeData: {}, afterData: {}, label: 'Lawn Care', mode: 'restore',
+    });
+    const tier = impact.disclosures.find((d) => d.code === 'waveguard_tier_change');
+    expect(tier.message).toMatch(/^Adding Lawn Care back moves your WaveGuard tier from Silver to Gold/);
+  });
+
+  it('restore mode discloses the setup fee going away', () => {
+    const impact = optOutImpact({
+      beforeResult: { ...mk('Silver', 114), oneTime: { membershipFee: 99 } },
+      afterResult: { ...mk('Gold', 103), oneTime: { membershipFee: 0 } },
+      beforeData: {}, afterData: {}, label: 'Lawn Care', mode: 'restore',
+    });
+    const fee = impact.disclosures.find((d) => d.code === 'membership_setup_fee');
+    expect(fee.message).toBe('The $99.00 WaveGuard setup fee no longer applies.');
+  });
+});
+
+describe('serviceOptOutTierSelectionActive (pre-push P0 — a hand-picked tier exits self-serve)', () => {
+  const { serviceOptOutTierSelectionActive, serviceOptOutRemovableKeys } = require('../services/estimate-service-opt-out');
+  const engineGold = { result: { recurring: { waveGuardTier: 'Gold' } } };
+
+  it('detects a row tier differing from the stored result engine tier', () => {
+    expect(serviceOptOutTierSelectionActive(engineGold, 'Silver')).toBe(true);
+    expect(serviceOptOutTierSelectionActive(engineGold, 'Gold')).toBe(false);
+  });
+
+  it('prefers the last opt-out commit stamp as the engine reference', () => {
+    const data = { ...engineGold, serviceOptOut: { engineTier: 'Silver' } };
+    // Customer dipped to Bronze via the clamped select-tier after an opt-out:
+    // row Bronze vs stamped engine Silver = selection active.
+    expect(serviceOptOutTierSelectionActive(data, 'Bronze')).toBe(true);
+    expect(serviceOptOutTierSelectionActive(data, 'Silver')).toBe(false);
+  });
+
+  it('never blocks on unknown or missing tiers', () => {
+    expect(serviceOptOutTierSelectionActive(engineGold, null)).toBe(false);
+    expect(serviceOptOutTierSelectionActive(engineGold, 'Copper')).toBe(false);
+    expect(serviceOptOutTierSelectionActive({}, 'Silver')).toBe(false);
+  });
+
+  it('empties the removable set, so /data never advertises what the write refuses', () => {
+    const data = {
+      ...engineGold,
+      engineInputs: { services: { pest: { apps: 4 }, lawn: { track: 'st_augustine' } } },
+    };
+    const sections = [
+      { key: 'pest_control', isRecurring: true },
+      { key: 'lawn_care', isRecurring: true },
+    ];
+    expect(serviceOptOutRemovableKeys(data, sections, 'Gold').size).toBeGreaterThan(0);
+    expect(serviceOptOutRemovableKeys(data, sections, 'Silver').size).toBe(0);
+  });
+});
+
+describe('sparse before-state (pre-push P0 — empty result must not shadow engineResult)', () => {
+  it('falls through an empty result scaffold to the mapped engineResult', () => {
+    const before = resolveOptOutBeforeResult({
+      result: {},
+      engineResult: { lineItems: [{ service: 'stinging_insect', price: 0, includedOnProgram: true }] },
+    });
+    expect((before.specItems || []).some((r) => r.onProg === true)).toBe(true);
+  });
+
+  it('yields a rows-less before-state when neither carrier holds pricing rows — the route fails closed on removals', () => {
+    // The route's removal guard is optOutResultHasPricingRows(beforeResult),
+    // so what matters is that no path can dress up an empty scaffold as a
+    // trustworthy before-state.
+    expect(optOutResultHasPricingRows(resolveOptOutBeforeResult({ result: {} }))).toBe(false);
+    expect(optOutResultHasPricingRows(resolveOptOutBeforeResult({}))).toBe(false);
+    expect(optOutResultHasPricingRows(
+      resolveOptOutBeforeResult({ result: {}, engineResult: { lineItems: [] } }),
+    )).toBe(false);
+  });
+});
+
+describe('serviceOptOutBlockedByProposal (pre-push P0 — restores must refuse itemized proposals)', () => {
+  it('blocks on itemization presence, not proposal.enabled', () => {
+    expect(serviceOptOutBlockedByProposal({ proposal: { enabled: false, programs: [{}] } })).toBe(true);
+    expect(serviceOptOutBlockedByProposal({ proposal: { buildings: [{}] } })).toBe(true);
+    expect(serviceOptOutBlockedByProposal({ proposal: { correctiveWork: [{}] } })).toBe(true);
+  });
+
+  it('does not block a scaffold with no itemization, or no proposal at all', () => {
+    expect(serviceOptOutBlockedByProposal({ proposal: { enabled: true } })).toBe(false);
+    expect(serviceOptOutBlockedByProposal({})).toBe(false);
+    expect(serviceOptOutBlockedByProposal(null)).toBe(false);
   });
 });
 

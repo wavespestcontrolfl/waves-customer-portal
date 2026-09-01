@@ -4086,18 +4086,20 @@ export function ServiceSection({
                 <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
                   Remove {section.label}?
                 </div>
+                {/* No combined plan totals here — the owner's price-copy rule
+                    bans "$X/mo"/"$X/yr" on customer estimate surfaces. The
+                    dryRun's disclosures carry the real changes in
+                    per-application terms; the first-visit line is an invoice
+                    preview (exempt class). */}
                 <div style={{ fontSize: 14, color: ESTIMATE_TEXT, lineHeight: 1.55 }}>
-                  Your plan becomes{' '}
-                  <strong>${Number(serviceOptOut.quote.next?.monthlyTotal || 0).toFixed(2)}/mo</strong>
-                  {Number(serviceOptOut.quote.previous?.monthlyTotal || 0) > 0 ? (
-                    <> (was ${Number(serviceOptOut.quote.previous.monthlyTotal).toFixed(2)}/mo)</>
-                  ) : null}.
                   {Number(serviceOptOut.quote.next?.onetimeTotal || 0)
                     !== Number(serviceOptOut.quote.previous?.onetimeTotal || 0) ? (
-                      <> Your first visit becomes{' '}
+                      <>Your first visit becomes{' '}
                         <strong>${Number(serviceOptOut.quote.next?.onetimeTotal || 0).toFixed(2)}</strong>
                         {' '}(was ${Number(serviceOptOut.quote.previous?.onetimeTotal || 0).toFixed(2)}).
                       </>
+                    ) : (serviceOptOut.quote.disclosures || []).length === 0 ? (
+                      <>Your estimate updates right away, and you can add it back anytime before accepting.</>
                     ) : null}
                 </div>
                 {(serviceOptOut.quote.disclosures || []).length ? (
@@ -4932,6 +4934,26 @@ function EstimateViewPageInner() {
   const cancelRemoveService = useCallback(() => {
     setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
   }, []);
+
+  // Restores go through the SAME preview-and-confirm flow as removals — a
+  // restore is the same whole-estimate reprice, so "Add it back" must show
+  // the resulting terms (tier, setup fee, per-application prices) before
+  // anything is written, and its commit is bound to the same previewBasis.
+  const onPreviewRestoreService = useCallback(async (sectionKey) => {
+    if (ctaPhaseRef.current === 'submitting') return;
+    if (adminDraftPreview) {
+      setError('Draft preview — restoring a service is the customer\'s choice once the estimate is sent.');
+      return;
+    }
+    setOptOut({ sectionKey, phase: 'previewing', quote: null, message: '' });
+    try {
+      const quote = await submitOptOut(sectionKey, true, true);
+      setOptOut({ sectionKey, phase: 'preview', quote, message: '' });
+    } catch (err) {
+      setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
+      setError(err.message);
+    }
+  }, [adminDraftPreview, submitOptOut]);
 
   const commitOptOut = useCallback(async (sectionKey, included, previewBasis = null) => {
     if (ctaPhaseRef.current === 'submitting') return;
@@ -6176,30 +6198,92 @@ function EstimateViewPageInner() {
               removal happened. */}
           {!readOnly && (data?.serviceOptOut?.removedKeys || []).length ? (
             <div style={{ marginTop: 12 }}>
-              {data.serviceOptOut.removedKeys.map((key, i) => (
-                <div
-                  key={key}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    gap: 10, flexWrap: 'wrap', padding: '10px 14px',
-                    fontSize: 14, color: ESTIMATE_BODY,
-                  }}
-                >
-                  <span>{data.serviceOptOut.removedLabels?.[i] || key} removed</span>
-                  <button
-                    type="button"
-                    onClick={() => commitOptOut(key, true)}
-                    disabled={optOut.sectionKey === key && optOut.phase === 'submitting'}
+              {data.serviceOptOut.removedKeys.map((key, i) => {
+                const label = data.serviceOptOut.removedLabels?.[i] || key;
+                const active = optOut.sectionKey === key;
+                // Restore confirm panel — same two-step as a removal: the
+                // dryRun's disclosures show the resulting terms BEFORE the
+                // reprice is written, and the commit echoes previewBasis.
+                if (active && (optOut.phase === 'preview' || optOut.phase === 'submitting') && optOut.quote) {
+                  return (
+                    <div key={key} style={estimateInnerBox({ padding: '14px 16px' })}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+                        Add {label} back?
+                      </div>
+                      {Number(optOut.quote.next?.onetimeTotal || 0)
+                        !== Number(optOut.quote.previous?.onetimeTotal || 0) ? (
+                          <div style={{ fontSize: 14, color: ESTIMATE_TEXT, lineHeight: 1.55 }}>
+                            Your first visit becomes{' '}
+                            <strong>${Number(optOut.quote.next?.onetimeTotal || 0).toFixed(2)}</strong>
+                            {' '}(was ${Number(optOut.quote.previous?.onetimeTotal || 0).toFixed(2)}).
+                          </div>
+                        ) : null}
+                      {(optOut.quote.disclosures || []).length ? (
+                        <ul style={{ margin: '10px 0 0', paddingLeft: 18, fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+                          {optOut.quote.disclosures.map((d, j) => (
+                            <li key={d.code ? `${d.code}-${j}` : j} style={{ marginBottom: 4 }}>{d.message}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+                          {label} comes back at your original quoted terms.
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => commitOptOut(key, true, optOut.quote?.previewBasis || null)}
+                          disabled={optOut.phase === 'submitting'}
+                          style={{
+                            ...estimateCtaStyle,
+                            padding: '10px 18px', fontSize: 14,
+                            opacity: optOut.phase === 'submitting' ? 0.6 : 1,
+                            cursor: optOut.phase === 'submitting' ? 'default' : 'pointer',
+                          }}
+                        >
+                          {optOut.phase === 'submitting' ? 'Updating…' : `Yes, add ${label} back`}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRemoveService}
+                          disabled={optOut.phase === 'submitting'}
+                          style={{
+                            ...estimateSecondaryCtaStyle,
+                            padding: '10px 18px', fontSize: 14,
+                            cursor: optOut.phase === 'submitting' ? 'default' : 'pointer',
+                          }}
+                        >
+                          Never mind
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div
+                    key={key}
                     style={{
-                      background: 'none', border: 'none', padding: 0,
-                      fontSize: 14, fontWeight: 600, color: ESTIMATE_TEXT,
-                      textDecoration: 'underline', cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      gap: 10, flexWrap: 'wrap', padding: '10px 14px',
+                      fontSize: 14, color: ESTIMATE_BODY,
                     }}
                   >
-                    {optOut.sectionKey === key && optOut.phase === 'submitting' ? 'Adding it back…' : 'Add it back'}
-                  </button>
-                </div>
-              ))}
+                    <span>{label} removed</span>
+                    <button
+                      type="button"
+                      onClick={() => onPreviewRestoreService(key)}
+                      disabled={active && optOut.phase === 'previewing'}
+                      style={{
+                        background: 'none', border: 'none', padding: 0,
+                        fontSize: 14, fontWeight: 600, color: ESTIMATE_TEXT,
+                        textDecoration: 'underline', cursor: 'pointer',
+                      }}
+                    >
+                      {active && optOut.phase === 'previewing' ? 'Checking your new price…' : 'Add it back'}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           ) : null}
 

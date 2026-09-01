@@ -13963,21 +13963,39 @@ function optOutPrepayRate(result, estData) {
 // refusal — the one move the owner ruled must never be self-serve. Resolve the
 // raw carrier through the canonical mapper so both sides of the comparison
 // share one shape — mapped top-level specItems retains the onProg rows the
-// guard reads (codex #3684 r1 P1). Mapping errors propagate; the route refuses.
+// guard reads (codex #3684 r1 P1). A sparse `result` (an empty scaffold with
+// no pricing rows) must not shadow a populated engineResult, and a removal
+// with NO trustworthy before-state fails closed at the route (pre-push codex
+// P0 on 9389704). Mapping errors propagate; the route refuses.
+function optOutResultHasPricingRows(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (Array.isArray(result?.recurring?.services) && result.recurring.services.length) return true;
+  if (Array.isArray(result?.oneTime?.items) && result.oneTime.items.length) return true;
+  if (Array.isArray(result?.oneTime?.specItems) && result.oneTime.specItems.length) return true;
+  if (Array.isArray(result?.specItems) && result.specItems.length) return true;
+  return false;
+}
 function resolveOptOutBeforeResult(parsedData) {
-  if (parsedData?.result && typeof parsedData.result === 'object') return parsedData.result;
+  if (optOutResultHasPricingRows(parsedData?.result)) return parsedData.result;
   if (parsedData?.engineResult && typeof parsedData.engineResult === 'object') {
-    return require('../services/pricing-engine/v1-legacy-mapper')
+    const mapped = require('../services/pricing-engine/v1-legacy-mapper')
       .mapV1ToLegacyShape(parsedData.engineResult);
+    if (optOutResultHasPricingRows(mapped)) return mapped;
   }
+  // A rows-less mapped result is still better than nothing for the tier/fee
+  // disclosures; the route separately fails closed on removals when even this
+  // is absent.
+  if (parsedData?.result && typeof parsedData.result === 'object') return parsedData.result;
   return null;
 }
 
 // What the removal does to money the customer did not touch. Returns the
 // disclosures the confirm panel renders, plus the one case the owner ruled must
-// never be self-serve.
-function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label }) {
+// never be self-serve. `mode` flips the wording for a restore — the same tier
+// move reads "Dropping X" one way and "Adding X back" the other.
+function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove' }) {
   const disclosures = [];
+  const restoring = mode === 'restore';
   const beforeRows = optOutOneTimeRows(beforeResult);
   const afterRows = optOutOneTimeRows(afterResult);
   const afterByKey = new Map(afterRows.map((r) => [optOutRowKey(r), r]));
@@ -14001,7 +14019,9 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label 
   if (beforeTier && afterTier && beforeTier !== afterTier) {
     disclosures.push({
       code: 'waveguard_tier_change',
-      message: `Dropping ${label} moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so the services you keep are priced at the ${afterTier} rate.`,
+      message: restoring
+        ? `Adding ${label} back moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so your services are priced at the ${afterTier} rate.`
+        : `Dropping ${label} moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so the services you keep are priced at the ${afterTier} rate.`,
     });
   }
 
@@ -14012,16 +14032,54 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label 
       code: 'membership_setup_fee',
       message: `A single-service plan includes the $${afterFee.toFixed(2)} WaveGuard setup fee, which the combined plan did not.`,
     });
+  } else if (restoring && beforeFee > afterFee) {
+    disclosures.push({
+      code: 'membership_setup_fee',
+      message: afterFee > 0
+        ? `The WaveGuard setup fee changes from $${beforeFee.toFixed(2)} to $${afterFee.toFixed(2)}.`
+        : `The $${beforeFee.toFixed(2)} WaveGuard setup fee no longer applies.`,
+    });
   }
 
   const beforeRate = optOutPrepayRate(beforeResult, beforeData);
   const afterRate = optOutPrepayRate(afterResult, afterData);
-  if (beforeRate != null && afterRate != null && afterRate < beforeRate) {
+  if (beforeRate != null && afterRate != null && afterRate !== beforeRate
+    && (restoring ? afterRate > beforeRate : afterRate < beforeRate)) {
     disclosures.push({
       code: 'annual_prepay_rate',
       message: afterRate > 0
         ? `The pay-in-full discount changes from ${Math.round(beforeRate * 100)}% to ${Math.round(afterRate * 100)}%.`
         : 'The 5% pay-in-full-for-the-year discount does not apply to a single-service plan.',
+    });
+  }
+
+  // Per-application changes on the recurring lines present on BOTH sides —
+  // the number the customer actually pays per visit to each kept service.
+  // This is the customer-facing shape of a tier move: the owner's price-copy
+  // rule bans combined plan totals ("$X/mo") on estimate surfaces, so the
+  // confirm panel renders THESE per-application sentences instead. The dollars
+  // are the EFFECTIVE post-discount amount (annualAfterDiscount over the
+  // year's visits — engine-computed, so tier discounts and program floors are
+  // in it); perTreatment is the pre-discount list amount and would report "no
+  // change" on the very tier collapse being confirmed.
+  const svcRows = (result) => (Array.isArray(result?.recurring?.services) ? result.recurring.services : [])
+    .filter((r) => r && typeof r === 'object');
+  const effectivePerApplication = (row) => {
+    const annual = Number(row.annualAfterDiscount ?? 0) || 0;
+    const visits = Number(row.visitsPerYear ?? 0) || 0;
+    if (annual > 0 && visits > 0) return Math.round((annual / visits) * 100) / 100;
+    return Number(row.perTreatment ?? 0) || 0;
+  };
+  const afterSvcByKey = new Map(svcRows(afterResult).map((r) => [String(r.service || r.name || ''), r]));
+  for (const row of svcRows(beforeResult)) {
+    const after = afterSvcByKey.get(String(row.service || row.name || ''));
+    if (!after) continue;
+    const beforePA = effectivePerApplication(row);
+    const afterPA = effectivePerApplication(after);
+    if (!beforePA || !afterPA || beforePA === afterPA) continue;
+    disclosures.push({
+      code: 'recurring_per_application',
+      message: `${row.name || row.service} changes from $${beforePA.toFixed(2)} to $${afterPA.toFixed(2)} per application.`,
     });
   }
 
@@ -14092,9 +14150,12 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     // mismatch so the page re-previews with real numbers. Restores have no
     // preview step and skip the requirement. Both sides of the comparison pass
     // through the same JS Date millisecond truncation — never compare a JS
-    // ms date to the raw µs column value.
+    // ms date to the raw µs column value. Removals AND restores both bind:
+    // a restore is the same whole-estimate reprice, and committing one
+    // without its preview would change tier, fees and per-application prices
+    // sight-unseen (pre-push codex P1 on 9e0c894).
     const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
-    if (!dryRun && included === false) {
+    if (!dryRun) {
       const previewBasis = typeof req.body?.previewBasis === 'string' ? req.body.previewBasis : null;
       if (!previewBasis || previewBasis !== rowBasis) {
         return res.status(409).json({ error: 'estimate_changed_since_preview' });
@@ -14113,12 +14174,21 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       // ONE resolver for the /data stamp and this write, so the payload can
       // never advertise an action the write refuses.
       const bundle = await buildPricingBundle(estimate).catch(() => null);
-      const removable = OptOut.serviceOptOutRemovableKeys(parsedData, bundle?.services || []);
+      const removable = OptOut.serviceOptOutRemovableKeys(
+        parsedData, bundle?.services || [], estimate.waveguard_tier,
+      );
       if (!removable.has(serviceKey)) {
         return res.status(400).json({ error: 'service_not_removable' });
       }
     } else if (!alreadyOut.includes(serviceKey)) {
       return res.status(400).json({ error: 'service_not_removed' });
+    } else if (OptOut.serviceOptOutBlockedByProposal(parsedData)
+      || OptOut.serviceOptOutTierSelectionActive(parsedData, estimate.waveguard_tier)) {
+      // Same refusals as removals: a proposal added AFTER the removal is the
+      // authoritative billed quote, and a standing /select-tier choice takes
+      // the estimate out of self-serve mix changes — a restore is the same
+      // whole-estimate reprice (pre-push codex P0s on b6236b5 / 9389704).
+      return res.status(400).json({ error: 'service_not_removable' });
     }
 
     const label = OptOut.serviceOptOutLabel(serviceKey);
@@ -14129,6 +14199,12 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     try {
       beforeResult = resolveOptOutBeforeResult(parsedData);
     } catch (_) {
+      return res.status(409).json({ error: 'reprice_unavailable' });
+    }
+    // FAIL CLOSED on removals with no trustworthy before-state: without one
+    // the bundled-charge refusal cannot run, and that guard is an owner
+    // ruling, not a best-effort disclosure.
+    if (included === false && !optOutResultHasPricingRows(beforeResult)) {
       return res.status(409).json({ error: 'reprice_unavailable' });
     }
     const beforeData = JSON.parse(JSON.stringify(parsedData));
@@ -14173,6 +14249,7 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     const afterResult = reprice.serverResult;
     const impact = optOutImpact({
       beforeResult, afterResult, beforeData, afterData: parsedData, label,
+      mode: included === false ? 'remove' : 'restore',
     });
     if (included === false && impact.wouldChargeBundled.length) {
       return res.status(400).json({
@@ -14254,9 +14331,15 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     // ceiling. The row's waveguard_tier is the customer's mutable choice once
     // select-tier writes it back, so clamping on the row would lock a customer
     // who dipped to Bronze out of the Gold they are still eligible for (codex
-    // #3684 r1 P2). Re-stamped on every commit, so restoring the removed lines
-    // restores the ceiling with them.
+    // #3684 r1 P2). Re-stamped on every commit, so restoring the removed
+    // lines restores the ceiling with them. This write only runs with NO
+    // standing tier selection (the selection-active refusal above), so the
+    // engine tier and the persisted row tier are the same value here.
     parsedData.serviceOptOut.engineTier = next.waveGuardTier || null;
+    // The stored explicit base belongs to the OLD mix — a later select-tier
+    // call would resolve it as 'explicit' and price the new mix off it. The
+    // new result rows are the resolution source now.
+    delete parsedData.baseMonthly;
 
     // service_interest is the service_summary in every delivery and follow-up
     // email, the per-application line NAME on the proposal PDF, and a pest
@@ -23997,8 +24080,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // more" in three places.
       ...((() => {
         if (!serviceOptOutGateOn()) return {};
-        const { currentlyOptedOutKeys, serviceOptOutLabel } = require('../services/estimate-service-opt-out');
-        const removedKeys = currentlyOptedOutKeys(parseEstimateDataSafe(estimate));
+        const {
+          currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
+          serviceOptOutTierSelectionActive,
+        } = require('../services/estimate-service-opt-out');
+        const projected = parseEstimateDataSafe(estimate);
+        // A proposal that gained itemization after a removal — or a standing
+        // /select-tier choice — refuses restores (same guards as the PUT), so
+        // don't advertise "Add it back" either.
+        if (serviceOptOutBlockedByProposal(projected)
+          || serviceOptOutTierSelectionActive(projected, estimate.waveguard_tier)) return {};
+        const removedKeys = currentlyOptedOutKeys(projected);
         if (!removedKeys.length) return {};
         return {
           serviceOptOut: {
@@ -24173,7 +24265,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           const sections = Array.isArray(pricingBundle.services) ? pricingBundle.services : [];
           if (!sections.length) return {};
           const { serviceOptOutRemovableKeys } = require('../services/estimate-service-opt-out');
-          const removable = serviceOptOutRemovableKeys(parseEstimateDataSafe(estimate), sections);
+          const removable = serviceOptOutRemovableKeys(
+            parseEstimateDataSafe(estimate), sections, estimate.waveguard_tier,
+          );
           if (!removable.size) return {};
           // depth 1 — the same depth the services array sits at inside the
           // bundle spread above, so this override strips exactly what that
@@ -24412,6 +24506,7 @@ module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.optOutImpact = optOutImpact;
 module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
+module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;

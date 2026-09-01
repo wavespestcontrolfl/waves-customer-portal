@@ -71,22 +71,55 @@ function inputCarriers(parsedData) {
  * @param {Array}  sections  the pricing bundle's services[] array
  * @returns {Set<string>} section keys
  */
-function serviceOptOutRemovableKeys(estData = {}, sections = []) {
+// Authored proposals are the authoritative quote and the engine rows are
+// retained-but-superseded. Refuse on ITEMIZATION PRESENCE, not on
+// proposal.enabled — normalizeProposal (estimate-proposal.js) returns a
+// stored proposal verbatim whenever it carries buildings/programs/
+// correctiveWork, so a scaffold with enabled:false and $0 program lines
+// still overrides the engine rows on every renderer, in the margin audit,
+// and in buildProposalFirstInvoice, which BILLS from it at mark-won.
+// Deliberately stricter than PUT /:token/interior-service, which checks
+// enabled and would let that scaffold through. One guard for removals,
+// RESTORES and the /data add-back projection — a row that gains an
+// itemization after a removal must refuse the restore too, or the route
+// would persist engine totals under a proposal that stays the authoritative
+// billed quote (pre-push codex P0 on b6236b5).
+function serviceOptOutBlockedByProposal(estData = {}) {
+  const proposal = isPlainObject(estData) ? estData.proposal : null;
+  return isPlainObject(proposal)
+    && !!(proposal.buildings || proposal.programs || proposal.correctiveWork);
+}
+
+// A standing /select-tier override — the row's waveguard_tier differing from
+// the engine's own tier for the current mix — takes the estimate out of
+// self-serve mix changes entirely (office lane). An opt-out reprice persists
+// the engine's tier and totals, and honoring a hand-picked tier through that
+// rewrite would either silently discard the choice or persist totals that
+// disagree with the stored result rows every renderer and accept reads
+// (pre-push codex P0 x2 on 9389704). Refusing is the smallest coherent cut;
+// the tier/mix interplay is an owner ruling, not a route default. The engine
+// reference is the last opt-out commit's stamp when one exists, else the
+// stored result's tier; unknown or missing tiers never block.
+function serviceOptOutTierSelectionActive(estData = {}, rowTier = null) {
+  const rank = (t) => ['bronze', 'silver', 'gold', 'platinum'].indexOf(String(t || '').toLowerCase());
+  if (rank(rowTier) < 0) return false;
+  const engineRef = estData?.serviceOptOut?.engineTier
+    || estData?.result?.recurring?.waveGuardTier
+    || estData?.result?.recurring?.tier
+    || null;
+  if (rank(engineRef) < 0) return false;
+  return rank(rowTier) !== rank(engineRef);
+}
+
+function serviceOptOutRemovableKeys(estData = {}, sections = [], rowTier = null) {
   const empty = new Set();
   if (!isPlainObject(estData)) return empty;
 
-  // Authored proposals are the authoritative quote and the engine rows are
-  // retained-but-superseded. Refuse on ITEMIZATION PRESENCE, not on
-  // proposal.enabled — normalizeProposal (estimate-proposal.js) returns a
-  // stored proposal verbatim whenever it carries buildings/programs/
-  // correctiveWork, so a scaffold with enabled:false and $0 program lines
-  // still overrides the engine rows on every renderer, in the margin audit,
-  // and in buildProposalFirstInvoice, which BILLS from it at mark-won.
-  // Deliberately stricter than PUT /:token/interior-service, which checks
-  // enabled and would let that scaffold through.
-  const proposal = estData.proposal;
-  if (isPlainObject(proposal)
-    && (proposal.buildings || proposal.programs || proposal.correctiveWork)) {
+  if (serviceOptOutBlockedByProposal(estData)) {
+    return empty;
+  }
+
+  if (serviceOptOutTierSelectionActive(estData, rowTier)) {
     return empty;
   }
 
@@ -285,6 +318,8 @@ function serviceOptOutLabel(sectionKey) {
 module.exports = {
   SERVICE_OPT_OUT_KEYS,
   NON_REMOVABLE_BY_POLICY,
+  serviceOptOutBlockedByProposal,
+  serviceOptOutTierSelectionActive,
   serviceOptOutRemovableKeys,
   serviceIsPresentInInputs,
   captureServiceOptOutProvenance,

@@ -84,17 +84,23 @@ describe('the confirm panel', () => {
   const quote = {
     previous: { monthlyTotal: 150, annualTotal: 1800, onetimeTotal: 0, waveGuardTier: 'Gold' },
     next: { monthlyTotal: 106, annualTotal: 1272, onetimeTotal: 99, waveGuardTier: 'Silver' },
+    previewBasis: '2026-08-31T12:00:00.000Z',
     disclosures: [
       { code: 'waveguard_tier_change', message: 'Dropping Lawn Care moves your WaveGuard tier from Gold to Silver, so the services you keep are priced at the Silver rate.' },
       { code: 'membership_setup_fee', message: 'A single-service plan includes the $99.00 WaveGuard setup fee, which the combined plan did not.' },
+      { code: 'recurring_per_application', message: 'Pest Control changes from $103.00 to $114.00 per application.' },
     ],
   };
 
-  it('states the new price and the old one side by side', () => {
+  it('never renders a combined plan total — per-application copy only (owner price-copy rule)', () => {
+    // "$X/mo"/"$X/yr" are banned on customer estimate surfaces; the panel
+    // speaks through the dryRun's per-application disclosures instead.
     renderSection(idleOptOut({ phase: 'preview', quote }));
     expect(screen.getByText('Remove Lawn Care?')).toBeInTheDocument();
-    expect(screen.getByText('$106.00/mo')).toBeInTheDocument();
-    expect(screen.getByText(/was \$150\.00\/mo/)).toBeInTheDocument();
+    expect(screen.queryByText(/Your plan becomes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$106\.00\/mo/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$1,?272/)).not.toBeInTheDocument();
+    expect(screen.getByText(/changes from \$103\.00 to \$114\.00 per application/)).toBeInTheDocument();
   });
 
   it('surfaces the first-visit change when the one-time total moves', () => {
@@ -135,6 +141,18 @@ describe('the confirm panel', () => {
     }));
     expect(screen.getByText('Remove Lawn Care?')).toBeInTheDocument();
     expect(screen.queryByText(/WaveGuard tier from/)).not.toBeInTheDocument();
+  });
+
+  it('falls back to a plain reassurance when nothing else moved at all', () => {
+    renderSection(idleOptOut({
+      phase: 'preview',
+      quote: {
+        previous: { monthlyTotal: 150, annualTotal: 1800, onetimeTotal: 0 },
+        next: { monthlyTotal: 106, annualTotal: 1272, onetimeTotal: 0 },
+        disclosures: [],
+      },
+    }));
+    expect(screen.getByText(/updates right away/)).toBeInTheDocument();
   });
 });
 
