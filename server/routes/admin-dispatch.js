@@ -4330,6 +4330,7 @@ const {
 } = require('../services/completion-invoice-candidate');
 const {
   observationsForSpecialtyService,
+  specialtyProtocolActionScopes,
   specialtyServiceKey,
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
@@ -5255,7 +5256,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     ]);
     // Structured scope for each completed action — authoritative interior/
     // exterior signal for the re-entry advisory (see report-data treatmentScope).
-    const reportProtocolActionScopes = (Array.isArray(protocolActionScopesCompleted) ? protocolActionScopesCompleted : [])
+    // Specialty preset lanes replace this list with server-derived metadata
+    // once the lane resolves below — the client-supplied scope/treatmentApplied
+    // is never persisted for them.
+    let reportProtocolActionScopes = (Array.isArray(protocolActionScopesCompleted) ? protocolActionScopesCompleted : [])
       .map((entry) => {
         if (!entry || typeof entry !== 'object') return null;
         const scope = String(entry.scope || '').toLowerCase();
@@ -5336,6 +5340,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'conflicting_structured_observations',
       });
     }
+    // report-data treats treatmentApplied as authoritative for applicationMade,
+    // re-entry and aftercare, so for specialty lanes the persisted metadata is
+    // derived from the shared preset (treatmentApplied) and the treated areas
+    // (scope) — never from the request body (local audit P1 on #3701).
+    const derivedSpecialtyScopes = specialtyProtocolActionScopes(resolvedSpecialtyServiceKey, {
+      actions: reportProtocolActions,
+      areas: completionAreas,
+    });
+    if (derivedSpecialtyScopes) reportProtocolActionScopes = derivedSpecialtyScopes;
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),

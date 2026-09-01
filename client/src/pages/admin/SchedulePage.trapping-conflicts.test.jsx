@@ -121,6 +121,17 @@ describe("typed area ownership", () => {
 });
 
 describe("specialty treatment scope", () => {
+  it("matches the server-side derivation for every classified area combination", async () => {
+    const { specialtyActionScopeForAreas } = await import("../../../../shared/specialty-service-closeouts");
+    const cases = [
+      [["Attic"], "exterior"], [["Garage / carport"], "exterior"], [["Eaves / soffit", "Roofline"], "interior"],
+      [["Attic", "Eaves / soffit"], "exterior"], [["Other"], "exterior"], [[], "interior"],
+      [["Interior pet areas", "Furniture near pet areas"], "exterior"], [["Legacy free text"], "interior"],
+    ];
+    for (const [areas, defaultScope] of cases) {
+      expect(specialtyActionScope({ areas, defaultScope })).toBe(specialtyActionScopeForAreas(areas, defaultScope));
+    }
+  });
   it("follows the treated areas when they all sit on one side", () => {
     expect(specialtyActionScope({ areas: ["Attic"], defaultScope: "exterior" })).toBe("interior");
     expect(specialtyActionScope({ areas: ["Attic / structural interior"], defaultScope: "exterior" })).toBe("interior");

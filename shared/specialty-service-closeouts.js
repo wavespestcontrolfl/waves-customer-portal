@@ -124,7 +124,42 @@ function validateSpecialtyClosureCombination(serviceKey, { observations, actions
     || specialtyFindingActionConflict(spec, observations, actions);
 }
 
+// Specialty action scope follows the treated areas when every classified
+// area (treatment-area-scopes.json) sits on one side; mixed or unclassified
+// areas keep the preset default. Mirrored by specialtyActionScope in
+// SchedulePage.jsx; the server derives the persisted metadata from the
+// preset so a stale or crafted client can never mark an inspection as
+// treated or a real productless treatment as untreated (local audit P1).
+const AREA_SCOPES = require('./treatment-area-scopes.json');
+
+function specialtyActionScopeForAreas(areas, defaultScope) {
+  const scopes = new Set((Array.isArray(areas) ? areas : [])
+    .map((area) => {
+      const label = String(area || '').trim();
+      if (AREA_SCOPES.interior.includes(label)) return 'interior';
+      if (AREA_SCOPES.exterior.includes(label)) return 'exterior';
+      return null;
+    })
+    .filter(Boolean));
+  return scopes.size === 1 ? [...scopes][0] : defaultScope;
+}
+
+function specialtyProtocolActionScopes(serviceKey, { actions, areas } = {}) {
+  const spec = SPECIALTY_SERVICE_CLOSEOUTS[specialtyServiceKey({ serviceKey })];
+  if (!spec) return null;
+  const byLabel = new Map((spec.protocols || []).map((action) => [action.label, action]));
+  return (Array.isArray(actions) ? actions : [])
+    .filter((label) => byLabel.has(label))
+    .map((label) => ({
+      label,
+      scope: specialtyActionScopeForAreas(areas, byLabel.get(label).scope),
+      treatmentApplied: byLabel.get(label).treatmentApplied === true,
+    }));
+}
+
 module.exports = {
+  specialtyActionScopeForAreas,
+  specialtyProtocolActionScopes,
   SPECIALTY_SERVICE_CLOSEOUTS,
   SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY,
   observationsForSpecialtyService,

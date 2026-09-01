@@ -3,6 +3,8 @@
 const {
   SPECIALTY_SERVICE_CLOSEOUTS,
   observationsForSpecialtyService,
+  specialtyActionScopeForAreas,
+  specialtyProtocolActionScopes,
   specialtyServiceKey,
   validateSpecialtyObservationCombination,
   validateSpecialtyClosureCombination,
@@ -169,5 +171,24 @@ describe('specialty service closeout vocabulary', () => {
     expect(validateSpecialtyClosureCombination('general_pest', {
       observations: ['anything'], actions: ['anything'],
     })).toBeNull();
+  });
+
+  test('server derives specialty action metadata from the preset and treated areas', () => {
+    expect(specialtyProtocolActionScopes('bee_wasp_removal', {
+      actions: ['Void nest treated', 'Inspection and identification only', 'Not a preset action'],
+      areas: ['Attic'],
+    })).toEqual([
+      { label: 'Void nest treated', scope: 'interior', treatmentApplied: true },
+      { label: 'Inspection and identification only', scope: 'interior', treatmentApplied: false },
+    ]);
+    expect(specialtyProtocolActionScopes('bee_wasp_removal', {
+      actions: ['Void nest treated'], areas: ['Attic', 'Eaves / soffit'],
+    })).toEqual([{ label: 'Void nest treated', scope: 'exterior', treatmentApplied: true }]);
+    expect(specialtyProtocolActionScopes('tick_control', {
+      actions: ['Pet-resting or kennel-area treatment'], areas: ['Interior pet areas', 'Furniture near pet areas'],
+    })).toEqual([{ label: 'Pet-resting or kennel-area treatment', scope: 'interior', treatmentApplied: true }]);
+    expect(specialtyProtocolActionScopes('general_pest', { actions: ['Anything'], areas: [] })).toBeNull();
+    expect(specialtyActionScopeForAreas(['Other'], 'exterior')).toBe('exterior');
+    expect(specialtyActionScopeForAreas([], 'interior')).toBe('interior');
   });
 });
