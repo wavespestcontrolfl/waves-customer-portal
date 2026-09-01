@@ -18,19 +18,39 @@ const { _internals } = require('../routes/public-quote');
 const { buildExistingCustomerPublicQuoteUpdates, findExistingCustomerByContact } = _internals;
 
 describe('findExistingCustomerByContact (codex #3591 r14 P1 — shared by the pre-pricing setup-waiver lookup and the customer link)', () => {
-  const fakeDb = (byPhone, byEmail) => () => {
+  const fakeDb = (phoneRows, emailRows) => () => {
     const calls = [];
     const chain = {
       whereRaw: (sql) => { calls.push(sql); return chain; },
       whereNull: () => chain,
-      first: async () => (calls.some((sql) => sql.includes('regexp_replace')) && !calls.some((sql) => sql.includes('LOWER(email)')) ? byPhone : byEmail),
+      limit: () => chain,
+      select: async () => (calls.some((sql) => sql.includes('regexp_replace')) && !calls.some((sql) => sql.includes('LOWER(email)')) ? phoneRows : emailRows),
     };
     return chain;
   };
   test('phone (last 10 digits) wins; email is the fallback; nothing → null', async () => {
-    expect(await findExistingCustomerByContact(fakeDb({ id: 'p' }, { id: 'e' }), { contactPhone: '+1 (941) 555-0199', contactEmail: 'x@y.z' })).toEqual({ id: 'p' });
-    expect(await findExistingCustomerByContact(fakeDb(null, { id: 'e' }), { contactPhone: '555', contactEmail: 'X@Y.Z' })).toEqual({ id: 'e' });
-    expect(await findExistingCustomerByContact(fakeDb(null, null), { contactPhone: '', contactEmail: '' })).toBeNull();
+    expect(await findExistingCustomerByContact(fakeDb([{ id: 'p' }], [{ id: 'e' }]), { contactPhone: '+1 (941) 555-0199', contactEmail: 'x@y.z' })).toEqual({ id: 'p' });
+    expect(await findExistingCustomerByContact(fakeDb([], [{ id: 'e' }]), { contactPhone: '555', contactEmail: 'X@Y.Z' })).toEqual({ id: 'e' });
+    expect(await findExistingCustomerByContact(fakeDb([], []), { contactPhone: '', contactEmail: '' })).toBeNull();
+  });
+
+  test('an AMBIGUOUS contact (two active rows) never links an arbitrary customer (codex #3591 r88 P1)', async () => {
+    // Two rows share the phone — decline outright, even with a unique email
+    // (the same shared household would just resolve by the other key).
+    expect(await findExistingCustomerByContact(
+      fakeDb([{ id: 'p1' }, { id: 'p2' }], [{ id: 'e' }]),
+      { contactPhone: '+1 (941) 555-0199', contactEmail: 'x@y.z' },
+    )).toBeNull();
+    // Two rows share the email — decline.
+    expect(await findExistingCustomerByContact(
+      fakeDb([], [{ id: 'e1' }, { id: 'e2' }]),
+      { contactPhone: '', contactEmail: 'x@y.z' },
+    )).toBeNull();
+    // No phone match at all still falls through to a UNIQUE email.
+    expect(await findExistingCustomerByContact(
+      fakeDb([], [{ id: 'e' }]),
+      { contactPhone: '+1 (941) 555-0199', contactEmail: 'x@y.z' },
+    )).toEqual({ id: 'e' });
   });
 });
 

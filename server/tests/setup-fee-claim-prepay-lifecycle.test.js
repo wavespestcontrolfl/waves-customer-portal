@@ -733,6 +733,18 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(bookingSrc).toMatch(/if \(!\(await pageLapsedWaiver\(\)\) && !\(await pageLapsedWaiver\(\)\)\) \{\s+logger\.error\(`\[booking:confirm\] FIX: lapsed-waiver alert could NOT be persisted/);
   });
 
+  test('the stamp retires only after a durable estimate link; activating a row as recurring stamps the setup (codex #3591 r88 P1)', () => {
+    const scheduleSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    // Both accept sites key the retire on the link result — an unlinked
+    // series keeps the stamp as provenance and pages the operator.
+    expect((scheduleSrc.match(/if \(await linkCreatedRowsToEstimate\(\)\) \{\s+await retireRodentSetupStampAfterAcceptance\(/g) || []).length).toBe(2);
+    expect(scheduleSrc).not.toMatch(/await linkCreatedRowsToEstimate\(\);\s*\n\s*await retireRodentSetupStampAfterAcceptance/);
+    // Make-this-recurring derives the obligation and stamps (or anchors a
+    // coverage claim) exactly like the creation path.
+    expect(scheduleSrc).toMatch(/makeRecurringPreRow && makeRecurringPreRow\.is_recurring !== true && !makeRecurringPreRow\.recurring_parent_id/);
+    expect(scheduleSrc).toMatch(/makeRecurringPreRow[\s\S]{0,1200}liveAnchorlessCoverageSetupClaim[\s\S]{0,800}pending_setup_fee: owedSetup/);
+  });
+
   test('the lapse branch spares pre-realignment drafts and names the live configured fee (codex #3591 r85)', () => {
     const bookingSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
     // A legacy rodent draft (no persisted setup decision, no

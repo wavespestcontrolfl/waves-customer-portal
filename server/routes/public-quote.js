@@ -96,23 +96,35 @@ function numberOrNull(...values) {
 // The wizard's existing-customer match (phone last-10 digits first, email
 // second; never a deleted row) — ONE definition shared by the pre-pricing
 // setup-waiver lookup and the post-pricing customer link (codex #3591 r14 P1).
+// UNAMBIGUOUS only (codex #3591 r88 P1): a shared household/business contact
+// matching TWO active rows must not link the estimate to an arbitrary
+// .first() row — the linked customer's services drive the gained-family
+// waiver reconciliation, so an arbitrary pick can strip the disclosed setup
+// for the wrong property. Same exactly-one rule the r83 pre-pricing waiver
+// probe applies: an ambiguous phone declines outright (falling through to
+// email would resolve the same shared household by another key); only a
+// no-match phone probe falls through.
 async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}) {
   const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
   const emailLc = String(contactEmail || '').trim().toLowerCase();
-  let existingCust = null;
   if (phoneDigits.length === 10) {
-    existingCust = await database('customers')
+    const matches = await database('customers')
       .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
       .whereNull('deleted_at')
-      .first();
+      .limit(2)
+      .select('*');
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return null;
   }
-  if (!existingCust && emailLc) {
-    existingCust = await database('customers')
+  if (emailLc) {
+    const matches = await database('customers')
       .whereRaw('LOWER(email) = ?', [emailLc])
       .whereNull('deleted_at')
-      .first();
+      .limit(2)
+      .select('*');
+    if (matches.length === 1) return matches[0];
   }
-  return existingCust || null;
+  return null;
 }
 
 // Which one-time setup obligation a wizard estimate carries into its

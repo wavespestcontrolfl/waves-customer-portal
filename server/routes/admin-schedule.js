@@ -5522,14 +5522,28 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (acceptEstimateOnBook && !estimateAttachRaceLost) {
       // Link the just-created rows to the estimate once it's a recorded win —
       // shared by the prepay path and the overlap-race standard fallback.
+      // Returns whether the source-estimate link is DURABLY written (retried
+      // once) — the stamp retire below keys on it (codex #3591 r88 P1): the
+      // link is the acceptance provenance the setup resolver reads, so
+      // retiring the stamp without it leaves the series with no estimate, no
+      // claim, and no stamp, and a later family lapse re-derives a setup the
+      // accepted quote already decided.
       const linkCreatedRowsToEstimate = async () => {
-        if (!(cols.source_estimate_id && createdAppointments.length)) return;
+        if (!(cols.source_estimate_id && createdAppointments.length)) return true;
+        const writeLink = () => db('scheduled_services')
+          .whereIn('id', createdAppointments.map((a) => a.id))
+          .update({ source_estimate_id: linkedEstimateId });
         try {
-          await db('scheduled_services')
-            .whereIn('id', createdAppointments.map((a) => a.id))
-            .update({ source_estimate_id: linkedEstimateId });
+          await writeLink();
+          return true;
         } catch (e) {
-          logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
+          try {
+            await writeLink();
+            return true;
+          } catch (e2) {
+            logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed (retried): ${e2.message}`);
+            return false;
+          }
         }
       };
       // Acceptance landed → the accept path billed (or deliberately waived)
@@ -5680,8 +5694,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // double-texted.
         if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
         // Link the just-created rows now that the estimate is a recorded win.
-        await linkCreatedRowsToEstimate();
-        await retireRodentSetupStampAfterAcceptance(acceptResult);
+        // The stamp retires ONLY once the link is durable (codex #3591 r88
+        // P1) — an unlinked series keeps the stamp as its provenance, and
+        // the operator is paged to relink before the double-bill hazard the
+        // stamp now carries can fire at first completion.
+        if (await linkCreatedRowsToEstimate()) {
+          await retireRodentSetupStampAfterAcceptance(acceptResult);
+        } else {
+          logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
+        }
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
         // An overlap that RACED in between the preflight check and the atomic
@@ -5704,8 +5725,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
             estimateAutoAccepted = true;
             downgradedAfterOverlapRace = true;
             if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
-            await linkCreatedRowsToEstimate();
-            await retireRodentSetupStampAfterAcceptance(retryResult);
+            if (await linkCreatedRowsToEstimate()) {
+              await retireRodentSetupStampAfterAcceptance(retryResult);
+            } else {
+              logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted (overlap fallback) but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
+            }
             bookingWarnings.push('Appointment booked and the estimate was marked accepted as standard — an annual prepay term covering this date already exists (it landed during booking), so no new prepay invoice/term was created. Manage prepay from Customer 360.');
           } catch (retryErr) {
             logger.warn(`[schedule] standard-accept fallback after prepay overlap failed for estimate ${linkedEstimateId}: ${retryErr.message}`);
@@ -8569,7 +8593,39 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           priceServiceBeforeRow = preTupleRow
             || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         }
+        // Make-this-recurring before-image for the rodent setup stamp below
+        // (codex #3591 r88 P1) — read under the trx before the update lands.
+        const makeRecurringPreRow = updates.is_recurring === true
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('id', 'customer_id', 'is_recurring', 'recurring_parent_id')
+          : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // A row ACTIVATED to recurring becomes a series root NOW (codex
+        // #3591 r88 P1): a phone-booked catalog bait visit (the call
+        // pipeline inserts single visits only) or any other one-off being
+        // turned into a program never passed the creation path's setup
+        // stamp, so its first completion would bill no setup. Derive and
+        // stamp exactly like the creation path — including anchoring a
+        // Customer 360 coverage-only prepay's anchor-less claim instead of
+        // stamping a second collectible setup. A derivation failure fails
+        // the save (fail-closed, same as the creation transaction) — the
+        // operator retries.
+        if (makeRecurringPreRow && makeRecurringPreRow.is_recurring !== true && !makeRecurringPreRow.recurring_parent_id) {
+          const plans = require('../services/secure-appointment-plans');
+          const owedSetup = await plans.resolveDirectRodentSetupObligation(trx, { id: req.params.id });
+          if (owedSetup > 0) {
+            const coverageClaim = await plans.liveAnchorlessCoverageSetupClaim(trx, { customerId: makeRecurringPreRow.customer_id, rootId: req.params.id });
+            if (coverageClaim) {
+              await plans.anchorSetupFeeClaim(trx, { claimId: coverageClaim.id, anchorId: req.params.id });
+              logger.info(`[schedule] rodent bait setup already billed on prepay invoice ${coverageClaim.invoice_id} — claim anchored to activated series ${req.params.id}, no stamp`);
+            } else {
+              await trx('scheduled_services')
+                .where({ id: req.params.id })
+                .whereNull('pending_setup_fee')
+                .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
+              logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on series ${req.params.id} activated as recurring — billed at first completion`);
+            }
+          }
+        }
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the
         // flip on the trx; the tech_status release + customer tracker
