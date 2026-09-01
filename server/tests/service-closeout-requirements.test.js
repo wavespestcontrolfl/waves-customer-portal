@@ -203,37 +203,6 @@ describe('closeout requirements freeze', () => {
     expect(frozen).toMatchObject({ frozen: true, source: 'fallback_inference', requiredPhotoCount: 2 });
   });
 
-  test('resolver: frozen job wins over a conflicting catalog row and skips the catalog', async () => {
-    const snap = buildCloseoutRequirementsSnapshot(normalizeRequirements(CATALOG_ROW, null));
-    const mutatedCatalog = stubKnex([{ ...CATALOG_ROW, required_photo_count: 99 }]);
-    const map = await resolveCloseoutRequirementsForJobs(
-      [{ id: 'job1', service_id: 'svc_frozen' }],
-      {
-        knex: mutatedCatalog,
-        frozenByJobId: new Map([['job1', JSON.stringify({ closeoutRequirements: snap })]]),
-      },
-    );
-    expect(map.get('job1')).toMatchObject({ requiredPhotoCount: 3, frozen: true });
-    // Every job frozen ⇒ zero catalog queries.
-    expect(mutatedCatalog.calls).toHaveLength(0);
-  });
-
-  test('resolver: mixed batch queries the catalog only for unfrozen jobs', async () => {
-    const snap = buildCloseoutRequirementsSnapshot(normalizeRequirements(CATALOG_ROW, null));
-    const knex = stubKnex([{ ...CATALOG_ROW, id: 'svc_live', required_photo_count: 5 }]);
-    const map = await resolveCloseoutRequirementsForJobs(
-      [
-        { id: 'jobFrozen', service_id: 'svc_frozen' },
-        { id: 'jobLive', service_id: 'svc_live' },
-      ],
-      { knex, frozenByJobId: new Map([['jobFrozen', { closeoutRequirements: snap }]]) },
-    );
-    expect(map.get('jobFrozen')).toMatchObject({ requiredPhotoCount: 3, frozen: true });
-    expect(map.get('jobLive')).toMatchObject({ requiredPhotoCount: 5 });
-    expect(map.get('jobLive').frozen).toBeUndefined();
-    expect(knex.calls).toHaveLength(1);
-  });
-
   test('write-side resolver: lookup failure freezes NOTHING', async () => {
     const snap = await resolveCloseoutRequirementsSnapshotForCompletion({
       trx: stubKnex(new Error('catalog unavailable')),

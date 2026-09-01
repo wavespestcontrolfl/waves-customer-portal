@@ -205,21 +205,14 @@ async function resolveCloseoutRequirementsSnapshotForCompletion({
 // handle; `strict` makes a catalog lookup failure PROPAGATE instead of
 // degrading every job to fallback inference — a status reader must be able
 // to tell "catalog unavailable" from "no catalog row" (closeout-status.js).
-// `frozenByJobId` (Map jobId → structured_notes value or pre-parsed object):
-// jobs with a valid frozen snapshot resolve from it and never touch the
-// catalog; only unfrozen jobs enter the whereIn.
-async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict = false, frozenByJobId = null } = {}) {
+// Frozen-first resolution lives with the CALLER (closeout-status.js reads
+// frozenCloseoutRequirements off the record before probing) — this resolver
+// is live-catalog only (GH codex r3: an in-resolver frozen branch had no
+// production consumer).
+async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict = false } = {}) {
   const result = new Map();
-  const liveJobs = [];
-  for (const job of jobs) {
-    const jobKey = job.id || job.sourceRecordId;
-    const frozen = frozenByJobId ? frozenCloseoutRequirements(frozenByJobId.get(jobKey)) : null;
-    if (frozen) result.set(jobKey, frozen);
-    else liveJobs.push(job);
-  }
-
-  const serviceIds = [...new Set(liveJobs.map((job) => job.service_id).filter(Boolean))];
-  const serviceNames = [...new Set(liveJobs
+  const serviceIds = [...new Set(jobs.map((job) => job.service_id).filter(Boolean))];
+  const serviceNames = [...new Set(jobs
     .filter((job) => !job.service_id && job.service_type)
     .map((job) => String(job.service_type).trim())
     .filter(Boolean))];
@@ -254,7 +247,7 @@ async function resolveCloseoutRequirementsForJobs(jobs = [], { knex = db, strict
     }
   }
 
-  for (const job of liveJobs) {
+  for (const job of jobs) {
     const serviceType = job.service_type || job.metadata?.serviceType || null;
     const catalogRow = byId.get(job.service_id) || byName.get(String(serviceType || '').trim().toLowerCase());
     result.set(job.id || job.sourceRecordId, normalizeRequirements(catalogRow || {}, serviceType));
