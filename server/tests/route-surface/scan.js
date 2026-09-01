@@ -318,6 +318,7 @@ class ModuleAnalysis {
   collect() {
     this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
     this.exportProps = new Map(); // module.exports.<name> = <ident|false>
+    this.exportRequireModule = null; // module.exports = require('./x') — a re-export
     this.directExternalRegs = []; // require('./x').<verb>() registrations
     this.importMemberWrites = []; // auth.guardA = ... on a require() binding
     this.externalRouterPasses = []; // required module handed to an unanalysed fn
@@ -338,6 +339,7 @@ class ModuleAnalysis {
     const fnArgCalls = []; // calls handing an inline FUNCTION to a consumer
     const borrowedRegCalls = []; // router.get.call(...) — borrowed registrations
     const factoryOptionCalls = []; // Router(<options>) — options need vetting
+    const memberMutatorCalls = []; // router.stack.push(...) — internal-state mutation
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
         && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
@@ -434,6 +436,15 @@ class ModuleAnalysis {
         && node.arguments.some((a) => a && (a.type === 'ArrowFunctionExpression' || a.type === 'FunctionExpression'))) {
         fnArgCalls.push(node);
       }
+      if (node.type === 'CallExpression'
+        && node.callee.type === 'MemberExpression'
+        && (node.callee.object.type === 'MemberExpression' || node.callee.object.type === 'OptionalMemberExpression')) {
+        const mname = memberPropName(node.callee);
+        if (mname === null
+          || ['push', 'unshift', 'splice', 'pop', 'shift', 'reverse', 'sort', 'fill', 'copyWithin', 'call', 'apply'].includes(mname)) {
+          memberMutatorCalls.push(node); // judged post-walk against router roots
+        }
+      }
       if (node.type === 'CallExpression' && node.arguments.length
         && ((node.callee.type === 'MemberExpression' && memberPropName(node.callee) === 'Router')
           || (node.callee.type === 'Identifier' && node.callee.name === 'Router'))) {
@@ -499,6 +510,9 @@ class ModuleAnalysis {
         if (!ctx.topLevel) this.exportUnstable = true;
         this.exportCandidate = node.right.type === 'Identifier' ? node.right.name : null;
         this.exportObjectNode = node.right.type === 'ObjectExpression' ? node.right : null;
+        // `module.exports = require('./x')` — a RE-EXPORT; the sweep follows
+        // it so mutations through the alias module reach the real target.
+        this.exportRequireModule = isRequireCall(node.right) ? this.resolveModule(node.right.arguments[0].value) : null;
         this.exportProps.clear(); // a wholesale assignment replaces prior props
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
         && node.left.type === 'MemberExpression' && memberPropName(node.left) !== null
@@ -707,10 +721,36 @@ class ModuleAnalysis {
         this.pushSweepProblem(`${this.loc(call)}: listen() on an inline express() application — bind the app to a const so its routes can be attributed`);
         continue;
       }
+      // listen() on a FACTORY RESULT (`https.createServer({}, fn).listen()`)
+      // — only reviewed routerConsumers may construct the served server.
+      if (obj.type === 'CallExpression' || obj.type === 'NewExpression') {
+        this.judgeListenFactory(obj, call);
+        continue;
+      }
       const base = this.resolveMemberChain(obj);
       const canon = base ? this.canonName(base) : null;
       if (canon && this.apps.has(canon) && !APP_IDENTIFIERS.has(canon)) {
         this.pushSweepProblem(`${this.loc(call)}: listen() on application ${canon} — an app other than the scanned root serving traffic hides its routes from the allowlist`);
+        continue;
+      }
+      const cb = canon ? this.bindings.get(canon) : null;
+      if (cb && cb.kind === 'call' && cb.node) this.judgeListenFactory(cb.node, call);
+    }
+    // A mutator (or borrowed call) on a router/app's INTERNAL routing state
+    // (`router.stack.push(...hidden.stack)`) splices layers the walk never
+    // attributes — reject it.
+    for (const mm of memberMutatorCalls) {
+      let root = mm.callee.object;
+      let firstProp = null;
+      while (root.type === 'MemberExpression' || root.type === 'OptionalMemberExpression') {
+        firstProp = memberPropName(root);
+        root = root.object;
+      }
+      if (root.type !== 'Identifier') continue;
+      const canon = this.canonName(root.name);
+      if ((this.routers.has(canon) || APP_IDENTIFIERS.has(canon))
+        && ['stack', '_router', 'params', '_params'].includes(firstProp)) {
+        this.problems.push(`${this.loc(mm)}: mutation of ${canon}.${firstProp} — splicing a router/app's internal routing state is not supported by the scanner; register routes through ${canon} directly`);
       }
     }
     // A function parameter sharing a module binding's name makes references
@@ -1144,6 +1184,9 @@ class ModuleAnalysis {
   }
 
   recordBinding(name, init, topLevel) {
+    // `exports = module.exports = router` — a chained assignment's VALUE is
+    // its rightmost operand; the inner assignment is visited separately.
+    while (init && init.type === 'AssignmentExpression' && init.operator === '=') init = init.right;
     if (init) this.countWrite(name);
     if (this.isRouterFactory(init) || this.isAppFactory(init)) {
       this.routers.add(name);
@@ -1369,6 +1412,31 @@ class ModuleAnalysis {
   cleanBinding(name) {
     if (this.shadowedNames.has(name) || this.reassignedNames.has(name)) return null;
     return this.bindings.get(name) || null;
+  }
+
+  /**
+   * listen() is being called on `factoryNode`'s result — only a reviewed
+   * routerConsumer (http.createServer) may construct the served server; the
+   * consumer checks police its arguments. Anything unreviewed could serve a
+   * raw handler (https/http2 createServer) the scanner never walks.
+   */
+  judgeListenFactory(factoryNode, call) {
+    const c = factoryNode.callee;
+    let entry = null;
+    if (c && c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier') {
+      if (isRequireCall(c.object)) {
+        const spec = c.object.arguments[0].value;
+        entry = this.scanner.registry.lookupRouterConsumer(this.resolveModule(spec) || spec, c.property.name);
+      } else if (c.object.type === 'Identifier') {
+        const ob = this.cleanBinding(this.canonName(c.object.name));
+        if (ob && ob.kind === 'require') entry = this.scanner.registry.lookupRouterConsumer(ob.module === null ? ob.spec : ob.module, c.property.name);
+      }
+    } else if (c && c.type === 'Identifier') {
+      const b = this.cleanBinding(this.canonName(c.name));
+      if (b && b.kind === 'requireMember') entry = this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name);
+    }
+    if (entry) return; // reviewed: its arguments are policed by the consumer checks
+    this.pushSweepProblem(`${this.loc(call)}: listen() on the result of an unreviewed factory (${this.src.slice(factoryNode.start, Math.min(factoryNode.end, factoryNode.start + 80))}) — a raw server could serve surface the scanner never walks; only reviewed routerConsumers may construct the served server`);
   }
 
   /**
@@ -1808,11 +1876,31 @@ class Scanner {
    * router owned by a module in the mounted surface: routes registered
    * outside the owning module are invisible to its guard ordering.
    */
+  /**
+   * Follow re-export chains (`alias.js: module.exports = require('./x')`) to
+   * the mounted module they alias — Node's module cache makes a mutation
+   * through the alias hit the mounted router. Null when the chain does not
+   * end in mounted surface.
+   */
+  reExportTarget(rel, seen = new Set()) {
+    if (this.modules.has(rel)) return this.modules.get(rel);
+    if (seen.has(rel) || !this.exists(rel)) return null;
+    seen.add(rel);
+    let m;
+    try { m = new ModuleAnalysis(rel, this.read(rel), this); } catch { return null; }
+    let next = m.exportRequireModule;
+    if (!next && m.exportCandidate) {
+      const b = m.bindings.get(m.canonName(m.exportCandidate));
+      if (b && b.kind === 'require' && b.module) next = b.module;
+    }
+    return next ? this.reExportTarget(next, seen) : null;
+  }
+
   checkExternalRouterMutations() {
     const flag = (m) => {
       for (const x of m.externalRouterRegs || []) {
-        if (!this.modules.has(x.module)) continue; // target is not mounted surface
-        const t = this.modules.get(x.module);
+        const t = this.modules.has(x.module) ? this.modules.get(x.module) : this.reExportTarget(x.module);
+        if (!t) continue; // target is not mounted surface (directly or via re-export)
         let targetsRouter;
         if (x.name) {
           const exp = t.exportLookup(x.name);
@@ -1829,8 +1917,8 @@ class Scanner {
       // its export resolves to one in the mounted surface — the helper could
       // register routes the owning module's guard ordering never sees.
       for (const x of m.externalRouterPasses || []) {
-        if (!this.modules.has(x.module)) continue;
-        const t = this.modules.get(x.module);
+        const t = this.modules.has(x.module) ? this.modules.get(x.module) : this.reExportTarget(x.module);
+        if (!t) continue;
         let isRouter;
         if (x.name) {
           const exp = t.exportLookup(x.name);

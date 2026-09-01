@@ -1949,6 +1949,59 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('strict routing'))).toBe(true);
   });
 
+  test('a mutation through a RE-EXPORT alias module reaches the mounted router', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/routes/alias.js': "module.exports = require('./x');",
+      'server/services/installer.js': "require('../routes/alias').get('/leak', (req, res) => res.json({}));",
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('listen() on an UNREVIEWED server factory (https.createServer) is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const https = require('https');",
+        "https.createServer({}, (req, res) => { res.end('leak'); }).listen(443);",
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('unreviewed factory'))).toBe(true);
+  });
+
+  test("a mutation of a router's INTERNAL stack (router.stack.push) is rejected", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const hidden = require('express').Router();",
+        "hidden.get('/leak', (req, res) => res.json({}));",
+        'router.stack.push(...hidden.stack);',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('mutation of router.stack'))).toBe(true);
+  });
+
+  test('the chained CommonJS spelling (exports = module.exports = router) keeps the alias', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'exports = module.exports = router;',
+        "exports.get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',
