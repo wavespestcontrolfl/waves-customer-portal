@@ -490,6 +490,13 @@ describe('service report v1', () => {
       expect(normalized).toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
     });
 
+    test('pet-resting area chips retain interior scope beside lawn treatment', () => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify(['Pet resting areas', 'Front lawn']) },
+      });
+      expect(normalized).toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
+    });
+
     test('conflict: exterior area + interior action ⇒ interior fires', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: {

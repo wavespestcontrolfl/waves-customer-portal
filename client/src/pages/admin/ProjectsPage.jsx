@@ -20,10 +20,12 @@ import ProjectFindingFieldInput, {
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
-import {
+import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
+
+const {
   TERMITE_LIQUID_DILUTION_METHODS,
   TERMITE_PERIMETER_METHODS,
-} from "../../lib/termite-treatment-methods";
+} = termiteTreatmentMethods;
 
 
 /**

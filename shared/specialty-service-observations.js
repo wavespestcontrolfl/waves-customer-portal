@@ -1,15 +1,21 @@
 'use strict';
 
-const SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY = Object.freeze({
-  dethatching: ['Full quoted area completed', 'Partial quoted area completed', 'Inspection only', 'Work deferred', 'Light debris removed', 'Moderate debris removed', 'Heavy debris removed', 'Debris consolidated onsite', 'Debris removal not included', 'Not applicable'],
-  plugging: ['6-inch spacing', '9-inch spacing', '12-inch spacing', 'Mixed spacing per site conditions', 'Not installed', 'Full quoted area completed', 'Partial quoted area completed', 'Inspection only', 'Work deferred'],
-  mosquito: ['No mosquito activity observed', 'Light mosquito activity', 'Moderate mosquito activity', 'Heavy mosquito activity', 'Customer-reported activity only', 'No standing-water source found', 'Removable standing water found', 'Breeding source could not be removed', 'Drainage or irrigation issue observed', 'Likely off-property pressure', 'Source not determined'],
-  fire_ant: ['Active mounds observed', 'Foraging activity observed', 'Mounds and foraging activity observed', 'Customer-reported activity only', 'No active fire ants observed', 'Identification uncertain', 'One isolated area', 'Several localized areas', 'Scattered throughout property', 'Widespread activity', 'Unable to fully determine'],
-  tick_control: ['Live tick observed', 'Multiple live ticks observed', 'Tick found on pet', 'Customer-reported tick activity', 'Evidence in monitoring device', 'No tick activity observed', 'Identification uncertain', 'Brown dog tick', 'American dog tick', 'Gulf Coast tick', 'Lone star tick', 'Other identified tick', 'Species not confirmed'],
-  bee_wasp_removal: ['Paper wasp', 'Yellowjacket', 'Hornet', 'Honey bee', 'Carpenter bee', 'Other solitary wasp', 'Other wasp', 'Identification uncertain', 'Exposed paper nest', 'Enclosed structural void', 'Ground nest', 'Carpenter bee gallery', 'Honey bee swarm', 'Established honey bee colony', 'Flying activity with no nest located', 'Inactive or abandoned nest', 'Active', 'Light activity', 'Heavy activity', 'Inactive', 'Unable to confirm'],
-  mud_dauber_removal: ['Active mud nests', 'Sealed nests; activity uncertain', 'Inactive or abandoned nests', 'Empty nest remnants', 'Mud dauber activity without completed nests', 'No current evidence observed', 'Identification uncertain', '1–3 nests', '4–10 nests', '11–20 nests', 'More than 20 nests', 'Exact count not practical'],
-  bed_bug_treatment: ['Initial inspection', 'Initial treatment', 'Scheduled follow-up treatment', 'Post-treatment inspection', 'Callback or renewed activity inspection', 'Live adults', 'Live nymphs', 'Eggs', 'Cast skins', 'Fecal spotting', 'Bed bugs captured in monitor', 'Customer-reported bites only', 'Customer-reported sighting', 'No confirmed evidence', 'Evidence inconclusive', 'Preparation complete', 'Preparation mostly complete', 'Preparation partially complete', 'Preparation not completed', 'Preparation not required for this visit'],
-});
+// Customer-report egress vocabulary for the specialty closeout lanes. The
+// JSON beside this file is the single source: the admin completion presets
+// (client/src/lib/service-completion-presets.js) build their dropdown groups
+// and dependent-selection rules from it, and this module derives the
+// server-side allowlist + combination validation from the same data.
+const {
+  groups: SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY,
+  exclusions: SPECIALTY_OBSERVATION_EXCLUSIONS_BY_KEY,
+} = require('./specialty-service-observations.json');
+
+const SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY = Object.freeze(Object.fromEntries(
+  Object.entries(SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY).map(([key, groups]) => [
+    key,
+    Object.freeze(groups.flatMap((group) => group.options)),
+  ]),
+));
 
 const SPECIALTY_SERVICE_KEY_ALIASES = Object.freeze({
   mosquito_monthly: 'mosquito', mosquito_seasonal: 'mosquito', mosquito_one_time: 'mosquito',
@@ -37,8 +43,32 @@ function specialtyServiceKey({ serviceKey, serviceType } = {}) {
   return null;
 }
 
+// A restored or stale-client payload can carry label combinations the
+// dropdown UI never offers (two values from one single-select group, or a
+// dependent pair the client reconciles away on selection). The immutable
+// customer report must not publish them, so the same rules run server-side.
+function validateSpecialtyObservationCombination(serviceKey, values) {
+  const canonical = specialtyServiceKey({ serviceKey });
+  const selected = new Set(Array.isArray(values) ? values : []);
+  for (const group of SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY[canonical] || []) {
+    if (group.options.filter((value) => selected.has(value)).length > 1) {
+      return 'Select only one value in each specialty finding group.';
+    }
+  }
+  for (const { value, excludes } of SPECIALTY_OBSERVATION_EXCLUSIONS_BY_KEY[canonical] || []) {
+    const excluded = excludes.find((other) => selected.has(other));
+    if (selected.has(value) && excluded) {
+      return `“${value}” cannot be paired with “${excluded}”.`;
+    }
+  }
+  return null;
+}
+
 module.exports = {
+  SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY,
+  SPECIALTY_OBSERVATION_EXCLUSIONS_BY_KEY,
   SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY,
   observationsForSpecialtyService,
   specialtyServiceKey,
+  validateSpecialtyObservationCombination,
 };

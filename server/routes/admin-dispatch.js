@@ -4331,6 +4331,7 @@ const {
 const {
   observationsForSpecialtyService,
   specialtyServiceKey,
+  validateSpecialtyObservationCombination,
 } = require('../../shared/specialty-service-observations');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
@@ -5312,6 +5313,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       return res.status(422).json({
         error: 'A structured observation is not valid for customer report publication.',
         code: 'invalid_structured_observation',
+      });
+    }
+    const structuredObservationConflict = validateSpecialtyObservationCombination(
+      resolvedSpecialtyServiceKey,
+      formObservations,
+    );
+    if (structuredObservationConflict) {
+      return res.status(422).json({
+        error: structuredObservationConflict,
+        code: 'conflicting_structured_observations',
       });
     }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([

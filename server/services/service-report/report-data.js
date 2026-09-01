@@ -504,7 +504,7 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   // Area chips are a controlled vocabulary and remain a valid scope signal.
   // attic covers the termite/rodent "Attic" area label (2026-08-27) — an
   // indoor space whose treatment carries an interior wait (codex inline r8).
-  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic|furniture|upholstery|carpet|rugs?|cabinets?|sinks?|appliance|wall void|mattress|box spring|bed frame|headboard|nightstands?|office|sleeping area|shared wall|outlets?|luggage|storage area|monitors?|interceptors?|garage)\b/.test(text);
+  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic|furniture|upholstery|carpet|rugs?|cabinets?|sinks?|appliance|wall void|mattress|box spring|bed frame|headboard|nightstands?|office|sleeping area|shared wall|outlets?|luggage|storage area|monitors?|interceptors?|garage|pet resting areas?)\b/.test(text);
   // fence/trash cover the controlled pest-area chips "Fence line" and
   // "Trash area" — clearly exterior choices that previously fell through
   // and (under the explicit-exterior rule) would wrongly zero the

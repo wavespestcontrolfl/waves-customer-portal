@@ -48,12 +48,13 @@ import {
 } from "../../lib/pest-default-mix";
 import {
   exclusiveProtocolProductConflict,
+  exclusiveProtocolSelectionConflict,
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   specialtyCompletionFor,
 } from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
-import { TERMITE_PERIMETER_METHODS } from "../../lib/termite-treatment-methods";
+import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -63,6 +64,7 @@ import EstimateProvenanceCard from "../../components/schedule/EstimateProvenance
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
+
 import BestTimeHint from "../../components/schedule/BestTimeHint";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
@@ -78,6 +80,7 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
+const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -11854,9 +11857,13 @@ export function CompletionPanel({
       // Lines without the picker (T&S + rodent, owner 2026-07-23) never restore
       // areas — a pre-change draft's chips would sit invisible in state (codex P3
       // on #2950); the areasTreatedHidden clearing effect backstops any other path.
-      !areasTreatedHidden && Array.isArray(savedDraft.areasServiced)
+      // Lanes that moved scope into a typed area field DO restore the generic
+      // list unfiltered: the clearing effect copies it into the typed field
+      // when that field is still empty, then empties the generic state. Dropping
+      // it here would lose a pre-migration draft's coverage (codex P1 r6 #3701).
+      (!areasTreatedHidden || typedTreatmentArea?.key) && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
-            .filter((a) => areaOptions.includes(a))
+            .filter((a) => typedTreatmentArea?.key || areaOptions.includes(a))
         : [],
     );
     setZoneMapImageFallback(
@@ -13210,6 +13217,14 @@ export function CompletionPanel({
     );
     if (specialtyProductConflict) {
       alert(specialtyProductConflict);
+      return;
+    }
+    const specialtyActionConflict = exclusiveProtocolSelectionConflict(
+      activeSelectedLabels(selectedProtocolActionLabels),
+      specialtyProtocolActions,
+    );
+    if (specialtyActionConflict) {
+      alert(specialtyActionConflict);
       return;
     }
     // Don't complete while an AI draft is in flight — the response is about to

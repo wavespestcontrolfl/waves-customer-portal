@@ -1,4 +1,19 @@
+import specialtyObservations from "../../../shared/specialty-service-observations.json";
+
 const option = (value) => ({ value, label: value });
+
+// Dropdown vocabulary and dependent-selection rules come from the shared
+// customer-report egress source (shared/specialty-service-observations.json)
+// so the admin UI can never offer a value the server allowlist rejects.
+// Group labels stay here — they are display copy, not report vocabulary.
+const specialtyFindings = (serviceKey, groupLabels) => ({
+  findingGroups: specialtyObservations.groups[serviceKey].map((group) => ({
+    key: group.key,
+    label: groupLabels[group.key],
+    options: group.options.map(option),
+  })),
+  observationExclusions: specialtyObservations.exclusions[serviceKey] || [],
+});
 
 export const SERVICE_COMPLETION_PRESETS = {
   dethatching: {
@@ -6,18 +21,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Front lawn", "Back lawn", "Side lawns", "Thin / stressed turf areas",
       "Heavy-thatch areas", "Along driveway / sidewalk", "Slope / drainage area",
     ],
-    findingGroups: [
-      {
-        key: "dethatching_scope",
-        label: "Dethatching scope completed",
-        options: ["Full quoted area completed", "Partial quoted area completed", "Inspection only", "Work deferred"].map(option),
-      },
-      {
-        key: "dethatching_debris",
-        label: "Thatch and debris result",
-        options: ["Light debris removed", "Moderate debris removed", "Heavy debris removed", "Debris consolidated onsite", "Debris removal not included", "Not applicable"].map(option),
-      },
-    ],
+    ...specialtyFindings("dethatching", { dethatching_scope: "Dethatching scope completed", dethatching_debris: "Thatch and debris result" }),
     protocols: [
       { label: "Inspection only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Single-pass dethatching completed", scope: "exterior", treatmentApplied: false },
@@ -32,18 +36,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Front lawn", "Back lawn", "Side lawns", "Bare areas", "Thin turf areas",
       "Damaged turf areas", "Along driveway / sidewalk", "Slope / drainage area",
     ],
-    findingGroups: [
-      {
-        key: "plug_spacing",
-        label: "Installed plug spacing",
-        options: ["6-inch spacing", "9-inch spacing", "12-inch spacing", "Mixed spacing per site conditions", "Not installed"].map(option),
-      },
-      {
-        key: "plugging_scope",
-        label: "Installation scope completed",
-        options: ["Full quoted area completed", "Partial quoted area completed", "Inspection only", "Work deferred"].map(option),
-      },
-    ],
+    ...specialtyFindings("plugging", { plug_spacing: "Installed plug spacing", plugging_scope: "Installation scope completed" }),
     protocols: [
       { label: "Inspection only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Sod plugs installed at quoted spacing", scope: "exterior", treatmentApplied: false },
@@ -60,18 +53,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Property perimeter", "Gutters / drains", "Planters / bromeliads",
       "Standing-water source", "Mosquito station location",
     ],
-    findingGroups: [
-      {
-        key: "mosquito_activity",
-        label: "Mosquito activity",
-        options: ["No mosquito activity observed", "Light mosquito activity", "Moderate mosquito activity", "Heavy mosquito activity", "Customer-reported activity only"].map(option),
-      },
-      {
-        key: "mosquito_source",
-        label: "Breeding-source findings",
-        options: ["No standing-water source found", "Removable standing water found", "Breeding source could not be removed", "Drainage or irrigation issue observed", "Likely off-property pressure", "Source not determined"].map(option),
-      },
-    ],
+    ...specialtyFindings("mosquito", { mosquito_activity: "Mosquito activity", mosquito_source: "Breeding-source findings" }),
     protocols: [
       { label: "Inspection and source assessment only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Directed barrier treatment", scope: "exterior", treatmentApplied: true },
@@ -88,18 +70,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Driveway / sidewalk edges", "Foundation perimeter", "Pool / lanai perimeter",
       "Fence line", "Drainage area", "Utility / irrigation boxes", "Playground / pet area",
     ],
-    findingGroups: [
-      {
-        key: "fire_ant_evidence",
-        label: "Fire ant activity",
-        options: ["Active mounds observed", "Foraging activity observed", "Mounds and foraging activity observed", "Customer-reported activity only", "No active fire ants observed", "Identification uncertain"].map(option),
-      },
-      {
-        key: "fire_ant_distribution",
-        label: "Activity distribution",
-        options: ["One isolated area", "Several localized areas", "Scattered throughout property", "Widespread activity", "Unable to fully determine"].map(option),
-      },
-    ],
+    ...specialtyFindings("fire_ant", { fire_ant_evidence: "Fire ant activity", fire_ant_distribution: "Activity distribution" }),
     protocols: [
       { label: "Inspection only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Individual mound treatment", scope: "exterior", treatmentApplied: true },
@@ -117,18 +88,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Dense vegetation", "Under deck / patio", "Lanai / screened enclosure",
       "Garage", "Interior pet areas", "Baseboards / wall edges", "Furniture near pet areas",
     ],
-    findingGroups: [
-      {
-        key: "tick_evidence",
-        label: "Tick evidence",
-        options: ["Live tick observed", "Multiple live ticks observed", "Tick found on pet", "Customer-reported tick activity", "Evidence in monitoring device", "No tick activity observed", "Identification uncertain"].map(option),
-      },
-      {
-        key: "tick_identification",
-        label: "Tick identification",
-        options: ["Brown dog tick", "American dog tick", "Gulf Coast tick", "Lone star tick", "Other identified tick", "Species not confirmed"].map(option),
-      },
-    ],
+    ...specialtyFindings("tick_control", { tick_evidence: "Tick evidence", tick_identification: "Tick identification" }),
     protocols: [
       { label: "Inspection only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Monitoring devices placed or checked", scope: "interior", treatmentApplied: false },
@@ -147,23 +107,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Attic", "Lanai / pool cage", "Porch / entry", "Garage / carport",
       "Tree / shrub", "Ground cavity", "Utility / irrigation box", "Fence / detached structure",
     ],
-    findingGroups: [
-      {
-        key: "stinging_insect_identification",
-        label: "Pest identified",
-        options: ["Paper wasp", "Yellowjacket", "Hornet", "Honey bee", "Carpenter bee", "Other solitary wasp", "Other wasp", "Identification uncertain"].map(option),
-      },
-      {
-        key: "nest_type",
-        label: "Nest or activity type",
-        options: ["Exposed paper nest", "Enclosed structural void", "Ground nest", "Carpenter bee gallery", "Honey bee swarm", "Established honey bee colony", "Flying activity with no nest located", "Inactive or abandoned nest"].map(option),
-      },
-      {
-        key: "nest_activity",
-        label: "Nest activity",
-        options: ["Active", "Light activity", "Heavy activity", "Inactive", "Unable to confirm"].map(option),
-      },
-    ],
+    ...specialtyFindings("bee_wasp_removal", { stinging_insect_identification: "Pest identified", nest_type: "Nest or activity type", nest_activity: "Nest activity" }),
     protocols: [
       { label: "Inspection and identification only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Exposed nest treated", scope: "exterior", treatmentApplied: true },
@@ -184,18 +128,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Garage / carport", "Exterior walls", "Windows / shutters",
       "Attic / structural interior", "Fence", "Shed / detached structure",
     ],
-    findingGroups: [
-      {
-        key: "mud_dauber_evidence",
-        label: "Nest condition",
-        options: ["Active mud nests", "Sealed nests; activity uncertain", "Inactive or abandoned nests", "Empty nest remnants", "Mud dauber activity without completed nests", "No current evidence observed", "Identification uncertain"].map(option),
-      },
-      {
-        key: "mud_dauber_count",
-        label: "Approximate nest count",
-        options: ["1–3 nests", "4–10 nests", "11–20 nests", "More than 20 nests", "Exact count not practical"].map(option),
-      },
-    ],
+    ...specialtyFindings("mud_dauber_removal", { mud_dauber_evidence: "Nest condition", mud_dauber_count: "Approximate nest count" }),
     protocols: [
       { label: "Inspection only", scope: "exterior", treatmentApplied: false, exclusive: true },
       { label: "Inactive nests removed", scope: "exterior", treatmentApplied: false },
@@ -216,23 +149,7 @@ export const SERVICE_COMPLETION_PRESETS = {
       "Nightstands", "Closets", "Wall voids / outlets", "Luggage / storage area",
       "Monitors / interceptors",
     ],
-    findingGroups: [
-      {
-        key: "bed_bug_visit_stage",
-        label: "Visit stage",
-        options: ["Initial inspection", "Initial treatment", "Scheduled follow-up treatment", "Post-treatment inspection", "Callback or renewed activity inspection"].map(option),
-      },
-      {
-        key: "bed_bug_evidence",
-        label: "Evidence observed",
-        options: ["Live adults", "Live nymphs", "Eggs", "Cast skins", "Fecal spotting", "Bed bugs captured in monitor", "Customer-reported bites only", "Customer-reported sighting", "No confirmed evidence", "Evidence inconclusive"].map(option),
-      },
-      {
-        key: "bed_bug_prep",
-        label: "Preparation status",
-        options: ["Preparation complete", "Preparation mostly complete", "Preparation partially complete", "Preparation not completed", "Preparation not required for this visit"].map(option),
-      },
-    ],
+    ...specialtyFindings("bed_bug_treatment", { bed_bug_visit_stage: "Visit stage", bed_bug_evidence: "Evidence observed", bed_bug_prep: "Preparation status" }),
     protocols: [
       { label: "Inspection only", scope: "interior", treatmentApplied: false, exclusive: true },
       { label: "Monitoring devices installed or checked", scope: "interior", treatmentApplied: false },
@@ -278,27 +195,9 @@ export function replaceFindingGroupSelection(current, group, nextValue) {
 
 export function reconcileDependentFindingSelections(preset, current, group, nextValue) {
   let next = replaceFindingGroupSelection(current, group, nextValue);
-  const remove = (values) => {
-    const blocked = new Set(values);
-    next = next.filter((value) => !blocked.has(value));
-  };
-
-  if (preset === SERVICE_COMPLETION_PRESETS.fire_ant) {
-    const noActivity = "No active fire ants observed";
-    const distribution = preset.findingGroups.find(({ key }) => key === "fire_ant_distribution");
-    const distributionValues = (distribution?.options || []).map(({ value }) => value);
-    if (nextValue === noActivity) remove(distributionValues);
-    if (distributionValues.includes(nextValue)) remove([noActivity]);
-  }
-
-  if (preset === SERVICE_COMPLETION_PRESETS.bee_wasp_removal) {
-    const inactiveNest = "Inactive or abandoned nest";
-    const activity = preset.findingGroups.find(({ key }) => key === "nest_activity");
-    const activeValues = (activity?.options || [])
-      .map(({ value }) => value)
-      .filter((value) => value !== "Inactive");
-    if (nextValue === inactiveNest) remove(activeValues);
-    if (activeValues.includes(nextValue)) remove([inactiveNest]);
+  for (const { value, excludes } of preset?.observationExclusions || []) {
+    if (nextValue === value) next = next.filter((item) => !excludes.includes(item));
+    else if (excludes.includes(nextValue)) next = next.filter((item) => item !== value);
   }
   return next;
 }
@@ -324,5 +223,15 @@ export function exclusiveProtocolProductConflict(selectedLabels, protocols, prod
   const exclusive = (selectedLabels || []).find((label) => byLabel.get(label)?.exclusive === true);
   return exclusive
     ? `Remove applied products or clear “${exclusive}” before completing this visit.`
+    : null;
+}
+
+export function exclusiveProtocolSelectionConflict(selectedLabels, protocols) {
+  const selected = Array.isArray(selectedLabels) ? selectedLabels : [];
+  if (selected.length < 2) return null;
+  const byLabel = new Map((protocols || []).map((action) => [action.label, action]));
+  const exclusive = selected.find((label) => byLabel.get(label)?.exclusive === true);
+  return exclusive
+    ? `Clear “${exclusive}” or remove the other completed actions before submitting.`
     : null;
 }

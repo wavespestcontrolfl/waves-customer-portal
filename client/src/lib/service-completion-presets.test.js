@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   SERVICE_COMPLETION_PRESETS,
   exclusiveProtocolProductConflict,
+  exclusiveProtocolSelectionConflict,
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
@@ -9,16 +10,37 @@ import {
 } from "./service-completion-presets";
 import observationAllowlist from "../../../shared/specialty-service-observations";
 
-const { observationsForSpecialtyService, specialtyServiceKey } = observationAllowlist;
+const {
+  SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY,
+  observationsForSpecialtyService,
+  specialtyServiceKey,
+  validateSpecialtyObservationCombination,
+} = observationAllowlist;
 
 describe("specialty pest completion configuration", () => {
-  test("every dropdown observation is server-approved for customer report egress", () => {
+  test("dropdown groups mirror the shared customer-report egress vocabulary", () => {
     for (const [key, preset] of Object.entries(SERVICE_COMPLETION_PRESETS)) {
-      const allowed = new Set(observationsForSpecialtyService(key));
-      for (const group of preset.findingGroups) {
-        for (const item of group.options) {
-          expect(allowed.has(item.value)).toBe(true);
-        }
+      expect(preset.findingGroups.map((group) => ({
+        key: group.key,
+        options: group.options.map((item) => item.value),
+      }))).toEqual(SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY[key]);
+      preset.findingGroups.forEach((group) => expect(group.label).toBeTruthy());
+      const values = preset.findingGroups.flatMap((group) => group.options.map((item) => item.value));
+      expect(new Set(observationsForSpecialtyService(key)).size).toBe(values.length);
+    }
+  });
+
+  test("dependent selection rules match the server combination validator", () => {
+    const rules = Object.entries(SERVICE_COMPLETION_PRESETS)
+      .flatMap(([key, preset]) => preset.observationExclusions.map((rule) => [key, preset, rule]));
+    expect(rules.length).toBeGreaterThan(0);
+    for (const [key, preset, { value, excludes }] of rules) {
+      for (const other of excludes) {
+        expect(validateSpecialtyObservationCombination(key, [value, other])).toContain("cannot be paired");
+        const group = preset.findingGroups.find((item) => item.options.some((opt) => opt.value === other));
+        expect(reconcileDependentFindingSelections(preset, [value], group, other)).toEqual([other]);
+        const valueGroup = preset.findingGroups.find((item) => item.options.some((opt) => opt.value === value));
+        expect(reconcileDependentFindingSelections(preset, [other], valueGroup, value)).toEqual([value]);
       }
     }
   });
@@ -95,6 +117,15 @@ describe("specialty pest completion configuration", () => {
     )).toEqual(["Active"]);
   });
 
+  test("server vocabulary rejects restored contradictory specialty findings", () => {
+    expect(validateSpecialtyObservationCombination(
+      "bee_wasp_removal", ["Inactive or abandoned nest", "Active"],
+    )).toContain("cannot be paired");
+    expect(validateSpecialtyObservationCombination(
+      "mud_dauber_removal", ["Active mud nests", "No current evidence observed"],
+    )).toContain("only one value");
+  });
+
   test("each protocol action has explicit treatment and scope metadata", () => {
     Object.values(SERVICE_COMPLETION_PRESETS).forEach((config) => {
       expect(config.areas.length).toBeGreaterThan(0);
@@ -142,6 +173,16 @@ describe("specialty pest completion configuration", () => {
     )).toContain("Remove applied products");
     expect(exclusiveProtocolProductConflict(
       ["Void nest treated"], protocols, 1,
+    )).toBeNull();
+  });
+
+  test("restored exclusive actions cannot coexist with performed work", () => {
+    const protocols = SERVICE_COMPLETION_PRESETS.bee_wasp_removal.protocols;
+    expect(exclusiveProtocolSelectionConflict(
+      ["Inspection and identification only", "Void nest treated"], protocols,
+    )).toContain("remove the other completed actions");
+    expect(exclusiveProtocolSelectionConflict(
+      ["Void nest treated", "Nest physically removed"], protocols,
     )).toBeNull();
   });
 
