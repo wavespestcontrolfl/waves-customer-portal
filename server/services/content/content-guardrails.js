@@ -2123,7 +2123,9 @@ function decodeJsStaticString(raw) {
         const close = raw.indexOf('}', i + 2);
         const hex = close === -1 ? '' : raw.slice(i + 2, close);
         if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) return null;
-        out += String.fromCodePoint(parseInt(hex, 16)); i = close;
+        const cp = parseInt(hex, 16);
+        if (cp > 0x10FFFF) return null; // out-of-range code point — fromCodePoint would THROW and abort the gate (Codex #504 r32)
+        out += String.fromCodePoint(cp); i = close;
       } else {
         const hex = raw.slice(i + 1, i + 5);
         if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
