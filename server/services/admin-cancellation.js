@@ -913,11 +913,69 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           logger.error(`[admin-cancellation] refund task repair failed for case ${prior.id}: ${repairErr.message}`);
         }
       }
-      // The recorded run's facts (what was pulled, what the customer was
-      // sent) answer the retry — a lost response must not be reported as
-      // "nothing pulled / nothing sent". Cases predating the outcome record
-      // fall back to the conservative zeros.
+      // Failed confirmation channels REPAIR on retry (codex r14 P2): a
+      // prior run whose term decision and case persisted but whose SMS or
+      // email did not accept left the acceptance open — echoing forever
+      // would leave the customer permanently untold. The send-once probes
+      // (audit-log for SMS, class-keyed idempotency for email) make the
+      // re-call safe: only the missing channel actually sends. On a clean
+      // repair the case outcome is stamped and the acceptance closes.
       const outcome = priorSnap && priorSnap.outcome ? priorSnap.outcome : null;
+      if (outcome && outcome.confirmationRequested === true
+        && Array.isArray(outcome.errors)
+        && outcome.errors.some((e) => String(e).startsWith('confirmation_'))) {
+        try {
+          const reqRow = prior.service_request_id
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            : null;
+          if (reqRow && reqRow.status === 'new') {
+            const verdictClean = prior.status !== 'open'
+              && outcome.errors.every((e) => String(e).startsWith('confirmation_'));
+            const resend = await sendCancellationConfirmations({
+              customer,
+              request: reqRow,
+              result: {
+                scope: Array.isArray(outcome.scope) ? outcome.scope : [],
+                remaining: [],
+                tierAfter: outcome.tierAfter ?? null,
+                lateFeeWaived: outcome.lateFeeWaived === true,
+              },
+              processed: verdictClean,
+              effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
+                ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
+              keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
+              entryPoint: 'admin_cancel_plan',
+              identityTrustLevel: 'admin_operator',
+            });
+            const stillFailed = [];
+            if (customer.phone && !resend.smsSent) stillFailed.push('confirmation_sms_not_sent');
+            if (customer.email && !resend.emailSent) stillFailed.push('confirmation_email_not_sent');
+            outcome.confirmationChannels = [...new Set([...(outcome.confirmationChannels || []), ...resend.channels])];
+            outcome.confirmation = outcome.confirmationChannels.includes('sms')
+              ? 'sms' : (outcome.confirmationChannels.includes('email') ? 'email' : null);
+            outcome.errors = [
+              ...outcome.errors.filter((e) => !String(e).startsWith('confirmation_')),
+              ...stillFailed,
+            ];
+            try {
+              await db('cancellation_cases').where({ id: prior.id })
+                .update({ snapshot: JSON.stringify({ ...priorSnap, outcome }), updated_at: new Date() });
+            } catch (stampErr) {
+              logger.warn(`[admin-cancellation] confirmation-repair stamp failed for case ${prior.id}: ${stampErr.message}`);
+            }
+            if (!outcome.errors.length) {
+              try {
+                await db('service_requests').where({ id: reqRow.id, status: 'new' })
+                  .update({ status: 'resolved', updated_at: new Date() });
+              } catch (closeErr) {
+                logger.warn(`[admin-cancellation] acceptance close after confirmation repair failed for request ${reqRow.id}: ${closeErr.message}`);
+              }
+            }
+          }
+        } catch (resendErr) {
+          logger.warn(`[admin-cancellation] confirmation repair failed for case ${prior.id}: ${resendErr.message}`);
+        }
+      }
       return {
         requestId: prior.service_request_id || null,
         caseId: prior.id,
@@ -995,6 +1053,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       input.waiveLateFee = true;
       logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id}`);
     }
+    // The accepted NO-communication choice is inherited the same way — a
+    // fresh dialog defaults the checkbox on, and a repair retry must not
+    // text a customer the original operator explicitly silenced.
+    if (requestMeta && requestMeta.sendConfirmation === false && input.sendConfirmation) {
+      input.sendConfirmation = false;
+      logger.info(`[admin-cancellation] retry inherits the no-confirmation choice from request ${request.id}`);
+    }
     try {
       const priorCase = await db('cancellation_cases')
         .where({ service_request_id: request.id })
@@ -1042,6 +1107,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           cancel_plan: {
             scope: wholeAccount ? [] : [...scope].sort(),
             waiveLateFee: input.waiveLateFee,
+            // The accepted communication choice: a repair retry must not
+            // text a customer the original operator explicitly chose not
+            // to contact.
+            sendConfirmation: input.sendConfirmation,
           },
         }),
       })
@@ -1321,7 +1390,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   if (!processed || errors.length) {
     try {
       const NotificationService = require('./notification-service');
-      await NotificationService.notifyAdmin(
+      const reviewAlert = await NotificationService.notifyAdmin(
         'service',
         `Cancel plan needs review for ${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
         `${actorLabel} cancelled ${wholeAccount ? 'the whole plan' : scope.map(familyLabelOf).join(', ')}`
@@ -1336,7 +1405,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           metadata: { requestId: request.id, customerId, processingErrors: errors },
         }
       );
+      // notifyAdmin resolves NULL on failure (its documented contract) —
+      // an awaited null would read as "alert raised" while the failures
+      // live only in logs. Surface it so the response never claims the
+      // office review alert has the details when no alert landed.
+      if (!reviewAlert || (reviewAlert.suppressed && reviewAlert.reason)) {
+        errors.push('review_alert_failed');
+        logger.error(`[admin-cancellation] review alert did not persist for request ${request.id}${reviewAlert && reviewAlert.reason ? ` (${reviewAlert.reason})` : ''}`);
+      }
     } catch (notifErr) {
+      errors.push('review_alert_failed');
       logger.error(`[admin-cancellation] review alert failed for request ${request.id}: ${notifErr.message}`);
     }
   }

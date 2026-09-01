@@ -684,6 +684,25 @@ describe('POST /:id/cancel-plan', () => {
     buildCancellationImpact.mockResolvedValue(base);
   }));
 
+  test('a review alert that did not persist is surfaced — the UI must not claim the office has the details', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'] });
+    // notifyAdmin's documented null-on-failure contract.
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(body.errors).toEqual(expect.arrayContaining(['in_progress_visit:s9', 'review_alert_failed']));
+  }));
+
+  test('a repair retry inherits the accepted NO-communication choice — the silenced customer stays silent', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['invoice_void:s1'] });
+    const first = await (await post(baseUrl, '/cancel-plan', { sendConfirmation: false })).json();
+    expect(first.processed).toBe(false);
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    // Retry from a fresh dialog (checkbox defaults back to true).
+    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+  }));
+
   test('a requested confirmation a reachable channel did not accept is a surfaced failure — review bell, never a clean "Done."', () => withServer(async (baseUrl) => {
     sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: false, channels: [] });
     const body = await (await post(baseUrl, '/cancel-plan')).json();
@@ -1075,6 +1094,39 @@ describe('POST /:id/cancel-plan', () => {
       const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       expect(body.duplicate).toBe(true);
       expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
+    }));
+
+    test('a duplicate with FAILED confirmation channels repairs them — the customer is not permanently untold', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: null, confirmationChannels: [],
+            errors: ['confirmation_sms_not_sent', 'confirmation_email_not_sent'],
+          },
+        }),
+      }];
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(body.duplicate).toBe(true);
+      // The send-once-guarded helper re-ran with the ORIGINAL verdict/copy.
+      expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({
+        processed: true, keptThrough: true, entryPoint: 'admin_cancel_plan',
+      }));
+      expect(body.confirmationChannels).toEqual(['sms', 'email']);
+      expect(body.errors).toEqual([]);
+      // Clean repair stamps the case and closes the acceptance.
+      expect(JSON.parse(mockState.cancellation_cases[0].snapshot).outcome.errors).toEqual([]);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+      expect(mockProcess).not.toHaveBeenCalled();
     }));
 
     test('a failed repair reports the missing task instead of a clean duplicate; a recorded refund is never re-raised', () => withServer(async (baseUrl) => {
