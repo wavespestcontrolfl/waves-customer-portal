@@ -591,14 +591,15 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
   });
 
   test('two indistinguishable public responders sharing one allowlist identity is a problem', () => {
-    // A second anonymous pathless middleware would land on the SAME
-    // `USE / (inline function)` key as an already-approved one and reuse its
-    // approval — the scanner must refuse identical keys from distinct
-    // source locations.
+    // A second IDENTICAL anonymous pathless middleware lands on the SAME
+    // `USE / (inline function#<digest>)` key as an already-approved one and
+    // would reuse its approval — the scanner must refuse identical keys from
+    // distinct source locations. (Distinct BODIES get distinct digests and
+    // are legitimately distinguishable.)
     const res = scanOf({
       'server/index.js': app([
         'app.use((req, res) => res.json({ a: 1 }));',
-        'app.use((req, res) => res.json({ b: 2 }));',
+        'app.use((req, res) => res.json({ a: 1 }));',
       ].join('\n')),
     });
     expect(res.problems.some((p) => p.includes('share the allowlist identity'))).toBe(true);
@@ -939,7 +940,7 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
 
   test('two anonymous responders on ONE source line are still distinct locations', () => {
     const res = scanOf({
-      'server/index.js': app('app.use((req, res) => res.json({ a: 1 })); app.use((req, res) => res.json({ b: 2 }));'),
+      'server/index.js': app('app.use((req, res) => res.json({ a: 1 })); app.use((req, res) => res.json({ a: 1 }));'),
     });
     expect(res.problems.some((p) => p.includes('share the allowlist identity'))).toBe(true);
   });
@@ -1716,6 +1717,107 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(res.problems.some((p) => p.includes("'require' is rebound"))).toBe(true);
+  });
+
+  test('a function PARAMETER shadowing a registered guard refuses credit', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const { guardA } = require('../middleware/a');",
+        "const router = require('express').Router();",
+        'function install(guardA) {',
+        "  router.get('/leak', guardA, (req, res) => res.json({}));",
+        '}',
+        'install((req, res, next) => next());',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // With the shadow refused, the route is PUBLIC — and a public route
+    // inside a function is itself rejected.
+    expect(res.problems.some((p) => p.includes('registered inside a function'))).toBe(true);
+  });
+
+  test('a registration on a helper RETURN VALUE (current().get) is rejected when the helper touches a router', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'function current() { return router; }',
+        "current().get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('on the return value of current()'))).toBe(true);
+  });
+
+  test('an application constructed with NEW (new express()) is tracked', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          'const live = new express();',
+          "live.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(live);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
+  });
+
+  test('a consumer-side DESCRIPTOR rewrite of an imported guard is refused credit and reported', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const auth = require('../middleware/a');",
+        "const router = require('express').Router();",
+        "Object.defineProperty(auth, 'guardA', { value: (req, res, next) => next() });",
+        "router.get('/leak', auth.guardA, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toContain('GET /api/x/leak');
+    expect(res.problems.some((p) => p.includes('rewrite of server/middleware/a.js export'))).toBe(true);
+  });
+
+  test('an inline use() responder carries a BODY DIGEST in its identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "app.use('/a', (req, res, next) => next());",
+        "app.use('/b', (req, res) => res.json({ leak: 1 }));",
+      ].join('\n')),
+    });
+    const a = res.publicRoutes.find((r) => r.path === '/a');
+    const b = res.publicRoutes.find((r) => r.path === '/b');
+    expect(a.extra).toMatch(/inline function#[0-9a-f]{8}/);
+    expect(b.extra).toMatch(/inline function#[0-9a-f]{8}/);
+    expect(a.extra).not.toBe(b.extra);
+  });
+
+  test('a side-effect module SERVING its own app is propagated from the sweep', () => {
+    const res = scanOf({
+      'server/index.js': app("require('./services/side');"),
+      'server/services/side.js': [
+        "const express2 = require('express');",
+        'const live = express2();',
+        "live.get('/leak', (req, res) => res.json({}));",
+        'live.listen(3000);',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('listen() on application live'))).toBe(true);
+  });
+
+  test('dynamic code (eval) in a server module is a problem, never silence', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'eval("router.get(\'/leak\', (req, res) => res.json({}))");',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('dynamic code (eval)'))).toBe(true);
   });
 
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {

@@ -111,6 +111,17 @@ function memberPropName(member) {
   return null;
 }
 
+/** Every identifier a binding pattern introduces (params, destructuring). */
+function patternNames(node, out) {
+  if (!node) return out;
+  if (node.type === 'Identifier') out.push(node.name);
+  else if (node.type === 'AssignmentPattern') patternNames(node.left, out);
+  else if (node.type === 'RestElement') patternNames(node.argument, out);
+  else if (node.type === 'ObjectPattern') for (const p of node.properties) patternNames(p.type === 'ObjectProperty' ? p.value : p, out);
+  else if (node.type === 'ArrayPattern') for (const el of node.elements) patternNames(el, out);
+  return out;
+}
+
 function stringLiteralArray(node) {
   if (!node || node.type !== 'ArrayExpression') return null;
   const out = [];
@@ -280,6 +291,10 @@ class ModuleAnalysis {
     this.exportedRouter = null;
     this.registrations = []; // ordered { object, method, args, topLevel, loc }
     this.problems = [];
+    // Findings that must surface even from an UNMOUNTED side-effect module
+    // (whose ordinary problems the sweep ignores): serving a second app,
+    // dynamic code, a rebound require.
+    this.sweepProblems = [];
     this.collect();
   }
 
@@ -287,6 +302,12 @@ class ModuleAnalysis {
     // Line AND column: two anonymous responders on one line must never
     // collapse to a single location (the duplicate-identity check keys on it).
     return `${this.file}:${node.loc ? `${node.loc.start.line}:${node.loc.start.column}` : '?'}`;
+  }
+
+  /** A problem that must surface even from an unmounted side-effect module. */
+  pushSweepProblem(msg) {
+    this.problems.push(msg);
+    this.sweepProblems.push(msg);
   }
 
   /** Node-order module resolution against the scanned tree (see resolveModulePath). */
@@ -311,6 +332,9 @@ class ModuleAnalysis {
     const memberAssignments = [];
     const computedMemberWrites = []; // obj[<non-literal>] = ...
     const listenCalls = []; // <app>.listen(...) receivers, checked post-walk
+    const paramNames = new Set(); // function parameters — lexical shadows
+    const callReceiverRegs = []; // current().get(...) — helper-returned receivers
+    const descriptorCalls = []; // Object.defineProperty(...)-style writes
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
         && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
@@ -325,6 +349,28 @@ class ModuleAnalysis {
         && node.callee.type === 'MemberExpression'
         && memberPropName(node.callee) === 'listen') {
         listenCalls.push(node);
+      }
+      if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression',
+        'ClassMethod', 'ClassPrivateMethod', 'ObjectMethod'].includes(node.type)) {
+        // A parameter sharing a top-level binding's name makes references
+        // inside the function lexically ambiguous — recorded as shadows.
+        for (const p of node.params || []) for (const n of patternNames(p, [])) paramNames.add(n);
+      }
+      if (node.type === 'CatchClause' && node.param) {
+        for (const n of patternNames(node.param, [])) paramNames.add(n);
+      }
+      if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
+        && (node.callee.name === 'eval' || node.callee.name === 'Function')) {
+        this.pushSweepProblem(`${this.loc(node)}: dynamic code (${node.callee.name}) in a server module — the scanner cannot see what it registers`);
+      }
+      if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'Function') {
+        this.pushSweepProblem(`${this.loc(node)}: dynamic code (new Function) in a server module — the scanner cannot see what it registers`);
+      }
+      if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+        && node.callee.object.type === 'Identifier'
+        && ((node.callee.object.name === 'Object' && ['defineProperty', 'defineProperties', 'assign', 'setPrototypeOf'].includes(memberPropName(node.callee)))
+          || (node.callee.object.name === 'Reflect' && ['set', 'defineProperty'].includes(memberPropName(node.callee))))) {
+        descriptorCalls.push(node);
       }
       if (node.type === 'ImportDeclaration') {
         // ESM imports bind exactly like require(): a default/namespace import
@@ -517,6 +563,11 @@ class ModuleAnalysis {
             return;
           } else if (base && this.isRouterFactory(base)) {
             this.problems.push(`${this.loc(node)}: ${method}() chained on an inline Router() call — bind the router to a const so its routes can be attributed`);
+          } else if (!base && node.callee.object.type === 'CallExpression'
+            && node.callee.object.callee.type === 'Identifier') {
+            // `current().get('/leak', h)` — a registration on a helper's
+            // return value; judged post-walk once the helper's body is known.
+            callReceiverRegs.push({ name: node.callee.object.callee.name, method, node });
           }
         }
         if (objName === null) {
@@ -620,13 +671,38 @@ class ModuleAnalysis {
     for (const call of listenCalls) {
       const obj = call.callee.object;
       if (obj.type === 'CallExpression' && this.isAppFactory(obj)) {
-        this.problems.push(`${this.loc(call)}: listen() on an inline express() application — bind the app to a const so its routes can be attributed`);
+        this.pushSweepProblem(`${this.loc(call)}: listen() on an inline express() application — bind the app to a const so its routes can be attributed`);
         continue;
       }
       const base = this.resolveMemberChain(obj);
       const canon = base ? this.canonName(base) : null;
       if (canon && this.apps.has(canon) && !APP_IDENTIFIERS.has(canon)) {
-        this.problems.push(`${this.loc(call)}: listen() on application ${canon} — an app other than the scanned root serving traffic hides its routes from the allowlist`);
+        this.pushSweepProblem(`${this.loc(call)}: listen() on application ${canon} — an app other than the scanned root serving traffic hides its routes from the allowlist`);
+      }
+    }
+    // A function parameter sharing a module binding's name makes references
+    // inside that function ambiguous to the flat model — treat as shadowed.
+    for (const n of paramNames) if (this.bindings.has(n)) this.shadowedNames.add(n);
+    // `current().get('/leak', h)` — when the helper's body references a
+    // router, its return value may BE that router; never drop it silently.
+    for (const cr of callReceiverRegs) {
+      const b = this.bindings.get(this.canonName(cr.name));
+      if (b && b.kind === 'function' && b.node && this.routerReferencedIn(b.node)) {
+        this.problems.push(`${this.loc(cr.node)}: ${cr.method}() on the return value of ${cr.name}() — the helper references a router, so this registration cannot be attributed; register through the router identifier`);
+      }
+    }
+    // Object.defineProperty(auth, 'guardA', ...) — a descriptor/property API
+    // rewriting an imported module's members is an import write like any
+    // assignment; an unresolvable property taints the whole module ('*').
+    for (const d of descriptorCalls) {
+      const target = d.arguments[0];
+      if (!target || target.type !== 'Identifier') continue;
+      const b = this.bindings.get(this.canonName(target.name));
+      if (b && (b.kind === 'require' || b.kind === 'requireMember') && b.module !== null) {
+        const nameArg = d.arguments[1];
+        const prop = nameArg && nameArg.type === 'StringLiteral'
+          && ['defineProperty', 'set'].includes(memberPropName(d.callee)) ? nameArg.value : '*';
+        this.importMemberWrites.push({ module: b.module, prop, loc: this.loc(d) });
       }
     }
     this.mutatedImportMembers = new Set(this.importMemberWrites.map((w) => `${w.module}#${w.prop}`));
@@ -819,7 +895,7 @@ class ModuleAnalysis {
     // `require` rebound to anything else makes every import-based conclusion
     // in this module a lie (a fake require can hand back no-op guards).
     if (this.bindings.has('require') || this.shadowedNames.has('require')) {
-      this.problems.push(`${this.file}: 'require' is rebound in this module — the scanner cannot trust any import here; use Node's require only`);
+      this.pushSweepProblem(`${this.file}: 'require' is rebound in this module — the scanner cannot trust any import here; use Node's require only`);
     }
     // EXECUTION order, not AST pre-order: in a fluent chain the outer call's
     // node encloses the inner one (`router.get('/x', h).use(guard)` runs the
@@ -957,9 +1033,9 @@ class ModuleAnalysis {
     if (w > 1) this.reassignedNames.add(name);
   }
 
-  /** `express()` — a second Express APPLICATION registers surface too. */
+  /** `express()` / `new express()` — a second APPLICATION registers surface too. */
   isAppFactory(node) {
-    if (!node || node.type !== 'CallExpression' || node.arguments.length) return false;
+    if (!node || (node.type !== 'CallExpression' && node.type !== 'NewExpression') || node.arguments.length) return false;
     const c = node.callee;
     // Direct factory spelling: `require('express')()`.
     if (isRequireCall(c)) return c.arguments[0].value === 'express';
@@ -1270,7 +1346,11 @@ class ModuleAnalysis {
         // behind its own identity; never credit it as plain middleware.
         const delegated = this.routerReferencedIn(node);
         if (delegated) return [{ type: 'opaque', desc: `inline function delegating to router ${delegated}` }];
-        return [{ type: 'middleware', desc: 'inline function' }];
+        // The BODY is identity: editing an approved inline responder to
+        // answer new paths must break the allowlist key.
+        const bodyHash = crypto.createHash('sha256')
+          .update(this.src.slice(node.start, node.end).replace(/\s+/g, ' ')).digest('hex').slice(0, 8);
+        return [{ type: 'middleware', desc: `inline function#${bodyHash}` }];
       }
       case 'Identifier': {
         const canon = this.canonName(node.name);
@@ -1289,7 +1369,7 @@ class ModuleAnalysis {
         const b = this.bindings.get(canon);
         if (!b) return [{ type: 'opaque', desc: `unbound identifier ${node.name}` }];
         if (b.kind === 'requireMember') {
-          if (b.module !== null && this.mutatedImportMembers.has(`${b.module}#${b.name}`)) {
+          if (b.module !== null && (this.mutatedImportMembers.has(`${b.module}#${b.name}`) || this.mutatedImportMembers.has(`${b.module}#*`))) {
             // A consumer overwrote this export — never credit the mutated name.
             return [{ type: 'opaque', desc: `${node.name} (imported export ${b.name} overwritten in ${this.file})` }];
           }
@@ -1432,7 +1512,7 @@ class ModuleAnalysis {
           return [{ type: 'opaque', desc: `${this.src.slice(node.start, node.end)} — unreviewed package export` }];
         }
         if (mod) {
-          if (this.mutatedImportMembers.has(`${mod}#${node.property.name}`)) {
+          if (this.mutatedImportMembers.has(`${mod}#${node.property.name}`) || this.mutatedImportMembers.has(`${mod}#*`)) {
             // A consumer overwrote this export — never credit the mutated name.
             return [{ type: 'opaque', desc: `${this.src.slice(node.start, node.end)} (imported export overwritten in ${this.file})` }];
           }
@@ -1659,8 +1739,12 @@ class Scanner {
       // A consumer overwriting a REGISTERED guard/passthrough export rewrites
       // what every other importer receives — reject the write itself.
       for (const w of m.importMemberWrites || []) {
-        if (this.registry.lookup(w.module, w.prop) || this.registry.lookupPassthrough(w.module, w.prop)) {
-          this.problems.push(`${w.loc}: assignment to ${w.module} export '${w.prop}' — overwriting a registered guard/passthrough is not supported by the scanner`);
+        const hits = w.prop === '*'
+          ? (this.registry.entries.some((g) => g.module === w.module)
+            || this.registry.passthroughs.some((pt) => !pt.package && pt.module === w.module))
+          : Boolean(this.registry.lookup(w.module, w.prop) || this.registry.lookupPassthrough(w.module, w.prop));
+        if (hits) {
+          this.problems.push(`${w.loc}: rewrite of ${w.module} export '${w.prop}' — overwriting a registered guard/passthrough (assignment or descriptor API) is not supported by the scanner`);
         }
       }
     };
@@ -1675,6 +1759,9 @@ class Scanner {
         continue;
       }
       flag(m); // its OTHER problems are ignored — the file is not mounted surface
+      // ...except findings that indict the PROCESS, not the module's own
+      // mounts: a second served app, dynamic code, a rebound require.
+      this.problems.push(...(m.sweepProblems || []));
     }
   }
 
