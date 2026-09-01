@@ -100,8 +100,13 @@ const USD_MARKER_RE = /\bUSD\b|US\$/i;
 // words (TRY, ALL) are matched case-SENSITIVELY so ordinary copy ("try",
 // "all plans") can never mark a quote foreign.
 const FOREIGN_SYMBOL_RE = /€|£|¥|₹|₩|C\$|CA\$|A\$|AU\$|NZ\$|R\$/;
-const FOREIGN_ISO_RE = /\b(CAD|AUD|EUR|GBP|NZD|MXN|JPY|CNY|CHF|SEK|NOK|DKK|ZAR|BRL|INR|PLN|SGD|HKD|AED|THB|PHP|MYR|IDR|VND|KRW|TWD|CZK|HUF|RON|ILS|SAR|QAR|KWD|BHD|OMR|EGP|CLP|COP|PEN|ARS|RUB|UAH|BGN|ISK|NGN|PKR|BDT|KES|LKR|GHS|TZS|UGX|MAD|DZD|TND|JOD|LBP|IQD|NPR|MMK|KHR|LAK|MNT|KZT|UZS|AZN|GEL|AMD|BYN|MDL|MKD|RSD|BAM|HRK|CRC|DOP|GTQ|HNL|NIO|PAB|PYG|BOB|UYU|VES|JMD|TTD|BSD|BBD|XCD|BZD|GYD|SRD|FJD|PGK|WST|SBD|VUV|XOF|XAF|XPF|ETB|RWF|BIF|MWK|ZMW|MZN|AOA|NAD|BWP|SZL|LSL|MUR|SCR|MVR|BND|MOP)\b/i;
-const FOREIGN_AMBIGUOUS_ISO_RE = /\b(TRY|ALL|TOP)\b/; // case-sensitive on purpose — English words in lowercase copy
+// The complete active ISO-4217 set (minus USD; HRK kept for legacy copy).
+// Codes that are English words or names (ALL, BOB, COP, CUP, GEL, MAD, PEN,
+// RON, SOS, TOP, TRY) live in the case-SENSITIVE regex below instead, so
+// ordinary lowercase copy ("try", "all plans", "pen") can never mark a
+// quote foreign.
+const FOREIGN_ISO_RE = /\b(AED|AFN|AMD|ANG|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BGN|BHD|BIF|BMD|BND|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHF|CLP|CNY|CRC|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HRK|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PGK|PHP|PKR|PLN|PYG|QAR|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TTD|TWD|TZS|UAH|UGX|UYU|UZS|VES|VND|VUV|WST|XAF|XCD|XOF|XPF|YER|ZAR|ZMW|ZWG)\b/i;
+const FOREIGN_AMBIGUOUS_ISO_RE = /\b(ALL|BOB|COP|CUP|GEL|MAD|PEN|RON|SOS|TOP|TRY)\b/; // case-sensitive on purpose — English words in lowercase copy
 const isForeignMarker = (s) => FOREIGN_SYMBOL_RE.test(s) || FOREIGN_ISO_RE.test(s) || FOREIGN_AMBIGUOUS_ISO_RE.test(s);
 
 /**
@@ -422,11 +427,15 @@ function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
  * unique (domain_id, path_key) WHERE superseded_by IS NULL.
  * Returns the path row id.
  */
-async function upsertPath(trx, domainId, row, { replacesPathId = null, now }) {
+async function upsertPath(trx, domainId, row, { replacesPathId = null, now, preserveTermsHash = false }) {
   const existing = await trx('seo_link_acquisition_paths')
     .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('*');
   let id;
   if (existing) {
+    // A pass that never ATTEMPTED the terms fetch (budget exhausted) carries
+    // no verdict on the agreement: the previously hashed text stands, so no
+    // erase and no revision bump on its account.
+    if (preserveTermsHash) row = { ...row, legal_terms_hash: existing.legal_terms_hash };
     const bump = {
       revision_payment: changedInputs(existing, row, PAYMENT_INPUTS),
       revision_communication: changedInputs(existing, row, COMMUNICATION_INPUTS),
@@ -487,7 +496,11 @@ const quoteOnPage = (pages, pageUrl, quote) => {
   // must not verify a claimed "USD 95" (the truncated claim would mint the
   // wrong cents). The match may not sit inside a longer number: no digit
   // directly before it, and no digit (or decimal continuation) after it.
-  const t = normQuote(page.text);
+  // Search ONLY the model-visible excerpt: the quote is the model's
+  // attestation of what it read, so text beyond the prompt cut must not
+  // verify a claim the model never saw in context (a hallucinated price
+  // could otherwise match unrelated copy deep in a long page).
+  const t = normQuote(page.excerpt != null ? page.excerpt : page.text);
   const q = normQuote(quote);
   if (!q) return false;
   let idx = t.indexOf(q);
@@ -622,8 +635,12 @@ async function investigatePaths(db, {
   };
   if (gated || dryRun || !targets.length) {
     if (dryRun && !gated) {
-      out.wouldFetch = targets.length * MAX_FETCHES_PER_DOMAIN;
-      out.wouldCall = targets.length;
+      // MAXIMA, not typical counts: a live run can spend the candidate cap
+      // PLUS the existence-probe and terms budgets per domain, and a schema
+      // failure buys one repair retry per model call — an honest cost
+      // preview must show the ceiling, not the happy path.
+      out.wouldFetch = targets.length * (MAX_FETCHES_PER_DOMAIN + SUBMISSION_VERIFY_BUDGET + TERMS_FETCH_BUDGET);
+      out.wouldCall = targets.length * 2;
     }
     return out;
   }
@@ -795,7 +812,14 @@ async function investigatePaths(db, {
         const termsAttempted = new Set(); // the budget caps ATTEMPTS — a failed or off-site fetch spends it too
         for (const p of writable) {
           if (!p.legal_attestation || !p.legal_terms_url || termsAttempted.has(p.legal_terms_url)) continue;
-          if (termsAttempted.size >= TERMS_FETCH_BUDGET) break;
+          if (termsAttempted.size >= TERMS_FETCH_BUDGET) {
+            // An UNATTEMPTED hash is not a verdict on the agreement: mark the
+            // path so the write phase leaves it unstamped (rotated retry) and
+            // preserves any previously valid hash, instead of erasing it and
+            // parking the path INVALID for 90 days on a local budget limit.
+            p.termsBudgetExhausted = true;
+            continue;
+          }
           termsAttempted.add(p.legal_terms_url);
           out.fetches += 1;
           const t = await fetcher(p.legal_terms_url);
@@ -810,9 +834,15 @@ async function investigatePaths(db, {
           // redirects of the same page aside): a terms URL that soft-redirects
           // to the homepage would otherwise hash an unrelated body as the
           // agreement and clear the §6.3 legal-validity gate.
+          // …and the body must BE text: fetchPage decodes any payload through
+          // .text(), so a PDF/image served at the terms URL would otherwise
+          // canonicalize as >200 chars of gibberish and mint a valid-looking
+          // hash with no agreement text behind it. Only explicitly textual
+          // MIME types may bind acceptance (fail-closed on a missing header).
           const termsFinal = (t && t.finalUrl) || p.legal_terms_url;
           const schemelessTerms = (u) => registry.normalizeSubmissionUrl(u).replace(/^https?:\/\//, '');
-          if (t && t.html && !t.blocked && !t.error && !t.truncated
+          const textualTerms = /^\s*(text\/|application\/(xhtml\+xml|xml)\b)/i.test(String((t && t.contentType) || ''));
+          if (t && t.html && !t.blocked && !t.error && !t.truncated && textualTerms
               && hostBound(host, termsFinal) && schemelessTerms(termsFinal) === schemelessTerms(p.legal_terms_url)) {
             const termsText = canonicalizeTerms(t.html);
             if (termsText.length >= MIN_TERMS_TEXT_CHARS) termsHashByUrl.set(p.legal_terms_url, sha256(termsText));
@@ -867,14 +897,28 @@ async function investigatePaths(db, {
               const gone = !!predKey && fetchErrors.some((f) => registry.normalizeSubmissionUrl(f.url) === predKey && /^status_(404|410)$/.test(f.reason));
               const redirectedTo = predKey ? redirectMap.get(predKey) : null;
               const redirected = !!redirectedTo && !!p.submission_url && redirectedTo === registry.normalizeSubmissionUrl(p.submission_url) && redirectedTo !== predKey;
-              if (gone || redirected) {
+              // A dead predecessor alone never repoints placements onto a
+              // successor nobody observed: a URL-bearing successor must have
+              // passed its own existence check this pass (a redirect INTO the
+              // successor is itself that observation), or the claim waits.
+              const successorObserved = !p.submission_url || !p.submissionUnverified;
+              if ((gone && successorObserved) || redirected) {
                 replaces = p.replaces_path_id;
                 evidence.replaces_evidence = gone ? 'predecessor_url_gone' : 'predecessor_redirected_to_successor';
               } else {
-                evidence.replaces_rejected = { id: p.replaces_path_id, reason: 'no_deterministic_predecessor_evidence' };
+                evidence.replaces_rejected = { id: p.replaces_path_id, reason: gone ? 'successor_unobserved' : 'no_deterministic_predecessor_evidence' };
               }
             }
+            if (p.termsBudgetExhausted) evidence.terms_verification = 'terms_budget_exhausted';
             const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
+            if (p.termsBudgetExhausted) {
+              // the hash was never ATTEMPTED — not a verdict: leave the path
+              // unstamped so the rotation retries it next pass, and let
+              // upsertPath keep any previously valid hash instead of erasing
+              // it (and bumping authority revisions) on a budget limit
+              row.last_investigated_at = null;
+              p.unstamped = true;
+            }
             if (p.submissionUnverified) {
               row.confidence = 0; // exists only as a claim until a pass observes the URL
               // A TRANSIENT verification failure (probe error/status, budget
@@ -887,7 +931,7 @@ async function investigatePaths(db, {
                 p.unstamped = true;
               }
             }
-            const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now });
+            const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now, preserveTermsHash: !!p.termsBudgetExhausted });
             if (id) {
               writtenIds.push(id);
               if (p.unstamped) unstampedIds.add(id);

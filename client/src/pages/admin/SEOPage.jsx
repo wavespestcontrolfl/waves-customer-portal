@@ -3099,7 +3099,7 @@ function BacklinkRegistryCard() {
             : runResult.gated
               ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
               : runResult.dryRun
-                ? `Preview: ${runResult.selected} selected, ~${runResult.wouldFetch ?? 0} fetches, ${runResult.wouldCall ?? 0} model calls`
+                ? `Preview: ${runResult.selected} selected, up to ${runResult.wouldFetch ?? 0} fetches and ${runResult.wouldCall ?? 0} model calls`
                 : runResult.started
                   ? "Investigator started in the background — runs are serialized; refresh the table to see results."
                   : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}
@@ -3157,6 +3157,7 @@ function BacklinkRegistryCard() {
             <tr>
               <th style={thStyle}>Domain</th>
               <th style={thR}>DR</th>
+              <th style={thR}>Traffic</th>
               <th style={thR}>Spam</th>
               <th style={thR}>Comp.</th>
               <th style={thStyle}>Best path</th>
@@ -3169,7 +3170,7 @@ function BacklinkRegistryCard() {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td style={{ ...tdStyle, color: D.muted }} colSpan={9}>
+                <td style={{ ...tdStyle, color: D.muted }} colSpan={10}>
                   {loading ? "Loading…" : "No registry rows match."}
                 </td>
               </tr>
@@ -3182,6 +3183,7 @@ function BacklinkRegistryCard() {
                 >
                   <td style={tdStyle}>{d.domain}</td>
                   <td style={tdR}>{d.domain_rating ?? "—"}</td>
+                  <td style={tdR}>{d.organic_traffic != null ? Number(d.organic_traffic).toLocaleString() : "—"}</td>
                   <td style={tdR}>{d.spam_score ?? "—"}</td>
                   <td style={tdR}>{d.competitors_linked ?? 0}</td>
                   <td style={{ ...tdStyle, fontFamily: "inherit" }}>{bestPathLabel(d)}</td>
@@ -3222,7 +3224,7 @@ function BacklinkRegistryCard() {
                 </tr>
                 {expandedId === d.id && (
                   <tr>
-                    <td style={{ ...tdStyle, fontFamily: "inherit", background: D.bg }} colSpan={9}>
+                    <td style={{ ...tdStyle, fontFamily: "inherit", background: D.bg }} colSpan={10}>
                       {detail?.forId !== d.id && <span style={{ color: D.muted }}>Loading…</span>}
                       {detail?.forId === d.id && detail.error && <span style={{ color: D.red }}>{detail.error}</span>}
                       {detail?.forId === d.id && !detail.error && (
@@ -3243,7 +3245,13 @@ function BacklinkRegistryCard() {
                                 {p.submission_url ? ` · ${p.submission_url}` : ""}
                                 {` · conf ${p.confidence ?? "—"}`}
                                 {p.payment_required
-                                  ? ` · ${p.estimated_cost_cents != null ? `$${(p.estimated_cost_cents / 100).toFixed(2)}` : `price ${p.currency || "unknown"}`}${p.renewal_period ? `/${p.renewal_period}` : ""}`
+                                  ? ` · ${p.estimated_cost_cents != null ? `$${(p.estimated_cost_cents / 100).toFixed(2)}` : `price ${p.currency || "unknown"}`}${
+                                      // a distinct renewal charge renders separately — "$95.00/annual"
+                                      // would present the initial fee as the recurring amount
+                                      p.renewal_cost_cents != null
+                                        ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period ? `/${p.renewal_period}` : ""}`
+                                        : p.renewal_period ? `/${p.renewal_period}` : ""
+                                    }`
                                   : " · free"}
                                 {p.superseded_by ? " · superseded" : ""}
                                 {p.baseline ? " · baseline import" : ""}
