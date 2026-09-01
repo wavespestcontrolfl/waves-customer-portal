@@ -3,8 +3,13 @@
 // days of GSC + GA4 per candidate URL ... recorded before any link activates").
 //
 // CAPTURES per candidate URL: GSC clicks / impressions / CTR / position, the
-// top queries the page ranks for, GA4 sessions and users, GA4 pageviews /
-// bounce / session duration, and GA4 key events.
+// top queries the page ranks for, GA4 sessions, users, bounce rate (session-
+// weighted), pageviews, and GA4 key events.
+//
+// Session duration is deliberately NOT captured: getTopPages returns it split
+// across pageTitle variants, and there is no session count at that grain to
+// weight it by. Reporting a pageview-weighted duration would be wrong, so it
+// is omitted rather than approximated.
 //
 // ⚠️ PARTIAL BASELINE — not sufficient to activate links on its own. The pilot
 // spec also names estimate starts, calls, CTA clicks and geography. Those are
@@ -296,8 +301,15 @@ if (JSON_ONLY) process.env.LOG_LEVEL = 'error';
     window: { startDate, endDate, days: DAYS },
     siteUrl,
     capturedAt: new Date().toISOString(),
-    captured: ['per-URL GSC clicks/impressions/CTR/position', 'top queries per URL', 'GA4 sessions/users', 'GA4 pageviews/bounce/duration', 'GA4 key events'],
-    notCaptured: ['estimate starts', 'calls', 'CTA clicks', 'geography'],
+    captured: [
+      'per-URL GSC clicks/impressions/CTR/position',
+      'top queries per URL',
+      'GA4 sessions/users',
+      'GA4 bounce rate (session-weighted)',
+      'GA4 pageviews',
+      'GA4 key events',
+    ],
+    notCaptured: ['estimate starts', 'calls', 'CTA clicks', 'geography', 'session duration'],
     partialBaseline:
       'search/traffic only. GA4 key events are a leading indicator, NOT portal-side estimate starts or calls — ' +
       'the documented stop rule (service conversion drop) still needs URL-to-conversion attribution captured separately.',
