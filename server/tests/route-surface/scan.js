@@ -140,6 +140,15 @@ function predicateLabel(text) {
 function walk(node, visit, ctx) {
   if (!node || typeof node.type !== 'string') return;
   visit(node, ctx);
+  if (node.type === 'LogicalExpression' && ['&&', '||', '??'].includes(node.operator)) {
+    // `cond && app.get('/debug', h)` registers only when cond is truthy —
+    // the right operand carries the operator's polarity in its identity.
+    const t = predicateLabel(ctx.src ? ctx.src.slice(node.left.start, node.left.end) : '?');
+    const label = node.operator === '&&' ? t : (node.operator === '||' ? `!(${t})` : `nullish(${t})`);
+    walk(node.left, visit, ctx); // the left operand evaluates unconditionally
+    walk(node.right, visit, { ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
+    return;
+  }
   if (node.type === 'IfStatement' || node.type === 'ConditionalExpression') {
     // Branch POLARITY is part of a conditional route's identity: the
     // alternate branch is labelled with the negated test, so moving a route
@@ -230,6 +239,7 @@ class ModuleAnalysis {
     const optionalCalls = [];
     const objectLiterals = [];
     const arrayLiterals = [];
+    const mutatedNames = new Set(); // .push()/.unshift()/[i]= targets
     const callArgArrays = []; // { arr, call } — exemption decided post-walk
     const memberAssignments = [];
     walk(this.ast.program, (node, ctx) => {
@@ -241,6 +251,17 @@ class ModuleAnalysis {
         optionalCalls.push(node);
       }
       if (node.type === 'ObjectExpression') objectLiterals.push(node);
+      if (node.type === 'CallExpression'
+        && node.callee.type === 'MemberExpression' && !node.callee.computed
+        && node.callee.object.type === 'Identifier' && node.callee.property.type === 'Identifier'
+        && ['push', 'unshift', 'splice', 'pop', 'shift', 'reverse', 'sort', 'fill', 'copyWithin'].includes(node.callee.property.name)) {
+        mutatedNames.add(node.callee.object.name);
+      }
+      if (node.type === 'AssignmentExpression'
+        && node.left.type === 'MemberExpression' && node.left.computed
+        && node.left.object.type === 'Identifier') {
+        mutatedNames.add(node.left.object.name); // chain[0] = x
+      }
       if (node.type === 'ArrayExpression') arrayLiterals.push(node);
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         for (const a of node.arguments) if (a && a.type === 'ArrayExpression') callArgArrays.push({ arr: a, call: node });
@@ -349,6 +370,13 @@ class ModuleAnalysis {
           // objects (res.app, this.modules, ...) are dropped there like any
           // non-router object.
           if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
+            const inner = node.callee.object;
+            if (!inner.computed && inner.property.type === 'Identifier' && isRequireCall(inner.object)) {
+              // require('./routers').api.get('/leak', h) — an inline named
+              // export mutation; recorded for the external-mutation sweep.
+              const mod = resolveModulePath(this.file, inner.object.arguments[0].value);
+              if (mod) this.directExternalRegs.push({ module: mod, name: inner.property.name, method, loc: this.loc(node) });
+            }
             this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
           }
           return;
@@ -451,6 +479,13 @@ class ModuleAnalysis {
     // member the scanner cannot resolve (`holders[0].get('/leak', h)`).
     // Allowed only as a direct call argument (`app.use('/x', [g, router])`,
     // which classify() flattens); anywhere else it is rejected.
+    // A middleware ARRAY mutated after its initializer (chain.unshift(mw),
+    // chain[0] = mw) no longer matches what the scanner sees — refuse it.
+    this.mutatedArrays = new Set();
+    for (const n of mutatedNames) {
+      const b = this.bindings.get(n);
+      if (b && b.kind === 'array') this.mutatedArrays.add(n);
+    }
     // Only an argument of a REGISTRATION call on a known router/app is a
     // handler array classify() will flatten; an array passed to any other
     // function (`install([router])`) hides the router from the walk.
@@ -513,18 +548,28 @@ class ModuleAnalysis {
         .filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
       if (!passed.length) continue;
       const c = call.callee;
+      const consumerOk = (entry) => {
+        if (!entry) return false;
+        if (entry.appOnly && passed.some((n) => !APP_IDENTIFIERS.has(n))) {
+          // The listener/error-handler must keep receiving THE APP — handing
+          // it a different router would silently swap the served surface
+          // away from what scan() walks.
+          this.problems.push(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got ${passed.join(', ')} — the scanner walks the app, so the process must serve it`);
+        }
+        return true;
+      };
       if (c.type === 'MemberExpression' && !c.computed && c.object.type === 'Identifier'
         && c.property.type === 'Identifier') {
         const objCanon = this.canonName(c.object.name);
         if (this.routers.has(objCanon) || APP_IDENTIFIERS.has(objCanon)) continue;
         const ob = this.bindings.get(c.object.name);
         if (ob && ob.kind === 'require'
-          && this.scanner.registry.lookupRouterConsumer(ob.module === null ? ob.spec : ob.module, c.property.name)) continue;
+          && consumerOk(this.scanner.registry.lookupRouterConsumer(ob.module === null ? ob.spec : ob.module, c.property.name))) continue;
       }
       if (c.type === 'Identifier') {
         const b = this.bindings.get(c.name);
         if (b && b.kind === 'requireMember'
-          && this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name)) continue;
+          && consumerOk(this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name))) continue;
       }
       this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`);
     }
@@ -588,6 +633,21 @@ class ModuleAnalysis {
       return { kind: 'none' };
     }
     return { kind: 'none' };
+  }
+
+  /**
+   * Root identifier of a fluent REGISTRATION chain
+   * (`router.get(...).use(...)`), or null when the call is not one.
+   */
+  registrationChainRoot(node) {
+    let cur = node;
+    while (cur && cur.type === 'CallExpression'
+      && cur.callee.type === 'MemberExpression' && !cur.callee.computed
+      && cur.callee.property.type === 'Identifier'
+      && (VERBS.has(cur.callee.property.name) || cur.callee.property.name === 'use')) {
+      cur = cur.callee.object;
+    }
+    return cur && cur.type === 'Identifier' ? cur.name : null;
   }
 
   /** Follow `const a = b` alias chains to the canonical name. */
@@ -655,6 +715,14 @@ class ModuleAnalysis {
     } else if (init && (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression')) {
       this.setBinding(name, { kind: 'function', topLevel });
     } else if (init && init.type === 'CallExpression') {
+      // Express registration calls RETURN the router, so
+      // `const api = router.get('/x', h)` aliases the router — later
+      // registrations through `api` must not be lost.
+      const regRoot = this.registrationChainRoot(init);
+      if (regRoot && (this.routers.has(this.canonName(regRoot)) || APP_IDENTIFIERS.has(this.canonName(regRoot)))) {
+        this.setBinding(name, { kind: 'alias', target: regRoot, topLevel });
+        return;
+      }
       // e.g. `const payLimiter = rateLimit({...})` — a produced handler. The
       // call node is kept so classify() can judge the callee's provenance.
       this.setBinding(name, { kind: 'call', node: init, topLevel });
@@ -744,6 +812,7 @@ class ModuleAnalysis {
         // An identifier bound to a MIXED path array ([/^\/secret$/, '/x'])
         // resolves element-by-element like an inline array literal.
         if (this.shadowedNames.has(node.name) || this.reassignedNames.has(node.name)) return null;
+        if (this.mutatedArrays && this.mutatedArrays.has(node.name)) return null;
         const b = this.bindings.get(node.name);
         if (b && b.kind === 'array') {
           return this.resolvePaths({ type: 'ArrayExpression', elements: b.elements });
@@ -782,7 +851,10 @@ class ModuleAnalysis {
       const b = this.bindings.get(node.name);
       if (!b) return null;
       if (b.kind === 'string') return [b.value];
-      if (b.kind === 'array') return stringLiteralArray({ type: 'ArrayExpression', elements: b.elements });
+      if (b.kind === 'array') {
+        if (this.mutatedArrays && this.mutatedArrays.has(node.name)) return null;
+        return stringLiteralArray({ type: 'ArrayExpression', elements: b.elements });
+      }
     }
     return null;
   }
@@ -926,7 +998,12 @@ class ModuleAnalysis {
           }
           return [this.scanner.moduleRef(b.module, node.name)];
         }
-        if (b.kind === 'array') return b.elements.flatMap((el) => this.classify(el, depth + 1));
+        if (b.kind === 'array') {
+          if (this.mutatedArrays && this.mutatedArrays.has(canon)) {
+            return [{ type: 'opaque', desc: `${node.name} (array mutated after its initializer)` }];
+          }
+          return b.elements.flatMap((el) => this.classify(el, depth + 1));
+        }
         if (b.kind === 'function') {
           const g = registry.lookup(this.file, canon, { local: true });
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
@@ -1072,7 +1149,7 @@ class GuardRegistry {
     // registering routes on it (http.createServer, Sentry's error handler).
     this.routerConsumers = (Array.isArray(json.routerConsumers) ? json.routerConsumers : []).map((r) => {
       if (!r.name || !r.module) throw new Error(`routerConsumers entry missing name/module: ${JSON.stringify(r)}`);
-      return { name: r.name, module: r.module };
+      return { name: r.name, module: r.module, appOnly: Boolean(r.appOnly) };
     });
   }
 

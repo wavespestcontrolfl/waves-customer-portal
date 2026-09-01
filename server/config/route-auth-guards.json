@@ -97,9 +97,9 @@
     "call app.get() just as well as in-repo code."
   ],
   "routerConsumers": [
-    { "name": "createServer", "module": "http",
-      "what": "wraps the app as a request listener; registers no routes" },
-    { "name": "setupExpressErrorHandler", "module": "@sentry/node",
-      "what": "appends Sentry's error-capture middleware; registers no routes" }
+    { "name": "createServer", "module": "http", "appOnly": true,
+      "what": "wraps the app as a request listener; registers no routes; must receive THE APP (the scanned root)" },
+    { "name": "setupExpressErrorHandler", "module": "@sentry/node", "appOnly": true,
+      "what": "appends Sentry's error-capture middleware; registers no routes; must receive THE APP" }
   ]
 }

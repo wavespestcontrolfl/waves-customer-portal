@@ -1089,6 +1089,78 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     ]);
   });
 
+  test("an inline named-export mutation (require('./m').api.get) is rejected", () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/multi').api);",
+      ].join('\n')),
+      'server/routes/multi.js': [
+        "const api = require('express').Router();",
+        "api.get('/thing', (req, res) => res.json({}));",
+        'module.exports = { api };',
+      ].join('\n'),
+      'server/services/installer.js': "require('../routes/multi').api.get('/leak', (req, res) => res.json({}));",
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a short-circuit registration (cond && app.get) carries operator polarity in its identity', () => {
+    const key = (expr) => scanOf({
+      'server/index.js': app(`${expr};`),
+    }).publicRoutes.map(routeKey)[0];
+    const andKey = key("process.env.DEV === 'true' && app.get('/debug', (req, res) => res.json({}))");
+    const orKey = key("process.env.DEV === 'true' || app.get('/debug', (req, res) => res.json({}))");
+    expect(andKey).toBe("server/index.js @ / :: GET /debug [conditional: process.env.DEV === 'true']");
+    expect(orKey).toBe("server/index.js @ / :: GET /debug [conditional: !(process.env.DEV === 'true')]");
+  });
+
+  test('a registration RETURN value aliases the router (const api = router.get(...))', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const api = router.get('/a', (req, res) => res.json({}));",
+        "api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/a', 'GET /api/x/leak']);
+  });
+
+  test('an appOnly routerConsumer receiving a non-app router is a problem', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          "const leakRouter = require('express').Router();",
+          "leakRouter.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(leakRouter);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
+  });
+
+  test('a middleware array MUTATED after its initializer is never trusted', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'const chain = [guardA];',
+        'chain.unshift((req, res) => res.json({ secret: 1 }));',
+        "router.get('/leak', chain, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // The tainted array is opaque — the guard inside it is never credited.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
