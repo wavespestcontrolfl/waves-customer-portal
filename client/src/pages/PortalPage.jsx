@@ -4638,13 +4638,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           invent a next-treatment month or mosquito restart the customer's
           plan may not include (tranche-1 truth fix) */}
       {upcomingOnly.length === 0 && (
+        // A cancelled account (C4) can't create requests — every
+        // request-creation route is blocked for this session, so the copy
+        // must not instruct an impossible action (codex GH r14 P2).
         <PortalStatePanel
           icon="leaf"
           eyebrow="Upcoming Visits"
-          title="No upcoming services scheduled"
-          message="Nothing is on your calendar yet. Request a visit and we'll get you scheduled."
-          actionLabel="Request a Visit"
-          onAction={onRequestVisit}
+          title={cancelledAccount ? 'No visits scheduled' : 'No upcoming services scheduled'}
+          message={cancelledAccount
+            ? 'Your plan is cancelled, so no visits are scheduled. Your past service records remain available.'
+            : "Nothing is on your calendar yet. Request a visit and we'll get you scheduled."}
+          actionLabel={cancelledAccount ? undefined : 'Request a Visit'}
+          onAction={cancelledAccount ? undefined : onRequestVisit}
           actionStyle={primaryButton}
         />
       )}
@@ -9918,7 +9923,7 @@ function PlanStationMap({ map }) {
   );
 }
 
-function MyPlanTab({ customer, focusService, onOpenRequest }) {
+function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -10817,6 +10822,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
               tierName={tierName}
               compact={compact}
               onOpenRequest={onOpenRequest}
+              refreshCustomer={refreshCustomer}
               styles={{ muted, subtle, primaryButton, secondaryButton, smallLinkButton }}
             />
           </section>
@@ -15812,7 +15818,7 @@ export default function PortalPage() {
         )}
         {!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the

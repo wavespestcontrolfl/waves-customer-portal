@@ -92,7 +92,7 @@ const isoDaysFromNow = (days) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export default function CancelFlow({ tierName, styles, compact, onOpenRequest }) {
+export default function CancelFlow({ tierName, styles, compact, onOpenRequest, refreshCustomer }) {
   const { muted, subtle, primaryButton, secondaryButton, smallLinkButton } = styles;
   const [stage, setStage] = useState('entry');
   const [busy, setBusy] = useState(false);
@@ -259,6 +259,16 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest })
         tierAfter: c.tierAfter || null,
       });
       setStage('done');
+      // A processed WHOLE-ACCOUNT cancellation has already made the account
+      // inactive server-side — without refreshing the auth snapshot the
+      // shell keeps rendering the live-plan UI and Billing's active-state
+      // loader hits now-blocked routes (codex GH r14 P1). Awaited so the
+      // cancelled banner, narrowed tabs, and restart panel appear
+      // immediately; a partial cancellation leaves the account active, so
+      // nothing to refresh there.
+      if (c.processed === true && !(Array.isArray(c.remaining) && c.remaining.length)) {
+        try { await refreshCustomer?.(); } catch { /* stale until reload; the server state is already correct */ }
+      }
     } catch (err) {
       showCustomerAlert(`Couldn't submit cancellation request: ${err.message || `please try again or call us at ${WAVES_PHONE_DISPLAY}.`}`);
     } finally {

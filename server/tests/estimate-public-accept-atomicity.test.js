@@ -1372,7 +1372,10 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     source: 'plan_restart',
     customer_id: 'cust-9',
     estimate_data: JSON.stringify({
-      planRestart: { families: ['pest_control'], mintedAt: '2026-08-30T00:00:00Z' },
+      // Attempt identity (codex GH r14 P1): the accept also proves the
+      // quote belongs to the attempt the account is in — the ids match the
+      // cancellation_cases fixture the passing test installs.
+      planRestart: { families: ['pest_control'], cancellationCaseId: 'case-9', cancellationRequestId: null, mintedAt: '2026-08-30T00:00:00Z' },
       result: {
         recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] },
         oneTime: { items: [], membershipFee: 99 },

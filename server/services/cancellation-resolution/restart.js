@@ -100,7 +100,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     ? latest : null;
   const scope = current && current.status === 'committed' ? parseJson(current.scope, []) : [];
   const scoped = (Array.isArray(scope) ? scope : []).filter((f) => RESTARTABLE_FAMILIES.includes(f));
-  if (scoped.length) return { families: scoped, caseId: current.id, source: 'case_scope' };
+  if (scoped.length) return { families: scoped, caseId: current.id, requestId: latestRequest ? latestRequest.id : null, source: 'case_scope' };
   // This attempt's correlation key and time anchor — the current case's when
   // it exists, else the latest request's own.
   const attemptRequestId = (current && current.service_request_id)
@@ -182,7 +182,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     logger.warn(`[plan-restart] prepay family evidence failed for ${customerId}: ${err.message}`);
   }
   const fromRows = uniqueServiceFamilies(keys).filter((f) => RESTARTABLE_FAMILIES.includes(f));
-  if (fromRows.length) return { families: fromRows, caseId: current ? current.id : null, source: 'cancelled_rows' };
+  if (fromRows.length) return { families: fromRows, caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'cancelled_rows' };
 
   // Last resort — LEGACY attempts only: the scoped-cancel audit note
   // ("Cancelled Pest Control, Lawn Care — plan continues with …") names
@@ -203,10 +203,10 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
         .filter(([, label]) => named.includes(label))
         .map(([key]) => key)
         .filter((f) => RESTARTABLE_FAMILIES.includes(f));
-      if (fromNote.length) return { families: fromNote, caseId: current ? current.id : null, source: 'churn_note' };
+      if (fromNote.length) return { families: fromNote, caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'churn_note' };
     }
   }
-  return { families: [], caseId: current ? current.id : null, source: 'none' };
+  return { families: [], caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'none' };
 }
 
 // Families named by the annual-prepay terms covering `dateStr`, family off
@@ -314,8 +314,20 @@ async function ownedResidualFamilies(dbh, customerId) {
     // service (codex GH r6 P1). Both reads are already narrowed by their
     // status/flag predicates below and scoped to one customer.
     .select('s.*', 'sv.service_key', 'sv.name as service_name');
+  const { etDateString } = require('../../utils/datetime-et');
   const [nonTerminalRows, ongoingAnchorRows] = await Promise.all([
-    residualBase().whereNotIn('s.status', TERMINAL_HISTORY_STATUSES).where('s.is_recurring', true),
+    // Upcoming-or-rescheduled, mirroring the processor's own sweep bound
+    // (codex GH r14 P1): the processor deliberately leaves stale PAST
+    // pending/confirmed rows untouched (scheduled_date >= today), so a
+    // historical stray must not read as residual ownership forever and
+    // empty eligibleFamilies. 'rescheduled' phantom rows keep their
+    // original — often past — date until SmartRebooker acts, so an open
+    // rebook intent counts regardless of date, exactly as the sweep pulls
+    // it.
+    residualBase().whereNotIn('s.status', TERMINAL_HISTORY_STATUSES).where('s.is_recurring', true)
+      .where(function upcomingOrRebook() {
+        this.where('s.scheduled_date', '>=', etDateString()).orWhere('s.status', 'rescheduled');
+      }),
     residualBase().where('s.recurring_ongoing', true),
   ]);
   const residualKeys = [];
@@ -328,7 +340,6 @@ async function ownedResidualFamilies(dbh, customerId) {
   // was quotable again while their paid term still ran, double-billing the
   // coverage). Deliberately NOT try/caught: ownership fails closed, same
   // as the row reads above.
-  const { etDateString } = require('../../utils/datetime-et');
   for (const key of await prepayTermFamilyKeys(dbh, customerId, etDateString())) {
     if (!residualKeys.includes(key)) residualKeys.push(key);
   }
@@ -402,7 +413,7 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     };
     assertNotCommercial({ propertyType: fresh.property_type }, 'stored');
 
-    const { families, caseId, source } = await cancelledFamiliesFor(fresh.id, trx);
+    const { families, caseId, requestId, source } = await cancelledFamiliesFor(fresh.id, trx);
     if (!families.length) {
       throw new RestartUnavailableError('nothing_to_restart', 'We could not find the plan to restart from this account.');
     }
@@ -557,6 +568,12 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
         cancelledFamilies: families,
         familiesSource: source,
         cancellationCaseId: caseId,
+        // Attempt identity for the accept path (codex GH r14 P1): a
+        // reactivate-then-recancel of the SAME families passes every
+        // set/churn/residual check, so the accept must also prove the
+        // quote belongs to the CURRENT attempt, not a prior one whose
+        // frozen price skipped the required recompute.
+        cancellationRequestId: requestId,
         mintedAt: nowDate.toISOString(),
       },
     };
@@ -748,9 +765,10 @@ async function assertRestartAcceptEligible(trx, estimate) {
   };
   const changed = () => refuse('This account changed since this restart quote was created — please reopen "Restart my plan" for a current quote.');
   let quoted;
+  let quotedAttempt;
   let fresh;
   let ownedFamilies;
-  let latestFamilies;
+  let latestAttempt;
   try {
     // Fresh in-transaction read: the accept path locked this row FOR UPDATE
     // just above, so this sees the committed truth, not the handler's
@@ -758,6 +776,10 @@ async function assertRestartAcceptEligible(trx, estimate) {
     const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
     const planRestart = parseJson(row?.estimate_data, {})?.planRestart;
     quoted = Array.isArray(planRestart?.families) ? planRestart.families : null;
+    quotedAttempt = {
+      caseId: planRestart?.cancellationCaseId ?? null,
+      requestId: planRestart?.cancellationRequestId ?? null,
+    };
     // Serialize against reactivation/restoration BEFORE the eligibility
     // reads (codex pre-push P1): the estimate row lock fences neither the
     // customers row nor scheduled_services, so a concurrent staff
@@ -782,7 +804,7 @@ async function assertRestartAcceptEligible(trx, estimate) {
     // older token whose families still pass the churn + residual checks
     // (codex GH r8 P1) — the quote must describe the cancellation the
     // account is actually in.
-    latestFamilies = fresh ? (await cancelledFamiliesFor(fresh.id, trx)).families : [];
+    latestAttempt = fresh ? await cancelledFamiliesFor(fresh.id, trx) : { families: [], caseId: null, requestId: null };
   } catch (err) {
     logger.warn(`[plan-restart] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
     throw refuse('We could not re-verify this restart just now — please try again in a moment.');
@@ -802,10 +824,22 @@ async function assertRestartAcceptEligible(trx, estimate) {
   // re-cancellation, an older narrower quote would restart a subset at a
   // composition the current attempt never priced (codex pre-push P1 on GH
   // r8; same equality the mint's reuse check applies).
-  const latestEligible = (latestFamilies || []).filter((f) => !owned.has(pricingKeyFor(f)));
+  const latestEligible = (latestAttempt.families || []).filter((f) => !owned.has(pricingKeyFor(f)));
   const latestSet = new Set(latestEligible.map(pricingKeyFor));
   const quotedSet = new Set(quoted.map(pricingKeyFor));
   if (quotedSet.size !== latestSet.size || [...quotedSet].some((k) => !latestSet.has(k))) throw changed();
+  // Attempt IDENTITY, beyond set equality (codex GH r14 P1): a
+  // reactivate-then-recancel of the SAME families produces an equal set,
+  // letting a prior attempt's unexpired token accept its frozen price
+  // without the recompute the new attempt requires. The quote must carry
+  // the ids of the attempt the account is actually in — both the case id
+  // and the request id (the case insert is best-effort, so the request is
+  // the identity that always exists for a portal cancellation). Older
+  // tokens minted before these stamps fail closed here; the customer
+  // re-taps for a fresh, correctly-priced quote.
+  const sameId = (a, b) => String(a ?? '') === String(b ?? '');
+  if (!sameId(quotedAttempt?.caseId, latestAttempt.caseId)
+    || !sameId(quotedAttempt?.requestId, latestAttempt.requestId)) throw changed();
 }
 
 module.exports = {

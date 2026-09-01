@@ -351,7 +351,7 @@ describe('mintRestartEstimate', () => {
       id: 'est-old-price', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'old-price', expires_at: '2099-01-01', archived_at: null,
       // Minted before a pricing-config change: today's recompute says 138.
       monthly_total: 120, annual_total: 1440, onetime_total: 99,
-      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'], cancellationCaseId: 'case-1', cancellationRequestId: null } }),
     });
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
@@ -462,7 +462,7 @@ describe('mintRestartEstimate', () => {
       { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Monthly Mosquito Program', cancelled_at: '2026-08-23T12:05:00Z' },
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-2', source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-2', requestId: null, source: 'cancelled_rows' });
   });
 
   test('a plan whose only footprint was a completed series anchor recovers from the reason the recurrence-stop stamped', async () => {
@@ -476,7 +476,7 @@ describe('mintRestartEstimate', () => {
       { id: 'anchor-1', customer_id: 'cust-1', status: 'completed', is_recurring: true, recurring_ongoing: false, cancellation_reason: 'Portal cancellation request req-5', service_type: 'Quarterly Pest Control', cancelled_at: null },
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-3', source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-3', requestId: null, source: 'cancelled_rows' });
   });
 
   test('a live annual-prepay term is plan evidence even with zero schedule rows (codex GH r10 P1)', async () => {
@@ -492,7 +492,7 @@ describe('mintRestartEstimate', () => {
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
     }];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-5', source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-5', requestId: null, source: 'cancelled_rows' });
   });
 
   test('a cancel-then-refunded prepay term still names the cancelled plan (codex GH r11 P1)', async () => {
@@ -508,7 +508,7 @@ describe('mintRestartEstimate', () => {
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: null,
     }];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-8', source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-8', requestId: null, source: 'cancelled_rows' });
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
     expect(tables.estimates).toHaveLength(1);
@@ -528,7 +528,7 @@ describe('mintRestartEstimate', () => {
       plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: 'inv-void-1',
     }];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: [], caseId: 'case-9', source: 'none' });
+    expect(found).toEqual({ families: [], caseId: 'case-9', requestId: null, source: 'none' });
   });
 
   test('a cancelled term with a linked EVER-PAID invoice keeps its r11 evidence (non-legacy shape)', async () => {
@@ -545,7 +545,7 @@ describe('mintRestartEstimate', () => {
       paid_at: '2026-01-02T00:00:00Z',
     }];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-10', source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-10', requestId: null, source: 'cancelled_rows' });
   });
 
   test('a prepay term still covering TODAY is owned coverage — the mint refuses rather than re-sell it (codex pre-push P0)', async () => {
@@ -591,7 +591,7 @@ describe('mintRestartEstimate', () => {
       { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-old', service_type: 'Tree & Shrub Program', cancelled_at: '2026-07-01' },
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: null, source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: null, requestId: 'req-new', source: 'cancelled_rows' });
   });
 
   test('rows cancelled with the request-scoped portal reason are this plan\'s evidence too', async () => {
@@ -623,7 +623,7 @@ describe('mintRestartEstimate', () => {
       { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Lawn Care Program', cancelled_at: '2026-07-02' },
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
-    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-new', source: 'cancelled_rows' });
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-new', requestId: null, source: 'cancelled_rows' });
   });
 
   test('a request-linked attempt with no row evidence FAILS CLOSED — an earlier scoped note inside the window supplies nothing (codex GH r9 P1)', async () => {
@@ -635,13 +635,13 @@ describe('mintRestartEstimate', () => {
       customer_id: 'cust-1', interaction_type: 'note', subject: 'Cancelled Lawn Care — plan continues with Pest Control', created_at: '2026-08-23T11:30:00Z',
     }];
     expect(await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table)))
-      .toEqual({ families: [], caseId: 'case-4', source: 'none' });
+      .toEqual({ families: [], caseId: 'case-4', requestId: null, source: 'none' });
   });
 
   test('falls back to the scoped churn note, then reports nothing to restart', async () => {
     tables.cancellation_cases = [];
     tables.customer_interactions = [{ customer_id: 'cust-1', interaction_type: 'note', subject: 'Cancelled Lawn Care, Mosquito — plan continues with Pest Control', created_at: '2026-08-01' }];
-    expect(await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table))).toEqual({ families: ['lawn_care', 'mosquito'], caseId: null, source: 'churn_note' });
+    expect(await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table))).toEqual({ families: ['lawn_care', 'mosquito'], caseId: null, requestId: null, source: 'churn_note' });
 
     tables.customer_interactions = [];
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });
@@ -666,7 +666,7 @@ describe('mintRestartEstimate', () => {
     // A LIVE recurring pest row (staff restored it) drops pest from the
     // quote and prices lawn at the combined tier.
     tables.scheduled_services = [
-      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Quarterly Pest Control' },
     ];
     await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
     const [estimateData, recomputeDeps] = recompute.mock.calls[0];
@@ -675,7 +675,7 @@ describe('mintRestartEstimate', () => {
 
     // Both families live again = nothing to restart.
     tables.scheduled_services.push(
-      { id: 'live-2', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Lawn Care Program' },
+      { id: 'live-2', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Lawn Care Program' },
     );
     tables.estimates = [];
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });
@@ -695,12 +695,25 @@ describe('mintRestartEstimate', () => {
     expect(recomputeDeps.priorQualifyingServices).toEqual(['pest_control']);
   });
 
+  test('a STALE past pending row is NOT residual ownership — the processor left it untouched by date, so must this read (codex GH r14 P1)', async () => {
+    // The sweep only cancels pending/confirmed rows with scheduled_date >=
+    // today; a historical stray survives cancellation with its status and
+    // must not empty eligibleFamilies forever.
+    tables.scheduled_services = [
+      { id: 'stale-1', customer_id: 'cust-1', status: 'pending', is_recurring: true, scheduled_date: '2024-01-15', service_type: 'Quarterly Pest Control' },
+    ];
+    tables.estimates = [];
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const [estimateData] = recompute.mock.calls[recompute.mock.calls.length - 1];
+    expect(Object.keys(estimateData.engineInputs.services).sort()).toEqual(['lawn', 'pest']);
+  });
+
   test('a STORED commercial property never gets an online restart price — refused before reuse or mint (codex pre-push P0)', async () => {
     tables.customers[0].property_type = 'commercial';
     // Even a LIVE reusable restart estimate must not be handed back.
     tables.estimates.push({
       id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,
-      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'], cancellationCaseId: 'case-1', cancellationRequestId: null } }),
     });
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'pricing_unavailable' });
     expect(recompute).not.toHaveBeenCalled();
@@ -757,7 +770,7 @@ describe('mintRestartEstimate', () => {
   test('multi-premises also blocks REUSE of a live restart estimate (no URL of any kind)', async () => {
     tables.estimates.push({
       id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,
-      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'], cancellationCaseId: 'case-1', cancellationRequestId: null } }),
     });
     const d = deps({ customerHasOnlyPrimaryPremises: async () => false });
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d })).rejects.toMatchObject({ code: 'pricing_unavailable' });
@@ -826,7 +839,7 @@ describe('assertRestartAcceptEligible', () => {
   beforeEach(() => {
     tables.estimates = [{
       id: 'est-r1', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'tok-r1',
-      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
+      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'], cancellationCaseId: 'case-1', cancellationRequestId: null } }),
     }];
   });
 
@@ -836,7 +849,7 @@ describe('assertRestartAcceptEligible', () => {
 
   test('a quoted family that went LIVE after the mint refuses the accept (staff restored it)', async () => {
     tables.scheduled_services = [
-      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Quarterly Pest Control' },
     ];
     await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
@@ -851,9 +864,9 @@ describe('assertRestartAcceptEligible', () => {
   });
 
   test('a residual family OUTSIDE the quote does not block the accept', async () => {
-    tables.estimates[0].estimate_data = JSON.stringify({ planRestart: { families: ['lawn_care'] } });
+    tables.estimates[0].estimate_data = JSON.stringify({ planRestart: { families: ['lawn_care'], cancellationCaseId: 'case-1', cancellationRequestId: null } });
     tables.scheduled_services = [
-      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+      { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Quarterly Pest Control' },
     ];
     await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE)).resolves.toBeUndefined();
   });
@@ -874,6 +887,26 @@ describe('assertRestartAcceptEligible', () => {
     tables.cancellation_cases = [{
       id: 'case-2', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['lawn_care']), created_at: '2026-08-25',
     }];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+  });
+
+  test('a SAME-families re-cancellation refuses the prior attempt\'s token — attempt identity beyond set equality (codex GH r14 P1)', async () => {
+    // Reactivate-then-recancel of the same families: churn stamp, residual
+    // and set-equality checks all pass, but the frozen price belongs to
+    // the earlier attempt. The case id no longer matches → refuse.
+    tables.cancellation_cases = [{
+      id: 'case-2', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control', 'lawn_care']), created_at: '2026-08-30',
+    }];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
+
+    // A pre-stamp token (no attempt ids in planRestart) fails closed the
+    // same way once any identified attempt exists.
+    tables.cancellation_cases = [{
+      id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control', 'lawn_care']), created_at: '2026-08-22',
+    }];
+    tables.estimates[0].estimate_data = JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } });
     await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
       .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
   });
