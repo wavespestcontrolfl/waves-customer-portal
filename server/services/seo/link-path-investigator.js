@@ -103,7 +103,7 @@ const USD_MARKER_RE = /\bUSD\b|US\$/i;
 // The ISO set is broad and case-insensitive; codes that double as English
 // words (TRY, ALL) are matched case-SENSITIVELY so ordinary copy ("try",
 // "all plans") can never mark a quote foreign.
-const FOREIGN_SYMBOL_RE = /€|£|¥|₹|₩|C\$|CA\$|A\$|AU\$|NZ\$|R\$/;
+const FOREIGN_SYMBOL_RE = /€|£|¥|₹|₩|₽|₺|₱|₪|฿|₴|₦|₨|₫|₭|₮|₲|₡|₵|₾|₸|₼|֏|﷼|C\$|CA\$|A\$|AU\$|NZ\$|R\$/;
 // The complete active ISO-4217 set (minus USD; HRK kept for legacy copy).
 // Codes that are English words or names (ALL, BOB, COP, CUP, GEL, MAD, PEN,
 // RON, SOS, TOP, TRY) live in the case-SENSITIVE regex below instead, so
@@ -411,7 +411,13 @@ function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
     renewal_period: modelPath.renewal_period || null,
     currency,
     fee_scope: modelPath.payment_required ? modelPath.fee_scope : null,
-    merchant_binding: modelPath.merchant_binding ? JSON.stringify(modelPath.merchant_binding) : null,
+    // NEVER the model's word: a merchant binding is the verified recipient
+    // identity an OBSERVED checkout chain produces (plan §merchant binding;
+    // the runner's job, step 5). A static investigation cannot observe one,
+    // so a claimed binding lives in the evidence only — a hallucinated or
+    // injected merchant_account_id must not become the canonical payment
+    // input. upsertPath preserves any runner-written binding on the row.
+    merchant_binding: null,
     account_required: modelPath.account_required,
     email_verification: modelPath.email_verification,
     payment_required: modelPath.payment_required,
@@ -450,6 +456,9 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
     // on the agreement: the previously hashed text stands, so no erase and
     // no revision bump on its account.
     if (preserveTermsHash) row = { ...row, legal_terms_hash: existing.legal_terms_hash };
+    // The investigator never owns merchant_binding (an observed-checkout
+    // artifact): whatever a runner verified onto the row stands.
+    row = { ...row, merchant_binding: existing.merchant_binding };
     const bump = {
       revision_payment: changedInputs(existing, row, PAYMENT_INPUTS),
       revision_communication: changedInputs(existing, row, COMMUNICATION_INPUTS),
@@ -598,8 +607,14 @@ function verifyPriceEvidence(pages, p) {
       // offer's own price to the verified quote's digits.
       const page = findPage(pages, ev.page_url);
       const marker = String(ev.marker || '').replace(/[^A-Za-z$]/g, '');
-      const verifiedCents = [priceOk ? parsePriceTextCents(p.price_text) : null, renewalOk ? parsePriceTextCents(p.renewal_price_text) : null]
-        .filter((c) => c != null);
+      // …and the verified quote must sit on the SAME page as the offer: a
+      // matching amount in an unrelated /store offer must not validate a
+      // /join membership quote it never occurs with.
+      const samePage = (u) => !!u && !!ev.page_url && registry.normalizeSubmissionUrl(u) === registry.normalizeSubmissionUrl(ev.page_url);
+      const verifiedCents = [
+        priceOk && samePage(p.price_page_url) ? parsePriceTextCents(p.price_text) : null,
+        renewalOk && samePage(p.renewal_price_page_url) ? parsePriceTextCents(p.renewal_price_text) : null,
+      ].filter((c) => c != null);
       const offerMatches = page && verifiedCents.length && jsonLdOffers(page.html)
         .some((o) => o.priceCurrency === marker && o.priceCents != null && verifiedCents.includes(o.priceCents));
       if (offerMatches) evidence = ev;
@@ -950,6 +965,7 @@ async function investigatePaths(db, {
               pages_fetched: pages.map((pg) => pg.url), fetch_errors: fetchErrors.map((f) => ({ url: f.url, reason: f.reason })),
               ...(Object.keys(verified.verification).length ? { price_verification: verified.verification } : {}),
               ...(p.submissionUnverified ? { submission_verification: p.submissionUnverified } : {}),
+              ...(p.merchant_binding ? { merchant_binding_claim: p.merchant_binding, merchant_binding_verification: 'unverified_static_step3' } : {}),
               ...(Object.keys(p.offhost).length ? { offhost_urls: p.offhost } : {}),
             };
             // Supersession needs DETERMINISTIC predecessor evidence, never the

@@ -3253,25 +3253,52 @@ function BacklinkRegistryCard() {
                             {(detail.paths || []).length === 0 && (
                               <div style={{ fontSize: 12, color: D.muted }}>None yet — not investigated.</div>
                             )}
-                            {(detail.paths || []).map((p) => (
-                              <div key={p.id} style={{ fontSize: 12, color: D.text, padding: "4px 0", borderBottom: `1px solid ${D.border}` }}>
-                                <span style={{ fontFamily: MONO }}>{p.acquisition_type}</span>
-                                {p.submission_url ? ` · ${p.submission_url}` : ""}
-                                {` · conf ${p.confidence ?? "—"}`}
-                                {p.payment_required
-                                  ? ` · ${p.estimated_cost_cents != null ? `$${(p.estimated_cost_cents / 100).toFixed(2)}` : `price ${p.currency || "unknown"}`}${
-                                      // a distinct renewal charge renders separately — "$95.00/annual"
-                                      // would present the initial fee as the recurring amount
-                                      p.renewal_cost_cents != null
-                                        ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period ? `/${p.renewal_period}` : ""}`
-                                        : p.renewal_period ? `/${p.renewal_period}` : ""
-                                    }`
-                                  : " · free"}
-                                {p.superseded_by ? " · superseded" : ""}
-                                {p.baseline ? " · baseline import" : ""}
-                              </div>
-                            ))}
+                            {(detail.paths || []).map((p) => {
+                              let ev = null;
+                              try { ev = typeof p.investigation === "string" ? JSON.parse(p.investigation) : p.investigation; } catch { /* unparseable evidence stays hidden */ }
+                              return (
+                                <div key={p.id} style={{ fontSize: 12, color: D.text, padding: "4px 0", borderBottom: `1px solid ${D.border}` }}>
+                                  <span style={{ fontFamily: MONO }}>{p.acquisition_type}</span>
+                                  {p.submission_url ? ` · ${p.submission_url}` : ""}
+                                  {` · conf ${p.confidence ?? "—"}`}
+                                  {p.payment_required
+                                    ? ` · ${p.estimated_cost_cents != null ? `$${(p.estimated_cost_cents / 100).toFixed(2)}` : `price ${p.currency || "unknown"}`}${
+                                        // a distinct renewal charge renders separately — "$95.00/annual"
+                                        // would present the initial fee as the recurring amount
+                                        p.renewal_cost_cents != null
+                                          ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period ? `/${p.renewal_period}` : ""}`
+                                          : p.renewal_period ? `/${p.renewal_period}` : ""
+                                      }`
+                                    : " · free"}
+                                  {p.superseded_by ? " · superseded" : ""}
+                                  {p.baseline ? " · baseline import" : ""}
+                                  {ev?.reasons && (
+                                    <div style={{ color: D.muted, marginTop: 2 }}>{ev.reasons}</div>
+                                  )}
+                                  {(ev?.disproven_reason || ev?.submission_verification || ev?.terms_verification) && (
+                                    <div style={{ color: D.muted, marginTop: 2 }}>
+                                      {[ev.disproven_reason, ev.submission_verification && `submission: ${ev.submission_verification}`, ev.terms_verification && `terms: ${ev.terms_verification}`]
+                                        .filter(Boolean).join(" · ")}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
+                          {(detail.attempts || []).length > 0 && (
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
+                                Attempts
+                              </div>
+                              {detail.attempts.map((a) => (
+                                <div key={a.id} style={{ fontSize: 12, color: D.text, padding: "2px 0" }}>
+                                  {new Date(a.created_at).toLocaleDateString()} · {a.provider} · {a.action} → {a.outcome}
+                                  {a.cost_cents ? ` · $${(a.cost_cents / 100).toFixed(2)}` : ""}
+                                  {a.sandbox ? " · sandbox" : ""}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           <div style={{ fontSize: 12, color: D.muted }}>
                             Seen by: {(detail.touches || []).map((t) => t.source).filter((v, i, a) => a.indexOf(v) === i).join(", ") || "—"}
                             {(detail.placements || []).length > 0 && ` · ${detail.placements.length} placement${detail.placements.length === 1 ? "" : "s"} on the board`}

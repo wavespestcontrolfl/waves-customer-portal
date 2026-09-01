@@ -347,7 +347,20 @@ router.get('/registry/:id', async (req, res, next) => {
       db('seo_link_domain_sources').where({ domain_id: domain.id }).orderBy('seen_at', 'asc'),
       db('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'status', 'target_page', 'location_key', 'link_type', 'live_url'),
     ]);
-    res.json({ domain, paths, touches, placements });
+    // Attempt history (§11: the drilldown audits what previous attempts did).
+    // Attempts key on path/prospect, not domain — collect via both.
+    const pathIds = paths.map((p) => p.id);
+    const prospectIds = placements.map((pl) => pl.id);
+    const attempts = (pathIds.length || prospectIds.length)
+      ? await db('seo_link_attempts')
+        .where((b) => {
+          if (pathIds.length) b.orWhereIn('path_id', pathIds);
+          if (prospectIds.length) b.orWhereIn('prospect_id', prospectIds);
+        })
+        .orderBy('created_at', 'desc').limit(50)
+        .select('id', 'path_id', 'prospect_id', 'provider', 'action', 'outcome', 'cost_cents', 'sandbox', 'evidence_url', 'created_at')
+      : [];
+    res.json({ domain, paths, touches, placements, attempts });
   } catch (err) { next(err); }
 });
 
@@ -361,14 +374,21 @@ router.patch('/registry/:id', async (req, res, next) => {
     const { action } = req.body || {};
     const nextState = REGISTRY_ACTIONS[action];
     if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
-    const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state');
+    const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state', 'score_reasons');
     if (!domain) return res.status(404).json({ error: 'not found' });
     const now = new Date();
     const patch = { agent_state: nextState, updated_at: now };
     patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
     // An explicit Reopen is a fresh mandate: clear the failure backoff so the
-    // very next sweep picks the domain up instead of honoring a stale defer.
-    if (action === 'reopen') { patch.investigate_after = null; patch.investigate_failures = 0; }
+    // very next sweep picks the domain up instead of honoring a stale defer —
+    // and the probe-tail deferral marker with it, so the reopened
+    // investigation gets its own rotated tail pass before a terminal close.
+    if (action === 'reopen') {
+      patch.investigate_after = null;
+      patch.investigate_failures = 0;
+      const cleared = String(domain.score_reasons || '').replace(/\s*·?\s*downgraded: terminal verdict deferred: unfetched candidate URLs remain/, '').trim();
+      if (cleared !== String(domain.score_reasons || '').trim()) patch.score_reasons = cleared || null;
+    }
     // Guard is IN the update: a lane can move the row to a lane-owned
     // aggregate (ready_to_acquire = a placement holds stamped pending
     // authority; acquiring/acquired) between read and write, so the

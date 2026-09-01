@@ -3,7 +3,7 @@
  *  - POST /registry/jobs/investigate runs the investigator once, bounded,
  *    dryRun passed through (gated flows back verbatim from the service).
  *  - GET /registry attaches the best-path summary to each row (§11 table).
- *  - GET /registry/:id returns domain + paths + touches + placements.
+ *  - GET /registry/:id returns domain + paths + touches + placements + attempts.
  *  - PATCH /registry/:id: watch / reject / reopen only; lane-owned aggregate
  *    states (ready_to_acquire/acquiring/acquired) are refused; unknown action → 400.
  * Handlers are invoked directly off the router stack (no supertest at root).
@@ -123,14 +123,14 @@ describe('GET /registry/:id', () => {
     const r = await call(handler('get', '/registry/:id'), { params: { id: 'nope' } });
     expect(r.status).toBe(404);
   });
-  test('returns domain + paths + touches + placements', async () => {
+  test('returns domain + paths + touches + placements + attempts', async () => {
     mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'qualified' };
     mockState.paths = [{ id: 'p1' }];
     mockState.touches = [{ source: 'competitor_gap' }];
     mockState.placements = [{ id: 'pl1', status: 'prospect' }];
     const r = await call(handler('get', '/registry/:id'), { params: { id: 'd1' } });
     expect(r.body).toEqual({
-      domain: mockState.firstDomain, paths: mockState.paths, touches: mockState.touches, placements: mockState.placements,
+      domain: mockState.firstDomain, paths: mockState.paths, touches: mockState.touches, placements: mockState.placements, attempts: mockState.attempts || [],
     });
   });
 });
@@ -167,5 +167,14 @@ describe('PATCH /registry/:id', () => {
     expect(mockState.updates[2].patch.investigate_after).toBeNull();
     expect(mockState.updates[2].patch.investigate_failures).toBe(0);
     expect(mockState.updates[0].patch.investigate_after).toBeUndefined(); // watch/reject leave the backoff alone
+  });
+  test('reopen clears the probe-tail deferral marker — a fresh mandate gets its own tail pass (Codex PR r8 P2)', async () => {
+    mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'watching', score_reasons: 'DR 40 · downgraded: terminal verdict deferred: unfetched candidate URLs remain' };
+    await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
+    expect(mockState.updates[0].patch.score_reasons).toBe('DR 40');
+    // a reopen with no marker leaves score_reasons untouched
+    mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'watching', score_reasons: 'DR 40' };
+    await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
+    expect(mockState.updates[1].patch.score_reasons).toBeUndefined();
   });
 });

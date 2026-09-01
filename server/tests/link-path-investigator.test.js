@@ -906,6 +906,12 @@ describe('full run', () => {
     // ANY USD/foreign conflict fails closed, whichever side each marker is on (Codex PR r7 P2)
     expect(deriveCurrency({ price_text: 'USD 95', currency_evidence: { marker: 'CAD' } })).toBe('unknown');
     expect(deriveCurrency({ price_text: 'CAD 95', currency_evidence: { marker: 'USD' } })).toBe('unknown');
+    // the remaining circulating currency symbols (Codex PR r8 P2)
+    expect(deriveCurrency({ price_text: '\u20b195' })).toBe('foreign'); // ₱
+    expect(deriveCurrency({ price_text: '\u20bd 950' })).toBe('foreign'); // ₽
+    expect(deriveCurrency({ price_text: '\u0e3f95' })).toBe('foreign'); // ฿
+    expect(deriveCurrency({ price_text: '\u20aa95' })).toBe('foreign'); // ₪
+    expect(deriveCurrency({ price_text: '\u20ba95' })).toBe('foreign'); // ₺
   });
 
   test('an empty terms shell is never hashed; a hash-less legal path never outranks a valid alternative (Codex PR r2 P1)', async () => {
@@ -1434,6 +1440,41 @@ describe('full run', () => {
     const kept = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
     expect(Number(kept.revision_execution)).toBe(2); // a runner executes a different client-side flow
     expect(Number(kept.revision)).toBe(2);
+  });
+
+  test('a model-claimed merchant binding never persists — evidence only, and a runner-verified one survives (Codex PR r8 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const binding = { checkout_origin: 'https://example.com/checkout', processor: { host: 'checkout.stripe.com', merchant_account_id: 'acct_evil123' }, issuer_merchant_descriptor: null };
+    const claimed = modelPath({ merchant_binding: binding });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([claimed]) }) }));
+    const row = db._tables.seo_link_acquisition_paths[0];
+    expect(row.merchant_binding).toBeNull(); // static investigation observes no checkout
+    const ev = JSON.parse(row.investigation);
+    expect(ev.merchant_binding_claim).toEqual(binding);
+    expect(ev.merchant_binding_verification).toBe('unverified_static_step3');
+
+    // a runner-verified binding on the existing row survives re-investigation
+    row.merchant_binding = JSON.stringify({ merchant_account_id: 'acct_real', observed: true });
+    row.last_investigated_at = new Date('2026-05-01');
+    d.agent_state = 'qualified';
+    d.score_reasons = 'downgraded: terminal verdict deferred: unfetched candidate URLs remain';
+    await investigatePaths(db, runOpts(db, { domainIds: [d.id], llmDispatch: async () => ({ ok: true, json: verdictOf([claimed]) }) }));
+    const kept = db._tables.seo_link_acquisition_paths[0];
+    expect(JSON.parse(kept.merchant_binding).merchant_account_id).toBe('acct_real');
+  });
+
+  test('a JSON-LD offer on a DIFFERENT page never validates the quote (Codex PR r8 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const joinText = `Directory listing page with membership details. Join for $95 / year. ${'Copy. '.repeat(10)}`;
+    const storeText = `Store page with products. ${'Copy. '.repeat(10)}`;
+    const pages = [
+      { url: 'https://example.com/join', excerpt: joinText, text: joinText, html: `<html><body>${joinText}</body></html>` },
+      { url: 'https://example.com/store', excerpt: storeText, text: storeText, html: `<html><script type="application/ld+json">{"@type":"Offer","price":"95","priceCurrency":"USD"}</script><body>${storeText}</body></html>` },
+    ];
+    const v = verifyPriceEvidence(pages, modelPath({ price_text: '$95 / year', price_page_url: 'https://example.com/join', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/store' } }));
+    expect(v.currency_evidence).toBeNull(); // the quote and the offer never occur together
+    expect(v.verification.currency_evidence).toBe('jsonld_offer_not_bound_to_verified_quote');
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
