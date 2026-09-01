@@ -56,16 +56,38 @@ function knexInsertPatterns(token) {
     // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
     new RegExp(String.raw`${TABLE_SEL}\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
     // `.into` only AS PART OF an insert chain — `db.select('*').into(x)`
-    // reads, it doesn't create.
-    new RegExp(String.raw`${INSERT_CALL}(?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.into\(\s*${token}\s*\)`, 'g'),
+    // reads, it doesn't create. (Insert-FIRST forms, `insert(payload)
+    // .into(x)`, are walked by insertFirstMatches below.)
     new RegExp(String.raw`\.into\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
-    // Table selected AFTER the insert — `db.insert(row).table('leads')`,
-    // the insert-first analog of `.into`.
-    new RegExp(String.raw`${INSERT_CALL}(?:[^()]|\([^()]*\))*\)${CHAIN}\s*${TABLE_SEL}\s*\(\s*${token}\s*\)`, 'g'),
     new RegExp(String.raw`\binsert\s*\(\s*${token}\s*\)`, 'g'),
     new RegExp(String.raw`\bbatchInsert\s*\(\s*${token}`, 'g'),
     new RegExp(String.raw`${FROM_SEL}\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   ];
+}
+
+// Insert-FIRST forms — `db.insert(payload).into('leads')`, `.insert(payload)
+// .table('leads')`: the payload is walked to its BALANCED close paren on
+// the string-blanked view (any nesting depth — `rows.map(row =>
+// normalize(row))` is fine), then the tail after it is matched by
+// `tailRe` (anchored with ^; capture 1 = the table token/expression).
+// Reported spans start at the insert call, like the regex forms.
+function insertFirstMatches(code, tailRe) {
+  const bare = blankCommentsAndStrings(code);
+  const out = [];
+  const headRe = new RegExp(INSERT_CALL, 'g');
+  let h;
+  while ((h = headRe.exec(bare))) {
+    let depth = 1;
+    let k = headRe.lastIndex;
+    for (; k < bare.length && depth > 0; k += 1) {
+      if (bare[k] === '(') depth += 1;
+      else if (bare[k] === ')') depth -= 1;
+    }
+    if (depth !== 0) continue;
+    const t = tailRe.exec(code.slice(k));
+    if (t) out.push({ index: h.index, length: (k - h.index) + t[0].length, capture: t[1] });
+  }
+  return out;
 }
 
 // Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting, with
@@ -141,8 +163,18 @@ function inRawContext(code, idx) {
   let j = idx;
   while (j > 0 && (bare[j - 1] === ' ' || bare[j - 1] === '\n' || code[j - 1] === '+')) j -= 1;
   const decl = code.slice(Math.max(0, j - 200), j).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/);
-  if (decl) return new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(decl[1])}\b`).test(bare);
-  return false;
+  if (!decl) return false;
+  // The constant may reach raw through simple aliases (`const QUERY = SQL;
+  // db.raw(QUERY)`), followed transitively to a fixpoint.
+  const names = new Set([decl[1]]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [a, b] of simpleAssignPairs(bare)) {
+      if (names.has(b) && !names.has(a)) { names.add(a); grew = true; }
+    }
+  }
+  return [...names].some((n) => new RegExp(String.raw`${RAW_CALLEE}\s*${escapeRe(n)}\b`).test(bare));
 }
 
 // Function-shaped factories with BALANCED bodies of any nesting depth: find
@@ -226,11 +258,28 @@ function leadsTableTokens(src) {
 // (Declaration-before-use is how every table constant in this repo reads;
 // a hoisted `var` used before its declaration would fall to the literal
 // walk-back and count — erring toward flagging.)
+// A declaration is VISIBLE at the use site only if no brace block that
+// encloses the declaration closes before the use — `function audit() {
+// const TABLE = 'audit'; }` is out of scope for a later sibling function,
+// which sees the module-level constant. Braces are counted on the
+// string-blanked view. Among visible preceding declarations the nearest
+// (innermost) wins.
+function declVisibleAt(bare, declIdx, useIdx) {
+  let depth = 0;
+  for (let k = declIdx; k < useIdx; k += 1) {
+    if (bare[k] === '{') depth += 1;
+    else if (bare[k] === '}') { depth -= 1; if (depth < 0) return false; }
+  }
+  return true;
+}
 function nearestDeclBindsLeads(code, name, idx) {
+  const bare = blankCommentsAndStrings(code);
   const declRe = new RegExp(String.raw`\b(?:const|let|var)\s+${escapeRe(name)}\s*=\s*(['"\x60])([^'"\x60]*)\1`, 'g');
   let value = null;
   let d;
-  while ((d = declRe.exec(code)) && d.index < idx) value = d[2];
+  while ((d = declRe.exec(code)) && d.index < idx) {
+    if (declVisibleAt(bare, d.index, idx)) value = d[2];
+  }
   return value === null || value === 'leads';
 }
 
@@ -474,10 +523,11 @@ const DYNAMIC_INSERT_PATTERNS = [
   new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   new RegExp(String.raw`(?:${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   new RegExp(String.raw`\bbatchInsert\s*\(${DYN_EXPR},`, 'g'),
-  new RegExp(String.raw`${INSERT_CALL}(?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.into\(${DYN_EXPR}\)`, 'g'),
   new RegExp(String.raw`\.into\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
-  new RegExp(String.raw`${INSERT_CALL}(?:[^()]|\([^()]*\))*\)${CHAIN}\s*(?:${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}\)`, 'g'),
 ];
+// Table selected AFTER the insert (dynamic) — `insert(payload).into(table)`
+// / `.table(table)` / `.from(table)`, payload walked balanced.
+const DYN_INSERT_FIRST_TAIL = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(${DYN_EXPR}\)`);
 
 function scanSourceForDynamicTableInserts(src) {
   const lines = src.split('\n');
@@ -519,6 +569,7 @@ function scanSourceForDynamicTableInserts(src) {
     let m;
     while ((m = pattern.exec(code))) record(m.index, m[0].length, m[1]);
   }
+  for (const f of insertFirstMatches(code, DYN_INSERT_FIRST_TAIL)) record(f.index, f.length, f.capture);
   // A dynamic-table builder handed to an in-file insertion helper
   // (`writeRow(db(table), row)`) — the dynamic mirror of the helper pass.
   for (const helper of insertingHelperNames(code)) {
@@ -538,9 +589,10 @@ function scanSourceForDynamicTableInserts(src) {
     if (!decl[2].trim() || isResolved(decl[2])) continue;
     dynBuilders.set(decl[1], decl[2]);
   }
-  // Conditional initializers holding a dynamic builder anywhere.
+  // Conditional OR logical initializers holding a dynamic builder anywhere
+  // — `cond ? db(a) : db(b)`, `enabled && db(table)`, `cached || db(table)`.
   const dynCondDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?]{0,120}\?[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?&|]{0,120}(?:\?|&&|\|\|)[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   let cnd;
@@ -675,10 +727,20 @@ function scanSourceForLeadInserts(src) {
   const endsByLine = new Map();
   const patterns = [RAW_SQL_INSERT_RE];
   const constOf = new Map();
+  const add = (index, len) => {
+    const line = code.slice(0, index).split('\n').length;
+    if (!endsByLine.has(line)) endsByLine.set(line, new Set());
+    endsByLine.get(line).add(index + len);
+  };
   for (const { token, name } of leadsTableTokens(code)) {
     const group = [...knexInsertPatterns(token), ...aliasInsertPatterns(code, token)];
     if (name) for (const p of group) constOf.set(p, name);
     patterns.push(...group);
+    const tail = new RegExp(String.raw`^${CHAIN}\s*(?:\.into|${TABLE_SEL}|${FROM_SEL})\s*\(\s*(${token})\s*\)`);
+    for (const f of insertFirstMatches(code, tail)) {
+      if (name && !nearestDeclBindsLeads(code, name, f.index)) continue;
+      add(f.index, f.length);
+    }
   }
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
@@ -686,9 +748,7 @@ function scanSourceForLeadInserts(src) {
     while ((m = pattern.exec(code))) {
       if (pattern === RAW_SQL_INSERT_RE && !inRawContext(code, m.index)) continue;
       if (constOf.has(pattern) && !nearestDeclBindsLeads(code, constOf.get(pattern), m.index)) continue;
-      const line = code.slice(0, m.index).split('\n').length;
-      if (!endsByLine.has(line)) endsByLine.set(line, new Set());
-      endsByLine.get(line).add(m.index + m[0].length);
+      add(m.index, m[0].length);
     }
   }
   return [...endsByLine.entries()]
@@ -774,6 +834,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['bracket access to a stored property builder', "const queries = { lead: db('leads') };\nawait queries['lead'].insert(row);"],
     ['builder passed into an in-file insertion helper', "function writeRow(builder, row) { return builder.insert(row); }\nawait writeRow(db('leads'), row);"],
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
+    ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
+    ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['SQL constant reaching raw through an alias', "const SQL = 'INSERT INTO leads (a) VALUES (?)';\nconst QUERY = SQL;\nawait db.raw(QUERY, [a]);"],
     ['bracket raw callee', "await db['raw']('INSERT INTO leads (a) VALUES (?)', [a]);"],
     ['stored CTE constant passed to raw', "const SQL = 'WITH src AS (SELECT 1 AS a) INSERT INTO leads (a) SELECT a FROM src';\nawait db.raw(SQL);"],
     ['factory body containing a brace inside a string', "function q() { const marker = '}'; return db('leads'); }\nawait q().insert(row);"],
@@ -811,6 +874,13 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
   test('a shadowed table constant binds per nearest declaration, not file-wide', () => {
     const src = "function a() {\n  const TABLE = 'leads';\n  return db(TABLE).insert(lead);\n}\nfunction b() {\n  const TABLE = 'audit';\n  return db(TABLE).insert(entry);\n}";
     expect(found(src)).toEqual(['return db(TABLE).insert(lead);']);
+  });
+
+  test('a sibling-scope declaration does not override the module constant a later use sees', () => {
+    const src = "const TABLE = 'leads';\nfunction audit() {\n  const TABLE = 'audit';\n  return TABLE;\n}\nfunction create() {\n  return db(TABLE).insert(row);\n}";
+    expect(found(src)).toEqual(['return db(TABLE).insert(row);']);
+    const inner = "const TABLE = 'audit';\nfunction create() {\n  const TABLE = 'leads';\n  if (x) {\n    return db(TABLE).insert(row);\n  }\n  return null;\n}";
+    expect(found(inner)).toEqual(['return db(TABLE).insert(row);']);
   });
 
   test('two inserts sharing one line surface as TWO sites on that line', () => {
@@ -860,6 +930,12 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     const localAlias = scanSourceForDynamicTableInserts('function q() { const base = db(table); return base; }\nawait q().insert(row);');
     expect(localAlias).toHaveLength(1);
     expect(localAlias[0].expr).toBe('table');
+    const logical = scanSourceForDynamicTableInserts('const target = enabled && db(table);\nif (target) await target.insert(row);');
+    expect(logical).toHaveLength(1);
+    expect(logical[0].expr).toBe('table');
+    const deepPayload = scanSourceForDynamicTableInserts('await db.insert(rows.map(row => normalize(row, opts.get(k)))).into(table);');
+    expect(deepPayload).toHaveLength(1);
+    expect(deepPayload[0].expr).toBe('table');
   });
 
   test('dynamic-table scan: computed expressions and shadowable lowercase constants stay dynamic', () => {
