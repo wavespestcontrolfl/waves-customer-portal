@@ -5290,11 +5290,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formObservations = normalizeCompletionTextArray(
       Array.isArray(structuredObservations) ? structuredObservations : [],
     );
+    const resolvedSpecialtyServiceKey = specialtyServiceKey({
+      serviceKey: completionProfile?.serviceKey,
+      serviceType: svc.service_type,
+    });
     const allowedStructuredObservations = new Set(
-      observationsForSpecialtyService(specialtyServiceKey({
-        serviceKey: completionProfile?.serviceKey,
-        serviceType: svc.service_type,
-      })),
+      observationsForSpecialtyService(resolvedSpecialtyServiceKey),
     );
     const invalidStructuredObservation = formObservations.find(
       (value) => !allowedStructuredObservations.has(value),
@@ -7511,8 +7512,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // Pressure recurring-issue component matches completed records'
         // service_findings by service_line) and surface on customer-facing
         // findings reads — neither is wanted for an advisory walkthrough.
-        if (useServiceReportV1 && serviceFindingsAvailable && submittedObservations.length && !isInternalOnlyCompletion) {
-          const findingRows = submittedObservations.map((title) => ({
+        // Specialty dropdown findings are rendered from the provenance-kept
+        // structured snapshot below. Do not duplicate them as bare findings:
+        // the PDF's raw-note guard intentionally removes bare-title rows.
+        const customerFindingObservations = resolvedSpecialtyServiceKey
+          ? []
+          : submittedObservations;
+        if (useServiceReportV1 && serviceFindingsAvailable && customerFindingObservations.length && !isInternalOnlyCompletion) {
+          const findingRows = customerFindingObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
             severity: completionFindingSeverity(title),
