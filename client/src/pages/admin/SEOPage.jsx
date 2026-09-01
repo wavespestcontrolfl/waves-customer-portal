@@ -2942,6 +2942,7 @@ function BacklinkRegistryCard() {
   const [loading, setLoading] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [detail, setDetail] = useState(null);
+  const expandedRef = useRef(null);
   const [busyId, setBusyId] = useState(null);
   const [runBusy, setRunBusy] = useState(false);
   const [runResult, setRunResult] = useState(null);
@@ -2976,16 +2977,22 @@ function BacklinkRegistryCard() {
   const toggleExpand = async (id) => {
     if (expandedId === id) {
       setExpandedId(null);
+      expandedRef.current = null;
       return;
     }
     setExpandedId(id);
+    expandedRef.current = id;
     setDetail(null);
     // detail carries the row id it answers — a slow response for a row the
-    // operator has since left never renders under the newly expanded one
+    // operator has since left never renders under the newly expanded one,
+    // and (via the ref check) never OVERWRITES the loaded detail of the row
+    // they moved to — that would strand the expanded row on "Loading…"
     try {
       const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
+      if (expandedRef.current !== id) return;
       setDetail({ forId: id, ...r });
     } catch (e) {
+      if (expandedRef.current !== id) return;
       setDetail({ forId: id, error: e?.message || "Detail load failed" });
     }
   };

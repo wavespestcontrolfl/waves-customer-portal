@@ -105,7 +105,7 @@ const FOREIGN_SYMBOL_RE = /€|£|¥|₹|₩|C\$|CA\$|A\$|AU\$|NZ\$|R\$/;
 // RON, SOS, TOP, TRY) live in the case-SENSITIVE regex below instead, so
 // ordinary lowercase copy ("try", "all plans", "pen") can never mark a
 // quote foreign.
-const FOREIGN_ISO_RE = /\b(AED|AFN|AMD|ANG|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BGN|BHD|BIF|BMD|BND|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHF|CLP|CNY|CRC|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HRK|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PGK|PHP|PKR|PLN|PYG|QAR|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TTD|TWD|TZS|UAH|UGX|UYU|UZS|VES|VND|VUV|WST|XAF|XCD|XOF|XPF|YER|ZAR|ZMW|ZWG)\b/i;
+const FOREIGN_ISO_RE = /\b(AED|AFN|AMD|ANG|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BGN|BHD|BIF|BMD|BND|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHF|CLP|CNY|CRC|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HRK|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PGK|PHP|PKR|PLN|PYG|QAR|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TTD|TWD|TZS|UAH|UGX|UYU|UZS|VES|VND|VUV|WST|XAF|XCD|XCG|XOF|XPF|YER|ZAR|ZMW|ZWG)\b/i;
 const FOREIGN_AMBIGUOUS_ISO_RE = /\b(ALL|BOB|COP|CUP|GEL|MAD|PEN|RON|SOS|TOP|TRY)\b/; // case-sensitive on purpose — English words in lowercase copy
 const isForeignMarker = (s) => FOREIGN_SYMBOL_RE.test(s) || FOREIGN_ISO_RE.test(s) || FOREIGN_AMBIGUOUS_ISO_RE.test(s);
 
@@ -527,6 +527,28 @@ const markerInText = (text, marker) => {
   return !!esc && new RegExp(`(^|[^A-Za-z0-9])${esc}($|[^A-Za-z0-9])`).test(text);
 };
 
+/** Every {priceCurrency, priceCents} pair in a page's ld+json blocks. */
+function jsonLdOffers(html) {
+  const out = [];
+  const re = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(String(html || ''))) !== null) {
+    let data;
+    try { data = JSON.parse(m[1]); } catch { continue; }
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) { node.forEach(walk); return; }
+      if (node.priceCurrency != null) {
+        const n = Number(node.price);
+        out.push({ priceCurrency: String(node.priceCurrency), priceCents: Number.isFinite(n) ? Math.round(n * 100) : null });
+      }
+      Object.values(node).forEach(walk);
+    };
+    walk(data);
+  }
+  return out;
+}
+
 /**
  * verifyPriceEvidence(pages, modelPath) → { price_text, renewal_price_text,
  * currency_evidence, verification } — verified fields only; failures nulled.
@@ -550,10 +572,20 @@ function verifyPriceEvidence(pages, p) {
       if (markerInText(verifiedQuotes, ev.marker)) evidence = ev;
       else verification.currency_evidence = 'marker_not_in_verified_quote';
     } else if (ev.kind === 'jsonld_price_currency') {
+      // The currency must come from the SAME structured offer as a VERIFIED
+      // quoted amount: an unrelated USD offer elsewhere in the page must not
+      // upgrade a bare-dollar quote in another currency. The model never
+      // sees script bodies (canonicalize strips them), so it cannot attest
+      // the association — it is bound deterministically here by matching the
+      // offer's own price to the verified quote's digits.
       const page = findPage(pages, ev.page_url);
-      const re = new RegExp(`"priceCurrency"\\s*:\\s*"${ev.marker.replace(/[^A-Za-z$]/g, '')}"`);
-      if (page && re.test(page.html)) evidence = ev;
-      else verification.currency_evidence = 'jsonld_not_on_fetched_page';
+      const marker = String(ev.marker || '').replace(/[^A-Za-z$]/g, '');
+      const verifiedCents = [priceOk ? parsePriceTextCents(p.price_text) : null, renewalOk ? parsePriceTextCents(p.renewal_price_text) : null]
+        .filter((c) => c != null);
+      const offerMatches = page && verifiedCents.length && jsonLdOffers(page.html)
+        .some((o) => o.priceCurrency === marker && o.priceCents != null && verifiedCents.includes(o.priceCents));
+      if (offerMatches) evidence = ev;
+      else verification.currency_evidence = page ? 'jsonld_offer_not_bound_to_verified_quote' : 'jsonld_not_on_fetched_page';
     } else {
       verification.currency_evidence = 'processor_currency_unverifiable_static';
     }
@@ -706,11 +738,13 @@ async function investigatePaths(db, {
         }
 
         // An evidence-less pass proves nothing: when every candidate fetch
-        // failed (transient DNS, timeouts, blocks), a verdict would close or
-        // reshape the domain on its NAME alone — treat it as a failed
-        // investigation (backoff applies) and spend no model call.
-        if (!pages.length) {
-          out.failed.push({ id: domain.id, domain: host, reason: 'no_page_evidence' });
+        // failed (transient DNS, timeouts, blocks) — or every page that DID
+        // load is a client-rendered shell whose canonical text is empty (the
+        // model would receive no substantive content and could still return
+        // a terminal verdict on the domain's NAME alone) — treat it as a
+        // failed investigation (backoff applies) and spend no model call.
+        if (!pages.some((pg) => pg.text.length >= MIN_COVERAGE_TEXT_CHARS)) {
+          out.failed.push({ id: domain.id, domain: host, reason: pages.length ? 'no_substantive_page_evidence' : 'no_page_evidence' });
           await deferFailedDomain(db, domain, now, { claim: claimState });
           continue;
         }
@@ -923,6 +957,20 @@ async function investigatePaths(db, {
               row.last_investigated_at = null;
               p.unstamped = true;
             }
+            // Content coverage gates STAMPING and REPLACEMENT: a path whose
+            // page the model never actually read (outside the fetch budget,
+            // or existence-probed only) carries no new observation. An
+            // EXISTING row echoed without coverage is skipped entirely — the
+            // echo must not overwrite covered fields or hide the path from
+            // the due-first rotation; a NEW uncovered path is written but
+            // unstamped, so the next pass reads its page before it settles.
+            const contentCovered = !p.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(p.submission_url));
+            if (!contentCovered) {
+              const echoKey = registry.pathKey(p.acquisition_type, p.submission_url);
+              if (!replaces && existingPaths.some((e) => e.path_key === echoKey)) continue;
+              row.last_investigated_at = null;
+              p.unstamped = true;
+            }
             if (p.submissionUnverified) {
               row.confidence = 0; // exists only as a claim until a pass observes the URL
               // A TRANSIENT verification failure (probe error/status, budget
@@ -1021,7 +1069,14 @@ async function investigatePaths(db, {
             if (verdict.verdict === 'qualified' && !best) { effectiveVerdict = 'watching'; downgradeNote = 'qualified verdict carried no executable path'; }
             if (verdict.verdict === 'not_reproducible' && best) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered active path remains'; }
             patch.agent_state = effectiveVerdict === 'qualified' ? 'qualified' : effectiveVerdict === 'watching' ? 'watching' : 'not_reproducible';
-            patch.watch_recheck_at = effectiveVerdict === 'watching' ? new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000) : null;
+            // A downgrade caused by TRANSIENT verification (an unstamped
+            // path — failed probe, inconclusive terms, exhausted budget)
+            // rechecks on the failure-backoff horizon, not the 30-day watch
+            // cadence: the advertised rotated retry must actually be near.
+            const transientDowngrade = downgradeNote && unstampedIds.size > 0;
+            patch.watch_recheck_at = effectiveVerdict === 'watching'
+              ? new Date(now.getTime() + (transientDowngrade ? INVESTIGATE_BACKOFF_BASE_MS : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))
+              : null;
             if (downgradeNote) patch.score_reasons = `${patch.score_reasons} · downgraded: ${downgradeNote}`;
           }
           await trx('seo_link_domains').where({ id: domain.id }).update(patch);

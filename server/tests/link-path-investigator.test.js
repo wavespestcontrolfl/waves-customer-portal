@@ -544,7 +544,7 @@ describe('full run', () => {
     const db = makeDb({ seo_link_domains: [d] });
     await investigatePaths(db, runOpts(db));
     const repriced = modelPath({ price_text: 'USD 120 / year', renewal_price_text: 'USD 120', quotes: ['USD 120 / year'] });
-    const fetch120 = async (url) => ({ status: 200, finalUrl: url, contentType: 'text/html', html: `<html><body>Join for USD 120 / year — ${url}</body></html>`, blocked: false, truncated: false });
+    const fetch120 = async (url) => ({ status: 200, finalUrl: url, contentType: 'text/html', html: `<html><body>Directory listing page with membership details and vendor information. Join for USD 120 / year — ${url}. Applications are reviewed within five business days.</body></html>`, blocked: false, truncated: false });
     await investigatePaths(db, runOpts(db, { domainIds: [d.id], fetchPage: fetch120, llmDispatch: async () => ({ ok: true, json: verdictOf([repriced]) }) }));
     const p = db._tables.seo_link_acquisition_paths[0];
     expect(p.estimated_cost_cents).toBe(12000);
@@ -659,7 +659,7 @@ describe('full run', () => {
   test('jsonld currency evidence verifies against the RAW html of the cited fetched page', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });
-    const jsonldFetch = async (url) => ({ status: 200, finalUrl: url, contentType: 'text/html', html: `<html><script type="application/ld+json">{"@type":"Offer","priceCurrency":"USD"}</script><body>Join for $95 / year — ${url}</body></html>`, blocked: false, truncated: false });
+    const jsonldFetch = async (url) => ({ status: 200, finalUrl: url, contentType: 'text/html', html: `<html><script type="application/ld+json">{"@type":"Offer","price":"95","priceCurrency":"USD"}</script><body>Directory listing page with membership details and vendor information. Join for $95 / year — ${url}. Applications are reviewed within five business days.</body></html>`, blocked: false, truncated: false });
     const path = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } });
     await investigatePaths(db, runOpts(db, { fetchPage: jsonldFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([path]) }) }));
     const p = db._tables.seo_link_acquisition_paths[0];
@@ -899,6 +899,7 @@ describe('full run', () => {
     expect(deriveCurrency({ price_text: 'a pen and pad for $9' })).toBe('unknown');
     expect(deriveCurrency({ price_text: 'cup of coffee $5' })).toBe('unknown');
     expect(deriveCurrency({ price_text: 'CUP 95' })).toBe('foreign');
+    expect(deriveCurrency({ price_text: 'XCG 95' })).toBe('foreign'); // 2025 Caribbean guilder (Codex PR r6 P2)
   });
 
   test('an empty terms shell is never hashed; a hash-less legal path never outranks a valid alternative (Codex PR r2 P1)', async () => {
@@ -1261,6 +1262,66 @@ describe('full run', () => {
     await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([legal]) }) }));
     const p = db._tables.seo_link_acquisition_paths[0];
     expect(p.legal_terms_hash).toBeNull();
+  });
+
+  test('a run whose every page is a script shell spends no model call and defers (Codex PR r6 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const shellFetch = async (url) => ({ status: 200, finalUrl: url, contentType: 'text/html', html: '<html><script src="app.js"></script><body></body></html>', blocked: false, truncated: false });
+    const llm = jest.fn(async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }));
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: shellFetch, llmDispatch: llm }));
+    expect(llm).not.toHaveBeenCalled(); // no substantive content — a verdict would judge the NAME
+    expect(r.failed).toEqual([expect.objectContaining({ reason: 'no_substantive_page_evidence' })]);
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('investigating'); // claimed, never CLOSED on a shell-only pass
+    expect(db._tables.seo_link_domains[0].investigate_after).toBeTruthy(); // backoff, not an hourly re-spend
+  });
+
+  test('a transient-verification watching downgrade rechecks on the backoff horizon, not 30 days (Codex PR r6 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    // the only path's submission URL fails its existence probe → unstamped,
+    // confidence 0, no best path → qualified downgrades to watching
+    const claimed = modelPath({ submission_url: 'https://example.com/hidden-join', price_page_url: 'https://example.com/hidden-join', renewal_price_page_url: 'https://example.com/hidden-join' });
+    const fetcher = async (url) => (url.includes('/hidden-join')
+      ? { status: 404, finalUrl: url, html: null, blocked: false }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([claimed]) }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    const horizon = new Date(dom.watch_recheck_at).getTime() - NOW.getTime();
+    expect(horizon).toBeLessThanOrEqual(investigator._internals.INVESTIGATE_BACKOFF_BASE_MS); // near-term retry
+  });
+
+  test('an unrelated JSON-LD USD offer never upgrades a bare-dollar quote (Codex PR r6 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const text = `Directory listing page with membership details. Join for $95 / year. ${'More copy about categories and vendors. '.repeat(3)}`;
+    const html = `<html><script type="application/ld+json">{"@type":"Offer","price":"500","priceCurrency":"USD"}</script><body>${text}</body></html>`;
+    const page = { url: 'https://example.com/join', excerpt: text, text, html };
+    const v = verifyPriceEvidence([page], modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } }));
+    expect(v.currency_evidence).toBeNull(); // the offer's own price must match the verified quote
+    expect(v.verification.currency_evidence).toBe('jsonld_offer_not_bound_to_verified_quote');
+  });
+
+  test('an existing path echoed WITHOUT content coverage is neither overwritten nor stamped (Codex PR r6 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const existing = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/unreadable-join',
+      path_key: 'paid_listing:https://example.com/unreadable-join', superseded_by: null, baseline: false, confidence: 0.9,
+      estimated_cost_cents: 12000, last_investigated_at: new Date('2026-08-15'), investigation: JSON.stringify({ reasons: 'covered last pass' }),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [existing] });
+    // its page times out this pass — the model still echoes the path from
+    // the prompt's identity list, with drifted fields
+    const echoed = modelPath({ submission_url: 'https://example.com/unreadable-join', confidence: 0.2, price_text: 'USD 5 / year', quotes: ['USD 5 / year'] });
+    const fetcher = async (url) => (url.includes('/unreadable-join')
+      ? { status: null, finalUrl: null, html: null, blocked: false, error: 'timeout' }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
+    const kept = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
+    expect(Number(kept.confidence)).toBe(0.9); // no observation, no replacement
+    expect(Number(kept.estimated_cost_cents)).toBe(12000);
+    expect(kept.last_investigated_at).toEqual(new Date('2026-08-15')); // stays due for rotation
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
