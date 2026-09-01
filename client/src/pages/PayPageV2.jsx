@@ -2869,9 +2869,10 @@ export default function PayPageV2() {
                 || depositCreditTotal > 0
                 || Number(invoice.creditApplied) > 0;
               const combinedPreviewPossible = !!(stripeSetup?.combined || (!stripeSetup && data.previousBalance?.invoices?.length));
-              // An invoice with no visible line items would otherwise show
-              // NO figure anywhere before checkout — keep Total due then.
-              const needsTotalFallback = visibleLineItems.length === 0;
+              // Only a SINGLE line item states the total on its own; zero
+              // items shows no figure at all and multiple items show only
+              // per-item prices — both keep Total due (Codex P2, round 5).
+              const needsTotalFallback = visibleLineItems.length !== 1;
               if (!hasAdjustments && !combinedPreviewPossible && !needsTotalFallback) return null;
               return (
             <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
