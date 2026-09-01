@@ -1140,7 +1140,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             setSelectedMethod(nextMethod);
             setAwaitingConfirm(false);
             setQuoteData(null);
-            syncAmountForMethod(nextMethod);
+            // Shared switch path: withdraws unlocked consent before the
+            // sync (see switchMethodAndSyncRef).
+            switchMethodAndSyncRef.current(nextMethod);
           }
         });
 
@@ -1190,6 +1192,21 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     return url.toString();
   };
 
+  // Consent to one authorization is not consent to the other (card vs
+  // NACHA/Reg E) — EVERY method-switch path withdraws an unlocked opt-in
+  // SYNCHRONOUSLY and syncs Stripe with the withdrawn value, so the PI is
+  // never updated with the stale saveCard and a wallet confirm can't ride
+  // a flag the customer no longer sees checked (Codex P1 on #3686, rounds
+  // 6–7: the tile buttons AND Stripe's own Payment Element tabs). Held in
+  // a ref so the Element's mount-time change handler always calls the
+  // latest copy (same stale-closure hazard as onSuccessRef above).
+  const switchMethodAndSyncRef = useRef(null);
+  switchMethodAndSyncRef.current = (nextMethod) => {
+    const nextSaveCard = saveCardLocked ? !!saveCardRef.current : false;
+    if (!saveCardLocked && saveCardRef.current) onSaveCardChange?.(false);
+    syncAmountForMethod(nextMethod, nextSaveCard);
+  };
+
   const selectPaymentMethod = (methodCategory) => {
     if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
     // Clear any pending card quote when switching methods
@@ -1197,14 +1214,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     setQuoteData(null);
     selectedMethodRef.current = methodCategory;
     setSelectedMethod(methodCategory);
-    // Consent to one authorization is not consent to the other (card vs
-    // NACHA/Reg E) — withdraw an unlocked opt-in SYNCHRONOUSLY, in the same
-    // handler that syncs Stripe, so the PI is never updated with the stale
-    // saveCard and a wallet confirm can't ride a flag the customer no
-    // longer sees checked (Codex P1 on #3686, round 6).
-    const nextSaveCard = saveCardLocked ? !!saveCard : false;
-    if (!saveCardLocked && saveCard) onSaveCardChange?.(false);
-    syncAmountForMethod(methodCategory, nextSaveCard);
+    switchMethodAndSyncRef.current(methodCategory);
   };
 
   // Two-step surcharge disclosure: createPaymentMethod → quote → confirm → finalize.
