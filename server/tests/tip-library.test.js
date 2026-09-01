@@ -92,11 +92,22 @@ describe('seasonForDate', () => {
 });
 
 describe('registryLineFor', () => {
-  test('maps known, aliased, and unknown lines', () => {
+  test('exact registry lines pass through', () => {
     expect(registryLineFor('lawn')).toBe('lawn');
     expect(registryLineFor('Tree_Shrub')).toBe('tree_shrub');
+  });
+
+  test('service keys and display names go through the canonical detector; palm is the tree & shrub line', () => {
+    expect(registryLineFor('wdo_inspection')).toBe('termite');
+    expect(registryLineFor('WDO Inspection')).toBe('termite');
+    expect(registryLineFor('Palm Injection')).toBe('tree_shrub');
     expect(registryLineFor('palm')).toBe('tree_shrub');
-    expect(registryLineFor('wdo')).toBe('termite');
+    expect(registryLineFor('Mosquito Treatment')).toBe('mosquito');
+    expect(registryLineFor('Rodent Exclusion')).toBe('rodent');
+    expect(registryLineFor('Quarterly Pest Control')).toBe('pest');
+  });
+
+  test('nothing recognisable falls back to pest', () => {
     expect(registryLineFor('bed_bug')).toBe('pest');
     expect(registryLineFor(undefined)).toBe('pest');
   });
@@ -168,6 +179,13 @@ describe('resolveTipIds', () => {
     const [linked, plain] = resolveTipIds(['lawn_irrigation_portal', 'lawn_sharp_blade']);
     expect(linked.link).toEqual({ label: 'My Property', path: '/portal?tab=property' });
     expect(plain.link).toBeUndefined();
+  });
+
+  test('the link is a snapshot — editing a resolved payload never edits the registry', () => {
+    const [first] = resolveTipIds(['lawn_irrigation_portal']);
+    first.link.path = '/evil';
+    expect(resolveTipIds(['lawn_irrigation_portal'])[0].link.path).toBe('/portal?tab=property');
+    expect(TIPS.find((t) => t.id === 'lawn_irrigation_portal').link.path).toBe('/portal?tab=property');
   });
 
   test('tolerates non-array input', () => {

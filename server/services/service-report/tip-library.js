@@ -24,6 +24,7 @@
  */
 
 const { etParts } = require('../../utils/datetime-et');
+const { detectServiceLine } = require('./service-line-configs');
 
 const SERVICE_LINES = Object.freeze(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
 const SEASONS = Object.freeze(['wet', 'dry', 'all']);
@@ -301,14 +302,17 @@ const TIPS = Object.freeze([
 
 const TIPS_BY_ID = new Map(TIPS.map((tip) => [tip.id, tip]));
 
-// Specialty and companion lines resolve to the closest registry line so a
-// WDO or bed-bug visit still gets a sensible lead group. Unknown → pest.
-const LINE_ALIASES = Object.freeze({ palm: 'tree_shrub', wdo: 'termite' });
-
+// An exact registry line passes through; anything else — a service key
+// ('wdo_inspection'), a display name ('Palm Injection'), a companion
+// label — goes through the canonical detector (service-line-configs) so
+// the picker leads with the right groups. Its `palm` answer is the tree &
+// shrub registry line; the detector's own fallback is pest.
 function registryLineFor(serviceLine) {
   const line = String(serviceLine || '').trim().toLowerCase();
-  const aliased = LINE_ALIASES[line] || line;
-  return SERVICE_LINES.includes(aliased) ? aliased : 'pest';
+  if (SERVICE_LINES.includes(line)) return line;
+  const detected = detectServiceLine(serviceLine);
+  if (detected === 'palm') return 'tree_shrub';
+  return SERVICE_LINES.includes(detected) ? detected : 'pest';
 }
 
 /**
@@ -345,7 +349,9 @@ function resolveTipIds(ids) {
     const tip = TIPS_BY_ID.get(id);
     if (!tip || seen.has(id)) continue;
     seen.add(id);
-    resolved.push({ id, copy: tip.copy, source: 'library', ...(tip.link ? { link: tip.link } : {}) });
+    // The link is a snapshot, never the registry's own object — a caller
+    // that edits its payload must not edit the registry for every later call.
+    resolved.push({ id, copy: tip.copy, source: 'library', ...(tip.link ? { link: { ...tip.link } } : {}) });
     if (resolved.length >= MAX_TIPS_PER_VISIT) break;
   }
   return resolved;
