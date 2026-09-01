@@ -866,6 +866,99 @@ router.post('/:id/send', async (req, res, next) => {
   }
 });
 
+// Send-time "lead with one service" (GATE_ESTIMATE_LEAD_SERVICE_SEND).
+// Scope, all deliberate: NEW residential customers only (no membership
+// evidence — a member's combined tier is theirs to keep), ungrouped, not a
+// proposal, two or more REMOVABLE recurring lines per the opt-out resolver.
+// Lead = the estimator's first selected recurring service (engineRequest
+// order, else section order). Every other removable line goes through the
+// shared applyServiceMixChange rail as actor 'staff' — dry run, then commit
+// bound to that preview — so the parked lines re-enter the plan through the
+// customer's own "Add it" tap on the page. Returns the fresh row (or the
+// input row untouched when nothing applied).
+async function applyLeadServiceForSend(estimate) {
+  const featureGates = require('../config/feature-gates');
+  if (!featureGates.isEnabled('estimateLeadServiceSend')) return estimate;
+  if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return estimate;
+  try {
+    if (!estimate || estimate.estimate_group_id || estimate.price_locked_at) return estimate;
+    if (String(estimate.category || 'RESIDENTIAL').toUpperCase() !== 'RESIDENTIAL') return estimate;
+    let estData = {};
+    try { estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { return estimate; }
+    if (estData?.serviceOptOut) return estimate; // already shaped once — never re-park on a resend
+    // Member exclusion (security-critical, AGENTS.md): EVERY member-evidence
+    // carrier the opt-out rail and reconcileFrozenMembershipSnapshot
+    // recognize — snapshot flag, priors in any carrier, and the recurring-
+    // customer flag in any replay shape (same truthy coercion) — PLUS a
+    // live active-plan check that fails CLOSED (a lookup error keeps the
+    // full bundle). A member's combined tier is theirs to keep.
+    if (estData?.membershipSnapshot?.isExistingCustomer === true) return estimate;
+    const evidenceCarriers = [estData, estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+      .filter((c) => c && typeof c === 'object');
+    if (evidenceCarriers.some((c) => Array.isArray(c.priorQualifyingServices) && c.priorQualifyingServices.length)) return estimate;
+    const recurringFlagged = evidenceCarriers.some((c) => {
+      const v = c.recurringCustomer ?? c.isRecurringCustomer;
+      if (v == null || v === false) return false;
+      const normalized = String(v).trim().toLowerCase();
+      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+    });
+    if (recurringFlagged) return estimate;
+    if (estimate.customer_id) {
+      const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
+      let activeMember = true;
+      try { activeMember = await isActivePlanCustomer(db, estimate.customer_id); } catch (_) { activeMember = true; }
+      if (activeMember) return estimate;
+    }
+    const estimatePublic = require('./estimate-public');
+    const OptOut = require('../services/estimate-service-opt-out');
+    const bundle = await estimatePublic.buildPricingBundle(estimate).catch(() => null);
+    const sections = Array.isArray(bundle?.services) ? bundle.services : [];
+    const removable = OptOut.serviceOptOutRemovableKeys(estData, sections, estimate.waveguard_tier);
+    if (removable.size < 1) return estimate;
+    const recurringKeys = sections.filter((s) => s && s.isRecurring === true).map((s) => String(s.key || ''));
+    if (recurringKeys.length < 2) return estimate;
+    // Lead: first selected recurring token in the estimator's own order.
+    const tokenToKey = Object.fromEntries(Object.entries(OptOut.SERVICE_OPT_OUT_KEYS)
+      .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
+    const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
+      .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
+    const leadKey = [...selectedOrder, ...recurringKeys].find((k) => recurringKeys.includes(k));
+    if (!leadKey) return estimate;
+    const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
+    if (!toPark.length) return estimate;
+
+    let current = estimate;
+    for (const serviceKey of toPark) {
+      // The rail's own resolver re-runs on every step (removability shrinks
+      // as lines leave — the last recurring line is never removable).
+      const preview = await estimatePublic.applyServiceMixChange({
+        estimate: current, body: { serviceKey, included: false, dryRun: true }, actor: 'staff',
+      });
+      if (preview.status !== 200 || !preview.body?.previewBasis) {
+        logger.info(`[admin-estimates] lead-service send: ${serviceKey} not parked on estimate ${estimate.id} (${preview.body?.error || preview.status})`);
+        continue;
+      }
+      const commit = await estimatePublic.applyServiceMixChange({
+        estimate: current, body: { serviceKey, included: false, previewBasis: preview.body.previewBasis }, actor: 'staff',
+      });
+      if (commit.status !== 200) {
+        logger.warn(`[admin-estimates] lead-service send: commit for ${serviceKey} refused on estimate ${estimate.id} (${commit.body?.error || commit.status})`);
+        continue;
+      }
+      const fresh = await db('estimates').where({ id: estimate.id }).first();
+      if (!fresh) break;
+      // Keep the caller's in-flight status (the route-level 'sending' claim)
+      // while taking every parked total from the row.
+      current = { ...fresh, status: estimate.status };
+    }
+    return current;
+  } catch (err) {
+    logger.warn(`[admin-estimates] lead-service send skipped for estimate ${estimate?.id}: ${err.message}`);
+    return estimate;
+  }
+}
+
 // Shared send logic — used by both immediate send and scheduled cron
 // Multi-property group pre-flight (codex #3244 r1). Publishing the group makes
 // every sibling token publicly acceptable, so BEFORE any channel delivery:
@@ -1109,6 +1202,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   assertEstimateSendable(estimate, {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
   });
+
+  // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
+  // the non-lead recurring lines as staff opt-out events BEFORE any delivery
+  // so every channel carries the single-service quote. Best-effort by
+  // design — a refusal or engine miss sends the full bundle exactly as today
+  // (never a blocked send), and the row is re-read so the message text and
+  // the delivery claim below see the parked totals.
+  estimate = await applyLeadServiceForSend(estimate);
 
   // Group pre-flight runs before ANY channel delivery (see helper above).
   let claimedGroupSiblings = [];
@@ -3624,3 +3725,4 @@ module.exports = router;
 // builder, so a minted estimate's locked price replays exactly like a sent
 // one. Lazy-required by services to avoid load-order cycles.
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
+module.exports.applyLeadServiceForSend = applyLeadServiceForSend;

@@ -758,6 +758,10 @@ module.exports = {
   serializePricingRevisionSummary,
   buildEstimateServiceRevisionDraft,
   createEstimateAddServiceRequest,
+  // Shared with estimate-service-opt-out (priced add): the default service
+  // block a never-quoted line gets, so a customer add and an office add price
+  // identically.
+  addRequestedServiceToInputs,
   // Shared with estimate-measurement-review (the lawn-area challenge flow):
   // both park service_requests rows off a public estimate token and need the
   // same attach-or-create customer resolution.

@@ -339,6 +339,107 @@ function readRemovedInputs(event) {
   return isPlainObject(raw) ? raw : null;
 }
 
+// ── Priced add (GATE_ESTIMATE_SERVICE_ADD) ─────────────────────────────
+//
+// The mirror of a removal: a service that was NEVER on the quote joins it
+// through the same dryRun-preview → confirm rail, priced by the same canonical
+// recompute. Only the three residential lines the engine can price from the
+// stored property profile alone; termite/rodent need measurements the profile
+// may not carry and are left to the office (bundle inquiry).
+const SERVICE_ADD_KEYS = ['pest_control', 'lawn_care', 'mosquito'];
+
+function replayableCarrier(estData) {
+  const req = estData?.engineRequest;
+  if (isPlainObject(req) && isPlainObject(req.profile) && Array.isArray(req.selectedServices)) return 'engineRequest';
+  if (isPlainObject(estData?.engineInputs) && isPlainObject(estData.engineInputs.services)) return 'engineInputs';
+  return null;
+}
+
+// Whether the engine can price `serviceKey` from what the estimate already
+// stores. Lawn needs a turf basis; the v2 profile derives treatable turf from
+// lot/home footprint (or a measured figure), the v1 inputs need lawnSqFt or
+// lotSqFt top-level (same rule addRequestedServiceToInputs applies).
+function serviceAddBuildable(estData, serviceKey) {
+  const carrier = replayableCarrier(estData);
+  if (!carrier) return false;
+  if (serviceKey !== 'lawn_care') return true;
+  if (carrier === 'engineRequest') {
+    const p = estData.engineRequest.profile;
+    return Number(p.measuredTurfSf) > 0 || Number(p.lawnSqFt) > 0 || Number(p.lotSqFt) > 0;
+  }
+  const ei = estData.engineInputs;
+  return Number(ei.lawnSqFt) > 0 || Number(ei.lotSqFt) > 0;
+}
+
+function serviceOptOutAddableKeys(estData = {}, sections = [], rowTier = null) {
+  const empty = new Set();
+  if (!isPlainObject(estData)) return empty;
+  if (serviceOptOutBlockedByProposal(estData)) return empty;
+  if (serviceOptOutTierSelectionActive(estData, rowTier)) return empty;
+  const list = Array.isArray(sections) ? sections : [];
+  // Residential, engine-priced recurring plans only: a commercial line or a
+  // quote-required section takes the whole page out of self-serve adds.
+  if (list.some((s) => s && (String(s.key || '').startsWith('commercial_') || s.quoteRequired === true))) return empty;
+  const recurring = list.filter((s) => s && s.isRecurring === true);
+  if (!recurring.length) return empty;
+  const present = new Set(recurring.map((s) => String(s.key || '')));
+  const removed = new Set(currentlyOptedOutKeys(estData));
+  const addable = new Set();
+  for (const key of SERVICE_ADD_KEYS) {
+    if (present.has(key)) continue;
+    // A removed line comes back through the restore path, never as an add.
+    if (removed.has(key)) continue;
+    if (serviceIsPresentInInputs(estData, key)) continue;
+    if (!serviceAddBuildable(estData, key)) continue;
+    addable.add(key);
+  }
+  return addable;
+}
+
+// The synthetic "removedInputs" for an add — the same shape a restore
+// re-plants, so applyServiceOptOutToEstimateData({ included: true }) is the one
+// surgery for both. engineRequest carriers get the selectedServices token
+// (translateV2CallToV1Input derives the service block from the profile +
+// options, exactly as a fresh admin quote would); engineInputs carriers get
+// the add-service flow's default block (estimate-add-service-request), so a
+// customer add and an office add price identically.
+function buildServiceAddInputs(estData = {}, serviceKey) {
+  const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
+  if (!spec || !SERVICE_ADD_KEYS.includes(serviceKey)) return { ok: false, reason: 'service_not_addable' };
+  const carrier = replayableCarrier(estData);
+  if (!carrier) return { ok: false, reason: 'service_not_addable' };
+  const captured = { engineInputs: null, inputs: null, selected: [] };
+  if (carrier === 'engineRequest') {
+    captured.selected = [spec.selected[0]];
+  }
+  if (isPlainObject(estData.engineInputs) && isPlainObject(estData.engineInputs.services)) {
+    const { addRequestedServiceToInputs } = require('./estimate-add-service-request');
+    const { added, updatedInputs, reason } = addRequestedServiceToInputs(estData.engineInputs, estData, serviceKey);
+    if (!added) return { ok: false, reason: reason || 'service_not_addable' };
+    const engineKey = spec.engine.find((k) => updatedInputs.services[k] != null);
+    if (!engineKey) return { ok: false, reason: 'service_not_addable' };
+    captured.engineInputs = { [engineKey]: updatedInputs.services[engineKey] };
+    // Keep the display carrier in step with the replay carrier.
+    if (isPlainObject(estData.inputs)) captured.inputs = { [engineKey]: updatedInputs.services[engineKey] };
+  }
+  return { ok: true, removedInputs: captured };
+}
+
+// Keys whose CURRENT state is "removed by staff at send time" — the page words
+// these as an offer ("Also available"), not as something the customer took
+// off ("removed · Add it back").
+function staffOfferedKeys(parsedData = {}) {
+  const events = parsedData?.serviceOptOut?.events;
+  if (!Array.isArray(events)) return [];
+  const latest = new Map();
+  for (const e of events) {
+    if (e && e.serviceKey) latest.set(e.serviceKey, e);
+  }
+  return Array.from(latest.values())
+    .filter((e) => e.included === false && e.actor === 'staff')
+    .map((e) => e.serviceKey);
+}
+
 // Section keys currently opted out, for the /data payload and the add-offer
 // suppression (answering "remove lawn" with "add lawn and save more" in three
 // places is the failure this prevents).
@@ -369,4 +470,8 @@ module.exports = {
   readRemovedInputs,
   currentlyOptedOutKeys,
   serviceOptOutLabel,
+  SERVICE_ADD_KEYS,
+  serviceOptOutAddableKeys,
+  buildServiceAddInputs,
+  staffOfferedKeys,
 };

@@ -14461,7 +14461,10 @@ function resolveOptOutBeforeResult(parsedData) {
 // move reads "Dropping X" one way and "Adding X back" the other.
 function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove' }) {
   const disclosures = [];
-  const restoring = mode === 'restore';
+  // 'restore' and 'add' read the same way to the customer — a line joining the
+  // plan — except that an add was never on it, so nothing comes "back".
+  const restoring = mode === 'restore' || mode === 'add';
+  const joinPhrase = mode === 'add' ? `Adding ${label}` : `Adding ${label} back`;
   const beforeRows = optOutOneTimeRows(beforeResult);
   const afterRows = optOutOneTimeRows(afterResult);
   const afterByKey = new Map(afterRows.map((r) => [optOutRowKey(r), r]));
@@ -14486,7 +14489,7 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
     disclosures.push({
       code: 'waveguard_tier_change',
       message: restoring
-        ? `Adding ${label} back moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so your services are priced at the ${afterTier} rate.`
+        ? `${joinPhrase} moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so your services are priced at the ${afterTier} rate.`
         : `Dropping ${label} moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so the services you keep are priced at the ${afterTier} rate.`,
     });
   }
@@ -14585,8 +14588,10 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
       const pa = effectivePerApplication(after, afterPestOff);
       if (!pa) continue;
       disclosures.push({
-        code: 'restored_per_application',
-        message: `${after.name || after.service} comes back at $${pa.toFixed(2)} per application.`,
+        code: mode === 'add' ? 'added_per_application' : 'restored_per_application',
+        message: mode === 'add'
+          ? `${after.name || after.service} is $${pa.toFixed(2)} per application.`
+          : `${after.name || after.service} comes back at $${pa.toFixed(2)} per application.`,
       });
     }
   }
@@ -14618,29 +14623,13 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   return { disclosures, wouldChargeBundled, afterPerApplication };
 }
 
-router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, next) => {
-  try {
-    // Dark posture is the GENERIC 404, not the bond/interior uniform 403: a
-    // dark removal advertises nothing, so the payload must stay byte-identical
-    // to an unknown token. The check is first, before any DB read.
-    if (!serviceOptOutGateOn()) return res.status(404).json({ error: 'Estimate not found' });
-    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-    if (!estimate || !isEstimateAcceptActive(estimate)) {
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
-    // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
-    // and price_locked_at is never cleared.
-    if (estimate.price_locked_at) {
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-
+// The service-mix change rail — ONE implementation for a customer removal /
+// restore / add (PUT /:token/service-opt-out) and the staff send-time
+// "lead with one service" removal (admin-estimates sendEstimateNow, actor
+// 'staff'). Callers own their own gates and token/id resolution; this owns
+// eligibility, the canonical recompute, the preview digest, the guarded CAS
+// write and the audit row. Returns { status, body } — never touches res.
+async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }) {
     // Reconcile a stale "existing customer" classification BEFORE this handler
     // reprices and persists, exactly as select-tier and preferences do. This
     // route replays the engine with priorQualifyingServices, so a lapsed
@@ -14649,13 +14638,13 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     // In-memory only; the write below persists whatever it corrected.
     await reconcileFrozenMembershipSnapshot(estimate);
 
-    const serviceKey = String(req.body?.serviceKey || '');
-    if (!serviceKey) return res.status(400).json({ error: 'serviceKey is required' });
-    if (typeof req.body?.included !== 'boolean') {
-      return res.status(400).json({ error: 'included is required' });
+    const serviceKey = String(body.serviceKey || '');
+    if (!serviceKey) return { status: 400, body: ({ error: 'serviceKey is required' }) };
+    if (typeof body.included !== 'boolean') {
+      return { status: 400, body: ({ error: 'included is required' }) };
     }
-    const included = req.body.included;
-    const dryRun = req.body?.dryRun === true;
+    const included = body.included;
+    const dryRun = body.dryRun === true;
 
     // The commit must be bound to the preview the customer confirmed —
     // removals AND restores alike (pre-push codex P1 on 9e0c894). The row
@@ -14676,6 +14665,8 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
         rowBasis,
         serviceKey,
         included,
+        mode,
+        actor,
         m: nextTotals.monthlyTotal,
         a: nextTotals.annualTotal,
         o: nextTotals.onetimeTotal,
@@ -14697,6 +14688,11 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     const OptOut = require('../services/estimate-service-opt-out');
     const optOutState = parsedData.serviceOptOut || null;
     const alreadyOut = OptOut.currentlyOptedOutKeys(parsedData);
+    // remove | restore | add. An add (GATE_ESTIMATE_SERVICE_ADD) is a line that
+    // was NEVER on the quote joining it — the mirror of a removal, on the same
+    // preview-and-confirm rail, priced by the same recompute. Customer-only:
+    // the staff send-time path only ever removes.
+    let mode = included === false ? 'remove' : 'restore';
 
     if (included === false) {
       // ONE resolver for the /data stamp and this write, so the payload can
@@ -14706,17 +14702,27 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
         parsedData, bundle?.services || [], estimate.waveguard_tier,
       );
       if (!removable.has(serviceKey)) {
-        return res.status(400).json({ error: 'service_not_removable' });
+        return { status: 400, body: ({ error: 'service_not_removable' }) };
       }
     } else if (!alreadyOut.includes(serviceKey)) {
-      return res.status(400).json({ error: 'service_not_removed' });
+      if (actor !== 'customer' || !serviceAddGateOn()) {
+        return { status: 400, body: ({ error: 'service_not_removed' }) };
+      }
+      const bundle = await buildPricingBundle(estimate).catch(() => null);
+      const addable = OptOut.serviceOptOutAddableKeys(
+        parsedData, bundle?.services || [], estimate.waveguard_tier,
+      );
+      if (!addable.has(serviceKey)) {
+        return { status: 400, body: ({ error: 'service_not_addable' }) };
+      }
+      mode = 'add';
     } else if (OptOut.serviceOptOutBlockedByProposal(parsedData)
       || OptOut.serviceOptOutTierSelectionActive(parsedData, estimate.waveguard_tier)) {
       // Same refusals as removals: a proposal added AFTER the removal is the
       // authoritative billed quote, and a standing /select-tier choice takes
       // the estimate out of self-serve mix changes — a restore is the same
       // whole-estimate reprice (pre-push codex P0s on b6236b5 / 9389704).
-      return res.status(400).json({ error: 'service_not_removable' });
+      return { status: 400, body: ({ error: 'service_not_removable' }) };
     }
 
     const label = OptOut.serviceOptOutLabel(serviceKey);
@@ -14727,13 +14733,13 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     try {
       beforeResult = resolveOptOutBeforeResult(parsedData);
     } catch (_) {
-      return res.status(409).json({ error: 'reprice_unavailable' });
+      return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
     // FAIL CLOSED on removals with no trustworthy before-state: without one
     // the bundled-charge refusal cannot run, and that guard is an owner
     // ruling, not a best-effort disclosure.
     if (included === false && !optOutResultHasPricingRows(beforeResult)) {
-      return res.status(409).json({ error: 'reprice_unavailable' });
+      return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
     const beforeData = JSON.parse(JSON.stringify(parsedData));
 
@@ -14742,16 +14748,23 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     const provenance = included === false
       ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
       : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
-    const restoreInputs = included === true
+    const restoreInputs = mode === 'restore'
       ? OptOut.readRemovedInputs(
         (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),
       )
-      : null;
+      : mode === 'add'
+        // Synthetic "removed inputs" — the same shape a restore re-plants, so
+        // the surgery below is the one implementation for both directions.
+        ? (OptOut.buildServiceAddInputs(parsedData, serviceKey).removedInputs || null)
+        : null;
+    if (mode === 'add' && !restoreInputs) {
+      return { status: 400, body: ({ error: 'service_not_addable' }) };
+    }
 
     const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
       serviceKey, included, removedInputs: restoreInputs, provenance,
     });
-    if (!applied.ok) return res.status(400).json({ error: applied.reason });
+    if (!applied.ok) return { status: 400, body: ({ error: applied.reason }) };
 
     // SERVER-AUTHORITATIVE identity, loaded explicitly. serverRecompute sets
     // priorQualifyingServices UNCONDITIONALLY, defaulting to [] — the membership
@@ -14804,10 +14817,10 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       try {
         activeVerified = !!estimate.customer_id && await isActivePlanCustomer(db, estimate.customer_id);
       } catch (_) {
-        return res.status(409).json({ error: 'reprice_unavailable' });
+        return { status: 409, body: ({ error: 'reprice_unavailable' }) };
       }
       if (!activeVerified) {
-        return res.status(409).json({ error: 'reprice_unavailable' });
+        return { status: 409, body: ({ error: 'reprice_unavailable' }) };
       }
     }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
@@ -14826,19 +14839,27 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     // Fail CLOSED. Nothing is written and nothing is shown — never fall back to
     // arithmetic or to the stale totals.
     if (!reprice.recomputed) {
-      return res.status(409).json({ error: 'reprice_unavailable' });
+      return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
 
     const afterResult = reprice.serverResult;
+    // An add the engine silently declined to price (no new recurring row —
+    // e.g. no turf basis after all) must fail closed, never persist a no-op
+    // "add" the customer then believes is on their plan.
+    if (mode === 'add') {
+      const rowsOf = (r) => (Array.isArray(r?.recurring?.services) ? r.recurring.services.length : 0);
+      if (rowsOf(afterResult) <= rowsOf(beforeResult)) {
+        return { status: 409, body: ({ error: 'add_unavailable' }) };
+      }
+    }
     const impact = optOutImpact({
-      beforeResult, afterResult, beforeData, afterData: parsedData, label,
-      mode: included === false ? 'remove' : 'restore',
+      beforeResult, afterResult, beforeData, afterData: parsedData, label, mode,
     });
     if (included === false && impact.wouldChargeBundled.length) {
-      return res.status(400).json({
+      return { status: 400, body: ({
         error: 'bundled_item_would_be_charged',
         items: impact.wouldChargeBundled,
-      });
+      }) };
     }
 
     const previous = {
@@ -14886,17 +14907,17 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     // re-derives it from its OWN recompute and refuses on any mismatch.
     const previewDigest = optOutPreviewDigest(next, impact);
     if (dryRun) {
-      return res.json({
-        success: true, dryRun: true, serviceKey, label, included,
+      return { status: 200, body: ({
+        success: true, dryRun: true, serviceKey, label, included, mode,
         previous, next, disclosures: impact.disclosures,
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,
-      });
+      }) };
     }
-    const submittedBasis = typeof req.body?.previewBasis === 'string' ? req.body.previewBasis : null;
+    const submittedBasis = typeof body.previewBasis === 'string' ? body.previewBasis : null;
     if (!submittedBasis || submittedBasis !== previewDigest) {
-      return res.status(409).json({ error: 'estimate_changed_since_preview' });
+      return { status: 409, body: ({ error: 'estimate_changed_since_preview' }) };
     }
 
     // ── commit ──────────────────────────────────────────────────────────
@@ -14939,6 +14960,8 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       serviceKey,
       label,
       included,
+      mode,
+      actor,
       at: new Date().toISOString(),
       removedInputs: included === false ? applied.removedInputs : null,
       provenance: provenance && Object.keys(provenance).length ? provenance : null,
@@ -15017,15 +15040,23 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       await trx('activity_log').insert({
         customer_id: estimate.customer_id || null,
         estimate_id: estimate.id,
-        action: included === false ? 'estimate_service_removed' : 'estimate_service_restored',
-        description: included === false
-          ? `Customer removed ${label} from their estimate.`
-          : `Customer added ${label} back to their estimate.`,
-        metadata: JSON.stringify({ serviceKey, label, previous, next }),
+        action: actor === 'staff'
+          ? 'estimate_service_offered_as_addon'
+          : mode === 'remove' ? 'estimate_service_removed'
+            : mode === 'add' ? 'estimate_service_added'
+              : 'estimate_service_restored',
+        description: actor === 'staff'
+          ? `Waves sent this estimate leading with one service; ${label} was parked as a one-tap add-on.`
+          : mode === 'remove'
+            ? `Customer removed ${label} from their estimate.`
+            : mode === 'add'
+              ? `Customer added ${label} to their estimate.`
+              : `Customer added ${label} back to their estimate.`,
+        metadata: JSON.stringify({ serviceKey, label, mode, actor, previous, next }),
       });
     });
     if (!updateCount) {
-      return res.status(409).json({ error: 'Estimate is no longer active' });
+      return { status: 409, body: ({ error: 'Estimate is no longer active' }) };
     }
 
     clearEstimatePricingCache(estimate.id);
@@ -15035,11 +15066,38 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       require('../services/estimate-slot-availability').invalidateEstimate(estimate.id);
     } catch (_) { /* cache invalidation is best-effort */ }
 
-    logger.info(`[estimate] ${estimate.id}: service ${included === false ? 'removed' : 'restored'} ${serviceKey} ($${next.monthlyTotal}/mo, $${next.annualTotal}/yr, tier ${next.waveGuardTier || 'none'})`);
-    return res.json({
-      success: true, serviceKey, label, included,
+    logger.info(`[estimate] ${estimate.id}: service ${mode === 'remove' ? 'removed' : mode} ${serviceKey} by ${actor} ($${next.monthlyTotal}/mo, $${next.annualTotal}/yr, tier ${next.waveGuardTier || 'none'})`);
+    return { status: 200, body: ({
+      success: true, serviceKey, label, included, mode,
       previous, next, disclosures: impact.disclosures,
-    });
+    }) };
+}
+
+router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, next) => {
+  try {
+    // Dark posture is the GENERIC 404, not the bond/interior uniform 403: a
+    // dark removal advertises nothing, so the payload must stay byte-identical
+    // to an unknown token. The check is first, before any DB read.
+    if (!serviceOptOutGateOn()) return res.status(404).json({ error: 'Estimate not found' });
+    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!estimate || !isEstimateAcceptActive(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
+    // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
+    // and price_locked_at is never cleared.
+    if (estimate.price_locked_at) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    const outcome = await applyServiceMixChange({ estimate, body: req.body || {}, actor: 'customer' });
+    return res.status(outcome.status).json(outcome.body);
   } catch (err) {
     return next(err);
   }
@@ -20806,6 +20864,12 @@ function commercialInteriorOptionGateOn() {
 function serviceOptOutGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_ESTIMATE_SERVICE_OPT_OUT || '').toLowerCase());
 }
+// Priced add-a-service rides the opt-out rail and is gated SEPARATELY (both
+// must be on): it is the first customer action that puts a NEVER-quoted line
+// on a plan.
+function serviceAddGateOn() {
+  return serviceOptOutGateOn() && featureGates.isEnabled('estimateServiceAdd');
+}
 
 // Commercial interior-service selector payload (owner 2026-08-17): the
 // quote-time option snapshot + current selection ride the commercial_pest
@@ -24771,11 +24835,20 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         if (!serviceOptOutGateOn()) return {};
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
-          serviceOptOutTierSelectionActive,
+          serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
         const removedKeys = currentlyOptedOutKeys(projected);
-        if (!removedKeys.length) return {};
+        // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
+        // live accept-active rows only, never a staff draft preview.
+        const addableKeys = serviceAddGateOn() && !adminDraftPreview && isEstimateAcceptActive(estimate)
+          ? Array.from(serviceOptOutAddableKeys(
+            projected, Array.isArray(pricingBundle?.services) ? pricingBundle.services : [], estimate.waveguard_tier,
+          ))
+          : [];
+        if (!removedKeys.length && !addableKeys.length) return {};
+        // Lines staff parked at send time read as an offer, not a removal.
+        const staffOffered = staffOfferedKeys(projected).filter((k) => removedKeys.includes(k));
         // A proposal that gained itemization after a removal — or a standing
         // /select-tier choice — refuses restores (same guards as the PUT), so
         // the "Add it back" control must not render. But the removed keys
@@ -24791,6 +24864,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             removedKeys,
             removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
             ...(restoreBlocked ? { restoreBlocked: true } : {}),
+            ...(staffOffered.length ? { staffOfferedKeys: staffOffered } : {}),
+            ...(addableKeys.length && !restoreBlocked
+              ? { addable: addableKeys.map((key) => ({ key, label: serviceOptOutLabel(key) })) }
+              : {}),
           },
         };
       })()),
@@ -25208,6 +25285,7 @@ module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.optOutImpact = optOutImpact;
+module.exports.applyServiceMixChange = applyServiceMixChange;
 module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
 module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;

@@ -1641,3 +1641,32 @@ violations at the severity noted.
   `client/src/hooks/useFeatureFlag.js`. DB-backed
   (`user_feature_flags`), session-cached, fails closed. No localStorage,
   no percentage rollouts, no env variants.
+
+  The same PUT is the priced ADD rail (GATE_ESTIMATE_SERVICE_ADD, strict
+  opt-in, needs the opt-out gate): `included:true` for a key the customer
+  never removed adds a NEVER-quoted residential line (pest / lawn /
+  mosquito only, `SERVICE_ADD_KEYS`) through the identical dryRun-preview →
+  confirm rail and canonical recompute (mode 'add'). Eligibility is ONE
+  resolver shared with the `/data` `serviceOptOut.addable` stamp
+  (`serviceOptOutAddableKeys`: residential, replayable carrier, turf basis
+  for lawn, same proposal / tier-selection refusals); the synthetic inputs
+  an add plants are the selectedServices token (engineRequest) or the
+  add-service flow's default block (engineInputs), so a customer add and an
+  office add price identically; an add whose recompute yields no new
+  recurring row fails CLOSED (409 add_unavailable). The rail body lives in
+  `applyServiceMixChange({ estimate, body, actor })` (returns { status,
+  body }, never touches res) — the route owns gate/token/viewability, the
+  rail owns eligibility, recompute, digest, CAS write and audit. Second
+  caller: `applyLeadServiceForSend` in admin-estimates `sendEstimateNowInner`
+  (GATE_ESTIMATE_LEAD_SERVICE_SEND, strict opt-in): a NEW residential
+  customer's ungrouped, non-proposal estimate with two or more removable
+  recurring lines is sent leading with the estimator's first selected
+  service, every other removable line parked as an `actor:'staff'` removal
+  (dry run → commit) BEFORE any delivery; `/data` ships those keys as
+  `serviceOptOut.staffOfferedKeys` and the page words them as an offer.
+  Best-effort by design — any refusal sends the full bundle as today, never
+  a blocked send — and a row that already carries `serviceOptOut` is never
+  re-shaped on resend. Members (snapshot flag or priors in any carrier) are
+  never parked. Treat the two gates, the customer-only add branch
+  (`actor !== 'customer'` → 400), the fail-closed no-new-row check and the
+  member exclusion as security-critical.
