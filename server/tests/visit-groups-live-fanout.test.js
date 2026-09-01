@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
       whereNotIn() { chain._ops.push(['whereNotIn', ...arguments]); return chain; },
       whereNull() { chain._ops.push(['whereNull', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
+      forNoKeyUpdate() { chain._ops.push(['forNoKeyUpdate']); return chain; },
       first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops) : null); },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
@@ -466,11 +467,15 @@ describe('createOrJoinVisit autopay exclusion — authoritative in-transaction c
     };
     await expect(createOrJoinVisit({ rows: [{ id: 's1' }, { id: 's2' }], createdBy: 'test' }))
       .rejects.toThrow(/not mutually groupable: autopay_enrolled/);
-    // The customer row was locked (FOR UPDATE read) before the refusal —
-    // the check is serialized against concurrent enrollment, not a peek.
+    // The customer row was locked (FOR NO KEY UPDATE read) before the
+    // refusal — serialized against the enrollment UPDATE, not a peek, and
+    // NOT FOR UPDATE: that conflicts with the caller's FK KEY SHARE from
+    // its own booking insert and deadlocks two concurrent same-customer
+    // bookings (pre-push codex r9 P1).
     const custRead = db.__calls.find((c) => c.table === 'customers' && c.op === 'first');
     expect(custRead).toBeTruthy();
-    expect(custRead.ops.some((o) => o[0] === 'forUpdate')).toBe(true);
+    expect(custRead.ops.some((o) => o[0] === 'forNoKeyUpdate')).toBe(true);
+    expect(custRead.ops.some((o) => o[0] === 'forUpdate')).toBe(false);
     // Refused before any visit write.
     expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'insert')).toBe(false);
   });

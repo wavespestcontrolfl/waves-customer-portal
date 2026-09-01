@@ -488,7 +488,15 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // group exists is NOT a double-charge path in Phase 1 (every row
     // still bills once, per row — see customerExcludedByAutopay); it is
     // the documented Phase-2 gate-flip precondition, owned by that lane.
-    await t('customers').where({ id: stopCustomerId }).forUpdate().first('id');
+    // FOR NO KEY UPDATE, not FOR UPDATE (pre-push codex r9 P1): the callers'
+    // just-inserted scheduled_services row already holds the customer's
+    // FK KEY SHARE lock, and FOR UPDATE conflicts with KEY SHARE — two
+    // concurrent same-customer bookings would each hold KEY SHARE and
+    // deadlock on the upgrade (one grouping silently skipped). NO KEY
+    // UPDATE does not conflict with KEY SHARE, yet still conflicts with the
+    // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
+    // TOCTOU fix needs is intact.
+    await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
     if (await customerExcludedByAutopay(stopCustomerId, t)) {
       throw new Error('rows not mutually groupable: autopay_enrolled');
     }
