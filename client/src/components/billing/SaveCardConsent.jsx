@@ -43,7 +43,11 @@ export default function SaveCardConsent({
   const consentText = getConsentText(methodType);
   // Display-only paragraph breaks — the canonical consent string (and its
   // CONSENT_VERSION) is unchanged; splitting must never alter characters.
-  const paragraphs = consentText.split(/(?<=\.) (?=[A-Z])/);
+  // Zero-width split (both sides are lookarounds) so the inter-sentence
+  // space stays in the preceding segment and joining the segments — DOM
+  // textContent, copy/paste, screen readers — reproduces the canonical
+  // string byte-for-byte (Codex P1 on #3686).
+  const paragraphs = consentText.split(/(?<=\. )(?=[A-Z])/);
   const isChecked = locked ? true : !!checked;
   // The authorization may collapse only while UNCHECKED. Once the box is
   // checked — and always in locked required-save flows — the full canonical
