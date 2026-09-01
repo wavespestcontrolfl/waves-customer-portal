@@ -304,37 +304,6 @@ const ALL_NUMBERS = [
       },
     ],
   },
-  // GBP tracking lines (config/twilio-numbers.js gbpTracking — keep in
-  // sync): customers text these from Google Business Profiles, and the
-  // drafts approve path replies FROM the same line (the sms_log thread
-  // anchor). Omitting them here made findKnownWavesNumber drop the
-  // ?fromNumber= deep link and reply from the hardcoded default,
-  // splitting the conversation (Codex #3700 r6 P1).
-  {
-    group: "GBP Tracking",
-    numbers: [
-      {
-        number: "+19413521572",
-        formatted: "(941) 352-1572",
-        label: "GBP Bradenton",
-      },
-      {
-        number: "+19413840224",
-        formatted: "(941) 384-0224",
-        label: "GBP Parrish",
-      },
-      {
-        number: "+19414910407",
-        formatted: "(941) 491-0407",
-        label: "GBP Sarasota",
-      },
-      {
-        number: "+19414774880",
-        formatted: "(941) 477-4880",
-        label: "GBP Venice",
-      },
-    ],
-  },
 ];
 
 // Flat lookup: number ->label

@@ -53,20 +53,14 @@ function laneLabel(lane) {
 }
 
 // Deep link that keeps the composer on the draft's own thread: phone pins
-// the recipient, and resolvedFromNumber (the send path's sms_log-anchored
-// Waves number) pins the From + thread lock — without it the composer's
-// default From is submitted as an explicit override and an inbound
-// conversation on another office number would split.
+// the recipient; the From comes from the composer's own draft fetch
+// (resolvedFromNumber/-Label are server-config-resolved on GET /:id), so
+// the link carries no number literal and the client's hardcoded list is
+// never the authority.
 function communicationsHref(draft) {
   const params = new URLSearchParams({ draftId: draft.id });
   const to = draft.recipientPhone || draft.customerPhone;
-  if (to) {
-    params.set("phone", to);
-    // Only alongside phone — the composer applies ?fromNumber= inside its
-    // phone branch, and a from without a phone would record a from-number
-    // the state never adopted (tripping the draft-detach mismatch effect).
-    if (draft.resolvedFromNumber) params.set("fromNumber", draft.resolvedFromNumber);
-  }
+  if (to) params.set("phone", to);
   return `/admin/communications?${params.toString()}`;
 }
 

@@ -60,11 +60,11 @@ describe("PendingDraftsTab", () => {
     expect(screen.getByText("Click follow-up")).toBeInTheDocument();
     expect(screen.getByText("Reply draft")).toBeInTheDocument();
     const links = screen.getAllByText("Open in Communications");
-    // The deep link pins the composer to the draft's own thread: recipient
-    // always; the sms_log-anchored From number when the send path resolved
-    // one (without it the composer's default From splits the conversation).
+    // The deep link pins the recipient; the From arrives via the
+    // composer's own draft fetch (server-config-resolved), never a URL
+    // number literal.
     expect(links[0]).toHaveAttribute("href", "/admin/communications?draftId=d1&phone=%2B19415550100");
-    expect(links[1]).toHaveAttribute("href", "/admin/communications?draftId=d2&phone=%2B19415550101&fromNumber=%2B19415551000");
+    expect(links[1]).toHaveAttribute("href", "/admin/communications?draftId=d2&phone=%2B19415550101");
     expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending");
   });
 

@@ -669,13 +669,14 @@ router.get('/', async (req, res, next) => {
     const resolved = await Promise.all(drafts.map(async (d) => {
       const r = await resolveDraftRecipient(d).catch(() => null);
       const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId);
-      return { r, fromNumber };
+      const fromLabel = fromNumber ? (TWILIO_NUMBERS.findByNumber(fromNumber)?.label || null) : null;
+      return { r, fromNumber, fromLabel };
     }));
 
     res.json({
       drafts: drafts.map((d, i) => {
         const flags = parseFlags(d.flags);
-        const { r, fromNumber } = resolved[i];
+        const { r, fromNumber, fromLabel } = resolved[i];
         return {
           id: d.id, smsLogId: d.sms_log_id,
           customerId: d.customer_id,
@@ -683,6 +684,7 @@ router.get('/', async (req, res, next) => {
           customerPhone: d.phone || null,
           recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
           resolvedFromNumber: fromNumber || null,
+          resolvedFromLabel: fromLabel,
           tier: d.waveguard_tier, stage: d.pipeline_stage,
           inboundMessage: d.inbound_message,
           draftResponse: d.draft_response,
@@ -1082,6 +1084,7 @@ router.get('/:id', async (req, res, next) => {
     const flags = parseFlags(d.flags);
     // Same resolved recipient/from contract as the list (see GET / above).
     const r = await resolveDraftRecipient(d).catch(() => null);
+    const singleFrom = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId) || null;
     res.json({
       id: d.id,
       smsLogId: d.sms_log_id,
@@ -1089,7 +1092,8 @@ router.get('/:id', async (req, res, next) => {
       customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
       customerPhone: d.phone || null,
       recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-      resolvedFromNumber: r?.fromNumber || await derivedOfficeNumber(d, r?.customerId) || null,
+      resolvedFromNumber: singleFrom,
+      resolvedFromLabel: singleFrom ? (TWILIO_NUMBERS.findByNumber(singleFrom)?.label || null) : null,
       tier: d.waveguard_tier,
       stage: d.pipeline_stage,
       inboundMessage: d.inbound_message,

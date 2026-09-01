@@ -1028,17 +1028,30 @@ function SmsTab() {
             setToNumber(draftPhone);
             finalPhone = draftPhone;
           }
+          // The draft payload carries the CONFIG-resolved From
+          // (resolvedFromNumber/-Label come from TWILIO_NUMBERS on the
+          // server — the same authority the send path uses), so the
+          // composer thread-locks to the conversation's own line without
+          // consulting the client's hardcoded list; a GBP-tracking-anchored
+          // thread would otherwise fall to the composer default and split
+          // (Codex #3700 r6 P1). This also records the from-number the
+          // STATE is becoming, not the initial closure value — a stale
+          // capture would trip the mismatch effect below and silently
+          // detach the draft (r2 P1).
+          const draftFrom = draft?.resolvedFromNumber || queryFromNumber || null;
+          if (draftFrom && draftFrom !== fromNumber) {
+            setFromNumber(draftFrom);
+            setThreadLock({
+              contactPhone: finalPhone,
+              ourNumber: draftFrom,
+              label: draft?.resolvedFromLabel || NUMBER_LABEL_MAP[draftFrom] || draftFrom,
+            });
+          }
           setLoadedMessageDraft(smsIsAdminRole && draft?.id ? {
             id: draft.id,
             draftResponse: draft.draftResponse || "",
             recipientPhone: finalPhone,
-            // Record the from-number the STATE is becoming, not the initial
-            // closure value: a ?fromNumber= deep link (Pending Drafts tab)
-            // sets state before this async callback lands, and the stale
-            // capture would trip the mismatch effect below, silently
-            // detaching the draft and re-routing send to the manual path
-            // (Codex #3700 r2 P1).
-            fromNumber: queryFromNumber || fromNumber,
+            fromNumber: draftFrom || fromNumber,
           } : null);
           if (draft?.customerId && draft?.customerPhone && phoneKey(finalPhone) === phoneKey(draft.customerPhone)) {
             setSelectedCustomerId(draft.customerId);
@@ -2243,6 +2256,13 @@ function SmsTab() {
               ))}
             </optgroup>
           ))}
+          {/* A thread-locked From resolved from server config (e.g. a GBP
+              tracking line) may not be in the client list — render it so
+              the locked select doesn't show blank. */}
+          {threadLock && fromNumber
+            && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
+            <option value={fromNumber}>{threadLock.label}</option>
+          )}
         </select>{" "}
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           To
