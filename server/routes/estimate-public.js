@@ -23062,9 +23062,23 @@ async function buildPricingBundleInner(estimate) {
   // setup for all of them, so all of them must preview it. Omitted entirely
   // when no setup was disclosed (payload byte-identical).
   const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
+  // A frozen UNIFIED decision (GATE_UNIFIED_SETUP_FEE, owner ruling
+  // 2026-09-01) rides the SAME preview channel: charged up front on BOTH
+  // billing terms (the prepay invoice carries it as its own line — never
+  // prepay-waived), any recurring mix. It deliberately does NOT become a
+  // firstVisitFees waveguard_setup card (those carry the legacy
+  // waived-with-prepay copy); the client forwards this field generically
+  // as an invoice preview row, so disclosure and the minted invoice agree.
+  const frozenUnifiedForPreview = estData?.setupFeeQuote?.kind === 'unified'
+    && Number(estData?.setupFeeQuote?.amount) > 0
+    && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(estData)
+    ? Math.round(Number(estData.setupFeeQuote.amount) * 100) / 100
+    : 0;
   const rodentBaitSetupFeeField = frozenRodentSetupForPreview > 0
     ? { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false } }
-    : {};
+    : (frozenUnifiedForPreview > 0
+      ? { rodentBaitSetupFee: { service: 'waveguard_setup', amount: frozenUnifiedForPreview, label: 'Setup Fee — one-time', waivedWithPrepay: false } }
+      : {});
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
     if (!manual) return payload;
@@ -23286,7 +23300,10 @@ async function buildPricingBundleInner(estimate) {
       // waiver: no fee was disclosed and none is charged).
       const frozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
       const frozenQuoteWaived = !!estData?.setupFeeQuote && !(frozenQuoteFee > 0);
-      if (!frozenQuoteWaived) {
+      // A UNIFIED-kind quote never renders the legacy waived-with-prepay
+      // card — its fee rides the generic preview row + breakdown instead
+      // (owner ruling 2026-09-01: prepay CHARGES it).
+      if (!frozenQuoteWaived && estData?.setupFeeQuote?.kind !== 'unified') {
         firstVisitFees.push({
           service: 'waveguard_setup',
           amount: frozenQuoteFee > 0 ? frozenQuoteFee : (Number(v1.membershipFee || PEST.initialFee || 99) || 99),
@@ -23415,7 +23432,8 @@ async function buildPricingBundleInner(estimate) {
       const feeAmount = frozenQuoteFee > 0
         ? frozenQuoteFee
         : (storedSetupAmount > 0 ? storedSetupAmount : (Number(PEST.initialFee || 99) || 99));
-      if (!frozenQuoteWaived) {
+      // Unified-kind quotes skip the legacy card (see the v1 branch).
+      if (!frozenQuoteWaived && estData?.setupFeeQuote?.kind !== 'unified') {
         fallbackFirstVisitFees.push({
           service: 'waveguard_setup',
           amount: feeAmount,
@@ -23596,7 +23614,8 @@ async function buildPricingBundleInner(estimate) {
     // { amount: 0, waived } quote suppresses the card entirely.
     const engineFrozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
     const engineFrozenQuoteWaived = !!estData?.setupFeeQuote && !(engineFrozenQuoteFee > 0);
-    if (!engineFrozenQuoteWaived) {
+    // Unified-kind quotes skip the legacy card (see the v1 branch).
+    if (!engineFrozenQuoteWaived && estData?.setupFeeQuote?.kind !== 'unified') {
       engineFirstVisitFees.push({
         service: 'waveguard_setup',
         amount: engineFrozenQuoteFee > 0 ? engineFrozenQuoteFee : (Number(PEST.initialFee || 99) || 99),

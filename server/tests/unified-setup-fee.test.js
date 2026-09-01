@@ -198,6 +198,25 @@ describe('decide-once enforcement on the billing/handoff paths (pre-push audit P
     expect(src).toMatch(/one-time setup fee billed with the prepay\./);
   });
 
+  test('estimate page + payment previews disclose a frozen unified fee as CHARGED, never prepay-waived (source contracts)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    // The generic preview field carries the unified fee (waivedWithPrepay
+    // false → the client shows it in BOTH the per-application and prepay
+    // invoice previews via extraInvoiceRows).
+    expect(src).toMatch(/frozenUnifiedForPreview > 0\s*\n\s*\? \{ rodentBaitSetupFee: \{ service: 'waveguard_setup', amount: frozenUnifiedForPreview, label: 'Setup Fee — one-time', waivedWithPrepay: false \} \}/);
+    // No legacy waived-with-prepay card for unified quotes — all three
+    // payload branches skip the push.
+    expect((src.match(/estData\?\.setupFeeQuote\?\.kind !== 'unified'\) \{\s*\n\s*(firstVisitFees|fallbackFirstVisitFees|engineFirstVisitFees)\.push\(\{/g) || []).length).toBe(3);
+    // The one-time breakdown discloses the fee on any mix, and the
+    // non-qualifying-mix suppression never strips a unified fee row.
+    expect(src).toMatch(/frozenUnifiedBreakdownFee > 0 && !hasExplicitWaveGuardSetup\) \{/);
+    expect(src).toMatch(/if \(!membershipFeeMixApplies && !\(frozenUnifiedBreakdownFee > 0\)\) \{/);
+    // SSR fee row shows for unified on any mix, and the existing-member
+    // strike-through never re-waives a frozen positive unified decision.
+    expect(src).toMatch(/\(hasWaveGuardMembership \|\| frozenUnifiedQuoteFee > 0\)/);
+    expect(src).toMatch(/isExistingMember && membershipFee > 0\s*\n\s*&& !\(frozenUnifiedQuoteFee > 0\)/);
+  });
+
   test('self-booking never re-waives a positive unified decision via the legacy member check (decide-once)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
     expect(src).toMatch(/if \(activeMember && !rodentSetupQuote && !unifiedSetupQuote\) \{/);
