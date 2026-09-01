@@ -1694,12 +1694,15 @@ function blankExpressionStringLiterals(text) {
   // (title="{" must not open a phantom expression that pairs a later real
   // prop quote and blanks a counted component's opener — astro parity,
   // Codex #504 r19); in prose only braces matter.
-  let inTag = false; let attrQ = null;
+  let inTag = false; let attrQ = null; let word = '';
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
     if (depth === 0) {
-      if (attrQ) { if (c === attrQ) attrQ = null; continue; }
+      // Quoted attr VALUES are blanked (quotes kept): tag-shaped text in a
+      // descendant attribute (title="</div>") never closes a wrapper or
+      // fakes a component (astro parity, Codex #504 r20).
+      if (attrQ) { if (c === attrQ) { attrQ = null; } else if (out[i] !== '\n') { out[i] = ' '; } continue; }
       if (inTag) {
         if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
         if (c === '>') { inTag = false; continue; }
@@ -1710,13 +1713,13 @@ function blankExpressionStringLiterals(text) {
       if (c === '{') { depth = 1; prevSig = '{'; continue; }
       continue;
     }
-    if (c === '{') { depth += 1; prevSig = '{'; continue; }
-    if (c === '}') { depth -= 1; prevSig = '}'; continue; }
+    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; prevSig = '}'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
         for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
-        if (j < s.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; }
+        if (j < s.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; word = ''; }
         continue;
       }
       // Comments render nothing and may spell tag-shaped text — blank whole.
@@ -1734,7 +1737,7 @@ function blankExpressionStringLiterals(text) {
       }
       // Regex literal (operator-position /, char-class aware) — its content
       // is text, and its quote/tag characters must not leak into pairing.
-      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
         let j = i + 1; let inClass = false; let closed = -1;
         for (; j < s.length && s[j] !== '\n'; j += 1) {
           const d = s[j];
@@ -1745,24 +1748,30 @@ function blankExpressionStringLiterals(text) {
         }
         if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
       }
-      // ++/-- end an operand: the / after n++ is DIVISION, not a regex.
+      // ++/-- end an operand (the / after n++ is DIVISION); a / after a
+      // regex-allowing KEYWORD (return /x/) opens a regex (word check).
+      if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
       if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
     }
   }
   return out.join('');
 }
 
+// Keywords after which a `/` starts a REGEX, not division (return /x/) —
+// shared by both lexers (astro parity).
+const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new']);
+
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced) — string/regex/comment-aware (astro closeOfExpressionAt).
 function closeOfExpressionAt(s, i) {
-  let depth = 0; let q = null; let prevSig = '';
+  let depth = 0; let q = null; let prevSig = ''; let word = '';
   for (let j = i; j < s.length; j += 1) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
     if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '/') { while (j < s.length && s[j] !== '\n') j += 1; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
-    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
       let k = j + 1; let inClass = false; let closed = -1;
       for (; k < s.length && s[k] !== '\n'; k += 1) {
         const d = s[k];
@@ -1773,8 +1782,9 @@ function closeOfExpressionAt(s, i) {
       }
       if (closed > 0) { j = closed; prevSig = '/'; continue; }
     }
-    if (c === '{') { depth += 1; prevSig = '{'; continue; }
-    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; continue; }
+    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
+    if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
   }
   return -1;
@@ -1967,17 +1977,42 @@ const INLINE_CTA_ROOT_RELATIVE_RE = /^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-
 // here first (Codex #3646 r16 P1).
 const INLINE_CTA_PROP_NAMES = Object.freeze(new Set(['headline', 'description', 'ctaLabel', 'ctaHref', 'phone', 'tel', 'eyebrow']));
 const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?[\d\-().\s]{7,20}$/;
-// Every attribute name (with its quoted-literal value, null when
-// expression-valued/unquoted/duplicated) via the sequential walk.
+// Every attribute name with its quoted-literal value (null when
+// expression-valued/unquoted) and its RAW expression text — a balanced
+// walk via the shared lexer, so nested-brace expressions
+// (headline={{"x":"y"}}) are consumed whole instead of desyncing a flat
+// regex and hiding the prop from validation (Codex #3646 r18 P1).
 function eachJsxAttr(attrs) {
-  const re = new RegExp(JSX_ATTR_RE.source, 'y');
   const s = String(attrs || '');
   const out = [];
-  let m;
-  re.lastIndex = 0;
-  while (re.lastIndex < s.length && (m = re.exec(s)) !== null) {
-    if (m[0].length === 0) break;
-    out.push({ name: m[1], literal: m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : null, expr: m[4] !== undefined ? m[4] : null });
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /[\s/]/.test(s[i])) i += 1;
+    const nm = /^[^\s=/>"'{}]+/.exec(s.slice(i));
+    if (!nm) break;
+    const name = nm[0];
+    i += name.length;
+    let k = i;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    if (s[k] !== '=') { out.push({ name, literal: null, expr: null }); i = k; continue; }
+    k += 1;
+    while (k < s.length && /\s/.test(s[k])) k += 1;
+    const c = s[k];
+    if (c === '"' || c === "'") {
+      let j = k + 1;
+      while (j < s.length && s[j] !== c) j += 1;
+      out.push({ name, literal: s.slice(k + 1, j), expr: null });
+      i = j + 1; continue;
+    }
+    if (c === '{') {
+      const e = closeOfExpressionAt(s, k);
+      out.push({ name, literal: null, expr: e > 0 ? s.slice(k, e + 1) : s.slice(k) });
+      if (e < 0) break;
+      i = e + 1; continue;
+    }
+    const um = /^[^\s"'{}>]+/.exec(s.slice(k));
+    out.push({ name, literal: null, expr: null });
+    i = k + (um ? um[0].length : 1);
   }
   return out;
 }
@@ -2026,6 +2061,72 @@ function inlineCtaContractFinding(body) {
     }
     if (!inlineCtaHrefValid(href)) {
       return finding('P0', 'INVALID_INLINECTA_DESTINATION', `Draft contains an <InlineCTA ctaHref="${href}"> that is not a well-formed root-relative path (no dot segments) or https URL — the astro publish gate rejects it (and executable schemes never ship).`);
+    }
+  }
+  return null;
+}
+
+// The vendored SpiderIdBoard prop contract (componentPropSchemas.
+// SpiderIdBoard): only these props; title/eyebrow non-empty strings;
+// species (optional) a JSON array of shaped records. Astro validates
+// string literals, simple literal expressions, and JSON-shaped container
+// expressions — opaque expressions stay unvalidated there and pass here
+// too (Codex #3646 r18 P1: the newly cataloged component shipped with no
+// portal-side prop contract).
+const SPIDER_ID_BOARD_PROP_NAMES = Object.freeze(new Set(['title', 'eyebrow', 'species', 'footnote', 'caption']));
+const SPIDER_RISKS = new Set(['beneficial', 'nuisance', 'medical']);
+const SPIDER_GLYPHS = new Set(['orb', 'tangle', 'crevice', 'hunter']);
+function spiderSpeciesRowsValid(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  for (const r of rows) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return false;
+    for (const f of ['name', 'where', 'hunt', 'eggSac']) if (typeof r[f] !== 'string' || !r[f]) return false;
+    if (!SPIDER_RISKS.has(r.risk)) return false;
+    if (r.sciName !== undefined && (typeof r.sciName !== 'string' || !r.sciName)) return false;
+    if (r.glyph !== undefined && !SPIDER_GLYPHS.has(r.glyph)) return false;
+    if (r.source !== undefined) {
+      const src = r.source;
+      if (!src || typeof src !== 'object' || Array.isArray(src)) return false;
+      if (typeof src.label !== 'string' || !src.label) return false;
+      if (typeof src.url !== 'string' || !/^https:\/\//i.test(src.url)) return false;
+      try { void new URL(src.url); } catch { return false; }
+    }
+  }
+  return true;
+}
+function spiderIdBoardContractFinding(body) {
+  const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  const strView = blankExpressionStringLiterals(text);
+  const attrView = maskJsxAttrQuotes(text);
+  for (const tag of eachTag(text)) {
+    if (tag.isClose || tag.name !== 'spideridboard' || !isExactTagAt(text, tag.start, 'SpiderIdBoard')) continue;
+    if (strView[tag.start] === ' ' || attrView[tag.start] === ' ') continue;
+    if (hasAttrSpreadAfter(tag.attrs)) {
+      return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard> carrying a JSX spread ({...}) — its props cannot be validated against the schema.');
+    }
+    for (const { name, literal, expr } of eachJsxAttr(tag.attrs)) {
+      if (!SPIDER_ID_BOARD_PROP_NAMES.has(name)) {
+        return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard> with unknown prop "${name}" — the component accepts only ${[...SPIDER_ID_BOARD_PROP_NAMES].join(', ')}; the astro publish gate rejects unknown props.`);
+      }
+      if (name === 'species') {
+        if (literal !== null) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species="…"> string — species must be a JSON array expression of shaped records (name, risk, where, hunt, eggSac; optional sciName, glyph, source{label, https url}).');
+        }
+        if (expr) {
+          let parsed; let jsonish = false;
+          try { parsed = JSON.parse(expr.slice(1, -1)); jsonish = true; } catch (_) { /* JS-flavored/opaque — astro leaves it unvalidated */ }
+          if (jsonish && !spiderSpeciesRowsValid(parsed)) {
+            return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species={…}> whose value does not validate: a non-empty JSON array of records with name/risk (beneficial|nuisance|medical)/where/hunt/eggSac (optional sciName, glyph orb|tangle|crevice|hunter, source{label, https url}) — the astro publish gate rejects it.');
+          }
+        }
+      } else {
+        if (literal !== null && (name === 'title' || name === 'eyebrow') && !literal) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=""> — the schema requires a non-empty string.`);
+        }
+        if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=${expr}> — a non-string literal expression never satisfies the string prop schema.`);
+        }
+      }
     }
   }
   return null;
@@ -4398,8 +4499,12 @@ function isKnownGoodInternalRoute(dest) {
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
 function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
-  const text = String(body || '');
-  if (!text) return null;
+  // Non-rendered content carries no live links: a fenced or commented
+  // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
+  // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
+  // validators apply (Codex #3646 r18 P1). Length-preserving.
+  const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  if (!text.trim()) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
   for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
     // Briefs may mandate a link as an ABSOLUTE hub URL; body occurrences
@@ -5800,6 +5905,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // expression-valued ctaHref must park here, not at the astro gate after
     // a full generation spend.
     inlineCtaContractFinding(body),
+    spiderIdBoardContractFinding(body),
     // Brand-token covers body AND meta too, but the hub-anchor exemption applies
     // ONLY to body markdown — editable meta is scanned strictly (a literal hub
     // brand in a spoke's title/description is a real leak, not an anchor).

@@ -805,6 +805,34 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('nested-brace prop expressions, non-rendered route examples, SpiderIdBoard contract (Codex #3646 r18)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // A nested-brace object expression is consumed whole and rejected for a string prop.
+    const nested = guardrails.evaluate({ body: wrap('<InlineCTA headline={{"x":"y"}} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+    expect(codesOf(nested, 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    // A fenced or commented InlineCTA example never flags a route.
+    const fenced = 'Intro.\n\n## Sec\n\n```mdx\n<InlineCTA ctaHref="/example-only/" />\n```\n\n{/* <a href="/also-example/">x</a> */}\n\nProse.';
+    expect(codesOf(guardrails.evaluate({ body: fenced, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+    // ...while a rendered dead ctaHref still does.
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA ctaHref="/definitely-not-a-real-page/" />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBeGreaterThan(0);
+    // SpiderIdBoard: the vendored prop contract holds.
+    for (const bad of [
+      '<SpiderIdBoard species={42} />',
+      '<SpiderIdBoard species="wolf spider" />',
+      '<SpiderIdBoard species={[{"name":"Wolf spider","risk":"weird","where":"x","hunt":"y","eggSac":"z"}]} />',
+      '<SpiderIdBoard species={[]} />',
+      '<SpiderIdBoard madeUp="x" />',
+      '<SpiderIdBoard title="" />',
+    ]) {
+      expect(codesOf(guardrails.evaluate({ body: wrap(bad), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    }
+    const goodBoard = '<SpiderIdBoard title="SWFL spiders" species={[{"name":"Wolf spider","sciName":"Lycosidae","risk":"nuisance","glyph":"hunter","where":"Ground level","hunt":"Roams at night","eggSac":"Carried on spinnerets","source":{"label":"UF/IFAS","url":"https://entnemdept.ufl.edu/x"}}]} />';
+    expect(codesOf(guardrails.evaluate({ body: wrap(goodBoard), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+    // Opaque species expressions stay unvalidated (astro parity).
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={speciesRows} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
+  });
+
   test('expression-literal InlineCTA props and unknown AffiliateLink props fail closed (Codex #3646 r17)', () => {
     withAffiliateEnv(() => {
       const propCodes = (r) => r.findings.filter((f) => f.code === 'INVALID_INLINECTA_PROPS').length;
@@ -868,7 +896,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'AFFILIATE_LINK_ADDED_ON_REFRESH', 'AFFILIATE_LINK_ON_PROTECTED_PAGE', 'PROHIBITED_AFFILIATE_PRODUCT',
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
-      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS',
+      'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS', 'INVALID_SPIDERIDBOARD_PROPS',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }

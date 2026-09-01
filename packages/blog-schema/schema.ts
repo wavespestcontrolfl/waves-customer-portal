@@ -740,20 +740,24 @@ function blankNonRenderedCode(src: string): string {
   return lines.join('\n');
 }
 
+// Keywords after which a `/` starts a REGEX, not division (return /x/,
+// case /x/: …) — the last-identifier check both lexers share.
+const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new']);
+
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced). Honors JS literals so their content can't end it early:
 // strings ({'a}b'}), REGEX literals ({/"}/.test(x)} — a regex quote or
 // brace is not syntax; operator-position `/` starts one, char-class
 // aware), and // and /* */ comments.
 function closeOfExpressionAt(src: string, i: number): number {
-  let depth = 0; let q: string | null = null; let prevSig = '';
+  let depth = 0; let q: string | null = null; let prevSig = ''; let word = '';
   for (let j = i; j < src.length; j += 1) {
     const c = src[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
-    if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; word = ''; continue; }
     if (depth > 0 && c === '/' && src[j + 1] === '/') { while (j < src.length && src[j] !== '\n') j += 1; continue; }
     if (depth > 0 && c === '/' && src[j + 1] === '*') { const e = src.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
-    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
       let k = j + 1; let inClass = false; let closed = -1;
       for (; k < src.length && src[k] !== '\n'; k += 1) {
         const d = src[k];
@@ -764,8 +768,9 @@ function closeOfExpressionAt(src: string, i: number): number {
       }
       if (closed > 0) { j = closed; prevSig = '/'; continue; }
     }
-    if (c === '{') { depth += 1; prevSig = '{'; continue; }
-    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; continue; }
+    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
+    if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
   }
   return -1;
@@ -838,12 +843,15 @@ function blankExpressionStrings(src: string): string {
   // opaque (title="{" must not open an expression — its brace once paired
   // a later real prop quote and blanked a counted component's opener:
   // fail open); in prose only braces matter.
-  let inTag = false; let attrQ: string | null = null;
+  let inTag = false; let attrQ: string | null = null; let word = '';
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
     if (depth === 0) {
-      if (attrQ) { if (c === attrQ) attrQ = null; continue; }
+      // Quoted attr VALUES are blanked (quotes kept): tag-shaped text in a
+      // descendant attribute (title="</div>") must never close a wrapper
+      // in the balancing view (Codex #504 r20).
+      if (attrQ) { if (c === attrQ) { attrQ = null; } else if (out[i] !== '\n') { out[i] = ' '; } continue; }
       if (inTag) {
         if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
         if (c === '>') { inTag = false; continue; }
@@ -854,13 +862,13 @@ function blankExpressionStrings(src: string): string {
       if (c === '{') { depth = 1; prevSig = '{'; continue; }
       continue;
     }
-    if (c === '{') { depth += 1; prevSig = '{'; continue; }
-    if (c === '}') { depth -= 1; prevSig = '}'; continue; }
+    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; prevSig = '}'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
         for (; j < src.length; j += 1) { if (src[j] === '\\') { j += 1; continue; } if (src[j] === c) break; }
-        if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; }
+        if (j < src.length) { for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' '; i = j; prevSig = c; word = ''; }
         continue;
       }
       // Comments render nothing and may spell tag-shaped text ({true &&
@@ -877,7 +885,7 @@ function blankExpressionStrings(src: string): string {
         for (let k = i; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
         i = j - 1; continue;
       }
-      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig))) {
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word))) {
         // Regex literal: scan to the unescaped closing `/`, honoring
         // character classes ([/] does not close).
         let j = i + 1; let inClass = false; let closed = -1;
@@ -890,7 +898,8 @@ function blankExpressionStrings(src: string): string {
         }
         if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
       }
-      if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
+      if (/[A-Za-z0-9_$]/.test(c)) word += c; else if (!/\s/.test(c)) word = '';
+      if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener; a / after return/throw/case/… IS one (word check above)
     }
   }
   return out.join('');
