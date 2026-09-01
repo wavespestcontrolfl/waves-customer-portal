@@ -3938,18 +3938,6 @@ const EstimateConverter = {
       ? []
       : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isLegacyRodentRow(svc));
     const pinnedLegacyRodentOnlyPlan = !suppressRecurringConversion && isPinnedLegacyRodentOnlyPlan(recurringServices, isLegacyRodentRow);
-    // Unified accept-time decision for estimates with NO frozen quote
-    // (staff/AI/call lanes; GATE_UNIFIED_SETUP_FEE, owner ruling
-    // 2026-09-01) — decided HERE, BEFORE any customer/visit/term/invoice
-    // write: the conversion is about to seed this customer's recurring
-    // series, and a decision taken after seeding would read the just-
-    // created series as "existing customer" and self-waive every new
-    // customer's fee (audit r6 P0). null = legacy predicate governs.
-    const acceptUnifiedDecision = await acceptTimeUnifiedSetupFeeDecision(database, {
-      customerId,
-      recurringServices: recurringServicesForConversion,
-      estimateData,
-    });
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -4183,6 +4171,18 @@ const EstimateConverter = {
         .first();
       if (lockedCustomerRow) effectiveCustomer = lockedCustomerRow;
     }
+    // Unified accept-time decision for estimates with NO frozen quote
+    // (staff/AI/call lanes; GATE_UNIFIED_SETUP_FEE, owner ruling
+    // 2026-09-01) — decided AFTER the customer row lock above (audit r8
+    // P0: two concurrent accepts must serialize, or both read "no service,
+    // no claim" and each mints the fee) and BEFORE any visit/term/invoice
+    // write (audit r6 P0: a post-seeding read waives via the just-created
+    // series). null = legacy predicate governs.
+    const acceptUnifiedDecision = await acceptTimeUnifiedSetupFeeDecision(database, {
+      customerId,
+      recurringServices: recurringServicesForConversion,
+      estimateData,
+    });
     const addOnContext = suppressRecurringConversion
       ? { addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null }
       : await classifyAddOnAcceptContext({
