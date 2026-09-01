@@ -198,9 +198,16 @@ async function createEstimateMeasurementReview({
 // rather than rejecting, and this is the flow's ONLY handoff — retry once,
 // then log LOUDLY; the request row stands either way (extension-route
 // pattern).
-async function sendOfficeNotification(database, { subject, description, customerId, estimateId, requestId }) {
+// `kind` names the office-request flavor riding this delivery core: the bell
+// category (must appear in notification-bell-policy's lists) and the log/lock
+// tag. The measurement review is the original; the soft-exit change request
+// (estimate-change-request.js) rides the same core so the one-request/one-bell
+// contract is implemented once.
+const MEASUREMENT_REVIEW_KIND = { category: 'estimate_measurement_review', tag: 'estimate-measurement-review', lock: 'measurement-review-notify' };
+
+async function sendOfficeNotification(database, { subject, description, customerId, estimateId, requestId }, kind = MEASUREMENT_REVIEW_KIND) {
   const attempt = () => NotificationService.notifyAdmin(
-    'estimate_measurement_review',
+    kind.category,
     subject,
     description,
     {
@@ -210,7 +217,7 @@ async function sendOfficeNotification(database, { subject, description, customer
       metadata: { estimateId, requestId, customerId },
     }
   ).catch((err) => {
-    logger.error(`[estimate-measurement-review] admin notification threw for request ${requestId}: ${err.message}`);
+    logger.error(`[${kind.tag}] admin notification threw for request ${requestId}: ${err.message}`);
     return null;
   });
   // ATOMIC delivery claim (codex #3376 P1: the commit lands before the send,
@@ -241,7 +248,7 @@ async function sendOfficeNotification(database, { subject, description, customer
         ),
       });
   } catch (err) {
-    logger.warn(`[estimate-measurement-review] notify lease claim failed for request ${requestId}: ${err.message} — skipping send (a retry will re-arm)`);
+    logger.warn(`[${kind.tag}] notify lease claim failed for request ${requestId}: ${err.message} — skipping send (a retry will re-arm)`);
     return;
   }
   if (!claimed) return; // another sender holds a fresh lease or delivery is done
@@ -259,7 +266,7 @@ async function sendOfficeNotification(database, { subject, description, customer
     } catch (err) {
       // The fresh lease still guards double-rings for its window; a later
       // retry after expiry re-sends — an extra bell beats a lost one.
-      logger.warn(`[estimate-measurement-review] notifiedAt stamp failed for request ${requestId}: ${err.message}`);
+      logger.warn(`[${kind.tag}] notifiedAt stamp failed for request ${requestId}: ${err.message}`);
     }
   };
   const releaseLease = async () => {
@@ -271,7 +278,7 @@ async function sendOfficeNotification(database, { subject, description, customer
           pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt' - 'notifyLeaseToken'"),
         });
     } catch (err) {
-      logger.warn(`[estimate-measurement-review] notify lease release failed for request ${requestId}: ${err.message}`);
+      logger.warn(`[${kind.tag}] notify lease release failed for request ${requestId}: ${err.message}`);
     }
   };
 
@@ -287,7 +294,7 @@ async function sendOfficeNotification(database, { subject, description, customer
   const deliver = async () => {
     const first = await attempt();
     if (first?.suppressed) {
-      logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
+      logger.info(`[${kind.tag}] admin notification suppressed by policy for request ${requestId}`);
       return true;
     }
     if (first?.id) return true;
@@ -298,16 +305,16 @@ async function sendOfficeNotification(database, { subject, description, customer
   let delivered = false;
   if (typeof database.transaction === 'function') {
     delivered = await database.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`measurement-review-notify:${requestId}`]);
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${kind.lock}:${requestId}`]);
       const existingBell = await trx('notifications')
-        .where({ recipient_type: 'admin', category: 'estimate_measurement_review' })
+        .where({ recipient_type: 'admin', category: kind.category })
         .whereRaw("metadata->>'requestId' = ?", [String(requestId)])
         .first()
         .catch(() => null);
       if (existingBell) return true; // crash-after-insert recovery: bell exists
       return deliver();
     }).catch((err) => {
-      logger.error(`[estimate-measurement-review] notify lock/send failed for request ${requestId}: ${err.message}`);
+      logger.error(`[${kind.tag}] notify lock/send failed for request ${requestId}: ${err.message}`);
       return false;
     });
   } else {
@@ -317,7 +324,7 @@ async function sendOfficeNotification(database, { subject, description, customer
 
   if (delivered) { await markDelivered(); return; }
   await releaseLease();
-  logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
+  logger.error(`[${kind.tag}] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
 }
 
 
@@ -457,4 +464,8 @@ module.exports = {
   normalizeReasons,
   isMeasurementReviewEligible,
   createEstimateMeasurementReview,
+  // Shared office-request delivery core (see estimate-change-request.js).
+  sendOfficeNotification,
+  dedupedOutcome,
+  defaultViewabilityCheck,
 };

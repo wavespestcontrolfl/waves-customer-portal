@@ -833,7 +833,12 @@ window.fetch = async (input, init) => {
     // documentRender affirmation mirrors the server's gated pdf-pass payload
     // so ?mode=pdf previews render the print document.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
-    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...(pdfPass ? { documentRender: true } : {}) });
+    // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
+    // the "Not what you expected?" sheet is exercised in preview.
+    return respond({ ...PAYLOADS[scenario](), glassDefault: true, softExit: true, ...(pdfPass ? { documentRender: true } : {}) });
+  }
+  if (url.includes('/change-request') || url.endsWith('/decline')) {
+    return respond({ success: true, deduped: false });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
