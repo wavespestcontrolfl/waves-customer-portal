@@ -2024,9 +2024,18 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
       for (let i = 0; i < trimmed.length; i += 1) {
         const ch = trimmed[i];
         if (ch === '"') {
-          let j = i + 1;
-          while (j < trimmed.length && trimmed[j] !== '"') { if (trimmed[j] === '\\') j += 1; j += 1; }
-          out += trimmed.slice(i, j + 1);
+          // Double-quoted spans ALSO decode with JS escape semantics —
+          // an identity escape ("x\\q" → xq) is valid JSX but invalid
+          // JSON, and preserving it made the whole prop opaque
+          // (Codex #3646 r30).
+          let j = i + 1; let rawInner = '';
+          while (j < trimmed.length && trimmed[j] !== '"') {
+            if (trimmed[j] === '\\') { rawInner += trimmed[j] + (trimmed[j + 1] || ''); j += 2; continue; }
+            rawInner += trimmed[j]; j += 1;
+          }
+          const decodedInner = decodeJsStaticString(rawInner);
+          if (decodedInner === null) return undefined; // unsupported escape — opaque
+          out += JSON.stringify(decodedInner);
           i = j;
         } else if (ch === "'") {
           // Single-quoted spans decode with REAL JS escape semantics —

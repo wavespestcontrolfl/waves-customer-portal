@@ -3533,7 +3533,9 @@ async function publishRefresh(draft, brief = {}) {
     // (Codex #3646 r26).
     const guardrailsMod = require('../content/content-guardrails');
     const rendered = guardrailsMod.blankNonRenderedMarkdown(guardrailsMod.blankComments(newBody));
-    const comp = rendered.match(/<([A-Z][A-Za-z0-9]*)(?=[\s/>])/);
+    // Only CATALOGUED MDX components flag — uppercase standard HTML
+    // (<BR>, <DIV>) is raw HTML in a .md and renders fine (Codex #3646 r30).
+    const comp = rendered.match(new RegExp('<(' + guardrailsMod.SAFE_MDX_COMPONENTS.join('|') + ')(?=[\\s/>])'));
     if (comp) {
       const err = new Error(`refresh target ${filePath} is a legacy .md file — an MDX component (<${comp[1]}>) cannot render there; migrate the page to .mdx first or drop the component`);
       err.statusCode = 422;
