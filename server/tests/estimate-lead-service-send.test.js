@@ -17,9 +17,12 @@ jest.mock('../routes/estimate-public', () => ({
   })),
   applyServiceMixChange: jest.fn(async (args) => { mockMixCalls.push(args); return mockMix.responder(args); }),
 }));
-const mockFreshRow = { id: 'est-1', status: 'viewed', monthly_total: 40, estimate_data: '{}' };
+// The db read returns the CLAIMED row (post send-claim version) first, then
+// the parked row after each commit — so the test can prove the rail is
+// handed the claimed version, never the caller's stale object.
+const mockRows = { queue: [] };
 jest.mock('../models/db', () => {
-  const dbh = () => ({ where: () => ({ first: async () => mockFreshRow }) });
+  const dbh = () => ({ where: () => ({ first: async () => (mockRows.queue.length > 1 ? mockRows.queue.shift() : mockRows.queue[0]) }) });
   dbh.fn = { now: () => 'now' };
   return dbh;
 });
@@ -36,15 +39,21 @@ const newCustomerRow = (overrides = {}) => ({
   status: 'sending',
   category: 'RESIDENTIAL',
   waveguard_tier: 'Silver',
+  // Stale: the route's send claim rewrote updated_at after this object was read.
+  updated_at: '2026-09-01T10:00:00.000Z',
   estimate_data: JSON.stringify({
     engineRequest: { profile: { homeSqFt: 2000 }, selectedServices: ['PEST', 'LAWN'], options: {} },
     inputs: { services: { pest: {}, lawn: {} } },
   }),
   ...overrides,
 });
+const CLAIMED_AT = '2026-09-01T10:00:05.000Z';
+const claimedRowFor = (row) => ({ ...row, status: 'sending', updated_at: CLAIMED_AT });
+const parkedRow = { id: 'est-1', status: 'viewed', monthly_total: 40, updated_at: '2026-09-01T10:00:09.000Z', estimate_data: '{}' };
 
 beforeEach(() => {
   mockMixCalls.length = 0;
+  mockRows.queue = [claimedRowFor(newCustomerRow()), parkedRow];
   mockPlan.active = false;
   mockPlan.throws = false;
   mockGates.estimateLeadServiceSend = true;
@@ -53,12 +62,16 @@ beforeEach(() => {
     : { status: 200, body: { success: true } });
 });
 
-test('parks the non-lead line as actor staff — dry run, then commit bound to that preview — and returns the fresh row with the send status kept', async () => {
+test('parks the non-lead line as actor staff — dry run, then commit bound to that preview, on the CLAIMED row version — and returns the fresh row with the send status kept', async () => {
   const out = await applyLeadServiceForSend(newCustomerRow());
   expect(mockMixCalls.map((c) => [c.actor, c.body.serviceKey, c.body.included, c.body.dryRun === true, c.body.previewBasis || null])).toEqual([
     ['staff', 'lawn_care', false, true, null],
     ['staff', 'lawn_care', false, false, 'digest-1'],
   ]);
+  // The rail's CAS compares updated_at: it must see the post-claim version,
+  // never the caller's stale object (pre-push codex P1).
+  for (const call of mockMixCalls) expect(call.estimate.updated_at).toBe(CLAIMED_AT);
+  expect(mockMixCalls[0].estimate.status).toBe('sending');
   expect(out.monthly_total).toBe(40);
   expect(out.status).toBe('sending');
 });
@@ -68,6 +81,7 @@ test('lead follows the estimator\'s selection order', async () => {
   const data = JSON.parse(row.estimate_data);
   data.engineRequest.selectedServices = ['LAWN', 'PEST'];
   row.estimate_data = JSON.stringify(data);
+  mockRows.queue = [claimedRowFor(row), parkedRow];
   await applyLeadServiceForSend(row);
   expect(mockMixCalls[0].body.serviceKey).toBe('pest_control');
 });
@@ -90,35 +104,44 @@ test('members, grouped, commercial, locked, already-shaped and single-line rows 
     newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST'], options: {} }, inputs: { services: { pest: {} } } }) }),
   ];
   for (const row of cases) {
+    mockRows.queue = [claimedRowFor(row), parkedRow];
     expect(await applyLeadServiceForSend(row)).toBe(row);
   }
   expect(mockMixCalls).toHaveLength(0);
 });
 
 test('member evidence in any carrier — the recurring-customer flag included — and a live active plan are never parked; a lookup failure fails CLOSED', async () => {
+  const run = async (row) => { mockRows.queue = [claimedRowFor(row), parkedRow]; return applyLeadServiceForSend(row); };
   const flagged = newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: { recurringCustomer: 'yes' } } }) });
-  expect(await applyLeadServiceForSend(flagged)).toBe(flagged);
+  expect(await run(flagged)).toBe(flagged);
   const flaggedInputs = newCustomerRow({ estimate_data: JSON.stringify({ engineInputs: { isRecurringCustomer: true, services: { pest: {}, lawn: {} } }, engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN'], options: {} } }) });
-  expect(await applyLeadServiceForSend(flaggedInputs)).toBe(flaggedInputs);
+  expect(await run(flaggedInputs)).toBe(flaggedInputs);
   mockPlan.active = true;
   const live = newCustomerRow({ customer_id: 'cust-1' });
-  expect(await applyLeadServiceForSend(live)).toBe(live);
+  expect(await run(live)).toBe(live);
   mockPlan.active = false;
   mockPlan.throws = true;
   const broken = newCustomerRow({ customer_id: 'cust-1' });
-  expect(await applyLeadServiceForSend(broken)).toBe(broken);
+  expect(await run(broken)).toBe(broken);
   expect(mockMixCalls).toHaveLength(0);
   // A linked NON-member still gets the lead-service shape.
   mockPlan.throws = false;
-  await applyLeadServiceForSend(newCustomerRow({ customer_id: 'cust-1' }));
+  await run(newCustomerRow({ customer_id: 'cust-1' }));
   expect(mockMixCalls).toHaveLength(2);
 });
 
-test('a refused preview never blocks the send — the full bundle goes out as today', async () => {
+test('a refused preview never blocks the send — the full bundle goes out as today, untouched object', async () => {
   mockMix.responder = () => ({ status: 409, body: { error: 'reprice_unavailable' } });
   const row = newCustomerRow();
   expect(await applyLeadServiceForSend(row)).toBe(row);
   expect(mockMixCalls).toHaveLength(1);
+});
+
+test('an archived or locked claimed row is left alone', async () => {
+  const row = newCustomerRow();
+  mockRows.queue = [{ ...claimedRowFor(row), archived_at: 'x' }, parkedRow];
+  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(mockMixCalls).toHaveLength(0);
 });
 
 test('a throwing rail is swallowed, not surfaced to the send', async () => {

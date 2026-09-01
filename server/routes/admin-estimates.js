@@ -883,8 +883,16 @@ async function applyLeadServiceForSend(estimate) {
   try {
     if (!estimate || estimate.estimate_group_id || estimate.price_locked_at) return estimate;
     if (String(estimate.category || 'RESIDENTIAL').toUpperCase() !== 'RESIDENTIAL') return estimate;
+    // The caller's object predates its own send claim (the route stamps
+    // status='sending' + updated_at before calling in), and the rail's CAS
+    // compares updated_at to the millisecond — a stale version would 409
+    // every commit and silently send the full bundle (pre-push codex P1).
+    // Work from the row as it is NOW; keep only the caller's in-flight status.
+    const claimedRow = await db('estimates').where({ id: estimate.id }).first();
+    if (!claimedRow || claimedRow.archived_at || claimedRow.price_locked_at) return estimate;
+    let current = { ...claimedRow, status: estimate.status };
     let estData = {};
-    try { estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    try { estData = typeof current.estimate_data === 'string' ? JSON.parse(current.estimate_data) : (current.estimate_data || {}); }
     catch { return estimate; }
     if (estData?.serviceOptOut) return estimate; // already shaped once — never re-park on a resend
     // Member exclusion (security-critical, AGENTS.md): EVERY member-evidence
@@ -904,17 +912,17 @@ async function applyLeadServiceForSend(estimate) {
       return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
     });
     if (recurringFlagged) return estimate;
-    if (estimate.customer_id) {
+    if (current.customer_id) {
       const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
       let activeMember = true;
-      try { activeMember = await isActivePlanCustomer(db, estimate.customer_id); } catch (_) { activeMember = true; }
+      try { activeMember = await isActivePlanCustomer(db, current.customer_id); } catch (_) { activeMember = true; }
       if (activeMember) return estimate;
     }
     const estimatePublic = require('./estimate-public');
     const OptOut = require('../services/estimate-service-opt-out');
-    const bundle = await estimatePublic.buildPricingBundle(estimate).catch(() => null);
+    const bundle = await estimatePublic.buildPricingBundle(current).catch(() => null);
     const sections = Array.isArray(bundle?.services) ? bundle.services : [];
-    const removable = OptOut.serviceOptOutRemovableKeys(estData, sections, estimate.waveguard_tier);
+    const removable = OptOut.serviceOptOutRemovableKeys(estData, sections, current.waveguard_tier);
     if (removable.size < 1) return estimate;
     const recurringKeys = sections.filter((s) => s && s.isRecurring === true).map((s) => String(s.key || ''));
     if (recurringKeys.length < 2) return estimate;
@@ -928,7 +936,7 @@ async function applyLeadServiceForSend(estimate) {
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (!toPark.length) return estimate;
 
-    let current = estimate;
+    let parked = 0;
     for (const serviceKey of toPark) {
       // The rail's own resolver re-runs on every step (removability shrinks
       // as lines leave — the last recurring line is never removable).
@@ -946,13 +954,14 @@ async function applyLeadServiceForSend(estimate) {
         logger.warn(`[admin-estimates] lead-service send: commit for ${serviceKey} refused on estimate ${estimate.id} (${commit.body?.error || commit.status})`);
         continue;
       }
+      parked += 1;
       const fresh = await db('estimates').where({ id: estimate.id }).first();
       if (!fresh) break;
       // Keep the caller's in-flight status (the route-level 'sending' claim)
       // while taking every parked total from the row.
       current = { ...fresh, status: estimate.status };
     }
-    return current;
+    return parked ? current : estimate;
   } catch (err) {
     logger.warn(`[admin-estimates] lead-service send skipped for estimate ${estimate?.id}: ${err.message}`);
     return estimate;
