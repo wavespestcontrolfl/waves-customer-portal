@@ -121,9 +121,18 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // transcription after three minutes.
     const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
-    expect(predicate).toContain('processing_heartbeat_at IS NOT NULL');
-    expect(predicate).toContain('processing_heartbeat_at IS NULL');
+    expect(predicate).toContain('CURRENT_BEAT');
     expect(predicate).toContain('LEGACY_CLAIM_QUIET_MINUTES');
+  });
+
+  test('a beat left by a PREVIOUS claim does not speak for this one', () => {
+    // An old pod reclaiming a row it had processed before carries a stale
+    // heartbeat; reading it as this claim's silence stole the live pass at
+    // once. The COALESCE keeps a NULL start from making the row match
+    // neither branch, which would be permanently unreclaimable.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const beat = source.match(/const CURRENT_BEAT = [^;]+;/s)[0];
+    expect(beat).toContain('processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)');
   });
 
   test('the ceiling never reaches the reclaim predicates — those are heartbeat-only', () => {

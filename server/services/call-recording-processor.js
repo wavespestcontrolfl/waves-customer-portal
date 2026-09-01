@@ -1979,10 +1979,20 @@ function summarizeBatch(results) {
 // and reading its silence as death let the new pod steal a live transcription
 // after three minutes (pre-push audit P1). Those keep the conservative
 // ten-minute window they had before the heartbeat existed.
+// A heartbeat only speaks for the claim that WROTE it. One left behind by a
+// previous pass is older than this claim's start, and reading it as this
+// claim's silence made a freshly claimed row look instantly dead — an old pod
+// reclaiming a row it had processed before would have its live pass stolen at
+// once, skipping the legacy window entirely (pre-push audit P1).
 const LEGACY_CLAIM_QUIET_MINUTES = 10;
+// COALESCE, not a bare comparison: with a NULL processing_started_at the
+// comparison yields NULL, NOT(NULL) is NULL, and the row would match NEITHER
+// branch — permanently unreclaimable, the worst possible bug in a lock.
+const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
+  + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
 const reclaimableClaim = (quietMinutes) => "("
-  + `(processing_heartbeat_at IS NOT NULL AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
-  + ' OR (processing_heartbeat_at IS NULL AND'
+  + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
+  + ` OR (NOT (${CURRENT_BEAT}) AND`
   + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
   + ")";
 // A voicemail landing on the TERMINAL skip path despite concrete service
