@@ -362,17 +362,20 @@ const TwilioService = {
   // Bradenton. Exported so display surfaces (the Pending Drafts queue's
   // Communications deep link) can show the SAME number the send path will
   // pick instead of maintaining a parallel derivation (Codex #3700 r5 P1).
-  async deriveOutboundNumber({ customerLocationId, customerId } = {}) {
+  // `customer` is an optional preloaded row ({ city }) for callers that
+  // already hold it (the drafts list joins customers for a whole page) —
+  // it skips the per-call lookup without changing the derivation.
+  async deriveOutboundNumber({ customerLocationId, customerId, customer } = {}) {
     const TWILIO_NUMBERS = require("../config/twilio-numbers");
     const { resolveLocation } = require("../config/locations");
     let locationId = customerLocationId;
-    if (!locationId && customerId) {
+    if (!locationId && (customer || customerId)) {
       try {
-        const customer = await db("customers")
+        const row = customer || await db("customers")
           .where({ id: customerId })
           .first();
-        if (customer) {
-          const loc = resolveLocation(customer.city);
+        if (row) {
+          const loc = resolveLocation(row.city);
           locationId = loc.id;
         }
       } catch {}

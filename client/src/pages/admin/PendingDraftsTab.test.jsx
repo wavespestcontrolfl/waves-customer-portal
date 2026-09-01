@@ -20,8 +20,10 @@ const DRAFTS = {
       recipientPhone: "+19415550100",
       inboundMessage: null,
       draftResponse: "Hi Pat, thanks for clicking through on your estimate.",
+      // Real click-followup rows carry the intent and NO campaign_type
+      // (click-followup.js inserts none) — the lane must come from intent.
       intent: "click_followup",
-      campaignType: "click_followup",
+      campaignType: null,
       contextSummary: null,
       createdAt: new Date().toISOString(),
     },
@@ -66,6 +68,25 @@ describe("PendingDraftsTab", () => {
     expect(links[0]).toHaveAttribute("href", "/admin/communications?draftId=d1&phone=%2B19415550100");
     expect(links[1]).toHaveAttribute("href", "/admin/communications?draftId=d2&phone=%2B19415550101");
     expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending");
+  });
+
+  it("locks every card and Refresh while one mutation is in flight", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    let finish;
+    adminFetch.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    fireEvent.click(screen.getAllByText("Approve & send")[0]);
+    // busyId names only d1, but d2's actions and Refresh must lock too:
+    // a second action would overwrite busyId and the first to finish
+    // would re-enable everything with the other still pending.
+    await waitFor(() => expect(screen.getAllByText("Approve & send")[1]).toBeDisabled());
+    expect(screen.getAllByText("Reject")[1]).toBeDisabled();
+    expect(screen.getByText("Refresh")).toBeDisabled();
+    finish({ success: true });
+    await waitFor(() => expect(screen.queryByText("Pat Customer")).not.toBeInTheDocument());
+    expect(screen.getAllByText("Approve & send")[0]).not.toBeDisabled();
+    expect(screen.getByText("Refresh")).not.toBeDisabled();
   });
 
   it("approve confirms, PUTs, and removes the card", async () => {

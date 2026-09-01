@@ -56,10 +56,17 @@ function samePhone(a, b) {
   return Boolean(left && right && left.slice(-10) === right.slice(-10));
 }
 
-async function resolveDraftRecipient(draft) {
+// `preloaded` lets a page-sized caller (GET /) hand over the sms_log row
+// and the draft's own customer row it already fetched in bulk, so a 50-row
+// page costs a fixed number of queries instead of two per draft (Codex
+// #3700 r9 P2). Keys present in `preloaded` are authoritative — a null
+// means "looked up, not found".
+async function resolveDraftRecipient(draft, preloaded = {}) {
   const flags = parseFlags(draft.flags);
   if (draft.sms_log_id) {
-    const smsLog = await db('sms_log').where({ id: draft.sms_log_id }).first();
+    const smsLog = 'smsLog' in preloaded
+      ? preloaded.smsLog
+      : await db('sms_log').where({ id: draft.sms_log_id }).first();
     if (smsLog?.from_phone) {
       return {
         toPhone: smsLog.from_phone,
@@ -70,9 +77,9 @@ async function resolveDraftRecipient(draft) {
     }
   }
 
-  const customer = draft.customer_id
-    ? await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first()
-    : null;
+  const customer = !draft.customer_id ? null
+    : 'customer' in preloaded ? preloaded.customer
+      : await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first();
   const metadataPhone = normalizeE164(flags.toPhone || flags.phone || flags.leadPhone);
   if (metadataPhone) {
     const customerMatches = customer?.phone && samePhone(metadataPhone, customer.phone);
@@ -104,12 +111,19 @@ async function resolveDraftRecipient(draft) {
 // customerId alone (Codex #3700 r2-r5 P1s). Display-only: the deep link
 // pins the number so the composer's hardcoded default cannot override
 // routing; the send path itself is untouched.
-async function derivedOfficeNumber(row, recipientCustomerId) {
+async function derivedOfficeNumber(row, recipientCustomerId, preloadedCustomer = null) {
   try {
     const TwilioService = require('../services/twilio');
+    // The preloaded row only stands in for the customer the send path
+    // would look up — never for a different customer the sms_log thread
+    // resolved to.
+    const customer = preloadedCustomer && recipientCustomerId && preloadedCustomer.id === recipientCustomerId
+      ? preloadedCustomer
+      : undefined;
     return await TwilioService.deriveOutboundNumber({
       customerLocationId: row.campaign_type ? row.nearest_location_id : undefined,
       customerId: recipientCustomerId || undefined,
+      customer,
     }) || null;
   } catch {
     return null;
@@ -642,7 +656,7 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
-        'customers.nearest_location_id')
+        'customers.nearest_location_id', 'customers.city')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -665,10 +679,18 @@ router.get('/', async (req, res, next) => {
     // use (resolveDraftRecipient: sms_log thread first, then flags, then
     // customer) — the flags-only guess could name one number while Approve
     // texts another (Codex #3700 P1). Resolution failure falls back to the
-    // legacy guess rather than dropping the row.
+    // legacy guess rather than dropping the row. Resolution is fed from
+    // ONE sms_log batch read plus the customer columns the page query
+    // already joined, so a full page stays at a fixed query count instead
+    // of two lookups per draft (Codex #3700 r9 P2).
+    const smsLogIds = drafts.map((d) => d.sms_log_id).filter(Boolean);
+    const smsLogs = smsLogIds.length ? await db('sms_log').whereIn('id', smsLogIds) : [];
+    const smsLogById = new Map(smsLogs.map((row) => [String(row.id), row]));
     const resolved = await Promise.all(drafts.map(async (d) => {
-      const r = await resolveDraftRecipient(d).catch(() => null);
-      const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId);
+      const customer = d.customer_id ? { id: d.customer_id, phone: d.phone, city: d.city } : null;
+      const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
+      const r = await resolveDraftRecipient(d, preloaded).catch(() => null);
+      const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId, customer);
       const fromLabel = fromNumber ? (TWILIO_NUMBERS.findByNumber(fromNumber)?.label || null) : null;
       return { r, fromNumber, fromLabel };
     }));

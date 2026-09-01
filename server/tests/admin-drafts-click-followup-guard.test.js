@@ -542,7 +542,7 @@ describe('list — send-path recipient resolution + paging', () => {
     TWILIO_NUMBERS.findByNumber.mockImplementation((n) => (n === '+19415551000' ? { number: n } : null));
     enqueue('message_drafts', { first: { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } }); // cursor anchor exists
     enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: 'sms-1' })] }); // page query
-    enqueue('sms_log', { first: { id: 'sms-1', from_phone: '+19415550777', to_phone: '+19415551000', customer_id: 'cust-1' } });
+    enqueue('sms_log', { rows: [{ id: 'sms-1', from_phone: '+19415550777', to_phone: '+19415551000', customer_id: 'cust-1' }] }); // ONE batch read for the page
     enqueue('message_drafts', { first: { count: '7' } }); // pendingCount
 
     const body = await withServer(async (base) => {
@@ -562,22 +562,37 @@ describe('list — send-path recipient resolution + paging', () => {
   test('GET / derives the office From lane-exactly for anchorless drafts', async () => {
     TWILIO_NUMBERS.getOutboundNumber.mockReturnValue('+19415552000');
     // Campaign lane: approve passes nearest_location_id → it wins.
-    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, campaign_type: 'upsell', nearest_location_id: 'venice', city: 'Sarasota' })] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    // No per-row customers/sms_log reads: the page query's joined customer
+    // columns feed both resolvers (r9 P2) — an unexpected lookup would
+    // dequeue nothing and surface as an undefined-row failure below.
+    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, campaign_type: 'upsell', phone: '+19415550101', nearest_location_id: 'venice', city: 'Sarasota' })] });
     enqueue('message_drafts', { first: { count: '1' } });
     const campaign = await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
     expect(TWILIO_NUMBERS.getOutboundNumber).toHaveBeenCalledWith('venice');
     expect(campaign.drafts[0].resolvedFromNumber).toBe('+19415552000');
+    expect(db).not.toHaveBeenCalledWith('customers');
+    expect(db).not.toHaveBeenCalledWith('sms_log');
 
     // Non-campaign lane: the send path passes only customerId, so Twilio
     // derives from the customer's CITY — nearest_location_id must NOT win.
     TWILIO_NUMBERS.getOutboundNumber.mockClear();
-    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, nearest_location_id: 'venice', city: 'Sarasota' })] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } }); // recipient resolution
-    enqueue('customers', { first: { id: 'cust-1', city: 'Sarasota' } });      // canonical resolver's own city read
+    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, phone: '+19415550101', nearest_location_id: 'venice', city: 'Sarasota' })] });
     enqueue('message_drafts', { first: { count: '1' } });
     await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
     expect(TWILIO_NUMBERS.getOutboundNumber).toHaveBeenCalledWith('sarasota');
+    expect(db).not.toHaveBeenCalledWith('customers');
+  });
+
+  test('GET / resolves a whole page from one sms_log batch read (no per-draft lookups)', async () => {
+    TWILIO_NUMBERS.findByNumber.mockImplementation((n) => (n === '+19415551000' ? { number: n } : null));
+    const rows = ['a', 'b', 'c'].map((k) => draftRow({ id: `draft-${k}`, status: 'pending', sms_log_id: `sms-${k}`, phone: '+19415550101', city: 'Sarasota' }));
+    enqueue('message_drafts', { rows });
+    enqueue('sms_log', { rows: rows.map((r) => ({ id: r.sms_log_id, from_phone: `+1941555${r.sms_log_id.slice(-1).charCodeAt(0)}`, to_phone: '+19415551000', customer_id: 'cust-1' })) });
+    enqueue('message_drafts', { first: { count: '3' } });
+    const body = await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
+    expect(body.drafts.map((d) => d.resolvedFromNumber)).toEqual(['+19415551000', '+19415551000', '+19415551000']);
+    expect(db.mock.calls.filter(([t]) => t === 'sms_log')).toHaveLength(1);
+    expect(db).not.toHaveBeenCalledWith('customers');
   });
 
   test("GET / routes from the sms_log-resolved customer's city when the draft row has no customer", async () => {
@@ -586,8 +601,10 @@ describe('list — send-path recipient resolution + paging', () => {
     // recipient customer, whose to_phone is NOT a recognized Waves number,
     // so the office must derive from THAT customer's city.
     enqueue('message_drafts', { rows: [draftRow({ status: 'pending', customer_id: null, sms_log_id: 'sms-2', city: null, nearest_location_id: null })] });
-    enqueue('sms_log', { first: { id: 'sms-2', from_phone: '+19415550888', to_phone: '+15005550000', customer_id: 'cust-9' } });
-    enqueue('customers', { first: { city: 'Venice', nearest_location_id: null } }); // recipient customer's city
+    enqueue('sms_log', { rows: [{ id: 'sms-2', from_phone: '+19415550888', to_phone: '+15005550000', customer_id: 'cust-9' }] });
+    // The joined customer (none here) never stands in for the thread's
+    // customer: the canonical resolver reads cust-9's city itself.
+    enqueue('customers', { first: { city: 'Venice', nearest_location_id: null } });
     enqueue('message_drafts', { first: { count: '1' } });
     const body = await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
     expect(TWILIO_NUMBERS.getOutboundNumber).toHaveBeenCalledWith('venice');

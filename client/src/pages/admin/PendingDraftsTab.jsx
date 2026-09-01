@@ -33,17 +33,25 @@ const D = {
 };
 
 // Lane = which pipeline parked the draft. campaign_type is authoritative
-// when present; the webhook/reply drafter rows carry only an intent.
+// when present (the campaign writers: 'reactivation' | 'upsell'); the
+// click-followup and estimate-clarify writers store NO campaign_type and
+// identify their rows by intent alone (click-followup.js,
+// estimate-clarify-asks.js), and the webhook/reply drafter rows carry only
+// a classifier intent — those fall through to the reply lane.
+const INTENT_LANES = {
+  click_followup: "click_followup",
+  estimate_clarify: "estimate_clarify",
+};
+
 function laneOf(draft) {
   if (draft.campaignType) return draft.campaignType;
-  if (draft.intent === "estimate_clarify") return "estimate_clarify";
-  return "reply_draft";
+  return INTENT_LANES[draft.intent] || "reply_draft";
 }
 
 const LANE_LABELS = {
   click_followup: "Click follow-up",
   upsell: "Upsell",
-  seasonal_reactivation: "Seasonal",
+  reactivation: "Seasonal",
   estimate_clarify: "Estimate clarify",
   reply_draft: "Reply draft",
 };
@@ -411,7 +419,12 @@ export default function PendingDraftsTab({ embedded = false }) {
           // copy against the narrowed missing set.
           key={`${draft.id}:${draft.draftResponse || ""}`}
           draft={draft}
-          busy={busyId === draft.id || loading || loadingMore}
+          // EVERY card locks while any mutation is in flight: busyId can
+          // name only one draft, so a second action started meanwhile
+          // would overwrite it and whichever request finished first would
+          // re-enable Refresh with the other still pending — reopening
+          // the stale-reload window the seq guard closes.
+          busy={busyId !== null || loading || loadingMore}
           onApprove={approve}
           onRevise={revise}
           onReject={reject}
