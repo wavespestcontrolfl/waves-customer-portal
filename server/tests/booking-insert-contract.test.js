@@ -196,9 +196,34 @@ function statementPrefix(source, refIndex) {
 // `<alias>.insert(` in the file counts as a site (GH Codex #3702 r4 P2).
 function collectInsertSites(source) {
   const out = [];
+  // Raw SQL inserts are sites too — a knex.raw('INSERT INTO
+  // scheduled_services …') must not slip past a builder-only scan
+  // (GH Codex r5 P1).
+  const rawRe = /INSERT\s+INTO\s+["'`]?scheduled_services\b/gi;
+  let rawM;
+  while ((rawM = rawRe.exec(source)) !== null) {
+    // Comment mentions are not sites (the iCal script documents its own
+    // insert in prose).
+    const lineStart = source.lastIndexOf('\n', rawM.index - 1) + 1;
+    const line = source.slice(lineStart, rawM.index);
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+    out.push(`${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`.trim());
+  }
   const re = /['"`]scheduled_services['"`]/g;
   let m;
   while ((m = re.exec(source)) !== null) {
+    // Table-LAST builder forms: trx.insert(data).into('scheduled_services')
+    // / .table('scheduled_services') put the insert BEFORE the table ref,
+    // so the forward chain walk below never sees it (GH Codex r5 P1). The
+    // statement's text up to the ref carries the .insert( in that shape.
+    const before = source.slice(Math.max(0, m.index - 12), m.index);
+    if (/\.(into|table)\s*\($/.test(before)) {
+      const prefix = statementPrefix(source, m.index);
+      if (/\.insert\s*\(/.test(prefix)) {
+        out.push(`${prefix} table-last:scheduled_services`.trim());
+      }
+      continue;
+    }
     // The ref must be the argument of a call: the next non-trivia char
     // closes it (this also catches a table string on its own line).
     let i = skipTrivia(source, m.index + m[0].length);
@@ -281,6 +306,12 @@ describe('booking insert-site contract', () => {
     // not cancel against a newly added twin).
     const twins = collectInsertSites("const [a] = await trx('scheduled_services').insert(insertData);\nreturn trx('scheduled_services').insert(insertData);");
     expect(new Set(twins).size).toBe(2);
+    // Table-last forms and raw SQL are caught (GH Codex r5 P1).
+    expect(collectInsertSites("await trx.insert(data).into('scheduled_services');")).toEqual(["await trx.insert(data).into( table-last:scheduled_services"]);
+    expect(collectInsertSites("await trx.insert(data).table('scheduled_services');")).toEqual(["await trx.insert(data).table( table-last:scheduled_services"]);
+    expect(collectInsertSites("await db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
+    // …but a table-last READ does not.
+    expect(collectInsertSites("await trx.select('*').from('x').table('scheduled_services');")).toEqual([]);
     // A read chained near the ref must NOT count…
     expect(collectInsertSites("await trx('scheduled_services').where({ id }).first();")).toEqual([]);
     // …nor an insert into a DIFFERENT table on the next line.
