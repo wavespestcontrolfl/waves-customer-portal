@@ -213,11 +213,15 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   // terminal verdict close routes nothing ever fetched). The last
   // PROBE_SLOT_RESERVE pre-cap positions are given to uncovered probes;
   // displaced hints queue after them for any remaining budget.
-  const allProbeUrls = new Set(PROBE_PATHS.map((pp) => `https://${host}${pp}`));
-  const uncoveredProbeUrls = new Set(uncovered.map((i) => `https://${host}${PROBE_PATHS[i]}`));
-  const probeBlock = out.filter((u) => allProbeUrls.has(u)); // keeps uncovered-first order
-  if (probeBlock.some((u) => uncoveredProbeUrls.has(u))) {
-    const others = out.filter((u) => !allProbeUrls.has(u));
+  // classification is by NORMALIZED key, exactly like the dedup above — an
+  // aliased hint ("/register/") that suppressed the canonical probe push
+  // still counts as that probe (reserved slot, mask bit, coverage)
+  const probeKey = (u) => registry.normalizeSubmissionUrl(u);
+  const allProbeKeys = new Set(PROBE_PATHS.map((pp) => probeKey(`https://${host}${pp}`)));
+  const uncoveredProbeKeys = new Set(uncovered.map((i) => probeKey(`https://${host}${PROBE_PATHS[i]}`)));
+  const probeBlock = out.filter((u) => allProbeKeys.has(probeKey(u))); // keeps uncovered-first order
+  if (probeBlock.some((u) => uncoveredProbeKeys.has(probeKey(u)))) {
+    const others = out.filter((u) => !allProbeKeys.has(probeKey(u)));
     const head = Math.max(0, MAX_FETCHES_PER_DOMAIN - PROBE_SLOT_RESERVE);
     return [...others.slice(0, head), ...probeBlock, ...others.slice(head)];
   }
@@ -785,15 +789,16 @@ async function investigatePaths(db, {
         });
         const priorProbeMask = Number(domain.probe_coverage_mask) || 0;
         const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths, probeOffset: Math.floor(now.getTime() / (60 * 60 * 1000)), probeMask: priorProbeMask });
-        const probeIndexByUrl = new Map(PROBE_PATHS.map((p, i) => [`https://${host}${p}`, i]));
-        let passProbeMask = 0; // probes OFFERED a fetch attempt this pass (success or failure both count)
+        const probeIndexByKey = new Map(PROBE_PATHS.map((p, i) => [registry.normalizeSubmissionUrl(`https://${host}${p}`), i]));
+        let passProbeMask = 0; // probes OFFERED a fetch attempt this pass (success or failure both count; aliased hints count via the normalized key)
         const pages = [];
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
         let cappedTail = false;
         for (const url of urls) {
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
-          if (probeIndexByUrl.has(url)) passProbeMask |= 1 << probeIndexByUrl.get(url);
+          const probeIdx = probeIndexByKey.get(registry.normalizeSubmissionUrl(url));
+          if (probeIdx !== undefined) passProbeMask |= 1 << probeIdx;
           out.fetches += 1;
           const page = await fetcher(url);
           const finalUrl = (page && page.finalUrl) || url;
