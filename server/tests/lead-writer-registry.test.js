@@ -104,11 +104,41 @@ function simpleAssignPairs(src) {
   return pairs;
 }
 
-// A raw-SQL match counts only in an EXECUTABLE raw-query context — a
-// `raw(` opener shortly before the match. A doc constant
-// (`const example = 'INSERT INTO leads …'`) has none and is ignored.
+// A raw-SQL match counts only in an EXECUTABLE raw-query context: a `raw(`
+// opener shortly before the match, OR the SQL stored in a constant that is
+// later PASSED to raw (`const SQL = 'INSERT …'; db.raw(SQL)`). A doc
+// constant never handed to raw is ignored.
 function inRawContext(code, idx) {
-  return /\braw\s*\(/.test(code.slice(Math.max(0, idx - 300), idx));
+  if (/\braw\s*\(/.test(code.slice(Math.max(0, idx - 300), idx))) return true;
+  const lineStart = code.lastIndexOf('\n', idx) + 1;
+  const decl = code.slice(lineStart, idx).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/);
+  if (decl) return new RegExp(String.raw`\braw\s*\(\s*${escapeRe(decl[1])}\b`).test(code);
+  return false;
+}
+
+// Function-shaped factories with BALANCED bodies of any nesting depth: find
+// every `function NAME(...) {` and block-bodied arrow head, walk the body to
+// its matching brace, and report the name when the body RETURNS a builder
+// matching bodyRe (whose first capture is returned for the caller).
+function balancedBodyFactories(src, bodyRe) {
+  const out = [];
+  const headRe = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{|\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g;
+  let h;
+  while ((h = headRe.exec(src))) {
+    const name = h[1] || h[2];
+    if (!name) continue;
+    let depth = 1;
+    let j = headRe.lastIndex;
+    for (; j < src.length && depth > 0; j += 1) {
+      if (src[j] === '{') depth += 1;
+      else if (src[j] === '}') depth -= 1;
+    }
+    const body = src.slice(headRe.lastIndex, j);
+    bodyRe.lastIndex = 0;
+    const bm = bodyRe.exec(body);
+    if (bm) out.push({ name, capture: bm[1] });
+  }
+  return out;
 }
 
 function leadsTableTokens(src) {
@@ -138,6 +168,15 @@ function aliasInsertPatterns(src, token) {
   const factories = new Set();
   let decl;
   while ((decl = declRe.exec(src))) builders.add(decl[1]);
+  // Conditional/logical initializers — `const target = cond ? db('leads')
+  // : db('audit');` — anything holding a leads builder anywhere in its
+  // (non-awaited) initializer is a stored builder.
+  const condDeclRe = new RegExp(
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;\n]*\bawait\b)[^;\n]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    'g'
+  );
+  let cnd;
+  while ((cnd = condDeclRe.exec(src))) builders.add(cnd[1]);
   // Arrow FACTORY returning the builder — `const baseQuery = () =>
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
   // idiom). Parenthesized or bare parameter lists both count.
@@ -147,14 +186,10 @@ function aliasInsertPatterns(src, token) {
   );
   let fac;
   while ((fac = factoryRe.exec(src))) factories.add(fac[1]);
-  // Named FUNCTION factory — `function baseQuery() { audit(); return
-  // db('leads'); }` (simple statements before the return allowed).
-  const fnFactoryRe = new RegExp(
-    String.raw`\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
-    'g'
-  );
-  let fn;
-  while ((fn = fnFactoryRe.exec(src))) factories.add(fn[1]);
+  // Function/block-arrow factories with BALANCED bodies of any depth —
+  // `function baseQuery() { try { … } finally { … } return db('leads'); }`.
+  const returnRe = new RegExp(String.raw`\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*(${token})\s*\)`);
+  for (const f of balancedBodyFactories(src, returnRe)) factories.add(f.name);
   // TRANSITIVE aliases: `const target = base;` makes `target` the same
   // builder (or factory), to a fixpoint. One pass collects every simple
   // identifier-to-identifier assignment; the closure runs in memory.
@@ -381,6 +416,16 @@ function scanSourceForDynamicTableInserts(src) {
     if (!decl[2].trim() || isResolved(decl[2])) continue;
     dynBuilders.set(decl[1], decl[2]);
   }
+  // Conditional initializers holding a dynamic builder anywhere.
+  const dynCondDeclRe = new RegExp(
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;\n]*\bawait\b)[^;\n?]{0,80}\?[^;\n]{0,120}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    'g'
+  );
+  let cnd;
+  while ((cnd = dynCondDeclRe.exec(code))) {
+    if (!cnd[2].trim() || isResolved(cnd[2]) || dynBuilders.has(cnd[1])) continue;
+    dynBuilders.set(cnd[1], cnd[2]);
+  }
   // Transitive aliases inherit the table expression (in-memory closure
   // over one assignment-pair pass).
   const dynPairs = simpleAssignPairs(code);
@@ -409,17 +454,13 @@ function scanSourceForDynamicTableInserts(src) {
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, fac[2]);
   }
-  // Named FUNCTION factory over a dynamic table.
-  const dynFnFactoryRe = new RegExp(
-    String.raw`\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{(?:[^{}]|\{[^{}]*\})*?\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
-    'g'
-  );
-  let fnFac;
-  while ((fnFac = dynFnFactoryRe.exec(code))) {
-    if (!fnFac[2].trim() || isResolved(fnFac[2])) continue;
-    const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(fnFac[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
+  // Function/block-arrow factories over a dynamic table, balanced bodies.
+  const dynReturnRe = new RegExp(String.raw`\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`);
+  for (const f of balancedBodyFactories(code, dynReturnRe)) {
+    if (!f.capture || !f.capture.trim() || isResolved(f.capture)) continue;
+    const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(f.name)}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
-    while ((use = useRe.exec(code))) record(use.index, use[0].length, fnFac[2]);
+    while ((use = useRe.exec(code))) record(use.index, use[0].length, f.capture);
   }
   // Raw SQL with a DYNAMIC target — `INSERT INTO ${table}` or
   // `'INSERT INTO ' + table` — scanned on the ORIGINAL source (the SQL text
@@ -577,6 +618,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['bracket-accessed table selector', "await db['table']('leads').insert(row);"],
     ['bracket-accessed from selector', "await db['from']('leads').insert(row);"],
     ['factory with a nested block before return', "function baseQuery() { if (audit) { audit(); } return db('leads'); }\nawait baseQuery().insert(row);"],
+    ['factory with deep nesting before return', "function baseQuery() { try { if (a) { audit(); } } finally { cleanup(); } return db('leads'); }\nawait baseQuery().insert(row);"],
+    ['conditional builder initializer', "const target = useLeads ? db('leads') : db('audit');\nawait target.insert(row);"],
+    ['SQL constant passed to raw', "const SQL = 'INSERT INTO leads (a) VALUES (?)';\nawait db.raw(SQL, [a]);"],
     ['SQL line comment between keywords', 'await db.raw(`INSERT -- audit\nINTO leads (a) VALUES (?)`, [a]);'],
     ['block-bodied arrow factory', "const baseQuery = () => { audit(); return db('leads'); };\nawait baseQuery().insert(row);"],
     ['transitive stored-builder alias', "const base = db('leads');\nconst target = base;\nawait target.insert(row);"],
@@ -737,6 +781,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       'const q = (t) => db(t);\nawait q(x).insert(row);'
     );
     expect(dynArrowFactory).toHaveLength(1);
+    const condDynBuilder = scanSourceForDynamicTableInserts('const target = c ? db(a) : db(b);\nawait target.insert(row);');
+    expect(condDynBuilder.length).toBeGreaterThanOrEqual(1);
     const insertThenTable = scanSourceForDynamicTableInserts('await db.insert(row).table(target);');
     expect(insertThenTable).toHaveLength(1);
     const rawCommentSep = scanSourceForDynamicTableInserts(
@@ -891,17 +937,34 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           }
         }
         expect(entries.length).toBeGreaterThanOrEqual(1);
+        const propAlt = cc.props.map(escapeRe).join('|');
         for (const { segS, segT } of entries) {
           const label = segT.trim().slice(0, 40);
           expect({ file: w.file, entry: label, objectLiteral: /^\s*[\w$]+\s*:\s*\{/.test(segS) })
             .toEqual({ file: w.file, entry: label, objectLiteral: true });
+          // Accessors could compute a governed prop at read time.
+          const getter = segS.match(new RegExp(String.raw`\b(?:get|set)\s+(?:${propAlt})\b`));
+          expect({ file: w.file, entry: label, accessor: getter && getter[0] })
+            .toEqual({ file: w.file, entry: label, accessor: null });
+          // Governed props must be DIRECT TOP-LEVEL data properties of the
+          // entry — a literal nested in a sub-object is not what
+          // config.table reads. Depth-1 blanking of the entry's object.
+          const bIdx = segS.indexOf('{');
+          let dT = 0;
+          let topT = '';
+          for (let k2 = bIdx; k2 < segS.length; k2 += 1) {
+            const st = segS[k2];
+            const chT = segT[k2];
+            if (st === '{') { dT += 1; topT += dT === 1 ? chT : ' '; continue; }
+            if (st === '}') { dT -= 1; topT += dT === 0 ? chT : ' '; continue; }
+            topT += dT === 1 ? chT : ' ';
+          }
           for (const p of cc.props) {
-            const literal = new RegExp(String.raw`\b${escapeRe(p)}\s*:\s*'[\w.]+'`).test(segT);
-            expect({ file: w.file, entry: label, prop: p, literal })
-              .toEqual({ file: w.file, entry: label, prop: p, literal: true });
+            const literal = new RegExp(String.raw`\b${escapeRe(p)}\s*:\s*'[\w.]+'`).test(topT);
+            expect({ file: w.file, entry: label, prop: p, topLevelLiteral: literal })
+              .toEqual({ file: w.file, entry: label, prop: p, topLevelLiteral: true });
           }
         }
-        const propAlt = cc.props.map(escapeRe).join('|');
         const shorthand = [...objBare.matchAll(new RegExp(String.raw`[{,]\s*(?:${propAlt})\s*(?=[,}])`, 'g'))];
         expect(shorthand.map((s) => s[0].trim())).toEqual([]);
         const noncanonical = [...objText.matchAll(new RegExp(String.raw`(?:["'\x60](?:${propAlt})["'\x60]\s*:|\[\s*["'\x60](?:${propAlt})["'\x60]\s*\])`, 'g'))];
