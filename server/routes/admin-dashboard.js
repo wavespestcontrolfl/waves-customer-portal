@@ -1286,25 +1286,35 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
     // environment without the table is a clean no-op (everything falls back).
     const rateByCustomer = new Map(); // customerId -> Map('YYYY-MM' -> rate)
     const snapshottedMonths = new Set(); // months with ANY snapshot row (vs none yet)
+    const { resolveBillingLane } = require('../services/billing-lane');
     try {
       const snapRows = await db('customer_mrr_snapshots')
         .where('period_month', '>=', rangeStart)
         .select('customer_id', db.raw("to_char(period_month, 'YYYY-MM') as ym"), 'monthly_rate');
       // #3669: snapshots before the lane-definition boundary hold the old wide
-      // population; from the boundary on they hold the corrected monthly-lane
-      // population. Treating a pre-boundary month as authoritative would read a
-      // surviving prepay/per-application member's missing POST-boundary row as
-      // $0 against their wide pre-boundary rows — a false NRR cliff at the
-      // boundary (Codex r7 P1). Pre-boundary months are therefore treated as
-      // unsnapshotted: via makeRateAt, every cohort based before the boundary
-      // keeps ONE consistent basis (the lane-aware current-rate fallback), and
-      // the point-in-time accrual restarts at the corrected definition.
+      // population (per-visit / prepay / per-application residue rows
+      // included); from the boundary on they hold the corrected monthly-lane
+      // population. Reading a residue member's wide pre-boundary rows against
+      // their missing post-boundary rows would produce a false NRR cliff at
+      // the boundary (Codex r7 P1), while discarding pre-boundary months
+      // wholesale would erase genuine monthly members' real expansion /
+      // contraction history (Codex r10). So: pre-boundary months stay
+      // authoritative, and ONLY the rows of members whose CURRENT lane is
+      // non-monthly are skipped there — those members read as $0 in every
+      // month, consistently (the same current-state approximation the live
+      // fallbacks use; a member who genuinely paid dues and later switched
+      // lanes is zeroed on both sides, so no false churn signal — the loss
+      // of their true contribution is the documented approximation).
       const { LANE_DEFINITION_BOUNDARY } = require('../services/mrr-bridge');
+      const nonMonthlyIds = new Set(
+        rows.filter((r) => resolveBillingLane(r).mode !== 'monthly_membership').map((r) => String(r.id)),
+      );
       for (const s of snapRows) {
         // The in-progress month's snapshot (written once at 6:05am ET) is stale for
         // same-day conversions/price changes, so treat it as unsnapshotted → those
         // cells use the live current rate (which IS the point-in-time truth for now).
-        if (s.ym !== nowMonth && `${s.ym}-01` >= LANE_DEFINITION_BOUNDARY) snapshottedMonths.add(s.ym);
+        if (s.ym !== nowMonth) snapshottedMonths.add(s.ym);
+        if (`${s.ym}-01` < LANE_DEFINITION_BOUNDARY && nonMonthlyIds.has(String(s.customer_id))) continue;
         if (!rateByCustomer.has(s.customer_id)) rateByCustomer.set(s.customer_id, new Map());
         rateByCustomer.get(s.customer_id).set(s.ym, Number(s.monthly_rate) || 0);
       }
@@ -1323,7 +1333,6 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
     // needed to resolve each member's point-in-time rate (customer id + current
     // monthly_rate fallback).
     const byCohort = new Map(); // 'YYYY-MM' -> [{ churnIdx, customerId, currentRate }]
-    const { resolveBillingLane } = require('../services/billing-lane');
     for (const r of rows) {
       const cohort = r.cohort_month;
       if (!cohort) continue;

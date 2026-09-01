@@ -169,6 +169,23 @@ describe('buildBridgeMonths — lane-definition boundary (#3669: history preserv
     expect(out[2].churned).toEqual({ mrr: 0, count: 0 });
   });
 
+  test('a live customer who left the population by SWITCHING lanes books as contraction, never churn (r10)', () => {
+    const out = buildBridgeMonths({
+      monthKeys: ['2026-10-01'],
+      snapshotsByMonth: new Map([
+        ['2026-09-01', snap({ a: 100, switcher: 80, gone: 50 })],
+        ['2026-10-01', snap({ a: 100 })],
+      ]),
+      conversionMonthById: new Map(),
+      laneSwitchedIds: new Set(['switcher']), // live on annual_prepay now
+    });
+    expect(out[0].degraded).toBe(false);
+    expect(out[0].contraction).toEqual({ mrr: 80, count: 1 }); // dues → 0, customer kept
+    expect(out[0].churned).toEqual({ mrr: 50, count: 1 }); // genuinely gone
+    // Additivity holds either way: start + Σbuckets = end.
+    expect(out[0].startMrr - out[0].contraction.mrr - out[0].churned.mrr).toBe(out[0].endMrr);
+  });
+
   test('laneBoundaryKey: null disables the boundary (pure-core callers can opt out)', () => {
     const out = buildBridgeMonths({
       monthKeys: ['2026-09-01'],
