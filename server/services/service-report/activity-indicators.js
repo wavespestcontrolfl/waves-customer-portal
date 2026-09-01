@@ -1208,7 +1208,6 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     const noApplicationChoices = ['Inspection / identification only', 'Treatment deferred'];
     const applicationChoices = work.filter((item) => ![
       ...noApplicationChoices,
-      'Treatment limited by site conditions',
       'Other',
     ].includes(item));
     if (work.some((item) => noApplicationChoices.includes(item)) && applicationChoices.length) {

@@ -52,6 +52,7 @@ import {
   specialtyCompletionFor,
 } from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import { TERMITE_PERIMETER_METHODS } from "../../lib/termite-treatment-methods";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -7002,7 +7003,7 @@ export function typedFieldValueConflicts(schemaType, values) {
     const method = String(values?.treatment_method ?? "").trim();
     const notice = String(values?.posted_notice ?? "").trim();
     if (
-      ["Liquid perimeter", "Trenching", "Rodding"].includes(method) &&
+      TERMITE_PERIMETER_METHODS.includes(method) &&
       notice &&
       notice !== "Yes"
     ) {
@@ -12633,7 +12634,7 @@ export function CompletionPanel({
       [label]: { scope, treatmentApplied: treatmentApplied === true },
     }));
   }
-  function applyProtocolAction(action) {
+  function applyProtocolAction(action, { conflictLabels = [] } = {}) {
     if (!action) return;
     // Same freeze + invalidation contract as every other payload mutation:
     // a productless protocol action (or one whose product is already
@@ -12653,13 +12654,22 @@ export function CompletionPanel({
     ) {
       return;
     }
-    invalidateGeneratedReportOnTypedEdit();
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
     recordActionScope(noteText, action.scope, action.treatmentApplied);
-    addChipNote(
-      action.conditional ? "Protocol optional" : "Protocol",
-      noteText,
-    );
+    if (!detachedAfterInvalidation) {
+      const conflictSet = new Set(conflictLabels);
+      const prefix = action.conditional ? "Protocol optional" : "Protocol";
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[Protocol(?: optional)?\]\s+(.+)$/i);
+          return !match || !conflictSet.has(match[1].trim());
+        })
+        .concat(`[${prefix}] ${noteText}`)
+        .join("\n")
+        .trim());
+    }
     if (
       action.product?.id &&
       !selectedProducts.find((p) => p.productId === action.product.id)
@@ -14005,6 +14015,7 @@ export function CompletionPanel({
       (opt) => opt.value === value,
     );
     if (option?.action) {
+      let conflicts = [];
       // Specialty lanes allow several performed steps (for example treatment
       // followed by nest removal), but an inspection/deferred choice cannot
       // coexist with performed work. Remove only the conflicting specialty
@@ -14017,7 +14028,7 @@ export function CompletionPanel({
           option.action.label,
         );
         const reconciledSet = new Set(reconciled);
-        const conflicts = selectedProtocolActionLabels.filter(
+        conflicts = selectedProtocolActionLabels.filter(
           (label) => !reconciledSet.has(label),
         );
         if (conflicts.length) {
@@ -14030,19 +14041,9 @@ export function CompletionPanel({
             conflicts.forEach((label) => delete next[label]);
             return next;
           });
-          if (!chipLinesDetached) {
-            setNotes((current) => current
-              .split("\n")
-              .filter((line) => {
-                const match = line.match(/^\s*\[Protocol(?: optional)?\]\s+(.+)$/i);
-                return !match || !conflictSet.has(match[1].trim());
-              })
-              .join("\n")
-              .trim());
-          }
         }
       }
-      applyProtocolAction(option.action);
+      applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
     }
   }
   function handleSpecialtyFindingChange(group, value) {

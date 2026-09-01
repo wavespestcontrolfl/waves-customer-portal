@@ -43,6 +43,7 @@ describe('editable service-report findings consistency', () => {
     ['one_time_pest_treatment', { evidence_observed: 'No evidence observed, Live pests observed' }],
     ['one_time_pest_treatment', { work_completed: 'Inspection / identification only, Bait placement' }],
     ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Exterior perimeter application' }],
+    ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Treatment limited by site conditions' }],
     ['termite_treatment', { termite_evidence: 'Preventive treatment — no activity observed, Live termites observed' }],
     ['palm_injection', { pest_disease_signs: 'None observed today, Scale' }],
   ])('%s rejects a zero-state paired with positive technician evidence', (type, values) => {

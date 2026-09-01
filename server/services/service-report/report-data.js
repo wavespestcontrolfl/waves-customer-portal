@@ -5025,6 +5025,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
+    applicationMade: readTimeSprayEvidence,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
     technician: {
