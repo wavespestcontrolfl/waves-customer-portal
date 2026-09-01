@@ -23,6 +23,7 @@
  */
 const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
+const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
@@ -446,6 +447,17 @@ async function submitRecap({
       });
     } catch { tierSnapshot = {}; /* legacy insert shape — never block the recap */ }
 
+    // Freeze the closeout requirements in force at completion, from the
+    // LOCKED row's catalog identity (same codex r20 rule as
+    // frozenTraceIdentity below). SAVEPOINT-wrapped inside the helper;
+    // null = lookup failed, freeze nothing — never block the recap.
+    const closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+      trx,
+      serviceId,
+      catalogServiceId: (locked || svc).service_id || null,
+      serviceType: (locked || svc).service_type || null,
+    });
+
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
     // so a double-tap/retry/race never re-texts the customer, while a
@@ -585,6 +597,13 @@ async function submitRecap({
         status: 'completed',
         ...snapshotBackfill,
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
+        // Merge-if-absent requirement freeze: preserves every existing key
+        // (visitOutcome, SMS claims — the recap otherwise never rewrites
+        // structured_notes) and NEVER overwrites an earlier /complete
+        // freeze (first-freeze-wins).
+        ...(closeoutSnap && !existingNotes.closeoutRequirements
+          ? { structured_notes: JSON.stringify({ ...existingNotes, closeoutRequirements: closeoutSnap }) }
+          : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
         updated_at: new Date(),
@@ -600,6 +619,9 @@ async function submitRecap({
         status: 'completed',
         technician_notes: note || null,
         ...tierSnapshot,
+        ...(closeoutSnap && serviceRecordCols.structured_notes
+          ? { structured_notes: JSON.stringify({ closeoutRequirements: closeoutSnap }) }
+          : {}),
         ...(Object.keys(frozenTraceIdentity).length
           ? { service_data: JSON.stringify(frozenTraceIdentity) }
           : {}),

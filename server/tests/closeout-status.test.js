@@ -1120,4 +1120,79 @@ describe('closeout-status: loader against a fake knex', () => {
   test('serviceId is required', async () => {
     await expect(getCloseoutStatus(null)).rejects.toThrow(/serviceId/);
   });
+
+  describe('frozen requirement snapshots', () => {
+    // The verdict the completion froze — deliberately mirrors the beforeEach
+    // catalog row so the healthy facts stay green, then the tests mutate the
+    // live catalog and prove the frozen record does not move.
+    const FROZEN_SNAP = {
+      v: 1,
+      frozenAt: '2026-08-30T18:01:00.000Z',
+      serviceId: 'cat-pest',
+      serviceName: 'Quarterly Pest Control',
+      category: 'pest_control',
+      source: 'catalog_v2',
+      requiresServiceReport: true,
+      requiresApplicationLog: true,
+      requiredPhotoCount: 0,
+      requiresCustomerSignature: false,
+      requiresCustomerNotice: true,
+      requiresLicense: false,
+      licenseCategory: null,
+    };
+    const frozenTables = () => {
+      const tables = healthyTables();
+      tables.service_records = [{
+        ...recordRow,
+        structured_notes: { completionSmsStatus: 'sent', closeoutRequirements: FROZEN_SNAP },
+      }];
+      return tables;
+    };
+    const resolverMock = require('../services/service-closeout-requirements').resolveCloseoutRequirementsForJobs;
+
+    test('catalog edits do NOT flip a frozen record — and the catalog is never read', async () => {
+      resolverMock.mockClear();
+      // The hazard scenario: requirements tightened AFTER the visit closed.
+      catalogRows[0].required_photo_count = 5;
+      catalogRows[0].requires_customer_signature = true;
+      const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(frozenTables()), now: NOW });
+      expect(result.requirements.asOf).toBe('frozen_at_completion');
+      expect(result.requirements.frozenAt).toBe('2026-08-30T18:01:00.000Z');
+      expect(result.facts.photos).toMatchObject({
+        state: 'not_required',
+        reason: 'catalog_zero_required_photos',
+        ruleSource: 'frozen_record',
+        requirementsSource: 'catalog_v2',
+      });
+      expect(result.requirements.unevaluated).toEqual([]);
+      expect(result.summary.closedOut).toBe(true);
+      // Frozen ⇒ zero live-catalog reads: the verdict depends on neither
+      // catalog edits nor catalog availability.
+      expect(resolverMock).not.toHaveBeenCalled();
+    });
+
+    test('a frozen verdict survives a catalog outage', async () => {
+      // The resolver is never invoked for a frozen record (asserted below),
+      // so an erroring catalog cannot reach the verdict — the same property
+      // the "never read" assertion in the previous test pins.
+      resolverMock.mockClear();
+      const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(frozenTables()), now: NOW });
+      expect(result.unavailable).toEqual([]);
+      expect(result.requirements.asOf).toBe('frozen_at_completion');
+      expect(result.summary.closedOut).toBe(true);
+      expect(resolverMock).not.toHaveBeenCalled();
+    });
+
+    test('a malformed snapshot falls back to the live catalog (pre-freeze behavior)', async () => {
+      resolverMock.mockClear();
+      const tables = healthyTables();
+      tables.service_records = [{
+        ...recordRow,
+        structured_notes: { completionSmsStatus: 'sent', closeoutRequirements: { requiresServiceReport: 'yes' } },
+      }];
+      const result = await getCloseoutStatus(SVC, { knex: makeFakeKnex(tables), now: NOW });
+      expect(result.requirements.asOf).toBe('current_catalog');
+      expect(resolverMock).toHaveBeenCalled();
+    });
+  });
 });

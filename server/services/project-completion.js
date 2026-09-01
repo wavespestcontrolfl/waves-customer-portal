@@ -8,6 +8,7 @@ const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-c
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
+const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const {
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
@@ -751,6 +752,7 @@ async function completeProjectBackedService({
       // create a record with the default false identity and no frozen
       // membership provenance (codex r11 P1). Customer read inside this
       // transaction, column-guarded; failure = legacy insert shape.
+      let lockedVisit = null;
       try {
         const customerCols = await trx('customers').columnInfo();
         const snapCust = customerCols.waveguard_tier
@@ -765,10 +767,10 @@ async function completeProjectBackedService({
         // FOR UPDATE, and an update-details reclassify racing this insert
         // would freeze a stale callback identity (codex GH-r4 P2; same rule
         // as the /complete and recap paths).
-        const lockedVisit = await trx('scheduled_services')
+        lockedVisit = await trx('scheduled_services')
           .where({ id: scheduledService.id })
           .forUpdate()
-          .first('id', 'is_callback')
+          .first('id', 'is_callback', 'service_id', 'service_type')
           .catch(() => null);
         Object.assign(insert, completionTierSnapshotFields({
           serviceRecordCols,
@@ -779,6 +781,21 @@ async function completeProjectBackedService({
           isCallback: (lockedVisit || scheduledService).is_callback === true,
         }));
       } catch { /* legacy insert shape — never block a project completion */ }
+      // Freeze the closeout requirements in force at completion (LOCKED
+      // identity, same staleness rule as the tier snapshot). SAVEPOINT-
+      // wrapped inside the helper; null = lookup failed, freeze nothing.
+      const closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+        trx,
+        serviceId: scheduledService.id,
+        catalogServiceId: (lockedVisit || scheduledService).service_id || null,
+        serviceType: (lockedVisit || scheduledService).service_type || null,
+      });
+      if (closeoutSnap && serviceRecordCols.structured_notes) {
+        insert.structured_notes = serializeJsonb({
+          ...parseJsonObject(insert.structured_notes),
+          closeoutRequirements: closeoutSnap,
+        });
+      }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
     } else {
       const update = buildServiceRecordProjectCompletionUpdate({
@@ -791,6 +808,30 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
+      // Merge-if-absent requirement freeze: a pre-freeze record completed
+      // again through this path gains a snapshot (frozenAt = now, honest
+      // about its own stamp); an existing freeze — e.g. from /complete —
+      // is NEVER overwritten (first-freeze-wins).
+      if (serviceRecordCols.structured_notes
+        && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {
+        const lockedVisit = await trx('scheduled_services')
+          .where({ id: scheduledService.id })
+          .forUpdate()
+          .first('id', 'service_id', 'service_type')
+          .catch(() => null);
+        const closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+          trx,
+          serviceId: scheduledService.id,
+          catalogServiceId: (lockedVisit || scheduledService).service_id || null,
+          serviceType: (lockedVisit || scheduledService).service_type || null,
+        });
+        if (closeoutSnap) {
+          update.structured_notes = serializeJsonb({
+            ...parseJsonObject(update.structured_notes ?? serviceRecord.structured_notes),
+            closeoutRequirements: closeoutSnap,
+          });
+        }
+      }
       if (Object.keys(update).length) {
         [serviceRecord] = await trx('service_records')
           .where({ id: serviceRecord.id })
