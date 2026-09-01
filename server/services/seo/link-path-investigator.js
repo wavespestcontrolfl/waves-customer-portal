@@ -53,6 +53,10 @@ const batchSize = () => {
 // the page cap, and a legal path without its terms hash is INVALID in §6.3).
 const MAX_FETCHES_PER_DOMAIN = 8;
 const TERMS_FETCH_BUDGET = 2;
+// Bodyless existence checks for model-reported submission URLs that no
+// fetched page corresponds to — a hallucinated or injected same-host URL
+// must not become an executable path on the model's word alone.
+const SUBMISSION_VERIFY_BUDGET = 3;
 const PAGE_EXCERPT_CHARS = 6000;
 const REINVESTIGATE_AFTER_DAYS = 90;
 const WATCH_RECHECK_DAYS = 30;
@@ -590,6 +594,29 @@ async function investigatePaths(db, {
             return clean;
           });
 
+        // A submission URL is EXECUTABLE only when this pass observed it: the
+        // page was fetched, or a bodyless resolveOnly probe (own small
+        // budget) confirms it exists on the domain. Anything else keeps its
+        // claim in the evidence but writes with confidence 0 — never a best
+        // path, never past a §6.3 floor — until a later pass verifies it.
+        const fetchedKeys = new Set(pages.map((pg) => registry.normalizeSubmissionUrl(pg.url)));
+        let verifyAttempts = 0;
+        for (const p of writable) {
+          if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
+          const key = registry.normalizeSubmissionUrl(p.submission_url);
+          if (fetchedKeys.has(key)) continue;
+          if (verifyAttempts >= SUBMISSION_VERIFY_BUDGET) { p.submissionUnverified = 'verify_budget_exhausted'; continue; }
+          verifyAttempts += 1;
+          out.fetches += 1;
+          const probe = await fetcher(p.submission_url, { resolveOnly: true });
+          const finalUrl = (probe && probe.finalUrl) || p.submission_url;
+          if (probe && !probe.error && !probe.blocked && probe.status >= 200 && probe.status < 400 && hostBound(host, finalUrl)) {
+            fetchedKeys.add(key);
+          } else {
+            p.submissionUnverified = (probe && (probe.error || (probe.blocked && 'blocked'))) || `status_${probe && probe.status}`;
+          }
+        }
+
         // Legal terms: fetch + hash (§3.2). Terms fetches have their OWN small
         // budget — the candidate loop always exhausts the page cap (homepage +
         // probes), and a legal_attestation path with no hash is INVALID under
@@ -639,9 +666,11 @@ async function investigatePaths(db, {
               reasons: p.reasons, quotes: p.quotes,
               pages_fetched: pages.map((pg) => pg.url), fetch_errors: fetchErrors.map((f) => ({ url: f.url, reason: f.reason })),
               ...(Object.keys(verified.verification).length ? { price_verification: verified.verification } : {}),
+              ...(p.submissionUnverified ? { submission_verification: p.submissionUnverified } : {}),
               ...(Object.keys(p.offhost).length ? { offhost_urls: p.offhost } : {}),
             };
             const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
+            if (p.submissionUnverified) row.confidence = 0; // exists only as a claim until a pass observes the URL
             const replaces = p.replaces_path_id && validIds.has(p.replaces_path_id) ? p.replaces_path_id : null;
             const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now });
             if (id) {
@@ -655,17 +684,20 @@ async function investigatePaths(db, {
           // proposed a different key for the real path.
           await trx('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').update({ last_investigated_at: now, updated_at: now });
 
-          // A full re-investigation DISPROVES what it did not re-report: any
+          // A re-investigation DISPROVES only what it actually COVERED: a
           // previously active, non-baseline path absent from this verdict is
-          // invalidated (confidence 0 + the reason in its evidence) so a
-          // reopened domain that comes back not_reproducible can never keep a
-          // stale executable path or feed it into best_path_id. Baselines are
-          // descriptive and stay; superseded rows were already handled.
+          // invalidated (confidence 0 + the reason in its evidence) ONLY when
+          // its own submission URL was among this pass's fetched pages — the
+          // model saw that page and still did not report the path. A path
+          // outside this pass's fetch coverage (budget, fetch error, no URL)
+          // is preserved untouched: absence of evidence never disproves it.
+          // Baselines are descriptive and stay; superseded rows were handled.
           if (claimState) {
-            const stale = await trx('seo_link_acquisition_paths')
+            const stale = (await trx('seo_link_acquisition_paths')
               .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
               .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
-              .select('id', 'investigation');
+              .select('id', 'investigation', 'submission_url'))
+              .filter((s) => s.submission_url && fetchedKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
             for (const s of stale) {
               const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
               await trx('seo_link_acquisition_paths').where({ id: s.id }).update({
@@ -724,6 +756,7 @@ module.exports = {
   PROBE_PATHS,
   MAX_FETCHES_PER_DOMAIN,
   TERMS_FETCH_BUDGET,
+  SUBMISSION_VERIFY_BUDGET,
   _internals: {
     deriveCurrency, centsFor, candidateUrls, hostBound, verifyPriceEvidence, buildPrompt, investigateWithModel,
     selectTargets, pathRowFrom, upsertPath, changedInputs, scoreDomain, pathValue,

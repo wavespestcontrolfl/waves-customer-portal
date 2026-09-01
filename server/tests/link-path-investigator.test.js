@@ -307,8 +307,55 @@ describe('full run', () => {
     const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
     const fetcher = jest.fn(okFetch);
     const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
-    expect(fetcher.mock.calls.length).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN);
-    expect(r.fetches).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN);
+    // candidate-page fetches respect the cap; resolveOnly existence probes ride their own budget
+    const pageCalls = fetcher.mock.calls.filter(([, opts]) => !(opts && opts.resolveOnly)).length;
+    expect(pageCalls).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN);
+    expect(r.fetches).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN + investigator.TERMS_FETCH_BUDGET + investigator.SUBMISSION_VERIFY_BUDGET);
+  });
+
+  test('an unfetched same-host submission URL needs a resolveOnly existence probe; unreachable ⇒ confidence 0 (Codex r9 P1)', async () => {
+    const d = domainRow();
+    // exhaust the page budget so the model-reported URL is outside coverage
+    const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/page-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    const reachable = jest.fn(okFetch);
+    await investigatePaths(db, runOpts(db, { fetchPage: reachable, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath()]) }) }));
+    const probeCall = reachable.mock.calls.find(([u, opts]) => u === 'https://example.com/join' && opts && opts.resolveOnly);
+    expect(probeCall).toBeTruthy();
+    expect(Number(db._tables.seo_link_acquisition_paths[0].confidence)).toBe(0.7); // probe succeeded — claim stands
+
+    // same setup, but the reported URL does not exist
+    const d2 = domainRow({ domain: 'other.com' });
+    const touches2 = Array.from({ length: 12 }, (_, i) => ({ domain_id: d2.id, source: 'list_import', source_detail: `https://other.com/page-${i}`, source_ref: null }));
+    const db2 = makeDb({ seo_link_domains: [d2], seo_link_domain_sources: touches2 });
+    const unreachable = jest.fn(async (url, opts) => (opts && opts.resolveOnly
+      ? { status: 404, finalUrl: url, html: null, blocked: false }
+      : okFetch(url)));
+    const ghost = modelPath({ submission_url: 'https://other.com/ghost-join' });
+    await investigatePaths(db2, runOpts(db2, { fetchPage: unreachable, llmDispatch: async () => ({ ok: true, json: verdictOf([ghost]) }) }));
+    const p2 = db2._tables.seo_link_acquisition_paths[0];
+    expect(p2.confidence).toBe(0); // never a best path, never past a §6.3 floor
+    expect(JSON.parse(p2.investigation).submission_verification).toBe('status_404');
+    expect(db2._tables.seo_link_domains[0].agent_state).toBe('watching'); // qualified with no executable path downgrades
+  });
+
+  test('an omitted path OUTSIDE this pass\'s fetch coverage is preserved, never disproven (Codex r9 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const uncovered = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/deep/hidden-join',
+      path_key: 'paid_listing:https://example.com/deep/hidden-join', superseded_by: null, baseline: false,
+      confidence: 0.6, last_investigated_at: new Date('2026-06-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [uncovered] });
+    // its page never loads this pass — coverage is absent, not negative
+    const fetcher = jest.fn(async (url, opts) => (url.includes('hidden-join')
+      ? { status: 500, finalUrl: url, html: null, blocked: false, error: 'http_500' }
+      : okFetch(url)));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath()]) }) }));
+    const kept = db._tables.seo_link_acquisition_paths.find((p) => p.id === uncovered.id);
+    expect(Number(kept.confidence)).toBe(0.6); // untouched
+    expect(JSON.parse(kept.investigation).disproven_at).toBeUndefined();
   });
 
   test('off-domain hint URLs are never fetched', async () => {
