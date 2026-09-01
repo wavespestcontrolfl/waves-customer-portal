@@ -16,9 +16,12 @@
  * stale entry (site no longer present) also fails, so the map always
  * mirrors reality.
  *
- * Matcher shape: a `('scheduled_services')` table ref with `.insert(`
- * either on the same line or within the next 3 lines (the
- * call-recording-processor and seeder sites chain across lines).
+ * Matcher shape: each `('scheduled_services')` table ref (the string may
+ * sit on its own line inside the call) is followed through its COMPLETE
+ * chained expression — balanced parentheses, string-safe, comments
+ * skipped — so a chain of any length or line count that ends in
+ * `.insert(` is caught; a bounded line window was evadable by padding the
+ * chain (GH Codex #3702 r3 P1).
  */
 
 const fs = require('fs');
@@ -71,8 +74,8 @@ const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
   ],
   'server/services/voice-agent/relay-booking.js': ["scheduled_services').insert(insertRow"], // commitVoiceBooking
   'server/services/call-recording-processor.js': [                          // follow-up savepoint + idempotent booking
-    "scheduled_services') .insert({",
-    "scheduled_services') .insert(insertData",
+    "scheduled_services').insert({",
+    "scheduled_services').insert(insertData",
   ],
   'scripts/import-ical-appointments.js': ["scheduled_services').insert(row"], // legacy import script
 };
@@ -98,19 +101,84 @@ function fingerprintOf(scope) {
   return (m ? m[0] : scope).replace(/\s+/g, ' ').trim();
 }
 
-// Collect scheduled_services insert-site fingerprints in one file.
+// Advance past whitespace and // and /* */ comments.
+function skipTrivia(source, i) {
+  for (;;) {
+    while (i < source.length && /\s/.test(source[i])) i += 1;
+    if (source.startsWith('//', i)) {
+      const nl = source.indexOf('\n', i);
+      i = nl === -1 ? source.length : nl + 1;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
+// Consume one balanced (...) span starting at an opening paren, skipping
+// string literals (a ')' inside a string can't end it early) AND comments
+// (an apostrophe inside a comment — "the customer's rental" — must not
+// open a phantom string that swallows the rest of the file).
+function balancedParens(source, i) {
+  let depth = 0;
+  while (i < source.length) {
+    if (source.startsWith('//', i)) {
+      const nl = source.indexOf('\n', i);
+      i = nl === -1 ? source.length : nl + 1;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    const ch = source[i];
+    if (ch === '(') depth += 1;
+    else if (ch === ')') { depth -= 1; i += 1; if (depth === 0) return i; continue; }
+    else if (ch === "'" || ch === '"' || ch === '`') {
+      const q = ch;
+      i += 1;
+      while (i < source.length && source[i] !== q) {
+        if (source[i] === '\\') i += 1;
+        i += 1;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+// Collect scheduled_services insert-site fingerprints in one file by
+// walking each table ref's ENTIRE chained expression.
 function collectInsertSites(source) {
-  const lines = source.split('\n');
   const out = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!/['"`]scheduled_services['"`]\s*\)/.test(lines[i])) continue;
-    const windowText = lines.slice(i, i + 4).join('\n');
-    // Anchor the .insert( to THIS table ref: same line after the ref, or a
-    // chained call on the following lines before any other table ref.
-    const afterRef = windowText.slice(windowText.indexOf('scheduled_services'));
-    const nextRef = afterRef.slice(20).search(/['"`]\w+['"`]\s*\)/);
-    const scope = nextRef === -1 ? afterRef : afterRef.slice(0, 20 + nextRef);
-    if (/\.insert\s*\(/.test(scope)) out.push(fingerprintOf(scope));
+  const re = /['"`]scheduled_services['"`]/g;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    // The ref must be the argument of a call: the next non-trivia char
+    // closes it (this also catches a table string on its own line).
+    let i = skipTrivia(source, m.index + m[0].length);
+    if (source[i] !== ')') continue;
+    i += 1;
+    let chain = "scheduled_services')";
+    // Follow the chain: .method(<balanced args>) repeated, trivia between
+    // links skipped (and excluded from the fingerprint).
+    for (;;) {
+      const j = skipTrivia(source, i);
+      if (source[j] !== '.') break;
+      const nm = /^[A-Za-z0-9_$]+/.exec(source.slice(j + 1));
+      if (!nm) break;
+      const parenStart = skipTrivia(source, j + 1 + nm[0].length);
+      if (source[parenStart] !== '(') break;
+      const end = balancedParens(source, parenStart);
+      chain += `.${nm[0]}${source.slice(parenStart, end)}`;
+      i = end;
+    }
+    if (/\.insert\s*\(/.test(chain)) out.push(fingerprintOf(chain));
   }
   return out;
 }
@@ -143,8 +211,13 @@ describe('booking insert-site contract', () => {
 
   test('the matcher recognizes every insert shape it claims to (self-check)', () => {
     expect(collectInsertSites("await trx('scheduled_services').insert(insertData).returning('*');")).toEqual(["scheduled_services').insert(insertData"]);
-    expect(collectInsertSites("const [r] = await sp('scheduled_services')\n  .insert({\n    customer_id: id,\n  })")).toEqual(["scheduled_services') .insert({"]);
-    expect(collectInsertSites("await trx('scheduled_services')\n  .insert(insertData)\n  .onConflict('idempotency_key')\n  .ignore()")).toEqual(["scheduled_services') .insert(insertData"]);
+    expect(collectInsertSites("const [r] = await sp('scheduled_services')\n  .insert({\n    customer_id: id,\n  })")).toEqual(["scheduled_services').insert({"]);
+    expect(collectInsertSites("await trx('scheduled_services')\n  .insert(insertData)\n  .onConflict('idempotency_key')\n  .ignore()")).toEqual(["scheduled_services').insert(insertData"]);
+    // A LONG chain (any number of links/lines before .insert) is caught —
+    // the bounded 3-line window this replaces was evadable by padding.
+    expect(collectInsertSites("await trx('scheduled_services')\n  .where({ a: 1 })\n  .whereNull('b')\n  // pad\n  .whereIn('c', [1, 2])\n  .orderBy('d')\n  .limit(1)\n  .insert(sneaky)")).toEqual(["scheduled_services').where({ a: 1 }).whereNull('b').whereIn('c', [1, 2]).orderBy('d').limit(1).insert(sneaky"]);
+    // A table argument split across lines is still a ref.
+    expect(collectInsertSites("await db(\n  'scheduled_services'\n).insert(x)")).toEqual(["scheduled_services').insert(x"]);
     // A read chained near the ref must NOT count…
     expect(collectInsertSites("await trx('scheduled_services').where({ id }).first();")).toEqual([]);
     // …nor an insert into a DIFFERENT table on the next line.
