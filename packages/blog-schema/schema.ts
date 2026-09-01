@@ -691,9 +691,19 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       if (!blank && depth < topDepth()) { while (listStack.length && listStack[listStack.length - 1].depth > depth) listStack.pop(); }
       if (marker && markerIndent <= (depth === topDepth() ? topCol() : 0) + 3) {
         // A sibling/outer marker pops inner items whose content column it
-        // sits left of; a deeper marker nests.
+        // sits left of; a deeper marker nests. Markers SHARING a line
+        // ("- - item") open nested containers — each inner marker's
+        // content column stacks on the previous (Codex #504 r28).
         while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > markerIndent) listStack.pop();
-        listStack.push({ col: marker[0].length, depth });
+        let colBase = 0;
+        let mm: RegExpMatchArray | null = marker;
+        let rest = strippedLine;
+        while (mm) {
+          colBase += mm[0].length;
+          listStack.push({ col: colBase, depth });
+          rest = rest.slice(mm[0].length);
+          mm = rest.match(/^(?:[-*+]|\d{1,9}[.)])\s+/);
+        }
       } else if (!blank && depth === topDepth() && indent < topCol() && (prevBlank || /^ {0,3}(?:#{1,6}\s|>|(?:-{3,}|_{3,}|\*{3,})\s*$)/.test(strippedLine))) {
         // An interrupting block (ATX heading, blockquote, thematic break)
         // ends the list even with no blank line before it (Codex #504 r24).
@@ -701,7 +711,8 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
         // column the line still satisfies remain.
         while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop();
       }
-      const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
+      let afterMarker = strippedLine;
+      if (marker) { let mm2 = afterMarker.match(/^ *(?:[-*+]|\d{1,9}[.)])\s+/); while (mm2) { afterMarker = afterMarker.slice(mm2[0].length); mm2 = afterMarker.match(/^(?:[-*+]|\d{1,9}[.)])\s+/); } }
       const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
         || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null)
         // A continuation fence at a nested item's content column (>= 4
@@ -760,7 +771,11 @@ function blankNonRenderedCode(src: string): string {
     const blank = line.trim() === '';
     let eIndent = 0;
     for (const ch of (line.match(/^[ \t]*/) || [''])[0]) eIndent += ch === '\t' ? 4 - (eIndent % 4) : 1; // tab = next 4-column stop (CommonMark), not a fixed width
-    const marker = line.match(/^( *)(?:[-*+]|\d{1,9}[.)])\s+/);
+    let marker = line.match(/^( *)(?:[-*+]|\d{1,9}[.)])\s+/);
+    // An ordered marker interrupts a paragraph only when it starts at 1
+    // (CommonMark) — "Paragraph\n2. text" is continuation text and must
+    // not open a phantom container that unblanks following code.
+    if (marker && /\d/.test(marker[0]) && !/^ *1[.)]/.test(line) && !prevBlankOrCode && listCols.length === 0) marker = null;
     if (marker && marker[1].length <= col() + 3 && eIndent < col() + 4) {
       while (listCols.length && listCols[listCols.length - 1] > marker[1].length) listCols.pop();
       listCols.push(marker[0].length);
@@ -796,7 +811,7 @@ function blankNonRenderedComments(src: string): string {
 
 // Keywords after which a `/` starts a REGEX, not division (return /x/,
 // case /x/: …) — the last-identifier check both lexers share.
-const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new']);
+const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new', 'break', 'continue']);
 // A `)` closing one of these keywords' condition puts the lexer back at
 // STATEMENT position — `if (ok) /x/.test(y)` starts a regex, not division.
 const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
@@ -1242,7 +1257,7 @@ function hasJsxSpread(attrs: string): boolean {
     if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
     if (c !== '{') continue;
     const attrPos = i === 0 || /\s/.test(s[i - 1]);
-    if (attrPos && /^\{\s*\.\.\./.test(s.slice(i))) return true;
+    if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true; // comment trivia before the ellipsis is still a spread
     // Balance the expression with the shared string/regex/comment-aware
     // lexer — a regex like {/\{/} must not derail the walk past a real
     // {...spread} (Codex #504 r27); unbalanced fails closed.
@@ -1508,7 +1523,9 @@ export function validateAffiliateUsage(
   if (!declared) blockers.push('body contains <AffiliateLink> but frontmatter.disclosure.type is not "affiliate" (FTC material-connection disclosure is rendered from that type)');
   if (opts.fileExt && opts.fileExt.toLowerCase() !== '.mdx') blockers.push(`<AffiliateLink> requires an .mdx post — a ${opts.fileExt} file renders the tag as literal text`);
   if (count > AFFILIATE_LINK_MAX_PER_POST) blockers.push(`${count} affiliate links — the cap is ${AFFILIATE_LINK_MAX_PER_POST} per post`);
-  const firstHeading = structural.search(/^#{2,3}\s/m);
+  // Attr text is not a heading: <div title="\n## fake\n"> renders no
+  // section (Codex #3646 r25) — mask attr values before the heading scan.
+  const firstHeading = maskJsxAttrQuotes(structural).search(/^#{2,3}\s/m);
   if (firstHeading === -1 || positions[0] < firstHeading) blockers.push('an affiliate link appears before the first section heading — answer the question first; products come later in the piece');
   if (!hasServiceCtaBefore(structural.slice(0, positions[0]))) {
     blockers.push('no Waves service CTA (<InlineCTA> leading to a service route, or a service/quote/calculator/city-service link) appears BEFORE the first affiliate link — the service CTA stays primary');
@@ -1939,7 +1956,11 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
           out += ch;
         }
       }
-      return { value: JSON.parse(out.replace(/,\s*([\]}])/g, '$1')) };
+      // Ordinary JS identifier keys ({ name: 'x' }) become quoted JSON keys
+      // (Codex #3646 r25) — applied outside strings (the walk above already
+      // normalized every string to double quotes).
+      const keyed = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
+      return { value: JSON.parse(keyed.replace(/,\s*([\]}])/g, '$1')) };
     } catch {
       return undefined;
     }

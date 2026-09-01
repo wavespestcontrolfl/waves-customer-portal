@@ -805,6 +805,28 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('lexer-aware spreads; unterminated invocations; JS keys; attr headings; attr URL text (Codex #3646 r25)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // A regex brace inside an allowed expression cannot hide a later spread.
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA headline={/\\{/.test(x)} {...props} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_DESTINATION')).toBeGreaterThan(0);
+      // Unterminated invocations are invalid, never silently skipped.
+      expect(codesOf(guardrails.evaluate({ body: 'Intro.\n\n## Sec\n\n<InlineCTA headline="x"', frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      // Ordinary JS identifier keys parse — invalid risk flags.
+      expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={[{ name: 'x', risk: 'invalid', where: 'x', hunt: 'x', eggSac: 'x' }]} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      // A multiline title cannot fake the first section heading.
+      const attrHeading = 'Intro.\n\n<div title="\n## fake\n">x</div>\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n\n## Real\n\nMore.';
+      expect(affiliateCodes(guardrails.evaluate({ body: attrHeading, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:EXCESSIVE_AFFILIATE_LINK_DENSITY');
+      // An absolute hub URL in DISPLAY text never flags a route; one in a
+      // real href still does.
+      const titleUrl = 'Intro.\n\n## Sec\n\n<div title="https://www.wavespestcontrol.com/example-only/">x</div>\n\nProse.';
+      expect(codesOf(guardrails.evaluate({ body: titleUrl, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+      const hrefUrl = 'Intro.\n\n## Sec\n\n<a href="https://www.wavespestcontrol.com/definitely-not-real/">x</a>\n\nProse.';
+      expect(codesOf(guardrails.evaluate({ body: hrefUrl, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBeGreaterThan(0);
+    });
+  });
+
   test('hub stamps pass; removing the last affiliate link on refresh blocks; JS-flavored species parse (Codex #3646 r24)', () => {
     withAffiliateEnv(() => {
       const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;

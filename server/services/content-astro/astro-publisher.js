@@ -3522,6 +3522,21 @@ async function publishRefresh(draft, brief = {}) {
   // The refresh writes the resolved file back IN PLACE — a legacy `.md`
   // stays `.md`, so its raw HTML blocks hide the Markdown inside them.
   const refreshMdx = !/\.md$/i.test(String(filePath || ''));
+  // A legacy .md cannot RENDER MDX components — a refreshed body adding
+  // one would ship literal markup to the customer page (Codex #3646 r25
+  // P1). Fail the publish; the page migrates to .mdx through the new-post
+  // lane's migration path, not a refresh.
+  if (!refreshMdx) {
+    const rendered = newBody
+      .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ');
+    const comp = rendered.match(/<([A-Z][A-Za-z0-9]*)(?=[\s/>])/);
+    if (comp) {
+      const err = new Error(`refresh target ${filePath} is a legacy .md file — an MDX component (<${comp[1]}>) cannot render there; migrate the page to .mdx first or drop the component`);
+      err.statusCode = 422;
+      throw err;
+    }
+  }
   // The managed-image directory is keyed by the PUBLISHED ROUTE — the
   // frontmatter slug the creating lane stamped — not the source file's
   // path: a flat file can render a nested route, and the new-post lane

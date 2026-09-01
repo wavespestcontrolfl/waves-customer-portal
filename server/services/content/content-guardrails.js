@@ -217,26 +217,20 @@ function attrValueAt(attrs, pos) {
 // (`data-config={JSON.stringify({...defaults})}`) sets nothing on the
 // element (#3595 r1). Quote-aware, brace-depth-tracked walk from `from`.
 function hasAttrSpreadAfter(attrs, from = 0) {
-  const a = String(attrs || '');
-  for (let i = Math.max(0, from); i < a.length; i += 1) {
-    const c = a[i];
-    if (c === '"' || c === "'" || c === '`') { const q = c; i += 1; while (i < a.length && a[i] !== q) i += 1; continue; }
-    if (c === '{') {
-      const attrPos = i === 0 || /\s/.test(a[i - 1]);
-      let j = i;
-      let d = 0;
-      for (; j < a.length; j += 1) {
-        const ch = a[j];
-        if (ch === '"' || ch === "'" || ch === '`') { const q = ch; j += 1; while (j < a.length && a[j] !== q) j += a[j] === '\\' ? 2 : 1; continue; }
-        if (ch === '{') d += 1;
-        else if (ch === '}') { d -= 1; if (d === 0) break; }
-      }
-      // The whole remaining text — a multiline spread may hold more than a
-      // few whitespace chars between `{` and `...` (#3595 late r2).
-      if (attrPos && /^\{\s*\.\.\./.test(a.slice(i))) return true;
-      i = j;
-      continue;
-    }
+  // Lexer-aware (astro hasJsxSpread parity — Codex #3646 r25): an allowed
+  // expression containing a regex brace ({/\{/.test(x)}) must not derail
+  // the walk past a real spread; comment trivia before the ellipsis is
+  // still a spread; unbalanced input fails closed.
+  const s = String(attrs || '').slice(Math.max(0, from));
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
+    if (c !== '{') continue;
+    const attrPos = i === 0 || /\s/.test(s[i - 1]);
+    if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true;
+    const e = closeOfExpressionAt(s, i);
+    if (e < 0) return true;
+    i = e;
   }
   return false;
 }
@@ -1812,7 +1806,7 @@ function closeOfExpressionAt(s, i) {
 // JSX opening tags (astro maskJsxAttrQuotes parity): title="[q](/quote/)"
 // or title="<InlineCTA />" renders no anchor and no component, so
 // attribute text must never satisfy a Markdown-link or tag scan.
-function maskJsxAttrQuotes(src) {
+function maskJsxAttrQuotes(src, { keepValuesOf = null } = {}) {
   const s = String(src || '');
   const out = s.split('');
   // Tags are DISCOVERED on the expression-literal-masked view (astro
@@ -1821,18 +1815,28 @@ function maskJsxAttrQuotes(src) {
   const re = /<[A-Za-z][\w.]*/g;
   let m;
   while ((m = re.exec(discover)) !== null) {
-    let j = m.index + m[0].length; let q = null; let qStart = -1;
+    let j = m.index + m[0].length; let q = null; let qStart = -1; let keepThis = false;
     for (; j < s.length; j += 1) {
       const c = s[j];
       if (q) {
         if (c === '\\') { j += 1; continue; }
         if (c === q) {
-          for (let t = qStart + 1; t < j; t += 1) if (out[t] !== '\n') out[t] = ' ';
+          if (!keepThis) for (let t = qStart + 1; t < j; t += 1) if (out[t] !== '\n') out[t] = ' ';
           q = null;
         }
         continue;
       }
-      if (c === '"' || c === "'" || c === '`') { q = c; qStart = j; continue; }
+      if (c === '"' || c === "'" || c === '`') {
+        q = c; qStart = j;
+        // Link-carrying attribute VALUES stay readable when asked (the
+        // route scan reads href/src/ctaHref); display text still masks.
+        keepThis = false;
+        if (keepValuesOf) {
+          const nm = /([A-Za-z_][\w:-]*)\s*=\s*$/.exec(s.slice(Math.max(m.index, j - 64), j));
+          if (nm && keepValuesOf.has(nm[1])) keepThis = true;
+        }
+        continue;
+      }
       if (c === '{') {
         const e = closeOfExpressionAt(s, j);
         if (e > 0) {
@@ -2117,7 +2121,11 @@ function inlineCtaContractFinding(body) {
   while ((ctaM = ctaRe.exec(text)) !== null) {
     if (strView[ctaM.index] === ' ' || attrView[ctaM.index] === ' ') continue;
     const tag = { start: ctaM.index, attrs: tagAttrsAt(text, ctaM.index) };
-    if (tag.attrs === null) continue; // unterminated — renders nothing to validate
+    if (tag.attrs === null) {
+      // An unterminated invocation breaks the downstream MDX build — never
+      // a clean draft (Codex #3646 r25 P1).
+      return finding('P0', 'INVALID_INLINECTA_PROPS', 'Draft contains an unterminated <InlineCTA (no closing \'>\') — malformed MDX fails the astro build.');
+    }
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
     }
@@ -2197,7 +2205,10 @@ function tolerantStaticJson(text) {
         out += ch;
       }
     }
-    return { value: JSON.parse(out.replace(/,\s*([\]}])/g, '$1')) };
+    // Ordinary JS identifier keys ({ name: 'x' }) become quoted JSON keys
+    // (astro parity — Codex #3646 r25).
+    const keyed = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
+    return { value: JSON.parse(keyed.replace(/,\s*([\]}])/g, '$1')) };
   } catch (_) { return undefined; }
 }
 
@@ -2229,7 +2240,9 @@ function spiderIdBoardContractFinding(body) {
   while ((sibM = sibRe.exec(text)) !== null) {
     if (strView[sibM.index] === ' ' || attrView[sibM.index] === ' ') continue;
     const tag = { start: sibM.index, attrs: tagAttrsAt(text, sibM.index) };
-    if (tag.attrs === null) continue;
+    if (tag.attrs === null) {
+      return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains an unterminated <SpiderIdBoard (no closing \'>\') — malformed MDX fails the astro build.');
+    }
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard> carrying a JSX spread ({...}) — its props cannot be validated against the schema.');
     }
@@ -2424,7 +2437,9 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // The first RENDERED section heading — code fences, comments, and hidden
   // spans are masked (length-preserving, so tag offsets stay aligned): a
   // "## fake" inside a fenced block or comment is not a section.
-  const structureMasked = blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(String(body || '')))));
+  // Attr text is not a heading (<div title=\"\\n## fake\\n\"> renders no
+  // section — Codex #3646 r25): mask attr values before the heading scan.
+  const structureMasked = maskJsxAttrQuotes(blankNonRenderedMarkdown(blankDefinitelyHiddenContent(blankComments(blankExpressions(String(body || ''))))));
   const firstHeading = structureMasked.search(/^#{2,3}\s/m);
   if (tags.some((t) => firstHeading === -1 || t.start < firstHeading)) {
     push('P1', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'opening', 'Draft places an affiliate link in the opening section (before the first section heading) — answer the reader\'s question first; product recommendations come later in the piece.');
@@ -4598,10 +4613,10 @@ function collectInternalDestinations(text) {
   const dests = [];
   let m;
   // Quoted attr VALUES are display text (<div title='<InlineCTA
-  // ctaHref="/x/" />'> renders no anchor) — a relative-arm match STARTING
-  // inside one is skipped; real href/src/ctaHref matches anchor at the
-  // attribute NAME, outside any value (Codex #3646 r19 P1).
-  const attrMasked = maskJsxAttrQuotes(s);
+  // ctaHref="/x/" />'> renders no anchor) — a match STARTING inside one is
+  // skipped. Link-carrying values (href/src/ctaHref) stay readable so the
+  // absolute arm still validates real destinations (Codex #3646 r19+r25).
+  const attrMasked = maskJsxAttrQuotes(s, { keepValuesOf: new Set(['href', 'src', 'ctaHref']) });
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
   while ((m = rel.exec(s)) !== null) {
     if (attrMasked[m.index] !== s[m.index]) continue;
@@ -4610,6 +4625,13 @@ function collectInternalDestinations(text) {
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
   while ((m = abs.exec(s)) !== null) {
+    // Absolute candidates inside quoted attr DISPLAY text (title="https://…")
+    // render nothing either (Codex #3646 r25 P1). Real href/src values are
+    // caught the same way here — the attr mask blanks all quoted values —
+    // but an absolute hub URL in an href is equally reachable through the
+    // markdown/reference arms when rendered, and a title-text URL must not
+    // block a draft; skip masked positions.
+    if (attrMasked[m.index] !== s[m.index]) continue;
     // Bare URLs in prose drag trailing punctuation into the match
     // ("…/contact/, then…") — trim it so a valid allowlisted route never
     // normalizes to "/contact/," and false-parks the draft.
