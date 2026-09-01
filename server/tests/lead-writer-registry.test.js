@@ -50,6 +50,9 @@ function knexInsertPatterns(token) {
     // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
     new RegExp(String.raw`\.\s*table\s*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
     new RegExp(String.raw`\.into\(\s*${token}\s*\)`, 'g'),
+    // Table selected AFTER the insert — `db.insert(row).table('leads')`,
+    // the insert-first analog of `.into`.
+    new RegExp(String.raw`\.\s*insert\s*\((?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.\s*table\s*\(\s*${token}\s*\)`, 'g'),
     new RegExp(String.raw`\binsert\s*\(\s*${token}\s*\)`, 'g'),
     new RegExp(String.raw`\bbatchInsert\s*\(\s*${token}`, 'g'),
     new RegExp(String.raw`\bfrom\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
@@ -230,6 +233,7 @@ const DYNAMIC_INSERT_PATTERNS = [
   new RegExp(String.raw`\.\s*table\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
   new RegExp(String.raw`\bbatchInsert\s*\(${DYN_EXPR},`, 'g'),
   new RegExp(String.raw`\.into\(${DYN_EXPR}\)`, 'g'),
+  new RegExp(String.raw`\.\s*insert\s*\((?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.\s*table\s*\(${DYN_EXPR}\)`, 'g'),
 ];
 
 function scanSourceForDynamicTableInserts(src) {
@@ -318,10 +322,14 @@ function scanSourceForDynamicTableInserts(src) {
     /\binsert\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(\?\?)/gi,
     /\binsert\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(:[\w$]+:)/gi,
   ];
+  // Comment-blanked but STRING-PRESERVING view (offsets identical): the SQL
+  // text lives in strings, but a COMMENT mentioning `INSERT INTO ${table}`
+  // is documentation, not a writer.
+  const codeStr = blankComments(src);
   for (const re of RAW_DYNAMIC_RES) {
     re.lastIndex = 0;
     let m;
-    while ((m = re.exec(src))) record(m.index, m[0].length, m[1]);
+    while ((m = re.exec(codeStr))) record(m.index, m[0].length, m[1]);
   }
   return [...endsByLine.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -433,6 +441,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['assigned-later stored builder', "let target;\ntarget = db('leads');\nawait target.insert(row);"],
     ['factory-returned stored builder', "const target = getDb()('leads');\nawait target.insert(row);"],
     ['arrow factory returning the builder', "const baseQuery = () => db('leads');\nawait baseQuery().insert(row);"],
+    ['table selected after insert', "await db.insert(row).table('leads');"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -581,6 +590,12 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       'const q = (t) => db(t);\nawait q(x).insert(row);'
     );
     expect(dynArrowFactory).toHaveLength(1);
+    const insertThenTable = scanSourceForDynamicTableInserts('await db.insert(row).table(target);');
+    expect(insertThenTable).toHaveLength(1);
+    const rawCommentMention = scanSourceForDynamicTableInserts(
+      '// legacy shape: INSERT INTO ${table} (a) VALUES (?)\nconst x = 1;'
+    );
+    expect(rawCommentMention).toEqual([]);
   });
 
   test('dynamic-table scan: two dynamic inserts on one line surface as TWO sites', () => {
@@ -673,11 +688,23 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // The config must stay IMMUTABLE after declaration — a later
         // property write (TYPES.lawn.table = x) or Object.assign /
         // defineProperty over it would feed the insert a runtime table.
-        const mutation = bare.match(new RegExp(
-          String.raw`\b${escapeRe(cc.object)}\b\s*(?:\.[\w$]+|\[[^\]]*\])+\s*=[^=]|Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\s*\([^)]*\b${escapeRe(cc.object)}\b`
-        ));
+        const mutationReFor = (name) => new RegExp(
+          String.raw`\b${escapeRe(name)}\b\s*(?:\.[\w$]+|\[[^\]]*\])+\s*=[^=]|Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\s*\([^)]*\b${escapeRe(name)}\b`
+        );
+        const mutation = bare.match(mutationReFor(cc.object));
         expect({ file: w.file, mutation: mutation && mutation[0].trim() })
           .toEqual({ file: w.file, mutation: null });
+        // Mutations THROUGH an alias too: every identifier initialized from
+        // the config object (const config = TYPES[type]) is itself checked
+        // for property writes / Object.assign. One aliasing level — the
+        // repo's actual access pattern; a deeper chain would need an AST.
+        const aliasRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*${escapeRe(cc.object)}\b`, 'g');
+        let al;
+        while ((al = aliasRe.exec(bare))) {
+          const aliasMutation = bare.match(mutationReFor(al[1]));
+          expect({ file: w.file, alias: al[1], mutation: aliasMutation && aliasMutation[0].trim() })
+            .toEqual({ file: w.file, alias: al[1], mutation: null });
+        }
         expect({ file: w.file, spreads: (objBare.match(/\.\.\./g) || []).length })
           .toEqual({ file: w.file, spreads: 0 });
         const propAlt = cc.props.map(escapeRe).join('|');
@@ -780,6 +807,12 @@ describe('lead-writer registry (#3137 groundwork)', () => {
               .toEqual({ caller: `${rel}@${m.index}`, topSpreads: 0 });
             const bindCount = (top.match(new RegExp(String.raw`\b${escapeRe(cc.prop)}\s*:`, 'g')) || []).length;
             expect({ caller: `${rel}@${m.index}`, bindCount }).toEqual({ caller: `${rel}@${m.index}`, bindCount: 1 });
+            // A quoted or computed spelling of the key (["'\x60]table["'\x60]
+            // or ['table']:) is a duplicate the count above can't see — the
+            // later property wins at runtime, so any such form fails.
+            const sneakyKey = top.match(new RegExp(String.raw`["'\x60]${escapeRe(cc.prop)}["'\x60]\s*[:\]]`));
+            expect({ caller: `${rel}@${m.index}`, sneakyKey: sneakyKey && sneakyKey[0] })
+              .toEqual({ caller: `${rel}@${m.index}`, sneakyKey: null });
             // The COMPLETE value must be the literal or the indirect
             // expression — a delimiter must follow, so `'lead' + 's'` and
             // `config.photoTableSuffix` don't pass on a prefix.
