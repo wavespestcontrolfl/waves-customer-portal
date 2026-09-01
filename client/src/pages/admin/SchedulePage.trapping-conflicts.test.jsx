@@ -121,13 +121,17 @@ describe("typed area ownership", () => {
 });
 
 describe("specialty treatment scope", () => {
-  it("marks attic bee void and mud-dauber treatments as interior", () => {
-    expect(specialtyActionScope({
-      specialtyKey: "bee_wasp_removal", label: "Void nest treated", areas: ["Attic"], defaultScope: "exterior",
-    })).toBe("interior");
-    expect(specialtyActionScope({
-      specialtyKey: "mud_dauber_removal", label: "Active nests treated", areas: ["Attic / structural interior"], defaultScope: "exterior",
-    })).toBe("interior");
+  it("follows the treated areas when they all sit on one side", () => {
+    expect(specialtyActionScope({ areas: ["Attic"], defaultScope: "exterior" })).toBe("interior");
+    expect(specialtyActionScope({ areas: ["Attic / structural interior"], defaultScope: "exterior" })).toBe("interior");
+    expect(specialtyActionScope({ areas: ["Garage / carport"], defaultScope: "exterior" })).toBe("interior");
+    expect(specialtyActionScope({ areas: ["Interior pet areas", "Furniture near pet areas"], defaultScope: "exterior" })).toBe("interior");
+    expect(specialtyActionScope({ areas: ["Eaves / soffit", "Roofline"], defaultScope: "interior" })).toBe("exterior");
+  });
+  it("keeps the default for mixed, unclassified or empty areas", () => {
+    expect(specialtyActionScope({ areas: ["Attic", "Eaves / soffit"], defaultScope: "exterior" })).toBe("exterior");
+    expect(specialtyActionScope({ areas: ["Other"], defaultScope: "exterior" })).toBe("exterior");
+    expect(specialtyActionScope({ areas: [], defaultScope: "interior" })).toBe("interior");
   });
 });
 

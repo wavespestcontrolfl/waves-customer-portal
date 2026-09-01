@@ -335,20 +335,22 @@ export function labelsPresentInMarkerNotes(notes, labels) {
     markerValues.has(String(label || "").trim().toLowerCase())
   ));
 }
-export function specialtyActionScope({ specialtyKey, label, areas, defaultScope }) {
-  const normalizedSpecialty = String(specialtyKey || "").toLowerCase();
-  const selectedAreas = (areas || []).map((area) => String(area).toLowerCase());
-  const interiorAreaSelected = selectedAreas.some((area) => (
-    area.includes("attic") || area.includes("interior wall void") || area.includes("structural interior")
-  ));
-  if (
-    interiorAreaSelected
-    && (((normalizedSpecialty.includes("bee") || normalizedSpecialty.includes("wasp") || normalizedSpecialty.includes("yellowjacket"))
-      && label === "Void nest treated")
-      || ((normalizedSpecialty.includes("mud_dauber") || normalizedSpecialty.includes("mud dauber"))
-        && /treated|application/i.test(label)))
-  ) return "interior";
-  return defaultScope;
+// Specialty preset actions carry a default scope, but the treated areas say
+// where the work actually happened: when every classified area sits on one
+// side (shared/treatment-area-scopes.json), the action follows it, so an
+// interior-only bee, mud-dauber or tick visit never exposes an exterior
+// re-entry target. Mixed or unclassified areas keep the default (codex P1 r9
+// #3701 — replaces a narrower attic/void token list).
+export function specialtyActionScope({ areas, defaultScope }) {
+  const scopes = new Set((areas || [])
+    .map((area) => {
+      const label = String(area || "").trim();
+      if (AREA_SCOPES.interior.includes(label)) return "interior";
+      if (AREA_SCOPES.exterior.includes(label)) return "exterior";
+      return null;
+    })
+    .filter(Boolean));
+  return scopes.size === 1 ? [...scopes][0] : defaultScope;
 }
 // Chip choices = this visit's treated-area chips, plus any already-selected
 // area that is no longer chipped at the visit level. Keeping stale
@@ -13642,12 +13644,9 @@ export function CompletionPanel({
           if (!meta) return null;
           return {
             label,
-            scope: specialtyActionScope({
-              specialtyKey: service.completionProfile?.serviceKey || service.serviceType,
-              label,
-              areas: completionAreasServiced,
-              defaultScope: meta.scope,
-            }),
+            scope: specialtyCompletion
+              ? specialtyActionScope({ areas: completionAreasServiced, defaultScope: meta.scope })
+              : meta.scope,
             treatmentApplied: meta.treatmentApplied === true,
           };
         })

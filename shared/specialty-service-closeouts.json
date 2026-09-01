@@ -86,10 +86,14 @@
       }
     ],
     "workState": {
-      "noWork": [
-        "Inspection only",
-        "Work deferred"
-      ],
+      "noWork": {
+        "Inspection only": [
+          "Inspection only"
+        ],
+        "Work deferred": [
+          "Work deferred; office follow-up required"
+        ]
+      },
       "completed": [
         "Full quoted area completed",
         "Partial quoted area completed",
@@ -194,11 +198,18 @@
       }
     ],
     "workState": {
-      "noWork": [
-        "Inspection only",
-        "Work deferred",
-        "Not installed"
-      ],
+      "noWork": {
+        "Inspection only": [
+          "Inspection only"
+        ],
+        "Work deferred": [
+          "Work deferred; office follow-up required"
+        ],
+        "Not installed": [
+          "Inspection only",
+          "Work deferred; office follow-up required"
+        ]
+      },
       "completed": [
         "Full quoted area completed",
         "Partial quoted area completed",

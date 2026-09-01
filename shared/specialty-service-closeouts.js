@@ -15,30 +15,28 @@ const SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY = Object.freeze(Object.fromEntries(
   ]),
 ));
 
-const SPECIALTY_SERVICE_KEY_ALIASES = Object.freeze({
-  mosquito_monthly: 'mosquito', mosquito_seasonal: 'mosquito', mosquito_one_time: 'mosquito',
-  bed_bug: 'bed_bug_treatment',
-});
+// Lane resolution is data-driven from specialty-service-keys.json so the
+// client presets (service-completion-presets.js) resolve identically. A
+// completion profile key is authoritative: when the schedule row carries one
+// that is not a specialty lane (e.g. the typed flea_tick profile whose frozen
+// display name still reads "Flea & Tick"), the display-name fallback must NOT
+// run — it is only for legacy rows with no profile key (codex P1 r9 #3701).
+const { aliases: SERVICE_KEY_ALIASES, serviceTypePatterns: SERVICE_TYPE_PATTERNS } = require('./specialty-service-keys.json');
 
 function observationsForSpecialtyService(serviceKey) {
   const key = String(serviceKey || '').trim();
-  return SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY[SPECIALTY_SERVICE_KEY_ALIASES[key] || key] || [];
+  return SPECIALTY_SERVICE_OBSERVATIONS_BY_KEY[SERVICE_KEY_ALIASES[key] || key] || [];
 }
 
 function specialtyServiceKey({ serviceKey, serviceType } = {}) {
   const key = String(serviceKey || '').trim();
-  const canonical = SPECIALTY_SERVICE_KEY_ALIASES[key] || key;
-  if (SPECIALTY_SERVICE_CLOSEOUTS[canonical]) return canonical;
+  if (key) {
+    const canonical = SERVICE_KEY_ALIASES[key] || key;
+    return SPECIALTY_SERVICE_CLOSEOUTS[canonical] ? canonical : null;
+  }
   const text = String(serviceType || '').toLowerCase();
-  if (/mosquito/.test(text)) return 'mosquito';
-  if (/dethatch/.test(text)) return 'dethatching';
-  if (/lawn\s*plugg|sod\s*plugg/.test(text)) return 'plugging';
-  if (/bed\s*bug/.test(text)) return 'bed_bug_treatment';
-  if (/fire\s*ant/.test(text)) return 'fire_ant';
-  if (/\btick/.test(text)) return 'tick_control';
-  if (/mud\s*dauber/.test(text)) return 'mud_dauber_removal';
-  if (/\bbee\b|\bwasp\b|yellow\s*jacket|yellowjacket|hornet/.test(text)) return 'bee_wasp_removal';
-  return null;
+  const match = SERVICE_TYPE_PATTERNS.find(({ pattern }) => new RegExp(pattern).test(text));
+  return match ? match.key : null;
 }
 
 // A restored or stale-client payload can carry label combinations the
@@ -64,22 +62,27 @@ function validateSpecialtyObservationCombination(serviceKey, values) {
 }
 
 // Mechanical lanes record work state twice — as a finding (scope / spacing
-// group) and as protocol actions. A no-work finding cannot sit beside a
-// performed action, and an exclusive no-work action cannot sit beside a
-// completed-work finding. Mirrored by specialtyFindingActionConflict on the
-// client for selection-time feedback.
+// group) and as protocol actions. workState.noWork maps each no-work finding
+// to the exclusive actions that explain it; a no-work finding cannot sit
+// beside a performed action or a different no-work explanation, and an
+// exclusive action cannot sit beside a completed-work finding. Mirrored by
+// specialtyFindingActionConflict on the client for selection-time feedback.
 function specialtyFindingActionConflict(spec, observations, actionLabels) {
   const workState = spec?.workState;
   if (!workState) return null;
   const byLabel = new Map((spec.protocols || []).map((action) => [action.label, action]));
   const actions = (Array.isArray(actionLabels) ? actionLabels : []).filter((label) => byLabel.has(label));
   const findings = Array.isArray(observations) ? observations : [];
-  const noWork = findings.find((value) => workState.noWork.includes(value));
+  const noWorkFindings = findings.filter((value) => Object.prototype.hasOwnProperty.call(workState.noWork, value));
   const performed = actions.find((label) => byLabel.get(label).exclusive !== true);
-  if (noWork && performed) return `“${noWork}” cannot be paired with completed action “${performed}”.`;
+  if (noWorkFindings.length && performed) {
+    return `“${noWorkFindings[0]}” cannot be paired with completed action “${performed}”.`;
+  }
   const exclusive = actions.find((label) => byLabel.get(label).exclusive === true);
   const completed = findings.find((value) => workState.completed.includes(value));
   if (exclusive && completed) return `“${exclusive}” cannot be paired with finding “${completed}”.`;
+  const mismatched = exclusive && noWorkFindings.find((value) => !workState.noWork[value].includes(exclusive));
+  if (mismatched) return `“${mismatched}” cannot be paired with action “${exclusive}”.`;
   return null;
 }
 

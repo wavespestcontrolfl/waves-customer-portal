@@ -6,6 +6,7 @@ import {
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
+  resolveSpecialtyServiceKey,
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "./service-completion-presets";
@@ -60,6 +61,12 @@ describe("specialty pest completion configuration", () => {
       expect(clientMessage).toContain(`cannot be paired with ${kind}`);
       expect(validateSpecialtyClosureCombination(key, { observations, actions })).toBe(clientMessage);
     }
+    expect(specialtyFindingActionConflict(dethatching, ["Inspection only"], ["Work deferred; office follow-up required"]))
+      .toBe("“Inspection only” cannot be paired with action “Work deferred; office follow-up required”.");
+    expect(validateSpecialtyClosureCombination("plugging", {
+      observations: ["Work deferred"], actions: ["Inspection only"],
+    })).toBe(specialtyFindingActionConflict(plugging, ["Work deferred"], ["Inspection only"]));
+    expect(specialtyFindingActionConflict(plugging, ["Not installed"], ["Work deferred; office follow-up required"])).toBeNull();
     expect(specialtyFindingActionConflict(dethatching, ["Inspection only"], ["Inspection only"])).toBeNull();
     expect(specialtyFindingActionConflict(dethatching, ["Work deferred"], ["Work deferred; office follow-up required"])).toBeNull();
     expect(specialtyFindingActionConflict(dethatching, ["Heavy debris removed"], ["Double-pass dethatching completed"])).toBeNull();
@@ -117,6 +124,34 @@ describe("specialty pest completion configuration", () => {
       expect(config.protocols.every((action) => action.treatmentApplied === false)).toBe(true);
     },
   );
+
+  test("a non-specialty profile key never falls through to the display name", () => {
+    const fleaTick = { serviceType: "Flea & Tick Control", completionProfile: { serviceKey: "flea_tick" } };
+    expect(specialtyCompletionFor(fleaTick)).toBeNull();
+    expect(specialtyServiceKey({ serviceKey: "flea_tick", serviceType: "Flea & Tick Control" })).toBeNull();
+    expect(specialtyCompletionFor({ serviceType: "Bee Removal", completionProfile: { serviceKey: "pest_control" } })).toBeNull();
+  });
+
+  test("client and server resolve the same specialty lane for every profile key and display name", () => {
+    const corpus = [
+      { serviceKey: "flea_tick", serviceType: "Flea & Tick Control" },
+      { serviceKey: "pest_control", serviceType: "Mosquito add-on" },
+      { serviceKey: "mosquito_seasonal", serviceType: "Anything" },
+      { serviceKey: "bed_bug", serviceType: "" },
+      { serviceKey: "", serviceType: "Flea & Tick Yard Treatment" },
+      { serviceKey: null, serviceType: "Yellowjacket Removal" },
+      { serviceType: "Lawn Dethatching" },
+      { serviceType: "Sod Plugging" },
+      { serviceType: "Fire Ant Treatment" },
+      { serviceType: "Mud Dauber Removal" },
+      { serviceType: "Bed Bug Heat Treatment" },
+      { serviceType: "Mosquito Monthly" },
+      { serviceType: "General Pest Control" },
+    ];
+    for (const input of corpus) {
+      expect(resolveSpecialtyServiceKey(input)).toBe(specialtyServiceKey(input));
+    }
+  });
 
   test("falls back to service-name matching for legacy schedule rows", () => {
     expect(specialtyCompletionFor({ serviceType: "Bee Removal" }))

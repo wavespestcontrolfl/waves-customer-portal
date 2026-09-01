@@ -3,6 +3,7 @@
 const {
   SPECIALTY_SERVICE_CLOSEOUTS,
   observationsForSpecialtyService,
+  specialtyServiceKey,
   validateSpecialtyObservationCombination,
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
@@ -25,8 +26,13 @@ describe('specialty service closeout vocabulary', () => {
         excludes.forEach((other) => expect(allowed.has(other)).toBe(true));
       }
       if (spec.workState) {
-        [...spec.workState.noWork, ...spec.workState.completed].forEach((value) => expect(allowed.has(value)).toBe(true));
-        expect(spec.protocols.some((action) => action.exclusive === true)).toBe(true);
+        const exclusive = new Set(spec.protocols.filter((action) => action.exclusive === true).map((action) => action.label));
+        expect(exclusive.size).toBeGreaterThan(0);
+        [...Object.keys(spec.workState.noWork), ...spec.workState.completed].forEach((value) => expect(allowed.has(value)).toBe(true));
+        Object.values(spec.workState.noWork).forEach((actions) => {
+          expect(actions.length).toBeGreaterThan(0);
+          actions.forEach((label) => expect(exclusive.has(label)).toBe(true));
+        });
       }
       spec.protocols.forEach((action) => {
         expect(['interior', 'exterior']).toContain(action.scope);
@@ -98,6 +104,28 @@ describe('specialty service closeout vocabulary', () => {
     expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
       observations: [], actions: ['Exposed nest treated', 'Nest physically removed'], productCount: 2,
     })).toBeNull();
+  });
+
+  test('rejects a no-work finding whose exclusive action explains a different work state', () => {
+    expect(validateSpecialtyClosureCombination('dethatching', {
+      observations: ['Inspection only'], actions: ['Work deferred; office follow-up required'],
+    })).toBe('“Inspection only” cannot be paired with action “Work deferred; office follow-up required”.');
+    expect(validateSpecialtyClosureCombination('plugging', {
+      observations: ['Not installed', 'Work deferred'], actions: ['Inspection only'],
+    })).toBe('“Work deferred” cannot be paired with action “Inspection only”.');
+    expect(validateSpecialtyClosureCombination('plugging', {
+      observations: ['Not installed'], actions: ['Work deferred; office follow-up required'],
+    })).toBeNull();
+  });
+
+  test('a profile key is authoritative and only keyless rows use the display name', () => {
+    expect(specialtyServiceKey({ serviceKey: 'flea_tick', serviceType: 'Flea & Tick Control' })).toBeNull();
+    expect(specialtyServiceKey({ serviceKey: 'pest_control', serviceType: 'Bee Removal' })).toBeNull();
+    expect(specialtyServiceKey({ serviceKey: 'mosquito_one_time' })).toBe('mosquito');
+    expect(specialtyServiceKey({ serviceKey: 'bed_bug' })).toBe('bed_bug_treatment');
+    expect(specialtyServiceKey({ serviceType: 'Flea & Tick Yard Treatment' })).toBe('tick_control');
+    expect(specialtyServiceKey({ serviceType: 'Yellowjacket Removal' })).toBe('bee_wasp_removal');
+    expect(specialtyServiceKey({ serviceType: 'General Pest Control' })).toBeNull();
   });
 
   test('accepts consistent work state, tagged free-text actions and lanes without work-state rules', () => {
