@@ -30,6 +30,7 @@ function makeConn(catalog = []) {
   const conn = (table) => {
     const chain = { _where: null };
     chain.where = (w) => { chain._where = w; return chain; };
+    chain.forShare = () => { calls.forShare = (calls.forShare || 0) + 1; return chain; };
     chain.whereRaw = (_sql, params) => { chain._names = (params || []).map((n) => String(n).toLowerCase()); return chain; };
     chain.first = () => Promise.resolve(
       catalog.find((r) => r.id === chain._where?.id),
@@ -171,6 +172,15 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(out.service_category_snapshot).toBeNull(); // explicit null = caller's decision
   });
 
+  test('inside a transaction the resolved catalog row is share-locked through the insert', async () => {
+    const conn = makeConn(CATALOG);
+    conn.isTransaction = true;
+    await completeScheduledServiceInsert({ ...BASE, service_id: 'svc-1' }, {
+      trx: conn, cols: COLS, source: { sourceAction: 'test_lane' },
+    });
+    expect(conn._calls.forShare).toBe(1);
+  });
+
   test('legacy " Service"-suffixed label resolves through the alias bridge', async () => {
     const catalog = [
       { id: 'svc-p', name: 'Pest Control', service_key: 'pest_control', category: 'pest', is_active: true },
@@ -257,7 +267,7 @@ describe('createScheduledService wrapper', () => {
   });
 
   test('a SUPPLIED blank idempotencyKey fails closed instead of inserting unguarded', async () => {
-    for (const blank of ['', null]) {
+    for (const blank of ['', null, '   ']) {
       await expect(createScheduledService({
         trx: makeConn(), insertData: { ...BASE }, cols: COLS, source: { sourceAction: 'x' }, idempotencyKey: blank,
       })).rejects.toThrow(/blank/);

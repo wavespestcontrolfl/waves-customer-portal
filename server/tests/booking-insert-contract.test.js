@@ -5,8 +5,10 @@
  * Every production INSERT into scheduled_services must either go through
  * the booking contract (services/booking/create-scheduled-service.js) or
  * be one of the frozen legacy sites below. The inventory freezes each
- * site's FINGERPRINT — the normalized `('scheduled_services')…insert(<arg
- * head>` expression — as a per-file multiset, not a bare count: with
+ * site's FINGERPRINT — the statement prefix (call-site identity: the
+ * assignment/return context on the ref's line) plus the normalized
+ * `('scheduled_services')…insert(<arg head>` expression — as a per-file
+ * multiset, not a bare count: with
  * counts alone, converting one legacy insert while adding a different
  * bare insert in the same file would net to zero and slip a new parallel
  * booking writer past the guard (GH Codex #3702 P2). Entries may only be
@@ -43,41 +45,59 @@ const CONTRACT_MODULE = 'server/services/booking/create-scheduled-service.js';
 // multiset. Shrink-only.
 const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
   'server/routes/admin-schedule.js': [
-    "scheduled_services').insert(insertData",   // POST / parent
-    "scheduled_services').insert(childData",    // POST / recurring children
-    "scheduled_services').insert(boosterData",  // POST / booster months
-    "scheduled_services').insert(childData",    // update-details child spawn
-    "scheduled_services').insert(data",         // series extension (visit-count top-up)
-    "scheduled_services').insert(nextData",     // auto-extend on completion
-    "scheduled_services').insert(data",         // recurring-alert extend
-    "scheduled_services').insert(data",         // recurring-alert convert_ongoing
+    "[svc] = await trx( scheduled_services').insert(insertData",
+    "const [childRow] = await trx( scheduled_services').insert(childData",
+    "const [boosterRow] = await trx( scheduled_services').insert(boosterData",
+    "const [childRow] = await trx( scheduled_services').insert(childData",
+    "const [row] = await trx( scheduled_services').insert(data",
+    "const [autoExtRow] = await conn( scheduled_services').insert(nextData",
+    "const [row] = await trx( scheduled_services').insert(data",
+    "const [row] = await trx( scheduled_services').insert(data",
   ],
-  'server/routes/booking.js': ["scheduled_services').insert({"],            // createSelfBooking
-  'server/routes/admin-dispatch.js': ["scheduled_services').insert(insertData"], // completion-CTA follow-up
-  'server/routes/admin-leads.js': ["scheduled_services').insert(insertData"],    // lead → appointment conversion
-  'server/services/slot-reservation.js': ["scheduled_services').insert({"], // estimate slot hold (customer_id NULL by design)
-  'server/services/health-alerts.js': ["scheduled_services').insert({"],    // complimentary visit action
-  'server/services/availability.js': ["scheduled_services').insert({"],     // AI-assistant confirmBooking
-  'server/services/recurring-appointment-seeder.js': [                      // seedFollowUpsForParent (locked/unlocked arms)
-    "scheduled_services').insert(rows",
-    "scheduled_services').insert(rows",
+  'server/routes/booking.js': [
+    "const [scheduledRow] = await trx( scheduled_services').insert({",
   ],
-  'server/services/annual-prepay-renewals.js': [                            // timed + windowless coverage rows
-    "scheduled_services').insert(buildInsert(scheduledDate, windowStart)",
-    "scheduled_services').insert(buildInsert(scheduledDate, null)",
-    "scheduled_services').insert(buildInsert(scheduledDate, null)",
+  'server/routes/admin-dispatch.js': [
+    "return trx( scheduled_services').insert(insertData",
   ],
-  'server/services/intelligence-bar/tools.js': ["scheduled_services').insert({"], // create_appointment
-  'server/services/estimate-converter.js': [                                // standalone companion + main unit
-    "scheduled_services').insert(standaloneRow",
-    "scheduled_services').insert(row",
+  'server/routes/admin-leads.js': [
+    "const [appt] = await trx( scheduled_services').insert(insertData",
   ],
-  'server/services/voice-agent/relay-booking.js': ["scheduled_services').insert(insertRow"], // commitVoiceBooking
-  'server/services/call-recording-processor.js': [                          // follow-up savepoint + idempotent booking
-    "scheduled_services').insert({",
-    "scheduled_services').insert(insertData",
+  'server/services/slot-reservation.js': [
+    "const [row] = await trx( scheduled_services').insert({",
   ],
-  'scripts/import-ical-appointments.js': ["scheduled_services').insert(row"], // legacy import script
+  'server/services/health-alerts.js': [
+    "return trx( scheduled_services').insert({",
+  ],
+  'server/services/availability.js': [
+    "const [scheduledRow] = await trx( scheduled_services').insert({",
+  ],
+  'server/services/recurring-appointment-seeder.js': [
+    "? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn( scheduled_services').insert(rows",
+    ": await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx( scheduled_services').insert(rows",
+  ],
+  'server/services/annual-prepay-renewals.js': [
+    "const [row] = await trx( scheduled_services').insert(buildInsert(scheduledDate, windowStart)",
+    "[created] = await conn( scheduled_services').insert(buildInsert(scheduledDate, null)",
+    "return trx( scheduled_services').insert(buildInsert(scheduledDate, null)",
+  ],
+  'server/services/intelligence-bar/tools.js': [
+    "const [created] = await trx( scheduled_services').insert({",
+  ],
+  'server/services/estimate-converter.js': [
+    "const inserted = await trx( scheduled_services').insert(standaloneRow",
+    "const inserted = await trx( scheduled_services').insert(row",
+  ],
+  'server/services/voice-agent/relay-booking.js': [
+    "const [created] = await trx( scheduled_services').insert(insertRow",
+  ],
+  'server/services/call-recording-processor.js': [
+    "const [fuRow] = await sp( scheduled_services').insert({",
+    "const [created] = await trx( scheduled_services').insert(insertData",
+  ],
+  'scripts/import-ical-appointments.js': [
+    "const [inserted] = await db( scheduled_services').insert(row",
+  ],
 };
 
 function walk(dir, out = []) {
@@ -152,8 +172,28 @@ function balancedParens(source, i) {
   return i;
 }
 
+// The statement text on the ref's line BEFORE the match — call-site
+// identity, so two byte-identical insert expressions in one file still
+// carry distinct fingerprints (the assignment/return context differs) and
+// a migrated site can't cancel against a newly added twin
+// (GH Codex #3702 r4 P2). For a table string on its own line, the
+// previous non-blank line carries the identity.
+function statementPrefix(source, refIndex) {
+  let lineStart = source.lastIndexOf('\n', refIndex - 1) + 1;
+  let prefix = source.slice(lineStart, refIndex).trim();
+  if (!prefix) {
+    const prevEnd = lineStart - 1;
+    const prevStart = source.lastIndexOf('\n', prevEnd - 1) + 1;
+    prefix = source.slice(prevStart, prevEnd).trim();
+  }
+  return prefix.replace(/\s+/g, ' ');
+}
+
 // Collect scheduled_services insert-site fingerprints in one file by
-// walking each table ref's ENTIRE chained expression.
+// walking each table ref's ENTIRE chained expression. A builder stored in
+// a variable first (`const visits = trx('scheduled_services'); await
+// visits.insert(...)`) is followed through the alias: every later
+// `<alias>.insert(` in the file counts as a site (GH Codex #3702 r4 P2).
 function collectInsertSites(source) {
   const out = [];
   const re = /['"`]scheduled_services['"`]/g;
@@ -178,7 +218,22 @@ function collectInsertSites(source) {
       chain += `.${nm[0]}${source.slice(parenStart, end)}`;
       i = end;
     }
-    if (/\.insert\s*\(/.test(chain)) out.push(fingerprintOf(chain));
+    const prefix = statementPrefix(source, m.index);
+    if (/\.insert\s*\(/.test(chain)) {
+      out.push(`${prefix} ${fingerprintOf(chain)}`.trim());
+      continue;
+    }
+    // No insert on the fluent chain — if the builder was captured in a
+    // variable, chase later .insert( calls through that alias.
+    const assign = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/.exec(statementPrefix(source, m.index));
+    if (assign) {
+      const alias = assign[1];
+      const aliasRe = new RegExp(`\\b${alias}\\s*\\.\\s*insert\\s*\\(\\s*(\\{|[A-Za-z0-9_.$]+)?`, 'g');
+      let am;
+      while ((am = aliasRe.exec(source)) !== null) {
+        out.push(`${statementPrefix(source, am.index)} alias:${am[0].replace(/\s+/g, ' ')}`.trim());
+      }
+    }
   }
   return out;
 }
@@ -210,14 +265,22 @@ describe('booking insert-site contract', () => {
   }
 
   test('the matcher recognizes every insert shape it claims to (self-check)', () => {
-    expect(collectInsertSites("await trx('scheduled_services').insert(insertData).returning('*');")).toEqual(["scheduled_services').insert(insertData"]);
-    expect(collectInsertSites("const [r] = await sp('scheduled_services')\n  .insert({\n    customer_id: id,\n  })")).toEqual(["scheduled_services').insert({"]);
-    expect(collectInsertSites("await trx('scheduled_services')\n  .insert(insertData)\n  .onConflict('idempotency_key')\n  .ignore()")).toEqual(["scheduled_services').insert(insertData"]);
+    expect(collectInsertSites("await trx('scheduled_services').insert(insertData).returning('*');")).toEqual(["await trx( scheduled_services').insert(insertData"]);
+    expect(collectInsertSites("const [r] = await sp('scheduled_services')\n  .insert({\n    customer_id: id,\n  })")).toEqual(["const [r] = await sp( scheduled_services').insert({"]);
+    expect(collectInsertSites("await trx('scheduled_services')\n  .insert(insertData)\n  .onConflict('idempotency_key')\n  .ignore()")).toEqual(["await trx( scheduled_services').insert(insertData"]);
     // A LONG chain (any number of links/lines before .insert) is caught —
     // the bounded 3-line window this replaces was evadable by padding.
-    expect(collectInsertSites("await trx('scheduled_services')\n  .where({ a: 1 })\n  .whereNull('b')\n  // pad\n  .whereIn('c', [1, 2])\n  .orderBy('d')\n  .limit(1)\n  .insert(sneaky)")).toEqual(["scheduled_services').where({ a: 1 }).whereNull('b').whereIn('c', [1, 2]).orderBy('d').limit(1).insert(sneaky"]);
+    expect(collectInsertSites("await trx('scheduled_services')\n  .where({ a: 1 })\n  // pad\n  .whereIn('c', [1, 2])\n  .orderBy('d')\n  .limit(1)\n  .insert(sneaky)")[0]).toContain('.insert(sneaky');
     // A table argument split across lines is still a ref.
-    expect(collectInsertSites("await db(\n  'scheduled_services'\n).insert(x)")).toEqual(["scheduled_services').insert(x"]);
+    expect(collectInsertSites("await db(\n  'scheduled_services'\n).insert(x)")).toEqual(["await db( scheduled_services').insert(x"]);
+    // A builder captured in a variable is followed through the alias
+    // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
+    expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // Two byte-identical insert EXPRESSIONS in different statements carry
+    // distinct call-site identities (GH Codex r4 P2 — a migrated site must
+    // not cancel against a newly added twin).
+    const twins = collectInsertSites("const [a] = await trx('scheduled_services').insert(insertData);\nreturn trx('scheduled_services').insert(insertData);");
+    expect(new Set(twins).size).toBe(2);
     // A read chained near the ref must NOT count…
     expect(collectInsertSites("await trx('scheduled_services').where({ id }).first();")).toEqual([]);
     // …nor an insert into a DIFFERENT table on the next line.

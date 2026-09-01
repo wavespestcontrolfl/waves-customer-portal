@@ -62,16 +62,21 @@ function contractError(message) {
 // this error for a "current transaction is aborted" on the insert that
 // follows (pre-push Codex P1).
 async function resolveCatalogIdentity(conn, insertData) {
+  // Inside a transaction, hold a share lock on the uniquely resolved row
+  // through the caller's insert — the same stability service-catalog-names
+  // uses — so a concurrent deactivate/archive can't retire the service
+  // between this read and the insert that references it (GH Codex r4 P2).
+  const stable = (q) => (conn.isTransaction && typeof q.forShare === 'function' ? q.forShare() : q);
   if (insertData.service_id) {
-    const row = await conn('services')
-      .where({ id: insertData.service_id })
+    const row = await stable(conn('services')
+      .where({ id: insertData.service_id }))
       .first('id', 'service_key', 'category');
     return row || null;
   }
   const snapshotKey = String(insertData.service_key_snapshot || '').trim();
   if (snapshotKey) {
-    const byKey = await conn('services')
-      .where({ service_key: snapshotKey, is_active: true })
+    const byKey = await stable(conn('services')
+      .where({ service_key: snapshotKey, is_active: true }))
       .select('id', 'service_key', 'category');
     return byKey.length === 1 ? byKey[0] : null;
   }
@@ -87,9 +92,9 @@ async function resolveCatalogIdentity(conn, insertData) {
   const { serviceNameCandidates } = require('../service-completion-profiles');
   const candidates = serviceNameCandidates(name).map((c) => c.toLowerCase());
   if (!candidates.length) return null;
-  const hits = await conn('services')
+  const hits = await stable(conn('services')
     .where({ is_active: true })
-    .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates)
+    .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates))
     .select('id', 'service_key', 'category');
   const distinct = [...new Map(hits.map((h) => [h.id, h])).values()];
   return distinct.length === 1 ? distinct[0] : null;
@@ -193,6 +198,10 @@ async function createScheduledService({ trx, insertData, cols, source, idempoten
   // closed, not fall through to an unguarded insert a retry would
   // double-book (GH Codex P1).
   if (idempotencyKey !== undefined) {
+    // Trim before judging: a whitespace-only key is a failed computation,
+    // and stamping it would make the NEXT unrelated failure read as an
+    // idempotent replay and silently drop a booking (GH Codex r4 P2).
+    idempotencyKey = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : idempotencyKey;
     if (!idempotencyKey || typeof idempotencyKey !== 'string') {
       throw contractError('idempotencyKey was supplied but is blank — refuse rather than insert unguarded');
     }
