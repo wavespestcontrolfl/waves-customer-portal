@@ -444,6 +444,24 @@ function statementPrefix(source, refIndex) {
   return prefix.replace(/\s+/g, ' ');
 }
 
+// A builder captured in a variable (`const visits = trx('scheduled_services')`
+// or `trx.table('scheduled_services')` / `.into(…)`) with the insert in a
+// LATER statement: every subsequent `<alias>.insert(` in the file is a
+// site (GH Codex #3702 r4 P2; table-last aliases r7 P2).
+function chaseAlias(source, refIndex, site, statementText = statementPrefix(source, refIndex)) {
+  const assign = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/.exec(statementText);
+  if (!assign) return;
+  const alias = assign[1];
+  const aliasRe = new RegExp(`\\b${alias}\\s*\\.\\s*insert\\s*\\(`, 'g');
+  let am;
+  while ((am = aliasRe.exec(source)) !== null) {
+    const open = am.index + am[0].length - 1;
+    const arg = source.slice(open + 1, balancedParens(source, open) - 1);
+    const head = (/^\s*(\{|[A-Za-z0-9_.$]+)/.exec(arg) || [, ''])[1];
+    site(am.index, `${statementPrefix(source, am.index)} alias:${alias}.insert(${head}`, arg);
+  }
+}
+
 // Collect scheduled_services insert-site fingerprints in one file by
 // walking each table ref's ENTIRE chained expression. A builder stored in
 // a variable first (`const visits = trx('scheduled_services'); await
@@ -487,6 +505,8 @@ function collectInsertSites(source) {
       const stmt = source.slice(statementStart(source, linkAt), m.index).replace(/\s+/g, ' ').trim();
       if (/\.insert\s*\(/.test(stmt)) {
         site(m.index, `${stmt} table-last:scheduled_services`, insertArgument(stmt));
+      } else {
+        chaseAlias(source, m.index, site, stmt);
       }
       continue;
     }
@@ -516,18 +536,7 @@ function collectInsertSites(source) {
     }
     // No insert on the fluent chain — if the builder was captured in a
     // variable, chase later .insert( calls through that alias.
-    const assign = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/.exec(statementPrefix(source, m.index));
-    if (assign) {
-      const alias = assign[1];
-      const aliasRe = new RegExp(`\\b${alias}\\s*\\.\\s*insert\\s*\\(`, 'g');
-      let am;
-      while ((am = aliasRe.exec(source)) !== null) {
-        const open = am.index + am[0].length - 1;
-        const arg = source.slice(open + 1, balancedParens(source, open) - 1);
-        const head = (/^\s*(\{|[A-Za-z0-9_.$]+)/.exec(arg) || [, ''])[1];
-        site(am.index, `${statementPrefix(source, am.index)} alias:${alias}.insert(${head}`, arg);
-      }
-    }
+    chaseAlias(source, m.index, site);
   }
   return out;
 }
@@ -570,6 +579,9 @@ describe('booking insert-site contract', () => {
     // A builder captured in a variable is followed through the alias
     // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // …including an alias captured through the table-last forms (r7 P2).
+    expect(collectInsertSites("const visits = trx.table('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    expect(collectInsertSites("const visits = trx\n  .into('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
     // Two byte-identical insert EXPRESSIONS in different statements carry
     // distinct call-site identities (GH Codex r4 P2 — a migrated site must
     // not cancel against a newly added twin).
