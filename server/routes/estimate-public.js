@@ -14716,7 +14716,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       }
       const bundle = await buildPricingBundle(estimate).catch(() => null);
       const addable = OptOut.serviceOptOutAddableKeys(
-        parsedData, bundle?.services || [], estimate.waveguard_tier,
+        parsedData, bundle?.services || [], estimate.waveguard_tier, { category: estimate.category },
       );
       if (!addable.has(serviceKey)) {
         return { status: 400, body: ({ error: 'service_not_addable' }) };
@@ -24865,6 +24865,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && isEstimateAcceptActive(estimate)
           ? Array.from(serviceOptOutAddableKeys(
             projected, Array.isArray(pricingBundle?.services) ? pricingBundle.services : [], estimate.waveguard_tier,
+            { category: estimate.category },
           ))
           : [];
         if (!removedKeys.length && !addableKeys.length) return {};

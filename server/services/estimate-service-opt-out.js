@@ -371,11 +371,23 @@ function serviceAddBuildable(estData, serviceKey) {
   return Number(ei.lawnSqFt) > 0 || Number(ei.lotSqFt) > 0;
 }
 
-function serviceOptOutAddableKeys(estData = {}, sections = [], rowTier = null) {
+// `category` is the estimates.category column — the authoritative scope, not
+// the rendered section keys (a commercial or legacy row can carry generic
+// keys). Fails CLOSED unless RESIDENTIAL (pre-push codex P1).
+function serviceOptOutAddableKeys(estData = {}, sections = [], rowTier = null, { category } = {}) {
   const empty = new Set();
   if (!isPlainObject(estData)) return empty;
+  if (String(category || '').toUpperCase() !== 'RESIDENTIAL') return empty;
   if (serviceOptOutBlockedByProposal(estData)) return empty;
   if (serviceOptOutTierSelectionActive(estData, rowTier)) return empty;
+  // Existing members never self-serve a priced add: their offers are the
+  // seasonal / member ladder (a different program than the fresh-quote
+  // default this rail would plant — pre-push codex P0), and their combined
+  // tier is the office's to extend. The mirror inquiry stays for them.
+  if (estData.membershipSnapshot?.isExistingCustomer === true) return empty;
+  for (const carrier of [estData, estData.engineInputs, estData.inputs, estData.engineRequest?.options]) {
+    if (isPlainObject(carrier) && Array.isArray(carrier.priorQualifyingServices) && carrier.priorQualifyingServices.length) return empty;
+  }
   const list = Array.isArray(sections) ? sections : [];
   // Residential, engine-priced recurring plans only: a commercial line or a
   // quote-required section takes the whole page out of self-serve adds.

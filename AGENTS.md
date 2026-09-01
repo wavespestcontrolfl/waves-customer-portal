@@ -1648,8 +1648,12 @@ violations at the severity noted.
   mosquito only, `SERVICE_ADD_KEYS`) through the identical dryRun-preview →
   confirm rail and canonical recompute (mode 'add'). Eligibility is ONE
   resolver shared with the `/data` `serviceOptOut.addable` stamp
-  (`serviceOptOutAddableKeys`: residential, replayable carrier, turf basis
-  for lawn, same proposal / tier-selection refusals); the synthetic inputs
+  (`serviceOptOutAddableKeys`: `estimates.category` RESIDENTIAL fail-closed
+  — never the rendered keys alone — no member evidence (snapshot flag or
+  priors: a member's seasonal / member ladder is a different program than
+  the fresh-quote default this rail plants, so members keep the office
+  inquiry), replayable carrier, turf basis for lawn, same proposal /
+  tier-selection refusals); the synthetic inputs
   an add plants are the selectedServices token (engineRequest) or the
   add-service flow's default block (engineInputs), so a customer add and an
   office add price identically; an add whose recompute yields no new

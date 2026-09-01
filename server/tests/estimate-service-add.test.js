@@ -31,44 +31,58 @@ const inputsOnly = () => ({
   result: { property: { lotSqFt: 8000 } },
 });
 const pestSection = [{ key: 'pest_control', isRecurring: true }];
+const RES = { category: 'RESIDENTIAL' };
 
 describe('serviceOptOutAddableKeys', () => {
   it('offers the residential lines not already on the quote', () => {
-    expect([...serviceOptOutAddableKeys(requestOnly(), pestSection)].sort()).toEqual(['lawn_care', 'mosquito']);
+    expect([...serviceOptOutAddableKeys(requestOnly(), pestSection, null, RES)].sort()).toEqual(['lawn_care', 'mosquito']);
     expect(SERVICE_ADD_KEYS).toEqual(['pest_control', 'lawn_care', 'mosquito']);
   });
 
   it('never re-offers a line that is present, or one the customer removed (that is a restore)', () => {
     const data = requestOnly();
     data.engineRequest.selectedServices = ['PEST', 'MOSQUITO'];
-    expect(serviceOptOutAddableKeys(data, [...pestSection, { key: 'mosquito', isRecurring: true }]).has('mosquito')).toBe(false);
+    expect(serviceOptOutAddableKeys(data, [...pestSection, { key: 'mosquito', isRecurring: true }], null, RES).has('mosquito')).toBe(false);
     const removed = requestOnly();
     recordServiceOptOutEvent(removed, { serviceKey: 'lawn_care', included: false, at: 'now' }, {});
     expect(currentlyOptedOutKeys(removed)).toEqual(['lawn_care']);
-    expect(serviceOptOutAddableKeys(removed, pestSection).has('lawn_care')).toBe(false);
+    expect(serviceOptOutAddableKeys(removed, pestSection, null, RES).has('lawn_care')).toBe(false);
   });
 
   it('requires a turf basis before offering lawn', () => {
     const noLot = requestOnly();
     noLot.engineRequest.profile = { homeSqFt: 2000 };
-    expect(serviceOptOutAddableKeys(noLot, pestSection).has('lawn_care')).toBe(false);
-    expect(serviceOptOutAddableKeys(noLot, pestSection).has('mosquito')).toBe(true);
+    expect(serviceOptOutAddableKeys(noLot, pestSection, null, RES).has('lawn_care')).toBe(false);
+    expect(serviceOptOutAddableKeys(noLot, pestSection, null, RES).has('mosquito')).toBe(true);
     const measured = requestOnly();
     measured.engineRequest.profile = { homeSqFt: 2000, measuredTurfSf: 3000 };
-    expect(serviceOptOutAddableKeys(measured, pestSection).has('lawn_care')).toBe(true);
+    expect(serviceOptOutAddableKeys(measured, pestSection, null, RES).has('lawn_care')).toBe(true);
     const v1NoLot = inputsOnly();
     delete v1NoLot.engineInputs.lotSqFt;
-    expect(serviceOptOutAddableKeys(v1NoLot, pestSection).has('lawn_care')).toBe(false);
+    expect(serviceOptOutAddableKeys(v1NoLot, pestSection, null, RES).has('lawn_care')).toBe(false);
+  });
+
+  it('fails closed on a non-residential or missing category, and never offers a member a priced add', () => {
+    expect(serviceOptOutAddableKeys(requestOnly(), pestSection, null, { category: 'COMMERCIAL' }).size).toBe(0);
+    expect(serviceOptOutAddableKeys(requestOnly(), pestSection, null, {}).size).toBe(0);
+    expect(serviceOptOutAddableKeys(requestOnly(), pestSection, null, { category: 'residential' }).size).toBe(2);
+    const member = { ...requestOnly(), membershipSnapshot: { isExistingCustomer: true } };
+    expect(serviceOptOutAddableKeys(member, pestSection, null, RES).size).toBe(0);
+    const priors = requestOnly();
+    priors.engineRequest.options.priorQualifyingServices = ['lawn_care'];
+    expect(serviceOptOutAddableKeys(priors, pestSection, null, RES).size).toBe(0);
+    const linkedNew = { ...requestOnly(), membershipSnapshot: { isExistingCustomer: false } };
+    expect(serviceOptOutAddableKeys(linkedNew, pestSection, null, RES).size).toBe(2);
   });
 
   it('offers nothing on commercial, quote-required, proposal, tier-selected or non-replayable estimates', () => {
-    expect(serviceOptOutAddableKeys(requestOnly(), [{ key: 'commercial_pest', isRecurring: true }]).size).toBe(0);
-    expect(serviceOptOutAddableKeys(requestOnly(), [{ key: 'pest_control', isRecurring: true, quoteRequired: true }]).size).toBe(0);
-    expect(serviceOptOutAddableKeys({ ...requestOnly(), proposal: { programs: [] } }, pestSection).size).toBe(0);
+    expect(serviceOptOutAddableKeys(requestOnly(), [{ key: 'commercial_pest', isRecurring: true }], null, RES).size).toBe(0);
+    expect(serviceOptOutAddableKeys(requestOnly(), [{ key: 'pest_control', isRecurring: true, quoteRequired: true }], null, RES).size).toBe(0);
+    expect(serviceOptOutAddableKeys({ ...requestOnly(), proposal: { programs: [] } }, pestSection, null, RES).size).toBe(0);
     const tierPicked = { ...requestOnly(), result: { recurring: { waveGuardTier: 'Bronze' } } };
-    expect(serviceOptOutAddableKeys(tierPicked, pestSection, 'Gold').size).toBe(0);
-    expect(serviceOptOutAddableKeys({ inputs: { services: { pest: {} } } }, pestSection).size).toBe(0);
-    expect(serviceOptOutAddableKeys(requestOnly(), []).size).toBe(0);
+    expect(serviceOptOutAddableKeys(tierPicked, pestSection, 'Gold', RES).size).toBe(0);
+    expect(serviceOptOutAddableKeys({ inputs: { services: { pest: {} } } }, pestSection, null, RES).size).toBe(0);
+    expect(serviceOptOutAddableKeys(requestOnly(), [], null, RES).size).toBe(0);
   });
 });
 
