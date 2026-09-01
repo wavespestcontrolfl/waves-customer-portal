@@ -4209,6 +4209,32 @@ describe('public estimate one-time breakdown', () => {
     expect(single.lineItems).toHaveLength(1);
   });
 
+  test('invoice-mode recurring accept bills the frozen bait-station setup beside the first application (codex #3591 r15 P1)', () => {
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 3 },
+      estData: {},
+      treatAsOneTime: false,
+      effectiveMonthlyTotal: 29.67,
+      recurringFirstVisitAmount: 89,
+      recurringSvcList: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67 }],
+      effectiveBillingCadence: { frequencyLabel: 'Quarterly', visitChargeLabel: 'Charged after each application' },
+      rodentSetupAmount: 99,
+    });
+    expect(draft.lineItems).toEqual([
+      expect.objectContaining({ unit_price: 89 }),
+      expect.objectContaining({ description: 'Bait Station Setup — one-time setup fee', unit_price: 99 }),
+    ]);
+    expect(draft.amount).toBe(188);
+    expect(draft.title).toContain('bait station setup');
+    const none = buildEstimateInvoiceModeDraft({
+      estimate: { id: 4 }, estData: {}, treatAsOneTime: false, effectiveMonthlyTotal: 29.67, recurringFirstVisitAmount: 89,
+      recurringSvcList: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67 }],
+      effectiveBillingCadence: { frequencyLabel: 'Quarterly', visitChargeLabel: 'Charged after each application' },
+    });
+    expect(none.lineItems).toHaveLength(1);
+    expect(none.amount).toBe(89);
+  });
+
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
     // A positive one_time_adjustment (or any unrecognized positive charge) is a
     // real billable line — unlike the negative member discount it must NOT switch
@@ -6639,10 +6665,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$330.00</span>');
     expect(html).toContain('$147.00</span>');
     expect(html).toContain('<span class="tier-lbl">Recurring service</span>');
-    expect(html).toContain('Add Lawn Care and save more');
-    expect(html).toContain('Silver tier pricing (10% off qualifying services)');
-    expect(html).not.toContain('Add WaveGuard Mosquito and save more');
-    expect(html).not.toContain('Gold tier pricing (15% off qualifying services)');
+    // Rodent bait counts toward the tier since 2026-08-29 (owner directive):
+    // pest + rodent = 2 qualifying services, so the upsell now targets the
+    // NEXT tier (Gold) instead of completing Silver.
+    expect(html).toContain('Add WaveGuard Mosquito and save more');
+    expect(html).toContain('Gold tier pricing (15% off qualifying services)');
+    expect(html).not.toContain('Add Lawn Care and save more');
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
@@ -6691,7 +6719,10 @@ describe('public estimate one-time breakdown', () => {
     expect(pricing.combinedRecurring).toEqual(expect.objectContaining({
       monthlySubtotal: 149,
       annualSubtotal: 1788,
-      qualifyingCount: 1,
+      // Rodent bait tier-counts since 2026-08-29 — pest + rodent = 2,
+      // matching the stored Silver tier. The legacy rodent row itself stays
+      // out of the % (waveGuardDiscountEligible false below).
+      qualifyingCount: 2,
     }));
     expect(pricing.services).toHaveLength(1);
     expect(pricing.services[0]).toEqual(expect.objectContaining({
@@ -7340,6 +7371,57 @@ describe('public estimate one-time breakdown', () => {
       treatAsOneTime: false,
       paymentMethodPreference: 'card_on_file',
     })).toMatch(/Choose pay per application/);
+  });
+
+  test('invoice copy names the bait-station setup a non-member rodent plan bills (codex #3591 r9 P1)', () => {
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'bait station setup',
+      firstApplicationAmount: 89,
+    })).toEqual(expect.objectContaining({
+      totalAmount: 188,
+      payPrefCardSub: 'Invoice includes bait station setup + first application ($188.00).',
+    }));
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'bait station setup',
+      firstApplicationAmount: 0,
+    })).toEqual(expect.objectContaining({
+      payAfterBody: 'Approve now; after you confirm, we send the bait station setup invoice for $99.00 so you can pay before service.',
+      payPrefCardSub: 'Invoice includes bait station setup ($99.00).',
+    }));
+  });
+
+  test('standalone non-member rodent estimate: displayed invoice totals carry the frozen $99 bait-station setup in BOTH payment modes (codex #3591 r9 P1)', () => {
+    const html = renderPage('rodent-setup-token', {
+      id: 'estimate-rodent-setup',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 29.67,
+      annualTotal: 356,
+      onetimeTotal: 99,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: {
+          services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perTreatment: 89, visitsPerYear: 4, perApplicationBilled: true, stations: 5 }],
+        },
+        oneTime: { items: [{ service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 }], specItems: [] },
+        specItems: [],
+        results: {},
+      },
+    });
+    expect(html).toContain('<span>Bait Station Setup</span><strong data-rodent-setup-due="99">$99.00</strong>');
+    // Standard: setup + first application = $99 + $89.
+    expect(html).toContain('data-standard-invoice-total data-standard-setup-due="99">$188.00</strong>');
+    expect(html).toContain('Invoice includes bait station setup + first application ($188.00).');
+    // Prepay: the setup rides the prepay invoice as its own line (never waived by prepay).
+    expect(html).toContain('data-prepay-setup-due="99"');
+    expect(html).toContain('<span>Bait Station Setup</span><strong>$99.00</strong>');
+    // Booking-step script (pay-per-application summary/total) carries the
+    // combined setup share too (codex #3591 r13 P1).
+    expect(html).toContain('const STANDARD_INVOICE_SETUP_DUE = 99;');
   });
 
   test('pay-per-application invoice copy matches setup and first application charges', () => {

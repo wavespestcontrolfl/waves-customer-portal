@@ -232,6 +232,42 @@ describe('wizardDraftSelfServeBookable — current-shape re-check for stored han
     expect(wizardDraftSelfServeBookable(draft({}, { annual: 0, oneTimeTotal: 150 }))).toBe(true);
   });
 
+  test('rodent bait setup share is not mixed billing; a real one-time add-on beside it still is (codex #3591 r8)', () => {
+    // Summary carries the share (new drafts).
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 316,
+      engineResult: {
+        summary: { recurringAnnualAfterDiscount: 316, oneTimeTotal: 99, rodentBaitSetupTotal: 99 },
+        lineItems: [{ service: 'rodent_bait', annual: 316 }, { service: 'rodent_bait_setup', price: 99 }],
+      },
+    }))).toBe(true);
+    // Drafts mirrored before the summary field existed: scan the lines.
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 316,
+      oneTimeTotal: 99,
+      engineResult: {
+        summary: { recurringAnnualAfterDiscount: 316, oneTimeTotal: 99 },
+        lineItems: [{ service: 'rodent_bait', annual: 316 }, { service: 'rodent_bait_setup', price: 99 }],
+      },
+    }))).toBe(true);
+    // Setup + a genuine one-time add-on → still mixed.
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 316,
+      engineResult: {
+        summary: { recurringAnnualAfterDiscount: 316, oneTimeTotal: 249, rodentBaitSetupTotal: 99 },
+        lineItems: [{ service: 'rodent_bait', annual: 316 }, { service: 'rodent_bait_setup', price: 99 }, { service: 'pest_initial_roach', price: 150 }],
+      },
+    }))).toBe(false);
+    // A summary share of 0 (member — waived) exempts nothing.
+    expect(wizardDraftSelfServeBookable(draft({}, {
+      annual: 316,
+      engineResult: {
+        summary: { recurringAnnualAfterDiscount: 316, oneTimeTotal: 150, rodentBaitSetupTotal: 0 },
+        lineItems: [{ service: 'rodent_bait', annual: 316 }, { service: 'pest_initial_roach', price: 150 }],
+      },
+    }))).toBe(false);
+  });
+
   test('bed-bug line → not eligible (no right-sized bookable slot)', () => {
     expect(wizardDraftSelfServeBookable(draft({}, {
       engineResult: { lineItems: [{ service: 'bed_bug', price: 500 }] },

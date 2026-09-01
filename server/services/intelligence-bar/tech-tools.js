@@ -262,20 +262,82 @@ async function getStopDetails(input, techId = null) {
   const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
 
-  // Property preferences
-  const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
-
   // Last 3 services
   const history = await db('service_records')
     .where({ customer_id: customer.id, status: 'completed' })
     .orderBy('service_date', 'desc').limit(3)
     .select('service_date', 'service_type', 'notes', 'products_used', 'technician_name');
 
-  // Today's scheduled service
+  // Today's scheduled service — tech callers see only THEIR visit for this
+  // customer (the same-day row can belong to another technician); admin/
+  // unscoped callers (no techId) stay unrestricted.
   const today = etDateString();
-  const todayService = await db('scheduled_services')
+  // Dead rows (rescheduled/skipped/no-show/canceled) are not a live visit —
+  // they must neither display as today's service nor release access codes.
+  const todayQuery = db('scheduled_services')
     .where({ customer_id: customer.id, scheduled_date: today })
-    .whereNotIn('status', ['cancelled']).first();
+    .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES);
+  if (techId) todayQuery.where('technician_id', techId);
+  // A caller asking about a SPECIFIC stop gets that stop — with several
+  // live services today an unordered .first() could ground the answer
+  // (facts, notes, alerts) in a sibling service.
+  if (input.service_id) todayQuery.where('id', input.service_id);
+  const todayService = await todayQuery.first();
+
+  // Access/property facts follow the same GATE_VISIT_FACTS policy as the
+  // visit brief (GET /:id/visit-brief): gate on, the shared fail-soft access
+  // block is the source and codes ride a PER-VISIT answer — no live visit
+  // today, no codes. The raw property_preferences dump below (gate off)
+  // predates the gate and bypassed it.
+  let property = null;
+  const PrevisitBrief = require('../previsit-brief');
+  if (PrevisitBrief.visitFactsGateEnabled()) {
+    if (todayService) {
+      let facts = null;
+      try {
+        facts = await PrevisitBrief.deterministicVisitFacts(todayService);
+      } catch { facts = null; }
+      // Re-verify the assignment AFTER the facts queries (same race the
+      // visit-brief route closes, Codex P1 on #3638): they run outside
+      // the scoped fetch above, so a dispatch reassignment during them
+      // would otherwise hand the stale authorized snapshot to the former
+      // technician. Ownership KNOWN lost mid-request → withhold the WHOLE
+      // answer (customer, notes, history), not just the codes — same as
+      // the visit-brief route's post-facts recheck, and INDEPENDENT of
+      // whether the facts read succeeded (a facts failure must not skip
+      // the only post-read ownership check). A facts FAILURE with
+      // ownership intact stays fail-soft: property null, rest intact.
+      // Admin callers (no techId) skip the recheck.
+      if (techId) {
+        const stillOwned = !!(await db('scheduled_services')
+          .where({
+            id: todayService.id,
+            technician_id: techId,
+            customer_id: customer.id,
+            scheduled_date: today,
+          })
+          .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
+          .first('id'));
+        if (!stillOwned) return { error: 'Customer not found' };
+      }
+      property = facts ? facts.access : null;
+    }
+  } else {
+    const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
+    property = prefs ? {
+      neighborhood_gate_code: prefs.neighborhood_gate_code,
+      property_gate_code: prefs.property_gate_code,
+      garage_code: prefs.garage_code,
+      lockbox_code: prefs.lockbox_code,
+      parking_notes: prefs.parking_notes,
+      side_gate_access: prefs.side_gate_access,
+      access_notes: prefs.access_notes,
+      pet_count: prefs.pet_count,
+      pet_details: prefs.pet_details,
+      pets_secured_plan: prefs.pets_secured_plan,
+      special_instructions: prefs.special_instructions,
+    } : null;
+  }
 
   return {
     customer: {
@@ -288,19 +350,7 @@ async function getStopDetails(input, techId = null) {
       lot_sqft: customer.lot_sqft,
       notes: customer.crm_notes,
     },
-    property: prefs ? {
-      neighborhood_gate_code: prefs.neighborhood_gate_code,
-      property_gate_code: prefs.property_gate_code,
-      garage_code: prefs.garage_code,
-      lockbox_code: prefs.lockbox_code,
-      parking_notes: prefs.parking_notes,
-      side_gate_access: prefs.side_gate_access,
-      access_notes: prefs.access_notes,
-      pet_count: prefs.pet_count,
-      pet_details: prefs.pet_details,
-      pets_secured_plan: prefs.pets_secured_plan,
-      special_instructions: prefs.special_instructions,
-    } : null,
+    property,
     todays_service: todayService ? {
       id: todayService.id,
       service_type: todayService.service_type,

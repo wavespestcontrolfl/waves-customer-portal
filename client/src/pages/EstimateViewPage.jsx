@@ -345,6 +345,11 @@ function displayServiceLabel(label) {
 
 function serviceKeysForEstimateSection(section = {}) {
   const keys = new Set();
+  // A structural rodent row the server flagged NON-qualifying wins over any
+  // earlier string match (the section's raw memberKeys still list
+  // 'rodent_bait' when rodent_waveguard.tier_qualifier is off) — codex
+  // #3591 r41 P2: the row-level verdict decides, never token order.
+  let rodentFlaggedNonQualifying = false;
 
   const collectText = (value) => {
     if (!value) return;
@@ -355,6 +360,12 @@ function serviceKeysForEstimateSection(section = {}) {
       if (text.includes('mosquito')) keys.add('mosquito');
       if (text.includes('tree') || text.includes('shrub')) keys.add('tree_shrub');
       if (text.includes('termite')) keys.add('termite_bait');
+      // Rodent bait stations count toward the WaveGuard tier since
+      // 2026-08-29 (codex #3591 r12 P2): pest + rodent is already Silver,
+      // so the lawn cross-sell must pick the multi-service copy rather than
+      // promising "Silver / 10%". Bait/station-led rodent text only —
+      // trapping/exclusion never count.
+      if (text.includes('rodent') && (text.includes('bait') || text.includes('station'))) keys.add('rodent_bait');
       return;
     }
     if (Array.isArray(value)) {
@@ -362,6 +373,18 @@ function serviceKeysForEstimateSection(section = {}) {
       return;
     }
     if (typeof value === 'object') {
+      // A rodent row the server marked NON-QUALIFYING (row-level live
+      // tier_qualifier posture) contributes nothing to the tier count the
+      // cross-sell copy is built on (codex #3591 r15 P2). Discount
+      // eligibility is a SEPARATE flag: a tier-counted row that is merely
+      // excluded from the % still moves the tier (pest + rodent = Silver,
+      // lawn reaches Gold) — codex #3591 r26 P1.
+      const rowKey = String(value.service || value.serviceKey || value.service_key || value.key || '').toLowerCase();
+      if (rowKey === 'rodent_bait'
+        && (value.countsTowardWaveGuardTier === false || value.tierQualifier === false)) {
+        rodentFlaggedNonQualifying = true;
+        return;
+      }
       [
         value.key,
         value.service,
@@ -391,6 +414,7 @@ function serviceKeysForEstimateSection(section = {}) {
     collectText(frequency.included);
     collectText(frequency.addOns);
   });
+  if (rodentFlaggedNonQualifying) keys.delete('rodent_bait');
 
   return keys;
 }
@@ -1368,10 +1392,23 @@ export function oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode) {
   const breakdown = pricing?.oneTimeBreakdown;
   const total = Number(breakdown?.total) || 0;
   if (total <= 0) return 0;
+  // The rodent bait-station setup is invoiced up front too (codex #3591 r33
+  // P1) — PPB previews it via extraInvoiceRows, so it is not an "after
+  // completion" extra either.
   const setup = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter(isWaveGuardSetupBreakdownRow)
+    .filter((row) => isWaveGuardSetupBreakdownRow(row) || isRodentBaitSetupBreakdownRow(row))
     .reduce((sum, row) => sum + (Number(row.amount ?? row.price ?? row.total) || 0), 0);
   return Math.max(0, Math.round((total - setup) * 100) / 100);
+}
+
+export function isRodentBaitSetupBreakdownRow(item = {}) {
+  if (String(item?.service || '').toLowerCase() === 'rodent_bait_setup') return true;
+  const raw = [item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('bait station setup');
 }
 
 // Mirrors the server isNonBillableOneTimeRow: inspections, the WaveGuard setup
@@ -6027,6 +6064,12 @@ function EstimateViewPageInner() {
     ? { ...fee, waivedWithPrepay: annualPrepayEligibleEffective }
     : fee);
   const setupFeeEffective = tierAwareFee(pricing.setupFee || null);
+  // Up-front rows beyond the WaveGuard setup (codex #3591 r33 P1): the
+  // frozen rodent bait-station setup is invoiced beside the first
+  // application by BOTH accept paths, so the payment choice previews it.
+  const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
+    ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
+    : [];
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -6685,6 +6728,7 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                extraInvoiceRows={rodentSetupInvoiceRows}
                 setupFee={setupFeeEffective}
                 annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
@@ -7025,6 +7069,7 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting'}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                extraInvoiceRows={rodentSetupInvoiceRows}
                 setupFee={setupFeeEffective}
                 annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}

@@ -38,6 +38,76 @@ const {
   unitLineValueKey,
 } = require('../utils/address-normalizer');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
+
+// Which of these rodent bait rows belong to a 2026-08-29+ (new-model) plan.
+// Two durable signals (codex #3591 r36/r37 P1), both resolved at the series
+// ROOT (children are seeded later than the plan they belong to and may carry
+// no estimate stamp of their own):
+//   • ESTIMATE provenance (the row's or its root's source_estimate_id): the
+//     creating estimate's stored result carries the perApplicationBilled /
+//     stations marker (rodentBaitLegacyReplaySignal returns null).
+//   • DIRECT series (admin booking, call booking, /secure — no estimate BY
+//     DESIGN): the root was created at/after the realignment ROLLOUT INSTANT
+//     (knex_migrations.migration_time of 20260829000040) — only the bracket
+//     ladder has existed since.
+// Root source ids are collected BEFORE the single estimates read, so a
+// child with no stamp under an estimate-origin root classifies through that
+// estimate. An unreadable estimate/root, or a pre-rollout root, is NOT
+// new-model (fail closed → left alone).
+async function rodentRowsWithNewModelProvenance(database, rows = []) {
+  const { rodentBaitLegacyReplaySignal, rodentRealignmentRolloutMs } = require('./rodent-bait-legacy-replay');
+  // 1. Resolve every row to its root (own row first, then the parent).
+  const rowIds = [...new Set(rows.map((row) => String(row.id)))];
+  const own = rowIds.length
+    ? await database('scheduled_services')
+      .whereIn('id', rowIds)
+      .select('id', 'recurring_parent_id', 'source_estimate_id', 'created_at')
+    : [];
+  const ownById = new Map((own || []).map((r) => [String(r.id), r]));
+  const parentIds = [...new Set((own || []).map((r) => r.recurring_parent_id).filter(Boolean).map(String))];
+  const parents = parentIds.length
+    ? await database('scheduled_services').whereIn('id', parentIds).select('id', 'source_estimate_id', 'created_at')
+    : [];
+  const parentById = new Map((parents || []).map((r) => [String(r.id), r]));
+  const rootFor = (row) => {
+    const self = ownById.get(String(row.id)) || row;
+    return self.recurring_parent_id ? parentById.get(String(self.recurring_parent_id)) || null : self;
+  };
+  const estimateIdFor = (row) => {
+    const root = rootFor(row);
+    return String(row.source_estimate_id || root?.source_estimate_id || '') || null;
+  };
+  // 2. ONE estimates read over every provenance id (row's own or its root's).
+  const sourceIds = [...new Set(rows.map(estimateIdFor).filter(Boolean))];
+  const newModelEstimateIds = new Set();
+  if (sourceIds.length) {
+    const estimates = await database('estimates').whereIn('id', sourceIds).select('id', 'estimate_data');
+    for (const est of estimates || []) {
+      let data = est.estimate_data;
+      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+      if (!data || typeof data !== 'object') continue;
+      const hasRodentRow = [data?.result?.recurring?.services, data?.result?.lineItems, data?.engineResult?.lineItems]
+        .some((arr) => Array.isArray(arr) && arr.some((svc) => String(svc?.service || '').toLowerCase() === 'rodent_bait'));
+      if (hasRodentRow && rodentBaitLegacyReplaySignal(data) === null) newModelEstimateIds.add(String(est.id));
+    }
+  }
+  // 3. Classify.
+  const needsRollout = rows.some((row) => !estimateIdFor(row));
+  const rolloutMs = needsRollout ? await rodentRealignmentRolloutMs(database) : 0;
+  const out = new Set();
+  for (const row of rows) {
+    const estimateId = estimateIdFor(row);
+    if (estimateId) {
+      if (newModelEstimateIds.has(estimateId)) out.add(String(row.id));
+      continue;
+    }
+    const root = rootFor(row);
+    if (!root || !(rolloutMs > 0)) continue;
+    const createdMs = new Date(root.created_at ?? NaN).getTime();
+    if (Number.isFinite(createdMs) && createdMs >= rolloutMs) out.add(String(row.id));
+  }
+  return out;
+}
 const {
   toQualifyingKey,
   toQualifyingKeys,
@@ -55,6 +125,7 @@ const SERVICE_LABEL = {
   tree_shrub: 'Tree & Shrub',
   mosquito: 'Mosquito',
   termite_bait: 'Termite Bait',
+  rodent_bait: 'Rodent Bait Stations',
 };
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
@@ -1526,7 +1597,7 @@ async function computeMembershipContext(database, {
         // A family this estimate re-quotes is already a priced line of the
         // estimate itself — never also listed as an existing extension.
         if (newKeys.includes(familyKey)) continue;
-        const eligibleRows = familyRows.filter((row) => {
+        let eligibleRows = familyRows.filter((row) => {
           if (planEligibleIds && !planEligibleIds.has(String(row.id))) return false;
           if (isCallbackServiceRow(row)) return false;
           const day = visitDateKey(row.scheduled_date);
@@ -1534,6 +1605,26 @@ async function computeMembershipContext(database, {
           return qualifyingKeysForRow(row).length === 1;
         });
         if (!eligibleRows.length) continue;
+        // Grandfathered rodent bait plans keep their snapshotted rate and
+        // never receive the new tier % (owner 2026-08-29) — they still COUNT
+        // toward the tier, but they are never repriced by an extension
+        // (codex #3591 r14 P1). Only rows with new-model provenance qualify:
+        // a creating estimate carrying the perApplicationBilled / stations
+        // marker, or a DIRECT series whose root was booked at/after the
+        // realignment rollout instant (codex #3591 r36/r37 P1); anything
+        // unprovable is left alone. FAIL CLOSED: a probe failure leaves the
+        // family off.
+        if (familyKey === 'rodent_bait') {
+          let newModelIds;
+          try {
+            newModelIds = await rodentRowsWithNewModelProvenance(database, eligibleRows);
+          } catch (probeErr) {
+            logger.warn(`[membership-context] rodent provenance probe failed — family left off the extension plan: ${probeErr.message}`);
+            continue;
+          }
+          eligibleRows = eligibleRows.filter((row) => newModelIds.has(String(row.id)));
+          if (!eligibleRows.length) continue;
+        }
         const distinctAddresses = new Set(eligibleRows.map((row) => row.effective_service_address).filter(Boolean));
         if (distinctAddresses.size > 1) continue;
         // Composite visits AND pre-minted invoices park at SNAPSHOT time

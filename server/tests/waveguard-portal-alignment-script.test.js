@@ -32,6 +32,15 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(detectServiceKeys({ service_type: 'Pest + Lawn + Mosquito Bundle' })).toEqual(['pest_control_quarterly', 'lawn_care', 'mosquito_monthly']);
   });
 
+  test('detects rodent bait stations as a qualifying family (2026-08-29); trapping/exclusion/one-time rodent work never count (codex #3591 r11 P1)', () => {
+    expect(detectServiceKeys({ service_type: 'Quarterly Rodent Bait Station Service' })).toEqual(['rodent_bait']);
+    expect(detectServiceKeys({ service_key: 'rodent_bait_quarterly', service_type: 'Rodent Bait Stations' })).toEqual(['rodent_bait']);
+    expect(detectServiceKeys({ service_type: 'Rodent Trapping' })).toEqual([]);
+    expect(detectServiceKeys({ service_type: 'Rodent Exclusion' })).toEqual([]);
+    expect(detectServiceKeys({ service_type: 'One-Time Rodent Bait Station Service' })).toEqual([]);
+    expect(uniqueServiceFamilies(['pest_control_quarterly', 'rodent_bait'])).toEqual(['pest_control', 'rodent_bait']);
+  });
+
   test('detects pest, tree/shrub, mosquito, and termite cadence variants without overcounting families', () => {
     expect(detectServiceKeys({ service_key: 'pest_general_bimonthly', service_type: 'Bi-Monthly Pest Control' })).toEqual(['pest_control_bimonthly']);
     expect(detectServiceKeys({ service_key: 'pest_general_monthly', service_type: 'Monthly Pest Control' })).toEqual(['pest_control_monthly']);

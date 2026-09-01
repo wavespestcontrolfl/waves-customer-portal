@@ -16,13 +16,13 @@ const {
 } = require('../services/pricing-engine/discount-engine');
 
 describe('canonical discount eligibility', () => {
-  test('WaveGuard tier membership: the five qualifying families, with lawn variants sharing lawn_care policy', () => {
-    for (const key of ['lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait']) {
+  test('WaveGuard tier membership: the six qualifying families (rodent_bait joined 2026-08-29), with lawn variants sharing lawn_care policy', () => {
+    for (const key of ['lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait', 'rodent_bait']) {
       expect(serviceCountsTowardWaveGuardTier(key)).toBe(true);
     }
     expect(serviceCountsTowardWaveGuardTier('lawn_care_enhanced')).toBe(true);
     expect(serviceCountsTowardWaveGuardTier('lawn_care_premium')).toBe(true);
-    for (const key of ['palm_injection', 'rodent_bait', 'termite_bond', 'bed_bug', 'trap_only_retainer', 'rodent_guarantee']) {
+    for (const key of ['palm_injection', 'termite_bond', 'bed_bug', 'trap_only_retainer', 'rodent_guarantee']) {
       expect(serviceCountsTowardWaveGuardTier(key)).toBe(false);
     }
   });
@@ -36,10 +36,10 @@ describe('canonical discount eligibility', () => {
   });
 
   test('tier % eligibility covers qualifiers + lawn variants, never the excluded services', () => {
-    for (const key of ['lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait', 'lawn_care_enhanced', 'lawn_care_premium']) {
+    for (const key of ['lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait', 'rodent_bait', 'lawn_care_enhanced', 'lawn_care_premium']) {
       expect(isTierDiscountEligible(key)).toBe(true);
     }
-    for (const key of ['palm_injection', 'rodent_bait', 'bora_care', 'foam_recurring']) {
+    for (const key of ['palm_injection', 'bora_care', 'foam_recurring']) {
       expect(isTierDiscountEligible(key)).toBe(false);
     }
   });

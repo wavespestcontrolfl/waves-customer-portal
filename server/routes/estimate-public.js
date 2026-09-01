@@ -1749,6 +1749,11 @@ function buildEstimateInvoiceModeDraft({
   // labeled-discount itemization as the standard accept leg (codex 2652 r2:
   // invoice-mode accepts previously dropped the promised label).
   manualDiscountItemization = null,
+  // Frozen rodent bait-station setup the accepted estimate disclosed
+  // (EstimateConverter.frozenRodentBaitSetupAmount) — the recurring
+  // invoice-mode draft bills it beside the first application exactly like
+  // the standard accept leg (codex #3591 r15 P1).
+  rodentSetupAmount = 0,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -1844,11 +1849,20 @@ function buildEstimateInvoiceModeDraft({
       unit_price: amount,
     }];
 
+  const setupAmount = roundInvoiceAmount(rodentSetupAmount) || 0;
+  if (setupAmount > 0) {
+    recurringLineItems.push({
+      description: 'Bait Station Setup — one-time setup fee',
+      quantity: 1,
+      unit_price: setupAmount,
+    });
+  }
+
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
-    amount,
-    title: `${svcType} — first ${visitNoun}`,
+    amount: Math.round((amount + setupAmount) * 100) / 100,
+    title: setupAmount > 0 ? `${svcType} — first ${visitNoun} + bait station setup` : `${svcType} — first ${visitNoun}`,
     lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
@@ -2860,6 +2874,10 @@ function buildStandardPayPerApplicationInvoiceCopy({
   setupAmount = 0,
   firstApplicationAmount = 0,
   fallbackNoPaymentCopy = 'No payment is charged on this page. Your first service visit will be billed after completion.',
+  // What the setup share IS — 'WaveGuard setup' (membership fee), 'bait
+  // station setup' (a non-member's rodent plan), or both. The copy must
+  // name what the invoice bills (codex #3591 r9 P1).
+  setupLabel = 'WaveGuard setup',
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -2875,7 +2893,7 @@ function buildStandardPayPerApplicationInvoiceCopy({
       firstApplicationAmount: firstApplication,
       totalAmount: total,
       payAfterBody: `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes WaveGuard setup + first application (${fmtMoney(total)}).`,
+      payPrefCardSub: `Invoice includes ${setupLabel} + first application (${fmtMoney(total)}).`,
       billingSmall: `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
     };
   }
@@ -2887,8 +2905,8 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the WaveGuard setup invoice for ${fmtMoney(setup)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes WaveGuard setup (${fmtMoney(setup)}).`,
+      payAfterBody: `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
+      payPrefCardSub: `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
       billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
     };
   }
@@ -3118,7 +3136,17 @@ function recurringServiceReceivesTierDiscount(svc = {}) {
     return svc.excludeFromPctDiscount !== true;
   }
   if (lineFlagsBlockPercentDiscount(svc) || svc.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE') return false;
-  if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
+  // rodent_bait follows the canonical predicates since 2026-08-29 (member;
+  // codex #3591 r2 P1) — but ONLY rows carrying new-model evidence
+  // (perApplicationBilled / stations). A bare legacy-shaped row (no flags,
+  // no marker) was priced with NO discount and must not have the tier %
+  // applied to it at view time — same conservative default as the
+  // rodentBaitLineBillsMonthly billing gate. The bare 'rodent' alias
+  // resolves non-qualifying through serviceCountsTowardWaveGuardTier.
+  if (key === 'rodent_bait'
+    && svc.perApplicationBilled !== true
+    && !(Number(svc.stations) > 0)) return false;
+  if (key === 'palm_injection') return false;
   if (serviceExcludedFromPercentDiscount(key)) return false;
   return serviceCountsTowardWaveGuardTier(key);
 }
@@ -3625,6 +3653,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
+        // Billing-unit marker (2026-08-29): new rodent bait lines bill per
+        // application; legacy lines never carry it and stay monthly-billed.
+        ...(item.perApplicationBilled === true ? { perApplicationBilled: true } : {}),
         // Carry the engine line's taxability so the annual-prepay blended rate
         // (resolveCommercialPrepayTaxRate) taxes the taxable commercial pest /
         // mosquito / termite / rodent share — engine-backed (quote-wizard) accepts
@@ -3668,24 +3699,45 @@ function recurringServicesWithSupplements(estResult = {}) {
     });
   }
 
+  // 2026-08-29+: rodent bait can be a REAL recurring.services row (WaveGuard
+  // member, per-application billed); the scalar rides as legacy display
+  // fallback. The merge PREFERS supplement values, so when a row already
+  // covers rodent bait the scalar contributes only cadence ENRICHMENT —
+  // never money figures or discount flags (the legacy
+  // `waveGuardDiscountEligible: false` would clobber the row's membership).
   const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
   if (rodentMonthly) {
     const visitsPerYear = firstPositiveNumber(resultStats.rodBaitVisitsPerYear, resultStats.rodentBait?.visitsPerYear) || 4;
     const annual = Math.round(rodentMonthly * 12 * 100) / 100;
     const size = resultStats.rodBaitSize || resultStats.rodentBait?.size || null;
+    // Only a NEW-MODEL row (service key exactly 'rodent_bait' — the mapper
+    // stamps it) is authoritative over the scalar; a sparse LEGACY row
+    // ("Legacy Rodent Monitoring" etc. that merely canonicalizes to the
+    // key) keeps the pre-2026-08-29 behavior where the scalar supplies the
+    // money figures and the no-discount posture it was priced under.
+    const existingRodentIdx = indexByKey.get('rodent_bait');
+    const hasRodentRow = existingRodentIdx != null
+      && String(services[existingRodentIdx]?.service || '') === 'rodent_bait';
     upsertSupplement('rodent_bait', {
       service: 'rodent_bait',
       name: 'Rodent Bait Stations',
       displayName: 'Rodent Bait Stations',
-      mo: rodentMonthly,
-      monthly: rodentMonthly,
-      annual,
-      perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
-      visitsPerYear,
       cadenceLabel: 'Quarterly monitoring',
-      detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
-      waveGuardDiscountEligible: false,
       tierLabel: 'Recurring service',
+      // With a new-model row present, NO money fields ride the supplement
+      // (codex #3591 r7 P1): the scalar is a ROUNDED monthly equivalent, so
+      // reconstructing perTreatment from it drifts ($89 → $29.67/mo →
+      // $89.01) and first-application invoicing consumes that figure. The
+      // row's engine-authorized amounts are already exact.
+      ...(hasRodentRow ? {} : {
+        mo: rodentMonthly,
+        monthly: rodentMonthly,
+        annual,
+        perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
+        visitsPerYear,
+        detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
+        waveGuardDiscountEligible: false,
+      }),
     });
   }
 
@@ -5155,22 +5207,36 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : null;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
+  // Disclosed rodent bait-station setup (owner 2026-08-29): the accept path
+  // bills the FROZEN amount on the standard invoice and the prepay path
+  // bills it on the prepay invoice (estimate-converter), so every total
+  // this card shows must carry it too — the customer was shown an invoice
+  // $99 under the one actually created (codex #3591 r9 P1). Same frozen
+  // resolver the accept uses; a locked estimate discloses nothing.
+  const rodentSetupDueToday = !locked
+    ? require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData)
+    : 0;
+  const standardSetupDue = Math.round((setupDueToday + rodentSetupDueToday) * 100) / 100;
+  const standardSetupLabel = setupDueToday > 0 && rodentSetupDueToday > 0
+    ? 'WaveGuard + bait station setup'
+    : (rodentSetupDueToday > 0 ? 'bait station setup' : 'WaveGuard setup');
   const standardInvoiceFirstApplicationAmount = !selectedServiceTierBillsMonthlyForView
     && firstServiceVisitTotal != null
     && firstServiceVisitTotal > 0
     ? firstServiceVisitTotal
     : 0;
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
-    setupAmount: setupDueToday,
+    setupAmount: standardSetupDue,
+    setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
-  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
+  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
   const standardInvoiceBillingSmallHtml = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
     ? `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`
     : (standardInvoiceCopy.hasSetup
-        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setupDueToday)} setup invoice so you can pay in-flow.`
+        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
         : (standardInvoiceCopy.hasFirstApplication
             ? `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`
             : escapeHtml(pageCopy.noPaymentCopy)));
@@ -5203,7 +5269,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
   const prepayRefreshFloor = annualPrepayWaivesMembership ? 0 : prepayComponents.protectedFloor;
   const prepayRefreshRate = annualPrepayWaivesMembership ? 0 : prepayComponents.discountRate;
-  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"`;
+  // The setup attr is emitted only when a setup is due, so the attribute
+  // shape of every non-rodent page stays byte-identical.
+  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"${rodentSetupDueToday > 0 ? ` data-prepay-setup-due="${Number(rodentSetupDueToday)}"` : ''}`;
   // Effective rate can drop below 1% when the lawn program minimum (or the
   // non-discountable margin floor) protects most of the base — show one
   // decimal there so the copy never reads "save 0%".
@@ -5218,19 +5286,29 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // case and hide the prepay option instead of advertising ~$0 savings.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
+  // The prepay invoice carries the disclosed bait-station setup as its own
+  // line (converter, codex r4) — never waived by prepay — so the displayed
+  // total includes it (codex #3591 r9 P1); on a taxable commercial prepay
+  // the setup line is taxed with the rest (converter r7), so it joins the
+  // subtotal BEFORE tax.
   const prepayInvoiceTotal = annualPrepayWaivesMembership
-    ? annualTotal
+    ? Math.round((annualTotal + rodentSetupDueToday) * 100) / 100
     : (() => {
-      const base = Math.max(0, prepayResolved.amount);
+      const base = Math.round((Math.max(0, prepayResolved.amount) + rodentSetupDueToday) * 100) / 100;
       // Commercial prepay is taxed on the taxable pest share — quote the
       // TAX-INCLUSIVE total here so the page matches the invoice/PaymentIntent
       // the converter creates (same blended rate + post-discount allocation +
       // the customer's effective rate resolved in handleEstimateView). Mirror
       // InvoiceService's rounding (tax dollars to cents, then add).
       if (!commercialManualAccept) return base;
+      // The setup joins the taxable base at the FULL effective rate, exactly
+      // as the converter blends it (codex #3591 r62/r68 P1) — a mixed
+      // taxable-bait + non-taxable-lawn prepay otherwise shows a total the
+      // exact-total guard rejects as stale.
       const taxRate = require('../services/estimate-converter').resolveCommercialPrepayTaxRate(recurring, {
         prepayDiscountApplied: prepayResolved.discount > 0,
         baseRate: opts.prepayBaseRate,
+        taxableOneTimeAmount: rodentSetupDueToday,
       });
       const tax = Math.round(base * taxRate * 100) / 100;
       return Math.round((base + tax) * 100) / 100;
@@ -5275,8 +5353,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
+          ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong data-rodent-setup-due="${Number(rodentSetupDueToday)}">${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
+          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
@@ -5295,6 +5374,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
+          ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong>${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">${est.depositPolicy?.required
@@ -6539,7 +6619,7 @@ ${shellQuestionsBar()}
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
-  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(setupDueToday)};
+  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(standardSetupDue)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -6575,7 +6655,10 @@ ${shellQuestionsBar()}
       const protectedFloor = Number(el.dataset.prepayProtectedFloor || 0);
       const floor = Math.min(annual, protectedFloor);
       const discountable = Math.max(0, roundMoney(annual - floor));
-      return Math.max(0, roundMoney(floor + discountable * (1 - rate)));
+      // The disclosed bait-station setup rides the prepay invoice as its
+      // own (never-waived) line — same server-side total rule.
+      const setupDue = Number(el.dataset.prepaySetupDue || 0);
+      return Math.max(0, roundMoney(floor + discountable * (1 - rate) + setupDue));
     };
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
       el.textContent = fmt(prepayTotalFor(el));
@@ -8189,7 +8272,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // replay shape (legacy rows predating the save-time sanitizer), and the
     // top-level priorQualifyingServices even without a snapshot.
     // extractEngineInputs() replays all of them on every reprice.
-    const replayShapes = [estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+    // engineInput (SINGULAR) is the public-wizard save shape (codex #3591
+    // r80 P1): public-quote persists its setup-waiver evidence there, so
+    // omitting it left a lapsed wizard waiver invisible to this
+    // reconciliation and acceptance omitted the now-owed setup.
+    const replayShapes = [estData.engineInputs, estData.engineInput, estData.inputs, estData.engineRequest?.options]
       .filter((shape) => shape && typeof shape === 'object');
     // Mirror the engine's truthy coercion: generateEstimate treats ANY truthy
     // recurring value (boolean true, 'true', legacy strings, form 'YES') as
@@ -8205,27 +8292,122 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       || truthyRecurringFlag(shape.isRecurringCustomer)
       || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
       || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
-    if (!frozenSnapshot && !frozenRecurring) return;
-    if (await isActivePlanCustomer(db, estimate.customer_id)) return;
-    // Drop every frozen artifact derived from the stale "existing customer"
-    // classification, not just the snapshot: priorQualifyingServices is
-    // re-injected by extractEngineInputs() on every recompute (keeping the
-    // combined-tier discount), the recurring flags in the stored replay
-    // shapes re-grant the member perk the same way, and
-    // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
-    // the runtime cache (returning the old bundle with no waivable setup
-    // fee). Leaving any behind lets the lead keep member pricing /
-    // undercharge even after the snapshot is gone.
-    delete estData.membershipSnapshot;
-    delete estData.priorQualifyingServices;
-    for (const shape of replayShapes) {
-      delete shape.recurringCustomer;
-      delete shape.isRecurringCustomer;
-      // A prior-service list NESTED in a replay shape (legacy rows predate
-      // the save-time sanitizer) replays straight through extractEngineInputs
-      // and restores the combined-tier discount the top-level delete just
-      // removed.
-      delete shape.priorQualifyingServices;
+    // The account-wide rodent setup-waiver evidence (top-level or nested in a
+    // replay shape) arms the trigger on its own.
+    const hasSetupWaiverEvidence = (obj) => Array.isArray(obj?.setupWaiverPriorQualifyingServices)
+      && obj.setupWaiverPriorQualifyingServices.length > 0;
+    const frozenSetupWaiver = hasSetupWaiverEvidence(estData) || replayShapes.some(hasSetupWaiverEvidence);
+    // The INVERSE case arms the trigger too (codex #3591 r78 P1): an
+    // estimate saved with NO waiver carries a positive frozen bait-station
+    // setup — if the account GAINED a qualifying family since (a pest/lawn
+    // plan booked before viewing/accepting), the waiver rule now covers it
+    // and acceptance must not bill the frozen $99. Mirrors the booking
+    // handoff's gained-family re-read.
+    const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
+      && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
+    if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    // The rodent setup waiver is re-validated INDEPENDENTLY of plan
+    // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
+    // family (e.g. pest) and rodent bait never self-waives, so a still-active
+    // rodent-only member whose pest plan was cancelled must not replay the
+    // stale pest evidence and accept without the $99 setup. Re-read the
+    // canonical families; when nothing but rodent_bait remains — or the
+    // read fails (FAIL CLOSED: unprovable evidence never waives a fee) — the
+    // evidence is dropped and the quote repriced.
+    let setupWaiverStale = false;
+    // The probe's verified families (non-rodent) — retained so a still-valid
+    // waiver reaches the authoritative reprice below (codex #3591 r77 P1):
+    // serverRecomputeFromEstimateData injects [] unless the deps carry the
+    // server-derived list, so preserving the stored field alone still
+    // re-added the $99 for a tierless-but-qualifying customer.
+    let verifiedWaiverKeys = null;
+    if (frozenSetupWaiver) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+        // STRICT (codex #3591 r68 P1): the default loader swallows a failed
+        // membership/catalog read as "no plan" → [] — indistinguishable from
+        // a genuinely lapsed waiver — which would reprice a member's quote
+        // with the $99 instead of taking the quote-required path below.
+        // planGate: false (codex #3591 r73 P1): the waiver's validity is
+        // decided by live qualifying families, not the membership stamp —
+        // the same ungated read the grant side uses.
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
+        setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
+        if (!setupWaiverStale) verifiedWaiverKeys = liveKeys;
+      } catch (probeErr) {
+        // Validity UNKNOWN (codex #3591 r41 P1): neither keep the waiver
+        // (could under-bill) nor drop it and reprice (fabricates non-member
+        // terms — no tier deps reach the recompute, so a multi-property
+        // member would lose tier AND waiver). Fail CLOSED to a manual
+        // quote: the frozen evidence stays as sent and
+        // setupWaiverUnverifiedRequote makes resolveEstimateQuoteRequirement
+        // refuse self-serve accept until a request can verify it.
+        logger.warn(`[estimate-public] setup-waiver evidence re-check failed for estimate ${estimate.id}: ${probeErr.message} — quote-required until verifiable`);
+        estData.setupWaiverUnverifiedRequote = true;
+        invalidateSendSnapshotPricingBundle(estData);
+        estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
+        clearEstimatePricingCache(estimate.id);
+        return;
+      }
+    }
+    // Gained-family probe (codex #3591 r78 P1): the stored positive setup
+    // is re-checked against the LIVE families. Fail-open to the disclosed
+    // figure — gaining a waiver is a benefit, so an unprovable read leaves
+    // the agreed setup standing (no flag, no reprice) rather than blocking
+    // the accept.
+    if (frozenUnwaivedSetup) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
+        if (liveKeys.filter((key) => key !== 'rodent_bait').length > 0) {
+          verifiedWaiverKeys = liveKeys;
+          // Persist the server-derived evidence so later replays
+          // (extractEngineInputs) and the accept-side probes see the
+          // waiver the reprice below applies.
+          estData.setupWaiverPriorQualifyingServices = liveKeys;
+        }
+      } catch (probeErr) {
+        logger.warn(`[estimate-public] gained-family setup-waiver probe failed for estimate ${estimate.id}: ${probeErr.message} — the disclosed setup stands`);
+      }
+    }
+    if (activeMember && !setupWaiverStale && !(frozenUnwaivedSetup && verifiedWaiverKeys)) return;
+    // The gained-family case was the ONLY trigger and nothing was gained:
+    // done. When member artifacts also armed the trigger, the lapsed-member
+    // cleanup below still runs exactly as before.
+    if (frozenUnwaivedSetup && !verifiedWaiverKeys && !frozenSnapshot && !frozenRecurring) return;
+    if (setupWaiverStale) {
+      delete estData.setupWaiverPriorQualifyingServices;
+      for (const shape of replayShapes) delete shape.setupWaiverPriorQualifyingServices;
+    }
+    if (!activeMember) {
+      // Drop every frozen artifact derived from the stale "existing customer"
+      // classification, not just the snapshot: priorQualifyingServices is
+      // re-injected by extractEngineInputs() on every recompute (keeping the
+      // combined-tier discount), the recurring flags in the stored replay
+      // shapes re-grant the member perk the same way, and
+      // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
+      // the runtime cache (returning the old bundle with no waivable setup
+      // fee). Leaving any behind lets the lead keep member pricing /
+      // undercharge even after the snapshot is gone.
+      delete estData.membershipSnapshot;
+      delete estData.priorQualifyingServices;
+      // The setup-waiver list is NOT deleted here (codex #3591 r76 P1): its
+      // validity is decided by the strict family probe above (planGate:
+      // false policy — the waiver is qualifying families, never the
+      // membership stamp), so a tierless customer whose qualifying row the
+      // probe just verified keeps the waiver; only setupWaiverStale removes
+      // it (handled before this block). Deleting it on the stamp alone made
+      // the recompute add a $99 the rule waives.
+      for (const shape of replayShapes) {
+        delete shape.recurringCustomer;
+        delete shape.isRecurringCustomer;
+        // A prior-service list NESTED in a replay shape (legacy rows predate
+        // the save-time sanitizer) replays straight through extractEngineInputs
+        // and restores the combined-tier discount the top-level delete just
+        // removed.
+        delete shape.priorQualifyingServices;
+      }
     }
     // Clearing the flags alone is not enough: the discount is already BAKED
     // INTO the stored result/totals from save-time, and buildPricingBundle's
@@ -8253,7 +8435,15 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // DB, not posted by a browser), so its quote-time T&S knob snapshot is
     // trustworthy and must be reused — a membership lapse must not also
     // re-price the T&S line off knobs flipped after the quote was sent.
-    const reprice = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true });
+    // The verified waiver rides the reprice (codex #3591 r77 P1): the
+    // recompute overwrites identity fields from deps unconditionally, so
+    // the strict probe's live families must be passed or a valid waiver is
+    // replaced with [] and the $99 re-added. Tier deps stay empty — the
+    // membership lapse deliberately reprices at non-member tier.
+    const reprice = await serverRecomputeFromEstimateData(estData, {
+      replaySavedPricingKnobs: true,
+      ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
+    });
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
       // A successful authoritative reprice supersedes any earlier fail-closed
@@ -9560,13 +9750,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           recurringServices: recurringSvcList,
           estimateData: estData,
         });
-        const base = resolved.amount;
+        // The converter's prepay invoice carries the disclosed bait-station
+        // setup as its own (never-waived, taxed) line — the quoted/
+        // acknowledged total must include it or the exact-total check
+        // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
+        // #3591 r16 P1). Same frozen resolver the converter bills from.
+        const acknowledgedRodentSetup = converter.frozenRodentBaitSetupAmount(estData);
+        const base = Math.round((resolved.amount + acknowledgedRodentSetup) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
         // + PaymentIntent the converter creates (uses the same blended rate +
-        // post-discount allocation). Residential prepay is untaxed (rate 0).
+        // post-discount allocation, with the setup in the taxable base — codex
+        // #3591 r68 P1). Residential prepay is untaxed (rate 0).
         const taxRate = isCommercialAccept
-          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate })
+          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate, taxableOneTimeAmount: acknowledgedRodentSetup })
           : 0;
         // Mirror InvoiceService EXACTLY: tax dollars rounded to cents, then added
         // to the base — so the messaged amount equals inv.total to the cent.
@@ -10863,6 +11060,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,
+          rodentSetupAmount: treatAsOneTime
+            ? 0
+            : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own
@@ -10913,6 +11113,40 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         invoiceModeResult = true;
         invoiceIdResult = inv.id;
+        // Same immutable setup ledger as the standard-accept mint (codex
+        // #3591 r69 P1): the invoice-mode draft bills the frozen rodent
+        // setup as its own line, so a later void/refund of a renamed or
+        // repriced invoice must still restore the obligation onto the
+        // accepted rodent root.
+        const invoiceModeRodentSetup = treatAsOneTime
+          ? 0
+          : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing);
+        if (invoiceModeRodentSetup > 0) {
+          const plans = require('../services/secure-appointment-plans');
+          // Gained-family recheck under the customer-row lock (codex #3591
+          // r79 P1): the pre-transaction reconciliation ran unlocked — a
+          // qualifying booking that committed since waives this fee, so
+          // the accept refuses retryably instead of billing it. Commercial
+          // bait is never family-waived (owner 2026-08-29) — exempt.
+          if (!require('../services/estimate-converter').estimateRodentBaitIsCommercial(acceptedEstDataForPricing)) {
+            await plans.assertFrozenRodentSetupStillOwed(trx, customerId);
+          }
+          const invoiceModeRoots = await trx('scheduled_services')
+            .where({ source_estimate_id: estimate.id, customer_id: customerId })
+            .whereNull('recurring_parent_id')
+            .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+            .select('id', 'service_type', 'service_id');
+          let invoiceModeRodentRoot = null;
+          for (const root of invoiceModeRoots || []) {
+            if ((await plans.authoritativeServiceKey(trx, root)) === 'rodent_bait') { invoiceModeRodentRoot = root; break; }
+          }
+          await plans.recordSetupFeeClaimForInvoice(trx, {
+            invoiceId: inv.id,
+            anchorId: invoiceModeRodentRoot ? invoiceModeRodentRoot.id : null,
+            amount: invoiceModeRodentSetup,
+            estimateId: estimate.id,
+          });
+        }
         // The customer-facing amount is the invoice's actual after-tax,
         // after-credit total — the same figure the /pay page collects.
         invoiceAmountResult = Number(inv.total) || 0;
@@ -11217,7 +11451,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             billingTerm,
             recurringServices: conversionRecurringServices,
           });
-          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine)) {
+          // Disclosed rodent bait-station setup (owner 2026-08-29; codex
+          // #3591 r3 P1): a non-member's accepted estimate carries a
+          // one-time rodent_bait_setup row that the standard invoice must
+          // bill — frozen-disclosure rule: the amount comes from the STORED
+          // estimate (shared resolver; the annual-prepay branch bills the
+          // same figure), never a live constant.
+          // A one-time selection schedules NO rodent plan — its setup must
+          // not mint (codex #3591 r59 P1); the recurring conversion path is
+          // the only one that owes it.
+          const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
+          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
@@ -11228,6 +11472,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 description: 'WaveGuard Membership — one-time setup fee',
                 quantity: 1,
                 unit_price: acceptSetupFeeAmount,
+              });
+            }
+            if (acceptedRodentSetupAmount > 0) {
+              // Gained-family recheck under the customer-row lock (codex
+              // #3591 r79 P1): a qualifying booking committed since the
+              // unlocked reconciliation waives this fee — refuse retryably
+              // instead of billing it. Commercial bait is never
+              // family-waived (owner 2026-08-29) — exempt.
+              if (!EstimateConverter.estimateRodentBaitIsCommercial(conversionEstData)) {
+                await require('../services/secure-appointment-plans').assertFrozenRodentSetupStillOwed(trx, customerId);
+              }
+              lineItems.push({
+                description: 'Bait Station Setup — one-time setup fee',
+                quantity: 1,
+                unit_price: acceptedRodentSetupAmount,
               });
             }
             if (includesFirstApplicationLine) {
@@ -11259,13 +11518,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 });
               }
             }
-            const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
-              ? 'WaveGuard Membership Setup + First Application'
-              : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
-            const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee plus first application.`
-              : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee only.`
+            const anySetupLine = setupFeeApplies || acceptedRodentSetupAmount > 0;
+            const setupTitleWord = setupFeeApplies ? 'WaveGuard Membership Setup' : 'Bait Station Setup';
+            const invoiceTitle = anySetupLine && includesFirstApplicationLine
+              ? `${setupTitleWord} + First Application`
+              : (anySetupLine ? setupTitleWord : 'First Service Application');
+            const setupNotesParts = [
+              setupFeeApplies ? `$${acceptSetupFeeAmount.toFixed(2)} setup fee` : null,
+              acceptedRodentSetupAmount > 0 ? `$${acceptedRodentSetupAmount.toFixed(2)} bait-station setup` : null,
+            ].filter(Boolean);
+            const invoiceNotes = anySetupLine && includesFirstApplicationLine
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} plus first application.`
+              : (anySetupLine
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} only.`
                 : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
             const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
               firstApplicationAmount: standardFirstApplicationAmount,
@@ -11316,6 +11581,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             standardInvoiceMinted = true;
             standardInvoiceAttached = !!attachScheduledServiceId;
             invoiceIdResult = inv.id;
+            // Immutable ledger for the setup this invoice bills (codex #3591
+            // r68 P1) — the same setup_fee_claims record the prepay and
+            // completion mints write, so a later void/refund of a renamed
+            // or repriced invoice still restores the obligation onto the
+            // series (restoreRodentSetupObligationForReversedInvoice reads
+            // the claim first). Anchored to the rodent root this accept
+            // just scheduled; anchor-less when none exists yet.
+            if (acceptedRodentSetupAmount > 0) {
+              const plans = require('../services/secure-appointment-plans');
+              const acceptRoots = await trx('scheduled_services')
+                .where({ source_estimate_id: estimate.id, customer_id: customerId })
+                .whereNull('recurring_parent_id')
+                .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+                .select('id', 'service_type', 'service_id');
+              let acceptRodentRoot = null;
+              for (const root of acceptRoots || []) {
+                if ((await plans.authoritativeServiceKey(trx, root)) === 'rodent_bait') { acceptRodentRoot = root; break; }
+              }
+              await plans.recordSetupFeeClaimForInvoice(trx, {
+                invoiceId: inv.id,
+                anchorId: acceptRodentRoot ? acceptRodentRoot.id : null,
+                amount: acceptedRodentSetupAmount,
+                estimateId: estimate.id,
+              });
+            }
             // The customer-facing amount is the invoice's actual after-tax,
             // after-credit total — the same figure the /pay page collects.
             invoiceAmountResult = Number(inv.total) || 0;
@@ -15443,6 +15733,13 @@ function extractEngineInputs(estData) {
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
     out.priorQualifyingServices = estData.priorQualifyingServices;
   }
+  // Account-wide setup-waiver evidence (codex #3591 r34 P1): persisted
+  // separately from the property-scoped tier list, same server-only
+  // round-trip rule — a grouped/secondary-property rodent quote must not
+  // re-add the $99 setup on replay when the account holds another plan.
+  if (Array.isArray(estData.setupWaiverPriorQualifyingServices) && estData.setupWaiverPriorQualifyingServices.length) {
+    out.setupWaiverPriorQualifyingServices = estData.setupWaiverPriorQualifyingServices;
+  }
   // Operator-stated price adjustment (agent flows, owner decision 2026-07-23):
   // persisted OUTSIDE engineInputs (same round-trip rule as
   // priorQualifyingServices) and re-injected as the engine's manualDiscount on
@@ -15519,6 +15816,21 @@ function savedFloorReplayOverrides(estData) {
   const { commercialFloorBoundServices } = require('../services/commercial-floor-replay');
   const commercialArmed = commercialFloorBoundServices(estData);
   overrides.commercialFloorsArmedServices = commercialArmed.length ? commercialArmed : undefined;
+  // Saved rodent-bait pricing pin (codex #3591 r2 P0) — shared with the
+  // authoritative recompute (admin-estimate-persistence), see the module.
+  const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  // Set even when EMPTY (undefined) — same posture as
+  // commercialFloorsArmedServices above: the key's presence in the spread
+  // neutralizes any pin persisted inside the browser-controlled stored
+  // inputs; the pin is server-derived from stored-RESULT evidence on every
+  // replay, never trusted from a stored blob.
+  overrides.rodentBaitLegacyReplay = rodentBaitLegacyReplaySignal(estData) || undefined;
+  // NEW-MODEL rodent posture freeze (codex #3591 r43 P1): a bracket-priced
+  // row froze the rodent_waveguard flags at save; the replay injects them so
+  // a later flag flip never moves a sent quote's tier or discounts. Same
+  // set-even-when-EMPTY posture as the pin above.
+  const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  overrides.rodentWaveguardPostureReplay = rodentWaveguardPostureReplaySignal(estData) || undefined;
   return overrides;
 }
 
@@ -16546,6 +16858,11 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const membershipLapsedRequote = (
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   )?.membershipLapsedRequote === true;
+  // The account-wide rodent setup-waiver evidence could not be verified on
+  // this request (codex #3591 r41 P1) — never self-serve accept on it.
+  const setupWaiverUnverifiedRequote = (
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  )?.setupWaiverUnverifiedRequote === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -16555,7 +16872,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialLowConfidenceSiteQuote
     || retiredLawnRequote
     || retiredTreeShrubRequote
-    || membershipLapsedRequote;
+    || membershipLapsedRequote
+    || setupWaiverUnverifiedRequote;
 
   return {
     quoteRequired,
@@ -16567,7 +16885,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
         || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
-        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)),
+        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)
+        || (setupWaiverUnverifiedRequote ? 'setup_waiver_unverified_requote' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -22703,6 +23022,21 @@ async function buildPricingBundleInner(estimate) {
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
+  // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
+  // accept paths bill this frozen figure UP FRONT beside the first
+  // application (never waived by prepay), so the payment choice previews
+  // it as an invoice row and the after-completion extras note excludes
+  // it. Deliberately NOT a firstVisitFees row — those drive the fee cards
+  // and the breakdown exclusions; this row stays in the breakdown. Resolved
+  // ONCE here and attached to EVERY bundle shape (codex #3591 r34 P1): a
+  // quote-wizard save persists engineResult (engine_invocation shape) and a
+  // legacy row may carry only stored totals — acceptance bills the frozen
+  // setup for all of them, so all of them must preview it. Omitted entirely
+  // when no setup was disclosed (payload byte-identical).
+  const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
+  const rodentBaitSetupFeeField = frozenRodentSetupForPreview > 0
+    ? { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false } }
+    : {};
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
     if (!manual) return payload;
@@ -22991,6 +23325,7 @@ async function buildPricingBundleInner(estimate) {
       // for any older client build still reading the singular field.
       setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
+      ...rodentBaitSetupFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
       source: 'v1_engine_shape',
@@ -23084,6 +23419,7 @@ async function buildPricingBundleInner(estimate) {
         ?? (((Number(estimate.onetime_total || 0) || 0) + fallbackAnchorLift) || null),
       setupFee: fallbackFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees: fallbackFirstVisitFees,
+      ...rodentBaitSetupFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     }), estimate, estData);
@@ -23278,6 +23614,7 @@ async function buildPricingBundleInner(estimate) {
     oneTimeBreakdown,
     setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
+    ...rodentBaitSetupFeeField,
     source: 'engine_invocation',
   }), estimate, estData, { anchorEngineResult });
   setEstimatePricingCache(estimate, payload);
