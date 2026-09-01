@@ -766,6 +766,28 @@ describe('processCancellationRequest', () => {
     expect(opts.metadata).toEqual(expect.objectContaining({ kind: 'termite_station_retrieval', customerId: 'c1', stationCount: 1 }));
   });
 
+  test('deferTermiteRetrieval holds the IMMEDIATE task for the caller\'s term decision — an end-now prepaid cancel raises nothing here', async () => {
+    db.__tables.scheduled_services = [];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [
+      { id: 't1', customer_id: 'c1', program: 'termite', owned_by: 'waves', is_active: true },
+    ];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    mockNotifyAdmin.mockClear();
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqT3', deferTermiteRetrieval: true });
+
+    expect(result.churned).toBe(true);
+    expect(result.errors).not.toContain('termite_retrieval_task');
+    // Returned to the caller, exactly like the dated task: the annual-
+    // prepay cancel decision is recorded AFTER this run, and a conflicting
+    // or lost decision must leave no instruction to pull stations from a
+    // term that still stands.
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(result.termiteRetrievalPending).toEqual({ retrieveAfter: null });
+  });
+
   test('end-of-coverage cancel DATES the retrieval task for the coverage boundary — stations stay until paid termite visits deliver', async () => {
     db.__tables.scheduled_services = [
       { id: 'tv1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false, prepaid_method: 'annual_prepay_invoice', service_type: 'Termite Bait Station Quarterly' },

@@ -422,6 +422,14 @@ async function processCancellationRequest({
   //                and the run parks for a fresh preview. Null = no
   //                assertion (portal path, repairs).
   approvedScopedPricing = null,
+  //   deferTermiteRetrieval (C3): the caller records an annual-prepay term
+  //                decision AFTER this run — the IMMEDIATE retrieval task
+  //                is returned as termiteRetrievalPending ({ retrieveAfter:
+  //                null }) instead of raised here, exactly like the dated
+  //                one, so a conflicting/failed decision never leaves a
+  //                pull-the-stations instruction on a term that still
+  //                stands. False (portal path) = raised here, as before.
+  deferTermiteRetrieval = false,
   // historyNote (C3): an IMMUTABLE request-scoped marker for the visit
   // history notes and the retry repair matching. The recorded REASON is
   // operator text (churn detail/classification) and may change between a
@@ -1220,12 +1228,14 @@ async function processCancellationRequest({
         });
         if (keptTermite) retrieveAfter = sweepAfter;
       }
-      if (retrieveAfter) {
-        // Deferred: the DATED task also depends on the caller's annual-
-        // prepay term decision, which happens AFTER this run — the caller
-        // raises it only once the cancel decision stands. A conflicting
-        // renew decision means the program continues, and no retrieval
-        // instruction may exist for a plan that did not end.
+      if (retrieveAfter || deferTermiteRetrieval) {
+        // Deferred: the DATED task — and, when the caller asks, the
+        // immediate one — also depends on the caller's annual-prepay term
+        // decision, which happens AFTER this run — the caller raises it
+        // only once the cancel decision stands. A conflicting renew
+        // decision (or a lost decision write) means the program continues,
+        // and no retrieval instruction may exist for a plan that did not
+        // end.
         termiteRetrievalPending = { retrieveAfter };
       } else {
         await raiseTermiteRetrievalTask(customerId, requestId, { retrieveAfter: null });

@@ -1197,14 +1197,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // error the lost task recorded.
             let promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
               && (e === 'prepay_term_disposition' || e === 'prepay_refund_task')));
-            // A lost DEFERRED dated retrieval task repairs here too — the
-            // decided-term latch is the only path a retried end_at_term run
-            // reaches, and without this the stale error echoes forever and
-            // the office never gets the pull-after date.
-            if (hasTermiteErr && priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn) {
+            // A lost DEFERRED retrieval task repairs here too — dated
+            // (end-of-coverage) or immediate (end-now): the decided-term
+            // latch is the only path a retried run reaches, and without
+            // this the stale error echoes forever and the office never
+            // gets its pull instruction.
+            const datedTermite = priorSnap.effectiveDate === 'end_of_coverage';
+            if (hasTermiteErr && (!datedTermite || priorSnap.effectiveOn)) {
               try {
                 const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: priorSnap.effectiveOn });
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: datedTermite ? priorSnap.effectiveOn : null });
                 promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
               } catch (termiteErr) {
                 logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
@@ -1409,6 +1411,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // forever (and per-request dedupe keys would double-bell).
   let request = openAcceptance;
   let priorOutcome = null;
+  // The date the cancellation TOOK EFFECT: on a repair retry the account was
+  // churned and its visits pulled by the first attempt, so the case record
+  // and the response keep that day — the prior snapshot's, or the accepted
+  // request's — never the day the retry happened to run.
+  let priorEffectiveOn = null;
   // Run 1's PROPOSED (never recorded) refund: a fingerprint-exempt repair
   // retry may only raise the office task on these approved numbers.
   let priorProposedRefund = null;
@@ -1454,6 +1461,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         : null;
       priorOutcome = snap && snap.outcome ? snap.outcome : null;
       priorProposedRefund = snap && !snap.refund && snap.proposedRefund ? snap.proposedRefund : null;
+      if (snap && /^\d{4}-\d{2}-\d{2}$/.test(String(snap.effectiveOn || ''))) priorEffectiveOn = snap.effectiveOn;
       if (snap && snap.waiveLateFee === true && !input.waiveLateFee) {
         input.waiveLateFee = true;
         logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id} (case snapshot)`);
@@ -1461,6 +1469,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     } catch (priorErr) {
       logger.warn(`[admin-cancellation] prior-case load failed for request ${request.id}: ${priorErr.message}`);
     }
+    // No case row survived the first attempt (lost case write): the
+    // acceptance itself dates the cancellation.
+    if (!priorEffectiveOn && request.created_at) priorEffectiveOn = etDateString(new Date(request.created_at));
     // A retry that ADDS the waiver ratchets it onto the durable record so a
     // later retry keeps it even if this run's case write fails.
     if (input.waiveLateFee && (!requestMeta || requestMeta.waiveLateFee !== true)) {
@@ -1535,6 +1546,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       waiveLateFee: input.waiveLateFee,
       feeEvaluationAt,
       approvedScopedPricing,
+      // A term decision follows this run: hold BOTH retrieval tasks (dated
+      // and immediate) until it stands — see the deferred block below.
+      deferTermiteRetrieval: !!(term && prepayPlan.prepayDisposition),
     });
   } catch (err) {
     logger.error(`[admin-cancellation] processor threw for request ${request.id}: ${err.message}`);
@@ -1666,15 +1680,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     }
   }
 
-  // Deferred DATED termite retrieval (end-of-coverage): the processor holds
-  // the dated task until the term decision stands — a conflicting renew
-  // decision means the program continues, and staff must never hold an
-  // instruction to pull Waves-owned stations on a date the plan no longer
-  // ends. Skipped on a conflict/failed disposition: that run is already
-  // partial (belled), and the repair retry re-runs the processor, which
-  // re-derives the pending task from live rows.
+  // Deferred termite retrieval: the processor holds the task — DATED for
+  // end-of-coverage, IMMEDIATE for an end-now cancel of a prepaid term —
+  // until the term decision stands. A conflicting renew decision, or a
+  // lost decision write, means the term is still renewable, and staff must
+  // never hold an instruction to pull Waves-owned stations from a program
+  // that did not end. Skipped on a conflict/failed disposition: that run
+  // is already partial (belled), and the repair retry re-runs the
+  // processor, which re-derives the pending task from live rows.
   if (result && result.termiteRetrievalPending) {
-    if (processed && (termOutcome === 'ends_at_term' || termOutcome === 'decision_already_recorded')) {
+    if (processed && ['ends_at_term', 'ended_now', 'decision_already_recorded'].includes(termOutcome)) {
       try {
         const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
         await raiseTermiteRetrievalTask(customerId, request.id,
@@ -1684,15 +1699,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         logger.error(`[admin-cancellation] deferred termite retrieval task failed for request ${request.id}: ${termiteErr.message}`);
       }
     } else {
-      logger.warn(`[admin-cancellation] dated termite retrieval NOT raised for request ${request.id} — term decision not confirmed (${termOutcome || 'no disposition'})`);
+      logger.warn(`[admin-cancellation] termite retrieval NOT raised for request ${request.id} — term decision not confirmed (${termOutcome || 'no disposition'})`);
     }
   }
 
   // The durable case (after the wind-down, like the portal path).
+  const effectiveOn = prepayPlan.keepThrough || priorEffectiveOn || etDateString();
   const caseSnapshotBody = {
     actor: { type: actorType, userId: actorUserId },
     effectiveDate: prepayPlan.effectiveDate,
-    effectiveOn: prepayPlan.keepThrough || etDateString(),
+    effectiveOn,
     waiveLateFee: input.waiveLateFee,
     prepayDisposition: prepayPlan.prepayDisposition,
     prepayTermId: term ? term.id : null,
@@ -1765,6 +1781,17 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // was actually sent — instead of reporting "nothing sent" for a run whose
   // response was lost (codex C3 r3 P2). A lost write here only degrades a
   // future duplicate's reporting; the run itself already happened.
+  // What this cancellation pulled, MERGED across attempts: a repair retry
+  // re-flips nothing, so its own cancelledCount is zero — the first run's
+  // recorded count (or, with a lost stamp, the processor's repair set:
+  // run 1's cancelled rows under this request's note) carries the truth.
+  // One number for the case record AND the response — the operator's
+  // repair screen must not read "0 visits pulled" for a cancel that
+  // happened.
+  const visitsPulled = (priorOutcome
+    ? Number(priorOutcome.visitsPulled) || 0
+    : (result ? Number(result.repairedCount) || 0 : 0))
+    + (result ? Number(result.cancelledCount) || 0 : 0);
   if (caseRow) {
     try {
       await db('cancellation_cases').where({ id: caseRow.id }).update({
@@ -1776,14 +1803,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // "3 visits pulled, Silver → Bronze" into "0 pulled" — the case
           // and lost-response echoes must keep what actually happened.
           outcome: {
-            // No recorded first-run outcome (lost stamp): the processor's
-            // repair set — run 1's cancelled rows under this request's
-            // note — IS the first run's pull set, so the reconstructed
-            // record never reads "0 pulled" for a cancel that happened.
-            visitsPulled: (priorOutcome
-              ? Number(priorOutcome.visitsPulled) || 0
-              : (result ? Number(result.repairedCount) || 0 : 0))
-              + (result ? Number(result.cancelledCount) || 0 : 0),
+            visitsPulled,
             scope: (Array.isArray(result?.scope) && result.scope.length)
               ? result.scope
               : (priorOutcome && Array.isArray(priorOutcome.scope) && priorOutcome.scope.length
@@ -1901,12 +1921,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     requestId: request.id,
     caseId: caseRow ? caseRow.id : null,
     processed,
-    visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
+    visitsPulled,
     scope: Array.isArray(result?.scope) ? result.scope : (wholeAccount ? [] : scope),
     remaining: Array.isArray(result?.remaining) ? result.remaining : [],
     tierBefore: result?.tierBefore ?? (caseSnapshot ? caseSnapshot.waveguard_tier : null),
     tierAfter: result?.tierAfter ?? null,
-    effectiveDate: prepayPlan.keepThrough || etDateString(),
+    effectiveDate: effectiveOn,
     keptThrough: prepayPlan.keepThrough,
     // The processor's CONFIRMED waiver, never the raw request.
     lateFeeWaived: result ? result.lateFeeWaived === true : false,
