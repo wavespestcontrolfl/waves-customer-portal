@@ -496,31 +496,49 @@ function structuredActionScope(service = {}) {
   return { hasInterior, hasExterior, hasTreatment };
 }
 
+// Controlled treatment-area labels carry an explicit scope
+// (shared/treatment-area-scopes.json — every chip vocabulary the completion
+// panel offers is classified there, and a test enumerates them). The regex
+// heuristics below remain only for free text: legacy off-list area values,
+// product target names and traced zone labels (codex P1 r8 #3701).
+const AREA_SCOPES = require('../../../shared/treatment-area-scopes.json');
+
+function normalizeScopeText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+const AREA_SCOPE_BY_LABEL = new Map([
+  ...AREA_SCOPES.interior.map((label) => [normalizeScopeText(label), 'interior']),
+  ...AREA_SCOPES.exterior.map((label) => [normalizeScopeText(label), 'exterior']),
+  ...AREA_SCOPES.unscoped.map((label) => [normalizeScopeText(label), 'unscoped']),
+]);
+
+// attic covers the termite/rodent "Attic" area label (2026-08-27) — an
+// indoor space whose treatment carries an interior wait (codex inline r8).
+const INTERIOR_SCOPE_RE = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic|furniture|upholstery|carpet|rugs?|cabinets?|sinks?|appliance|wall void|mattress|box spring|bed frame|headboard|nightstands?|office|sleeping area|shared wall|outlets?|luggage|storage area|monitors?|interceptors?|garage|pet resting areas?)\b/;
+// fence/trash cover the controlled pest-area chips "Fence line" and
+// "Trash area" — clearly exterior choices that previously fell through
+// and (under the explicit-exterior rule) would wrongly zero the
+// customer's dry-down timer (codex P1 #3007). screened/enclosure, standing
+// water, deck, station(s), crawlspace, slab edge and wood contact cover the
+// termite + mosquito vocabularies added 2026-08-27 (codex inline r6);
+// turf / weed breakthrough / insect activity areas / disease affected the
+// one-time lawn chips (codex P1 r7 #3701).
+const EXTERIOR_SCOPE_RE = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact|turf|weed breakthrough|insect activity areas|disease affected)\b/;
+
+function classifyScopeValue(value) {
+  const text = normalizeScopeText(value);
+  const known = AREA_SCOPE_BY_LABEL.get(text);
+  if (known) return { interior: known === 'interior', exterior: known === 'exterior' };
+  return { interior: INTERIOR_SCOPE_RE.test(text), exterior: EXTERIOR_SCOPE_RE.test(text) };
+}
+
 function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
-  const text = scopeTextValues({ service, applications, zones })
-    .join(' ')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ');
-  // Area chips are a controlled vocabulary and remain a valid scope signal.
-  // attic covers the termite/rodent "Attic" area label (2026-08-27) — an
-  // indoor space whose treatment carries an interior wait (codex inline r8).
-  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic|furniture|upholstery|carpet|rugs?|cabinets?|sinks?|appliance|wall void|mattress|box spring|bed frame|headboard|nightstands?|office|sleeping area|shared wall|outlets?|luggage|storage area|monitors?|interceptors?|garage|pet resting areas?)\b/.test(text);
-  // fence/trash cover the controlled pest-area chips "Fence line" and
-  // "Trash area" — clearly exterior choices that previously fell through
-  // and (under the explicit-exterior rule) would wrongly zero the
-  // customer's dry-down timer (codex P1 #3007).
-  // screened/enclosure, standing water, deck, station(s), crawlspace, slab
-  // edge and wood contact cover the termite + mosquito area vocabularies
-  // added 2026-08-27 ("Screened enclosure", "Standing water areas", "Under
-  // deck / patio", "Bait stations", "Crawlspace", "Garage / slab edge",
-  // "Wood contact points") — exterior choices that would otherwise fall
-  // through and zero the customer's dry-down timer (codex inline r6).
-  // turf / weed breakthrough / insect activity areas / disease affected cover
-  // the one-time lawn "Areas treated" chips ("Thin / stressed turf areas",
-  // "Weed breakthrough areas", "Insect activity areas", "Disease-affected
-  // areas") — exterior applications that carry the dry-down target (codex P1
-  // r7 #3701).
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact|turf|weed breakthrough|insect activity areas|disease affected)\b/.test(text);
+  const values = scopeTextValues({ service, applications, zones });
+  const text = values.map(normalizeScopeText).join(' ');
+  const classified = values.map(classifyScopeValue);
+  const textInterior = classified.some((entry) => entry.interior);
+  const textExterior = classified.some((entry) => entry.exterior);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);

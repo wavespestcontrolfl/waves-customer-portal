@@ -4331,8 +4331,8 @@ const {
 const {
   observationsForSpecialtyService,
   specialtyServiceKey,
-  validateSpecialtyObservationCombination,
-} = require('../../shared/specialty-service-observations');
+  validateSpecialtyClosureCombination,
+} = require('../../shared/specialty-service-closeouts');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -5315,9 +5315,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'invalid_structured_observation',
       });
     }
-    const structuredObservationConflict = validateSpecialtyObservationCombination(
+    // Findings are also checked against the completed protocol actions: a
+    // no-work finding beside performed work (or vice versa) must not reach
+    // the immutable customer report (codex P2 r8 #3701).
+    const structuredObservationConflict = validateSpecialtyClosureCombination(
       resolvedSpecialtyServiceKey,
-      formObservations,
+      { observations: formObservations, actions: reportProtocolActions },
     );
     if (structuredObservationConflict) {
       return res.status(422).json({

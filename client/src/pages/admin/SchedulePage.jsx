@@ -52,6 +52,7 @@ import {
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   specialtyCompletionFor,
+  specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
@@ -215,7 +216,7 @@ function baseUnitOf(unit) {
   const u = String(unit || "");
   return u.includes("/") ? u.split("/")[0] : u;
 }
-const AREAS_BY_SERVICE = {
+export const AREAS_BY_SERVICE = {
   pest: [
     "Perimeter",
     "Garage",
@@ -13227,6 +13228,15 @@ export function CompletionPanel({
       alert(specialtyActionConflict);
       return;
     }
+    const specialtyFindingActionClash = specialtyFindingActionConflict(
+      specialtyCompletion,
+      activeSelectedLabels(selectedObservationLabels),
+      activeSelectedLabels(selectedProtocolActionLabels),
+    );
+    if (specialtyFindingActionClash) {
+      alert(specialtyFindingActionClash);
+      return;
+    }
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.
@@ -14117,6 +14127,15 @@ export function CompletionPanel({
       // tags; generic pest and every other completion lane keep their existing
       // multi-action behavior.
       if (specialtyCompletion) {
+        const findingClash = specialtyFindingActionConflict(
+          specialtyCompletion,
+          activeSelectedLabels(selectedObservationLabels),
+          [option.action.label],
+        );
+        if (findingClash) {
+          alert(findingClash);
+          return;
+        }
         const reconciled = reconcileExclusiveProtocolSelections(
           selectedProtocolActionLabels,
           specialtyProtocolActions,
@@ -14143,7 +14162,6 @@ export function CompletionPanel({
   }
   function handleSpecialtyFindingChange(group, value) {
     if (generating || photoAnalyzing) return;
-    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     const groupValues = new Set((group?.options || []).map((item) => item.value));
     const reconciled = reconcileDependentFindingSelections(
       specialtyCompletion,
@@ -14151,6 +14169,19 @@ export function CompletionPanel({
       group,
       value,
     );
+    // A no-work finding beside already-selected performed actions (or a
+    // completed-work finding beside an inspection/deferred action) is
+    // refused at selection, before the AI draft is invalidated.
+    const actionClash = specialtyFindingActionConflict(
+      specialtyCompletion,
+      reconciled,
+      activeSelectedLabels(selectedProtocolActionLabels),
+    );
+    if (actionClash) {
+      alert(actionClash);
+      return;
+    }
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     if (!detachedAfterInvalidation) {
       setNotes((current) => current
         .split("\n")

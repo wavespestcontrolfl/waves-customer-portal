@@ -7,27 +7,56 @@ import {
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
   specialtyCompletionFor,
+  specialtyFindingActionConflict,
 } from "./service-completion-presets";
-import observationAllowlist from "../../../shared/specialty-service-observations";
+import specialtyCloseouts from "../../../shared/specialty-service-closeouts";
 
 const {
-  SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY,
+  SPECIALTY_SERVICE_CLOSEOUTS,
   observationsForSpecialtyService,
   specialtyServiceKey,
   validateSpecialtyObservationCombination,
-} = observationAllowlist;
+  validateSpecialtyClosureCombination,
+} = specialtyCloseouts;
 
 describe("specialty pest completion configuration", () => {
-  test("dropdown groups mirror the shared customer-report egress vocabulary", () => {
+  test("presets mirror the shared closeout vocabulary the server validates", () => {
+    expect(Object.keys(SERVICE_COMPLETION_PRESETS).sort()).toEqual(Object.keys(SPECIALTY_SERVICE_CLOSEOUTS).sort());
     for (const [key, preset] of Object.entries(SERVICE_COMPLETION_PRESETS)) {
+      const spec = SPECIALTY_SERVICE_CLOSEOUTS[key];
+      expect(preset.areas).toEqual(spec.areas);
+      expect(preset.protocols).toEqual(spec.protocols);
       expect(preset.findingGroups.map((group) => ({
         key: group.key,
         options: group.options.map((item) => item.value),
-      }))).toEqual(SPECIALTY_SERVICE_OBSERVATION_GROUPS_BY_KEY[key]);
+      }))).toEqual(spec.findingGroups);
       preset.findingGroups.forEach((group) => expect(group.label).toBeTruthy());
       const values = preset.findingGroups.flatMap((group) => group.options.map((item) => item.value));
       expect(new Set(observationsForSpecialtyService(key)).size).toBe(values.length);
     }
+  });
+
+  test("work-state findings reject contradictory protocol actions on both sides", () => {
+    const dethatching = SERVICE_COMPLETION_PRESETS.dethatching;
+    const plugging = SERVICE_COMPLETION_PRESETS.plugging;
+    const cases = [
+      ["dethatching", dethatching, ["Inspection only"], ["Double-pass dethatching completed"], "completed action"],
+      ["plugging", plugging, ["Not installed"], ["Sod plugs installed at quoted spacing"], "completed action"],
+      ["dethatching", dethatching, ["Full quoted area completed"], ["Inspection only"], "finding"],
+      ["plugging", plugging, ["9-inch spacing"], ["Work deferred; office follow-up required"], "finding"],
+    ];
+    for (const [key, preset, observations, actions, kind] of cases) {
+      const clientMessage = specialtyFindingActionConflict(preset, observations, actions);
+      expect(clientMessage).toContain(`cannot be paired with ${kind}`);
+      expect(validateSpecialtyClosureCombination(key, { observations, actions })).toBe(clientMessage);
+    }
+    expect(specialtyFindingActionConflict(dethatching, ["Inspection only"], ["Inspection only"])).toBeNull();
+    expect(specialtyFindingActionConflict(dethatching, ["Work deferred"], ["Work deferred; office follow-up required"])).toBeNull();
+    expect(specialtyFindingActionConflict(dethatching, ["Heavy debris removed"], ["Double-pass dethatching completed"])).toBeNull();
+    expect(specialtyFindingActionConflict(dethatching, ["Inspection only"], ["Free-text note action"])).toBeNull();
+    expect(specialtyFindingActionConflict(
+      SERVICE_COMPLETION_PRESETS.bee_wasp_removal, ["Active"], ["Inspection and identification only"],
+    )).toBeNull();
   });
 
   test("dependent selection rules match the server combination validator", () => {
