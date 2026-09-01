@@ -114,12 +114,32 @@ function aliasInsertPatterns(src, token) {
 // aligned with the original source.
 function blankCommentsAndStrings(code) {
   const blank = (s) => s.replace(/[^\n]/g, ' ');
+  // Template literals: blank the string TEXT but PRESERVE the code inside
+  // ${...} substitutions (length- and newline-preserving) — so
+  // db(`${schema}.leads`) leaves `schema` visible, reads as a non-blank
+  // argument, and is classified dynamic instead of vanishing entirely.
+  const blankTemplate = (s) => {
+    let out = '';
+    let depth = 0;
+    for (let i = 0; i < s.length; i += 1) {
+      const c = s[i];
+      if (depth === 0 && c === '$' && s[i + 1] === '{') { depth = 1; out += '  '; i += 1; continue; }
+      if (depth > 0) {
+        if (c === '{') depth += 1;
+        else if (c === '}') { depth -= 1; out += ' '; continue; }
+        out += c === '\n' || depth > 0 ? c : ' ';
+        continue;
+      }
+      out += c === '\n' ? c : ' ';
+    }
+    return out;
+  };
   return code
     .replace(/\/\*[\s\S]*?\*\//g, blank)
     .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p) => p + blank(m.slice(p.length)))
     .replace(/'(?:\\.|[^'\\\n])*'/g, blank)
     .replace(/"(?:\\.|[^"\\\n])*"/g, blank)
-    .replace(/`(?:\\.|[^`\\])*`/g, blank);
+    .replace(/`(?:\\.|[^`\\])*`/g, blankTemplate);
 }
 
 // ANY table argument, running over BLANKED code: a pure string-literal
@@ -345,6 +365,13 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(shadowable).toHaveLength(1);
   });
 
+  test('dynamic-table scan: an interpolated template table is dynamic; a plain template literal is not', () => {
+    const interpolated = scanSourceForDynamicTableInserts('await db(`${schema}.leads`).insert(row);');
+    expect(interpolated).toHaveLength(1);
+    const plain = scanSourceForDynamicTableInserts('await db(`other_things`).insert(row);');
+    expect(plain).toEqual([]);
+  });
+
   test('dynamic-table scan: two dynamic inserts on one line surface as TWO sites', () => {
     const sites = scanSourceForDynamicTableInserts('await db(a).insert(x); await db(b).insert(y);');
     expect(sites).toHaveLength(1);
@@ -370,6 +397,16 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     // Same rule as the literal scan: two dynamic inserts on one line cannot
     // get distinguishable allowlist keys.
     expect(dynamic.filter((s) => s.siteCount > 1).map(key)).toEqual([]);
+    // The allowlist entry is bound to the TABLE EXPRESSION, not just the
+    // anchor — swapping `db(photoTable)` for `db(req.body.table)` behind an
+    // unchanged insert line changes the expr and forces a re-review of the
+    // never-leads reason.
+    const byKey = new Map(DYNAMIC_TABLE_INSERTS.map((w) => [key(w), w]));
+    for (const s of dynamic) {
+      const entry = byKey.get(key(s));
+      if (!entry) continue; // already reported above
+      expect({ site: key(s), expr: s.expr }).toEqual({ site: key(s), expr: entry.expr });
+    }
     const present = new Set(dynamic.map(key));
     const stale = DYNAMIC_TABLE_INSERTS.filter((w) => !present.has(key(w)));
     expect(stale.map(key)).toEqual([]);

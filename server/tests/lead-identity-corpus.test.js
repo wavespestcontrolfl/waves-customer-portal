@@ -285,6 +285,17 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     }
   });
 
+  test('descriptive text is FROZEN by content hash — prose PII (a name, a street) cannot be pattern-matched, so editing it is a reviewed act', () => {
+    // Update procedure: change the fixture, run
+    //   node -e "const crypto=require('crypto');const c=require('./fixtures/lead-identity-corpus.json');console.log(crypto.createHash('sha256').update(JSON.stringify([c.$comment,...c.cases.map((x)=>[x.id,x.rationale])])).digest('hex'))"
+    // from server/, and paste the new hash HERE in the same PR — the diff of
+    // this line is what makes the reviewer read the new prose.
+    const crypto = require('crypto');
+    const canonical = JSON.stringify([corpus.$comment, ...CASES.map((c) => [c.id, c.rationale])]);
+    expect(crypto.createHash('sha256').update(canonical).digest('hex'))
+      .toBe('de285bf0153d1e9e009b83ad03f814d32f29403d2e1cffd48cd97349c2911a5f');
+  });
+
   test('no case relies on exactly one usable phone (direction-dependent in production)', () => {
     for (const c of CASES) {
       const phones = [phoneKey(c.a.phone), phoneKey(c.b.phone)].filter(Boolean).length;
