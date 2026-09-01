@@ -1027,6 +1027,68 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/:id']);
   });
 
+  test('an array holding a router passed to a NON-registration call is rejected', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const { install } = require('./services/installer');",
+        "const router = require('express').Router();",
+        'install([router]);',
+        "app.use('/api/x', router);",
+      ].join('\n')),
+      'server/services/installer.js': [
+        "function install(arr) { arr[0].get('/leak', (req, res) => res.json({})); }",
+        'module.exports = { install };',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('stored in an array') || p.includes('unanalysed function'))).toBe(true);
+  });
+
+  test('a SPREAD call argument in path position expands (router.get(...arr))', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get(...['/leak', (req, res) => res.json({})]);",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a named module member resolves through the FINAL export mapping, not internal bindings', () => {
+    // module.exports = { api: leak } — requiring .api mounts leak at runtime;
+    // the guarded internal `api` binding must not be credited.
+    const res = scanOf({
+      'server/index.js': app([
+        "const { api } = require('./routes/multi');",
+        "app.use('/api/x', api);",
+      ].join('\n')),
+      'server/routes/multi.js': [
+        "const express = require('express');",
+        'const api = express.Router();',
+        'const leak = express.Router();',
+        "const { guardA } = require('../middleware/a');",
+        "api.get('/thing', guardA, (req, res) => res.json({}));",
+        "leak.get('/thing', (req, res) => res.json({}));",
+        'module.exports = { api: leak };',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/thing']);
+  });
+
+  test("a static() root passed as an identifier binds the RESOLVED initializer into the identity", () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const path = require('path');",
+        "const buildDir = path.join(__dirname, 'dist');",
+        "app.use('/assets', express.static(buildDir));",
+      ].join('\n')),
+    });
+    expect(res.publicRoutes.map(routeKey)).toEqual([
+      "server/index.js @ / :: STATIC /assets (buildDir = path.join(__dirname, 'dist'))",
+    ]);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),

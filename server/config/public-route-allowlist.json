@@ -71,7 +71,7 @@
         "GET /sw.js [conditional: config.nodeEnv === 'production']",
         "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production']",
         "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production']",
-        "STATIC / (clientBuild) [conditional: config.nodeEnv === 'production']",
+        "STATIC / (clientBuild = path.join(__dirname, '..', 'client', 'dist')) [conditional: config.nodeEnv === 'production']",
         "STATIC / (path.join(__dirname, '..', 'client', 'public'))"
       ]
     },

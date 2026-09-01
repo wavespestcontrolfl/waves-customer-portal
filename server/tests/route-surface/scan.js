@@ -222,6 +222,7 @@ class ModuleAnalysis {
 
   collect() {
     this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
+    this.exportProps = new Map(); // module.exports.<name> = <ident|false>
     this.directExternalRegs = []; // require('./x').<verb>() registrations
     this.bindingWrites = new Map(); // name -> count of value-bearing writes
     this.reassignedNames = new Set(); // written more than once — ambiguous
@@ -229,7 +230,7 @@ class ModuleAnalysis {
     const optionalCalls = [];
     const objectLiterals = [];
     const arrayLiterals = [];
-    const callArgArrays = new Set();
+    const callArgArrays = []; // { arr, call } — exemption decided post-walk
     const memberAssignments = [];
     walk(this.ast.program, (node, ctx) => {
       if (node.type === 'CallExpression' && node.arguments.some((a) => a && a.type === 'Identifier')) {
@@ -242,7 +243,7 @@ class ModuleAnalysis {
       if (node.type === 'ObjectExpression') objectLiterals.push(node);
       if (node.type === 'ArrayExpression') arrayLiterals.push(node);
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
-        for (const a of node.arguments) if (a && a.type === 'ArrayExpression') callArgArrays.add(a);
+        for (const a of node.arguments) if (a && a.type === 'ArrayExpression') callArgArrays.push({ arr: a, call: node });
       }
       if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
         this.recordBinding(node.id.name, node.init, ctx.topLevel);
@@ -293,6 +294,18 @@ class ModuleAnalysis {
         if (!ctx.topLevel) this.exportUnstable = true;
         this.exportCandidate = node.right.type === 'Identifier' ? node.right.name : null;
         this.exportObjectNode = node.right.type === 'ObjectExpression' ? node.right : null;
+        this.exportProps.clear(); // a wholesale assignment replaces prior props
+      } else if (node.type === 'AssignmentExpression' && node.operator === '='
+        && node.left.type === 'MemberExpression' && !node.left.computed
+        && node.left.property.type === 'Identifier'
+        && node.left.object.type === 'MemberExpression' && !node.left.object.computed
+        && node.left.object.object.type === 'Identifier' && node.left.object.object.name === 'module'
+        && node.left.object.property.type === 'Identifier' && node.left.object.property.name === 'exports') {
+        // `module.exports.name = value` — the export MAPPING is what a
+        // requiring module actually receives; recorded per name.
+        if (!ctx.topLevel) this.exportUnstable = true;
+        this.exportProps.set(node.left.property.name,
+          node.right.type === 'Identifier' ? node.right.name : false);
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
         && node.left.type === 'MemberExpression' && !node.left.computed
         && node.left.property.type === 'Identifier') {
@@ -438,8 +451,19 @@ class ModuleAnalysis {
     // member the scanner cannot resolve (`holders[0].get('/leak', h)`).
     // Allowed only as a direct call argument (`app.use('/x', [g, router])`,
     // which classify() flattens); anywhere else it is rejected.
+    // Only an argument of a REGISTRATION call on a known router/app is a
+    // handler array classify() will flatten; an array passed to any other
+    // function (`install([router])`) hides the router from the walk.
+    const exemptArrays = new Set();
+    for (const { arr, call } of callArgArrays) {
+      const c = call.callee;
+      if (!c || c.type !== 'MemberExpression' || c.computed || c.property.type !== 'Identifier') continue;
+      const base = this.resolveMemberChain(c.object);
+      if (!base || !(this.routers.has(base) || APP_IDENTIFIERS.has(base))) continue;
+      if (VERBS.has(c.property.name) || c.property.name === 'use') exemptArrays.add(arr);
+    }
     for (const arr of arrayLiterals) {
-      if (callArgArrays.has(arr)) continue;
+      if (exemptArrays.has(arr)) continue;
       for (const el of arr.elements) {
         if (el && el.type === 'Identifier' && this.routers.has(this.canonName(el.name))) {
           this.problems.push(`${this.loc(el)}: router ${el.name} stored in an array — the scanner cannot attribute registrations made through array access; mount/register via the router identifier`);
@@ -477,9 +501,15 @@ class ModuleAnalysis {
     // callees with a reviewed `routerConsumers` registry entry
     // (http.createServer, the Sentry error handler).
     for (const call of callsWithIdentifierArgs) {
-      const passed = call.arguments
-        .filter((a) => a && a.type === 'Identifier')
-        .map((a) => this.canonName(a.name))
+      const argNames = [];
+      for (const a of call.arguments) {
+        if (a && a.type === 'Identifier') argNames.push(a.name);
+        else if (a && a.type === 'ArrayExpression') {
+          for (const el of a.elements) if (el && el.type === 'Identifier') argNames.push(el.name);
+        }
+      }
+      const passed = argNames
+        .map((n) => this.canonName(n))
         .filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
       if (!passed.length) continue;
       const c = call.callee;
@@ -534,6 +564,30 @@ class ModuleAnalysis {
       }
     }
     return false;
+  }
+
+  /**
+   * What this module actually EXPORTS under `name` — the mapping a requiring
+   * module receives, not an internal binding that happens to share the name
+   * (`module.exports = { api: leak }` exports leak under api).
+   * Returns { kind: 'ident', name } | { kind: 'opaque' } | { kind: 'none' }.
+   */
+  exportLookup(name) {
+    if (this.exportUnstable) return { kind: 'opaque' };
+    if (this.exportProps.has(name)) {
+      const v = this.exportProps.get(name);
+      return v ? { kind: 'ident', name: v } : { kind: 'opaque' };
+    }
+    if (this.exportObjectNode) {
+      for (const prop of this.exportObjectNode.properties) {
+        if (prop.type === 'ObjectProperty' && !prop.computed
+          && prop.key.type === 'Identifier' && prop.key.name === name) {
+          return prop.value.type === 'Identifier' ? { kind: 'ident', name: prop.value.name } : { kind: 'opaque' };
+        }
+      }
+      return { kind: 'none' };
+    }
+    return { kind: 'none' };
   }
 
   /** Follow `const a = b` alias chains to the canonical name. */
@@ -899,9 +953,18 @@ class ModuleAnalysis {
               && (this.cleanBinding(c.object.name) || {}).spec === 'express'))) {
           // Provenance-checked like Router(): only require('express').static
           // counts — an in-repo helper.static() could return a router whose
-          // routes would hide behind an existing STATIC allowlist key.
+          // routes would hide behind an existing STATIC allowlist key. The
+          // identity binds the RESOLVED root (an identifier's initializer),
+          // so re-pointing the directory constant forces re-review.
           const arg = node.arguments[0];
-          const desc = arg ? this.src.slice(arg.start, arg.end) : '';
+          let desc = arg ? this.src.slice(arg.start, arg.end) : '';
+          if (arg && arg.type === 'Identifier') {
+            const b = this.cleanBinding(arg.name);
+            if (b && b.kind === 'string') desc = `${arg.name} = '${b.value}'`;
+            else if (b && b.kind === 'call' && b.node) {
+              desc = `${arg.name} = ${this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ').slice(0, 120)}`;
+            } else desc = `${arg.name} = <unresolved>`;
+          }
           return [{ type: 'static', desc }];
         }
         if (c.type === 'CallExpression' && this.isNodeModulesRef(c)) {
@@ -1123,7 +1186,13 @@ class Scanner {
   classifyModuleName(rel, name, depth, label) {
     if (!rel || !this.exists(rel)) return [{ type: 'opaque', desc: label }];
     const m = this.module(rel);
-    return m.classify({ type: 'Identifier', name }, depth).map((h) => {
+    // Resolve the FINAL export mapping, never an internal binding that
+    // merely shares the requested name (`module.exports = { api: leak }`).
+    const exp = m.exportLookup(name);
+    if (exp.kind !== 'ident') {
+      return [{ type: 'opaque', desc: `${label} → export not statically resolvable` }];
+    }
+    return m.classify({ type: 'Identifier', name: exp.name }, depth).map((h) => {
       if (h.type === 'localRouter') return { type: 'router', module: rel, name: h.name };
       if (h.type === 'opaque') return { type: 'opaque', desc: `${label} → ${h.desc}` };
       return h;
@@ -1223,13 +1292,29 @@ class Scanner {
       const args = [...reg.args];
       let paths = ['/'];
       let pathResolved = true;
-      if (args.length && m.couldBePath(args[0])) {
+      let pathHandled = false;
+      if (args.length && args[0].type === 'SpreadElement') {
+        // router.get(...['/leak', h]) — expand an inline array spread so the
+        // real path is seen; any other spread is an UNRESOLVED path, never a
+        // handler list at the mount root.
+        if (args[0].argument.type === 'ArrayExpression') {
+          args.splice(0, 1, ...args[0].argument.elements.filter(Boolean));
+        } else {
+          paths = [`<unresolved:${m.src.slice(args[0].start, args[0].end)}>`];
+          pathResolved = false;
+          args.shift();
+          pathHandled = true;
+        }
+      }
+      if (pathHandled) {
+        // path settled above
+      } else if (args.length && m.couldBePath(args[0])) {
         const resolved = m.resolvePaths(args[0]);
         if (resolved) paths = resolved;
         else { paths = [`<unresolved:${m.src.slice(args[0].start, args[0].end)}>`]; pathResolved = false; }
         args.shift();
       } else if (reg.method !== 'use' && args.length
-        && !['ArrowFunctionExpression', 'FunctionExpression', 'ArrayExpression', 'SpreadElement'].includes(args[0].type)
+        && !['ArrowFunctionExpression', 'FunctionExpression', 'ArrayExpression'].includes(args[0].type)
         && !(args[0].type === 'Identifier' && !m.ambiguousFirstArg(args[0]))) {
         // Express verbs take a leading path. An expression we cannot resolve
         // ('/api/' + x, PATHS.leak) must be treated as an UNRESOLVED path —
