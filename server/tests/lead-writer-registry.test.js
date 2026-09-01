@@ -516,13 +516,25 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       expect({ site: key(w), kind: cc && cc.kind }).toEqual({ site: key(w), kind: expect.any(String) });
 
       if (cc.kind === 'config-literals') {
-        // Every listed prop's literal values in the entry's own file.
+        // EVERY assignment of a listed prop in the entry's own file — not
+        // just the ones that happen to be literals. A runtime value
+        // (`table: resolveTable(...)`) fails unless explicitly allowValues'd.
         const src = files.find((f) => f.rel === w.file).src;
         const propAlt = cc.props.map(escapeRe).join('|');
-        const values = [...src.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*'([\w.]+)'`, 'g'))]
-          .map((m) => m[1]);
-        expect(values.length).toBeGreaterThanOrEqual(cc.minValues);
-        for (const t of values) assertNotLeads(`${w.file} config`, t);
+        const assignments = [...src.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*('[\w.]+'|[^,}\n]+)`, 'g'))];
+        const literals = [];
+        for (const a of assignments) {
+          const v = a[1].trim();
+          const lit = v.match(/^'([\w.]+)'$/);
+          const allowed = Boolean(lit) || (cc.allowValues || []).includes(v);
+          expect({ file: w.file, assignment: a[0].trim(), allowed })
+            .toEqual({ file: w.file, assignment: a[0].trim(), allowed: true });
+          if (lit) {
+            literals.push(lit[1]);
+            assertNotLeads(`${w.file} config`, lit[1]);
+          }
+        }
+        expect(literals.length).toBeGreaterThanOrEqual(cc.minValues);
       } else if (cc.kind === 'positional-call') {
         // In-file helper: every call passes a LITERAL table at argIndex.
         const src = files.find((f) => f.rel === w.file).src;
@@ -535,20 +547,26 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           assertNotLeads(`${w.file} ${cc.helper}`, lit[1]);
         }
       } else if (cc.kind === 'object-call') {
-        // Exported helper: every call site anywhere under server/ must bind
-        // the prop to a literal (or the declared indirect expression, whose
-        // own values another entry's contract validates).
+        // Exported helper: EVERY invocation anywhere under server/ — not
+        // just object-literal ones — is enumerated. A call passing a
+        // variable (`storeFunnelPhotos(opts)`) is unresolvable and fails
+        // outright; an object-literal call must bind the prop to a literal
+        // (or the declared indirect expression, whose own values another
+        // entry's contract validates).
         let callers = 0;
         for (const { rel, src } of files) {
-          const re = new RegExp(String.raw`(?<!function )${escapeRe(cc.helper)}\s*\(\s*\{`, 'g');
+          const re = new RegExp(String.raw`(?<!function )\b${escapeRe(cc.helper)}\s*\(`, 'g');
           let m;
           while ((m = re.exec(src))) {
             callers += 1;
-            const win = src.slice(m.index, m.index + 400);
+            const after = src.slice(re.lastIndex, re.lastIndex + 400);
+            const objectLiteral = /^\s*\{/.test(after);
+            expect({ caller: `${rel}@${m.index}`, objectLiteral })
+              .toEqual({ caller: `${rel}@${m.index}`, objectLiteral: true });
             const bindRe = new RegExp(
               String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}` : ''})`
             );
-            const bound = win.match(bindRe);
+            const bound = after.match(bindRe);
             expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
               .toEqual({ caller: `${rel}@${m.index}`, bound: true });
             if (bound[1]) assertNotLeads(rel, bound[1]);
