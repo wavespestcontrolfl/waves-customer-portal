@@ -213,6 +213,24 @@ function statementStart(source, i) {
   return 0;
 }
 
+// Split an argument list on top-level commas (strings and nesting skipped).
+function topLevelArgs(args) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < args.length; i += 1) {
+    const ch = args[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i += 1;
+      while (i < args.length && args[i] !== ch) { if (args[i] === '\\') i += 1; i += 1; }
+    } else if ('([{'.includes(ch)) depth += 1;
+    else if (')]}'.includes(ch)) depth -= 1;
+    else if (ch === ',' && depth === 0) { out.push(args.slice(start, i).trim()); start = i + 1; }
+  }
+  out.push(args.slice(start).trim());
+  return out;
+}
+
 // The text inside the `.insert(…)` argument list of a chain/statement.
 function insertArgument(text) {
   const at = text.search(/\.insert\s*\(/);
@@ -320,7 +338,13 @@ function isContractCompleted(source, arg) {
     + `|\\bdelete\\s+${text}\\b`
     + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${text}\\b`,
   );
-  return !mutated.test(source);
+  if (mutated.test(source)) return false;
+  // A completed value that ESCAPES into another binding (`const alias =
+  // data;`) could be mutated under that name, which the check above can't
+  // see — fail closed (GH Codex r9 P2). Reads of a property, spreads and
+  // call arguments are not escapes.
+  const escaped = new RegExp(`\\b(?!${text}\\b)[A-Za-z_$][\\w$]*\\s*=(?![=>])\\s*${text}\\b\\s*(?=[;,)\\]}]|\\n|$)`);
+  return !escaped.test(source);
 }
 
 // Whether the file binds completeScheduledServiceInsert to the CANONICAL
@@ -514,10 +538,25 @@ function collectInsertSites(source) {
     if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
     site(rawM.index, `${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`, null);
   }
-  // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`).
-  const re = /['"`](?:\w+\.)?scheduled_services['"`]/g;
+  // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`),
+  // plus any CONSTANT bound to the table name in this file
+  // (`const TABLE = 'scheduled_services'; trx(TABLE)…` — GH Codex r9 P2).
+  const constNames = [...source.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*['"`](?:\w+\.)?scheduled_services['"`]/g)].map((c) => c[1]);
+  const re = new RegExp(`['"\`](?:\\w+\\.)?scheduled_services['"\`]${constNames.length ? `|\\b(?:${constNames.join('|')})\\b` : ''}`, 'g');
   let m;
   while ((m = re.exec(source)) !== null) {
+    // knex.batchInsert('scheduled_services', rows[, chunk]) — the table is
+    // the FIRST argument, followed by a comma; the rows argument is the
+    // payload (GH Codex r9 P2).
+    if (/batchInsert\s*\($/.test(source.slice(Math.max(0, m.index - 24), m.index).replace(/\s+$/, ''))
+      || /batchInsert\s*\(\s*$/.test(source.slice(Math.max(0, m.index - 24), m.index))) {
+      const callOpen = source.lastIndexOf('(', m.index);
+      const args = source.slice(callOpen + 1, balancedParens(source, callOpen) - 1);
+      const rows = topLevelArgs(args)[1] || '';
+      const head = (/^\s*(\{|\[|[A-Za-z0-9_.$]+)/.exec(rows) || [, ''])[1];
+      site(m.index, `${statementPrefix(source, m.index)} batchInsert:scheduled_services, ${head}`, rows);
+      continue;
+    }
     // .into('scheduled_services') / .table('scheduled_services') refs. The
     // insert may sit BEFORE the ref (table-last:
     // trx.insert(data).into('scheduled_services') — GH Codex r5 P1): the
@@ -574,7 +613,10 @@ function multisetMissing(a, b) {
 }
 
 describe('booking insert-site contract', () => {
-  const files = [...walk(SERVER_ROOT), ...walk(path.join(REPO_ROOT, 'scripts'))];
+  // ops/agents is an established production-write surface (mutating
+  // tools, dry-run by default) — a scheduled_services insert there is a
+  // booking writer like any other (GH Codex r9 P2).
+  const files = [...walk(SERVER_ROOT), ...walk(path.join(REPO_ROOT, 'scripts')), ...walk(path.join(REPO_ROOT, 'ops'))];
   const found = new Map(); // repo-relative path -> fingerprint multiset
   for (const file of files) {
     const rel = relRepo(file);
@@ -584,6 +626,7 @@ describe('booking insert-site contract', () => {
   }
 
   test('the matcher recognizes every insert shape it claims to (self-check)', () => {
+    const IMPORT = "const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');\n";
     expect(collectInsertSites("await trx('scheduled_services').insert(insertData).returning('*');")).toEqual(["await trx( scheduled_services').insert(insertData"]);
     expect(collectInsertSites("const [r] = await sp('scheduled_services')\n  .insert({\n    customer_id: id,\n  })")).toEqual(["const [r] = await sp( scheduled_services').insert({"]);
     expect(collectInsertSites("await trx('scheduled_services')\n  .insert(insertData)\n  .onConflict('idempotency_key')\n  .ignore()")).toEqual(["await trx( scheduled_services').insert(insertData"]);
@@ -595,6 +638,16 @@ describe('booking insert-site contract', () => {
     // A builder captured in a variable is followed through the alias
     // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // A constant bound to the table name is followed (GH Codex r9 P2)…
+    expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait trx(TABLE).insert(data);")).toEqual(["await trx( scheduled_services').insert(data"]);
+    expect(collectInsertSites("const TABLE = 'scheduled_services';\nconst visits = trx(TABLE);\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait trx.insert(data).into(TABLE);")).toHaveLength(1);
+    expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait trx(TABLE).where({ id }).first();")).toEqual([]);
+    // …and so is knex.batchInsert, literal or constant table (r9 P2); rows
+    // that all came out of the helper are compliant.
+    expect(collectInsertSites("await trx.batchInsert('scheduled_services', rows, 50);")).toEqual(["await trx.batchInsert( batchInsert:scheduled_services, rows"]);
+    expect(collectInsertSites("const TABLE = 'scheduled_services';\nawait knex.batchInsert(TABLE, [row]);")).toEqual(["await knex.batchInsert( batchInsert:scheduled_services, ["]);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
     expect(collectInsertSites("await trx.table('scheduled_services').insert(data);")).toEqual(["await trx.table( scheduled_services').insert(data"]);
     expect(collectInsertSites("const [row] = await trx\n  .into('scheduled_services')\n  .insert(data)\n  .returning('*');")).toEqual(["const [row] = await trx .into( scheduled_services').insert(data"]);
@@ -640,7 +693,6 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx('public.scheduled_services').insert(x);")).toEqual(["await trx( scheduled_services').insert(x"]);
     // A bespoke insert whose payload came out of the CANONICAL completion
     // helper is COMPLIANT — it may leave the frozen inventory (GH Codex r5 P2)…
-    const IMPORT = "const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');\n";
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, { trx, cols, source });\nconst [row] = await trx('scheduled_services').insert(data).returning('*');`)).toEqual([]);
     expect(collectInsertSites(`${IMPORT}await trx('scheduled_services').insert(await completeScheduledServiceInsert(raw, { trx, cols, source }));`)).toEqual([]);
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, { trx, cols, source }));\nawait trx('scheduled_services').insert(rows);`)).toEqual([]);
@@ -668,6 +720,12 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n{\n  const data = raw;\n  await trx('scheduled_services').insert(data);\n}`)).toHaveLength(1);
     // (control-flow parens and call arguments are not parameter positions)
     expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nif (data) {\n  log(data);\n  await trx('scheduled_services').insert(data);\n}`)).toEqual([]);
+    // …a completed payload that ESCAPES into another binding stays bare —
+    // it could be mutated under that name (GH Codex r9 P2)…
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst alias = data;\nalias.source_action = null;\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlet alias;\nalias = data\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    // (a property read, a spread, or passing it as an argument is not an escape)
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst id = data.customer_id;\nconst copy = { ...data };\naudit(data);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
     for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;']) {
       expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
