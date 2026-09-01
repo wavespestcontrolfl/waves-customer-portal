@@ -183,6 +183,28 @@ test('gate ON + ledger ADVISORY: a ledger failure still FAILS CLOSED and aborts 
   expect(db.__tables.customers[0].active).toBe(true);
 });
 
+test('a monthly component repriced mid-run aborts the wind-down — stale planned rates never overwrite a concurrent pricing change', async () => {
+  db.__tables.invoices = [];
+  db.__tables.customer_plan_rates = [
+    // The plan said pest_control was 60 → 66, but a concurrent write moved it.
+    { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 75 },
+  ];
+  const plan = {
+    monthlyLane: true, perApplicationLane: false, inScope: ['lawn_care'], remaining: ['pest_control'],
+    remainingRates: [{ family: 'pest_control', before: 60, after: 66 }],
+    tierBefore: 'Silver', tierAfter: 'Bronze', scalarBefore: 150, scalarAfter: 66,
+  };
+  const tierBeforeRun = db.__tables.customers[0].waveguard_tier;
+  await expect(applyScopedWindDown('cust-1', plan, { requestId: 'req-1' })).rejects.toThrow(/zero rows/);
+  expect(db.__tables.customers[0].waveguard_tier).toBe(tierBeforeRun);
+  expect(Number(db.__tables.customer_plan_rates[0].monthly_rate)).toBe(75);
+  // Matching rate → the CAS lands and the wind-down completes.
+  db.__tables.customer_plan_rates[0].monthly_rate = 60;
+  await applyScopedWindDown('cust-1', plan, { requestId: 'req-1' });
+  expect(Number(db.__tables.customer_plan_rates[0].monthly_rate)).toBe(66);
+  expect(db.__tables.customers[0].waveguard_tier).toBe('Bronze');
+});
+
 test('a per-application reprice whose CAS lands on zero rows aborts the wind-down — tier demote rolls back, never a silently kept old price', async () => {
   db.__tables.invoices = [];
   // The live price drifted after the preview (plan said 90 → 96).

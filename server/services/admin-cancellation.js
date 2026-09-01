@@ -1240,6 +1240,30 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           logger.warn(`[admin-cancellation] follow-up repair failed for case ${prior.id}: ${repairFlowErr.message}`);
         }
       }
+      // A LOST clean close repairs here (the only path a decided-term
+      // retry reaches): the stamped outcome is error-free but the
+      // acceptance may still read 'new' — every later cancellation would
+      // keep reusing this request, its UNIQUE case, and its dedupe state.
+      // Same affected-row posture as the commit close.
+      // Clean = a stamped outcome with no errors. A MISSING stamp is a
+      // lost write, not a clean run — closing on it would strand repairs.
+      const outcomeClean = !!(priorSnap && priorSnap.outcome)
+        && !(Array.isArray(priorSnap.outcome.errors) && priorSnap.outcome.errors.length);
+      if (outcomeClean && prior.service_request_id) {
+        try {
+          const openReq = await db('service_requests')
+            .where({ id: prior.service_request_id }).first('id', 'status');
+          if (openReq && openReq.status === 'new') {
+            const closed = await db('service_requests').where({ id: openReq.id, status: 'new' })
+              .update({ status: 'resolved', updated_at: new Date() });
+            if (closed) await resolveReviewBell(openReq.id);
+            else throw new Error('acceptance close updated zero rows');
+          }
+        } catch (closeErr) {
+          // Still 'new' — the next echo retries; resends stay deduped.
+          logger.warn(`[admin-cancellation] latch close repair failed for request ${prior.service_request_id}: ${closeErr.message}`);
+        }
+      }
       return {
         requestId: prior.service_request_id || null,
         caseId: prior.id,

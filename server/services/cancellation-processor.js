@@ -290,16 +290,34 @@ async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = '
   await db.transaction(async (trx) => {
     if (plan.monthlyLane) {
       await trx('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', plan.inScope).del();
+      // CAS like the per-application lane below: the plan was computed at
+      // processor ENTRY (a post-sweep recompute is impossible — the scoped
+      // rows are already cancelled), so a ledger/hold write landing during
+      // the sweep would be silently overwritten with stale planned values
+      // and the customer billed differently from the approved facts. Zero
+      // rows = the rate is no longer what the plan (and the operator) saw:
+      // abort the whole transaction so the run surfaces scoped_wind_down
+      // and a fresh preview re-approves the live numbers.
       for (const r of plan.remainingRates) {
         if (r.heldHoldId) {
           // Held family: reprice the HOLD's saved rate; component stays 0 /
           // source plan_hold so the resume restores the demoted price.
-          await trx('plan_holds').where({ id: r.heldHoldId, status: 'active' })
+          const heldWhere = { id: r.heldHoldId, status: 'active' };
+          if (r.before != null) heldWhere.held_monthly_rate = r.before;
+          const heldUpdated = await trx('plan_holds').where(heldWhere)
             .update({ held_monthly_rate: r.after, updated_at: new Date() });
+          if (!heldUpdated) {
+            throw new Error(`held rate CAS matched zero rows for hold ${r.heldHoldId} (${r.family}) — hold changed since the approved preview`);
+          }
           continue;
         }
-        await trx('customer_plan_rates').where({ customer_id: customerId, family_key: r.family })
+        const rateWhere = { customer_id: customerId, family_key: r.family };
+        if (r.before != null) rateWhere.monthly_rate = r.before;
+        const rateUpdated = await trx('customer_plan_rates').where(rateWhere)
           .update({ monthly_rate: r.after, source: 'cancellation_scoped', effective_at: new Date(), updated_at: new Date() });
+        if (!rateUpdated) {
+          throw new Error(`monthly component CAS matched zero rows for ${r.family} — rate changed since the approved preview`);
+        }
       }
     }
     if (plan.perApplicationLane) {

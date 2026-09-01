@@ -1578,6 +1578,29 @@ describe('POST /:id/cancel-plan', () => {
       expect(arg.approvedScopedPricing).toMatch(/^tier=.*\|monthly=.*\|rates=.*\|perapp=/);
     }));
 
+    test('a decided-term duplicate with a CLEAN outcome repairs a lost acceptance close — the stale new request stops being reusable', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: false, confirmation: null, confirmationChannels: [], errors: [],
+          },
+        }),
+      }];
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      expect(body.duplicate).toBe(true);
+      expect(mockProcess).not.toHaveBeenCalled();
+      expect(mockState.service_requests[0].status).toBe('resolved');
+    }));
+
     test('a stale termite_retrieval_task on a decided-term duplicate repairs — the office recovers the dated pull instruction', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.service_requests = [{
