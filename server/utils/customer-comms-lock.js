@@ -48,11 +48,26 @@ const LOCK_WAIT_TIMEOUT = '10s';
 
 async function lockCustomerComms(trx, customerId) {
   if (!customerId) return;
+  // SET LOCAL lasts to the END of the transaction, not to the next
+  // statement, so setting it bare would hand this timeout to every later
+  // write in a booking, scheduling or estimate transaction and would widen a
+  // stricter one a caller had already chosen (codex #3677 P1). Read the
+  // value in force, bound only the acquisition, put it back either way.
+  const previous = await trx.raw('SHOW lock_timeout')
+    .then((res) => res?.rows?.[0]?.lock_timeout)
+    .catch(() => null);
   await trx.raw(`SET LOCAL lock_timeout = '${LOCK_WAIT_TIMEOUT}'`);
-  await trx.raw(
-    'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-    [`customer-comms:${customerId}`],
-  );
+  try {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+      [`customer-comms:${customerId}`],
+    );
+  } finally {
+    // Restoring inside finally matters: on a lock timeout the caller's catch
+    // may still run more statements in this transaction.
+    if (previous) await trx.raw('SET LOCAL lock_timeout = ?', [previous]).catch(() => {});
+    else await trx.raw('RESET lock_timeout').catch(() => {});
+  }
 }
 
 /**
