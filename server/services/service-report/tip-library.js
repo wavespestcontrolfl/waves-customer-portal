@@ -268,8 +268,10 @@ const TIPS = Object.freeze([
     id: 'lawn_irrigation_portal', group: 'lawn', label: 'Add your irrigation settings to the portal',
     keywords: ['irrigation', 'sprinkler', 'schedule', 'portal', 'zones', 'run time', 'days'], lines: ['lawn'], season: 'all',
     // Conditional: the picker marks this "already on file" when the
-    // customer's property row has irrigation_system set. The live note
-    // renders the link to the My Property tab.
+    // customer's property row actually carries irrigation settings —
+    // watering days, run minutes, inches per week, zones or the rain
+    // sensor — NOT the irrigation_system flag, which defaults on
+    // (migration 20260828000002). The live note renders the My Property link.
     condition: 'irrigation_on_file',
     link: { label: 'My Property', path: '/portal?tab=property' },
     copy: "If you add your irrigation settings to your Waves portal — the watering days, run minutes per zone, and whether you have a rain sensor — under My Property, I can compare what the lawn is actually getting against what it needs each season and adjust the program to match. It takes about two minutes and makes every lawn report after it more accurate.",
@@ -304,6 +306,20 @@ const TIPS = Object.freeze([
     copy: "Flea eggs and larvae live in the bedding and carpet where the pet sleeps, not on the pet. A hot wash of the bedding weekly and a daily vacuum of those spots for a couple of weeks removes the stages a treatment can't reach — and empty the vacuum outside.",
   },
 ]);
+
+// Deep-frozen: the registry is the screened source of customer copy, and
+// tipsForVisit hands out these same objects — a consumer annotating one
+// must not be able to change what a later resolveTipIds emits.
+function deepFreeze(value, seen = new WeakSet()) {
+  if (value && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
+    Object.freeze(value);
+    for (const inner of Object.values(value)) deepFreeze(inner, seen);
+  }
+  return value;
+}
+deepFreeze(TIPS);
+deepFreeze(TIP_GROUPS);
 
 const TIPS_BY_ID = new Map(TIPS.map((tip) => [tip.id, tip]));
 
