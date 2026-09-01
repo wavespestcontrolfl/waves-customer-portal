@@ -1970,15 +1970,22 @@ function blankStaticHiddenClassElements(text) {
     const name = m[1];
     const attrs = tagAttrsAt(s, m.index);
     if (attrs === null || /\/\s*$/.test(attrs)) continue;
-    let cls = null;
-    for (const a of eachJsxAttr(attrs)) {
-      const n = a.name.toLowerCase();
-      if (n !== 'class' && n !== 'classname') continue;
-      cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
+    // A wrapper SPREAD can inject hidden/style at render time — blanked
+    // like the astro validator does (fail closed; Codex #3646 r28 P1).
+    let hide = hasAttrSpreadAfter(attrs);
+    if (!hide) {
+      let cls = null;
+      for (const a of eachJsxAttr(attrs)) {
+        const n = a.name.toLowerCase();
+        if (n !== 'class' && n !== 'classname') continue;
+        cls = a.literal !== null ? a.literal : staticStringOfExpr(a.expr);
+      }
+      if (cls === null) continue;
+      if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) continue;
+      if (/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls)) continue;
+      hide = true;
     }
-    if (cls === null) continue;
-    if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) continue;
-    if (/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls)) continue;
+    if (!hide) continue;
     const tagRe = new RegExp('<(\\/?)' + name + '\\b', 'gi');
     tagRe.lastIndex = m.index + 1 + name.length + attrs.length + 1;
     let depth = 1; let t; let closeEnd = -1;

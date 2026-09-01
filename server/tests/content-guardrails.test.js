@@ -805,6 +805,13 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
+    withAffiliateEnv(() => {
+      const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+      expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
   test('string-safe key quoting; statically hidden Tailwind CTAs never count (Codex #3646 r27)', () => {
     withAffiliateEnv(() => {
       const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;

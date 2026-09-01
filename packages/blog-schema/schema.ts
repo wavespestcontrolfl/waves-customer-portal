@@ -1735,6 +1735,13 @@ export function validateMarkdownComponentProps(
 
     const schema = componentPropSchemas[name];
     const knownPropNames = new Set(Object.keys(schema.shape));
+    // An attribute-position SPREAD delivers props no static parser can see
+    // — the invocation can never be validated (Codex #3646 r28; the portal
+    // mirror already rejects this shape).
+    if (hasJsxSpread(inv.attrs)) {
+      issues.push({ component: name, index: idx, issue: 'invalid-value', prop: '{...}', message: `<${name}> carries a JSX spread ({...}) — its props cannot be validated against the schema` });
+      continue;
+    }
     const { simple, expressions } = parseJsxProps(inv.attrs);
 
     // Unknown-prop detection — any prop name not in the schema shape.
