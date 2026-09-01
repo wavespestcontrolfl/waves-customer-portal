@@ -133,7 +133,12 @@ router.get('/recordings', async (req, res, next) => {
 router.post('/process/:callSid', async (req, res, next) => {
   try {
     const force = req.query.force === 'true' || req.body?.force === true;
-    const result = await CallRecordingProcessor.processRecording(req.params.callSid, { force });
+    // `operator` = a human pressed Process, which selects the short quiet
+    // window for a stalled claim. Distinct from `force`, which means "re-run
+    // a call that already finished" and carries its own extraction policy —
+    // conflating them made manual first runs behave like reprocesses.
+    const operator = req.query.operator === 'true' || req.body?.operator === true || force;
+    const result = await CallRecordingProcessor.processRecording(req.params.callSid, { force, operator });
     // A blocked claim is not a completed run — surface it as a conflict so
     // no client can render it as success (the owner's manual Process tap
     // during the 2026-08-31 wedge got a 200 and a success toast while the

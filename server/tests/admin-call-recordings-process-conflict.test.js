@@ -63,7 +63,8 @@ describe('POST /process/:callSid skip semantics', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/process/${SID}?force=true`, { method: 'POST' });
       expect(res.status).toBe(200);
-      expect(CallRecordingProcessor.processRecording).toHaveBeenCalledWith(SID, { force: true });
+      // force implies operator: a reprocess is a human asking too.
+      expect(CallRecordingProcessor.processRecording).toHaveBeenCalledWith(SID, { force: true, operator: true });
     });
   });
 });
@@ -75,6 +76,32 @@ describe('POST /process/:callSid skip semantics', () => {
 // The retry window differs by caller: a forced run takes over 3 quiet
 // minutes after a claim stops beating, an unforced one waits 10. Telling
 // every operator the long number cost about seven minutes on a hot call.
+// `force` means "re-run a finished call" and carries extraction policy of its
+// own; `operator` means "a human pressed the button" and selects the short
+// quiet window. Conflating them made a manual FIRST run behave like a
+// historical reprocess.
+describe('operator intent is distinct from force', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a plain operator click does not set force', async () => {
+    CallRecordingProcessor.processRecording.mockResolvedValue({ success: true });
+    await withServer(async (base) => {
+      await fetch(`${base}/admin/call-recordings/process/${SID}?operator=true`, { method: 'POST' });
+    });
+    expect(CallRecordingProcessor.processRecording)
+      .toHaveBeenCalledWith(SID, { force: false, operator: true });
+  });
+
+  test('an unattended run is neither', async () => {
+    CallRecordingProcessor.processRecording.mockResolvedValue({ success: true });
+    await withServer(async (base) => {
+      await fetch(`${base}/admin/call-recordings/process/${SID}`, { method: 'POST' });
+    });
+    expect(CallRecordingProcessor.processRecording)
+      .toHaveBeenCalledWith(SID, { force: false, operator: false });
+  });
+});
+
 describe('the 409 names the retry window that actually applies', () => {
   beforeEach(() => jest.clearAllMocks());
 

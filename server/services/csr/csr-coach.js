@@ -124,7 +124,10 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
     // 3-minute human path and the 10-minute automatic one (codex #3677 P1).
     // Scoring is best-effort: failing after four minutes is strictly better
     // than pinning a call in 'processing'.
-    }, { timeout: CSR_SCORE_TIMEOUT_MS });
+      // maxRetries: 0 — the SDK applies the timeout per ATTEMPT and defaults
+      // to 2 retries, which would let a bounded call hold the caller's claim
+      // for three intervals (codex #3677 P2).
+    }, { timeout: CSR_SCORE_TIMEOUT_MS, maxRetries: 0 });
 
     let score;
     try {

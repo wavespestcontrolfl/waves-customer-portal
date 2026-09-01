@@ -277,7 +277,9 @@ export default function CallRecordingsPanel() {
 
   const processOne = async (callSid, { force = false } = {}) => {
     try {
-      const qs = force ? "?force=true" : "";
+      // operator on every click — a human pressed the button. force only when
+      // the row already finished, since it also changes extraction policy.
+      const qs = force ? "?force=true&operator=true" : "?operator=true";
       const res = await adminFetch(
         `/admin/call-recordings/process/${callSid}${qs}`,
         { method: "POST" },
@@ -706,10 +708,11 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
     setProcessVerdict(null);
     try {
       const res = await adminFetch(
-        // force: a human is asking on purpose, which selects the shorter
-        // quiet window. The heartbeat still protects a live pass — reclaim is
-        // on silence, not on age (codex #3677 P1).
-        `/admin/call-recordings/process/${r.twilio_call_sid}?force=true`,
+        // operator, not force: a human asking on purpose selects the shorter
+        // quiet window, while force would also change extraction policy on
+        // what may be a first run. The heartbeat still protects a live pass —
+        // reclaim is on silence, not on age.
+        `/admin/call-recordings/process/${r.twilio_call_sid}?operator=true`,
         { method: "POST" },
       );
       if (!stillShowing()) return;

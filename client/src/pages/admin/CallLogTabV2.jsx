@@ -480,24 +480,26 @@ export default function CallLogTabV2() {
     window.location.assign(`/admin/communications?${params.toString()}#tab=sms`);
   };
 
-  const handleProcessCall = async (callSid) => {
+  const handleProcessCall = async (callSid, alreadyProcessed = false) => {
     if (!callSid || processingCallSid) return;
     setProcessingCallSid(callSid);
     setProcessResult(null);
-    // EVERY click here is force=true, because every click here is a human
-    // asking on purpose. That used to be reserved for Reprocess, so a stuck
-    // 'processing' row — the exact case this button exists for — got the
-    // conservative 10-minute window and the 3-minute operator recovery was
-    // unreachable from this screen (codex #3677 P1).
+    // operator=true on EVERY click, because every click here is a human
+    // asking on purpose, and that is what selects the short quiet window for
+    // a stalled claim. Previously this sent force=false and the 3-minute
+    // recovery was unreachable from this screen (codex #3677 P1).
     //
-    // What makes it safe is the heartbeat: the claim guard reclaims on
-    // SILENCE, not on age, so a live pass mid-transcription keeps beating and
-    // is still protected from a concurrent run. force no longer means
-    // "ignore the guard" — it means "the shorter quiet window applies".
-    const force = true;
+    // NOT force: that means "re-run a call that already finished" and carries
+    // its own extraction policy — sending it on a manual FIRST run left valid
+    // caller-stated name corrections review-only (codex #3677 P2).
+    //
+    // What makes the short window safe is the heartbeat: the claim guard
+    // reclaims on SILENCE, not on age, so a live pass mid-transcription keeps
+    // beating and is still protected from a concurrent run.
+    const query = alreadyProcessed ? "?force=true&operator=true" : "?operator=true";
     try {
       const res = await adminFetch(
-        `/admin/call-recordings/process/${callSid}${force ? "?force=true" : ""}`,
+        `/admin/call-recordings/process/${callSid}${query}`,
         { method: "POST" },
       );
       // A skip is an HTTP 200 with success:true, and several of them mean
@@ -1283,7 +1285,9 @@ export default function CallLogTabV2() {
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleProcessCall(c.twilio_call_sid)
+                                    // Reprocess: this row already finished, so
+                                    // force applies as well as operator.
+                                    handleProcessCall(c.twilio_call_sid, true)
                                   }
                                   disabled={
                                     !!processingCallSid || !!autoProcessingSid

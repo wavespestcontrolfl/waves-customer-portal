@@ -6024,7 +6024,12 @@ One specific, concrete step Virginia or the office should take within the next 2
 Formatting:
 Use markdown headers (##) for sections. Use bullet points. Keep the entire output under 400 words. Write like you're handing a cheat sheet to a technician sitting in the truck.`,
       }],
-    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction });
+      // maxRetries: 0 — the SDK defaults to 2 and applies the timeout PER
+      // ATTEMPT, so a bounded call could still hold the claim for three
+      // intervals and trip the stall watchdog on a healthy pass (codex P2).
+      // The pipeline has its own retry lanes; a claim-holding pass does not
+      // need a second one inside it.
+    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 });
 
     return response.content[0]?.text?.trim() || null;
   } catch (err) {
@@ -6196,7 +6201,13 @@ const CallRecordingProcessor = {
           .forUpdate()
           .first('first_name', 'last_name', 'phone', 'updated_at') || null;
       }
-      if (!opts.force) {
+      // `operator` — a human pressed a button — selects the short quiet
+      // window. `force` still means "re-run a call that already finished",
+      // which carries its own policy elsewhere (the name-correction
+      // auto-apply gate at allowNameAutoApply). Overloading one flag for both
+      // made every manual first run behave like a historical reprocess and
+      // left valid caller-stated name corrections review-only (codex P2).
+      if (!(opts.force || opts.operator)) {
         // Reclaim stale 'processing' rows older than 10 min — server crash or
         // Gemini hang between claim (this UPDATE) and terminal status write
         // would otherwise wedge the row forever, since both the claim guard
@@ -6329,7 +6340,7 @@ const CallRecordingProcessor = {
         skipped: true,
         reason: 'already_processing',
         retryAfterMinutes: beating
-          ? (opts.force ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
+          ? ((opts.force || opts.operator) ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
           : LEGACY_CLAIM_QUIET_MINUTES,
       };
     }
@@ -13596,6 +13607,10 @@ const CallRecordingProcessor = {
                   // v2EmailBlocked for the email slots). The held codes
                   // never match QUIET_HOURS_HOLD, so the 8 AM sweep re-arm
                   // below cannot resurrect a consentless text.
+                  // Roughly two thousand lines of scheduling work separate
+                  // this from the Step 5 gate, and this is a TEXT TO A
+                  // CUSTOMER. Re-check immediately before it (codex P1).
+                  if (!(await stillOwnsClaim())) return abandonToPeer('the appointment confirmation text');
                   const sendResult = (holdImpliedSmsLeg || v2SmsBlocked)
                     ? {
                       sent: false,
@@ -13761,6 +13776,7 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
+                        if (!(await stillOwnsClaim())) return abandonToPeer('the confirmation fan-out text');
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
@@ -13871,6 +13887,7 @@ const CallRecordingProcessor = {
                       const emailOnlySlots = (confirmationOptedOut || v2EmailBlocked) ? [] : getServiceContactSlots(freshCustomer || {})
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
+                        if (!(await stillOwnsClaim())) return abandonToPeer('the appointment confirmation email');
                         const AppointmentEmail = require('./appointment-email');
                         const emailRes = await AppointmentEmail.sendAppointmentConfirmationEmail({
                           customerId,
