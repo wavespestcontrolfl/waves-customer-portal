@@ -14082,7 +14082,11 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   const beforePestOff = pestPrefPerAppOff(beforeResult, beforeData);
   const afterPestOff = pestPrefPerAppOff(afterResult, afterData);
   const effectivePerApplication = (row, prefOff = 0) => {
-    const annual = Number(row.annualAfterDiscount ?? 0) || 0;
+    // manualFinalAnnual is the FINAL customer amount when an operator manual
+    // discount hit the row; annualAfterDiscount is only post-WaveGuard, and
+    // reading it alone overstates the disclosed dollars on manually
+    // discounted quotes (codex #3684 r4 P1).
+    const annual = Number(row.manualFinalAnnual ?? row.annualAfterDiscount ?? 0) || 0;
     const visits = Number(row.visitsPerYear ?? 0) || 0;
     const gross = annual > 0 && visits > 0
       ? Math.round((annual / visits) * 100) / 100
@@ -14137,7 +14141,15 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
     });
   }
 
-  return { disclosures, wouldChargeBundled };
+  // Canonical after-side per-application terms, for the previewBasis digest:
+  // a pricing-config change can redistribute prices among surviving services
+  // while the aggregates stay put, and the digest must catch that too.
+  const afterPerApplication = svcRows(afterResult).map((r) => ({
+    s: String(r.service || r.name || ''),
+    pa: effectivePerApplication(r, afterPestOff),
+  }));
+
+  return { disclosures, wouldChargeBundled, afterPerApplication };
 }
 
 router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, next) => {
@@ -14178,27 +14190,38 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     const included = req.body.included;
     const dryRun = req.body?.dryRun === true;
 
-    // The commit must be bound to the preview the customer confirmed. A write
-    // landing between preview and confirm (a preference toggle, a tier change,
-    // another opt-out) would otherwise be folded silently into this commit's
-    // fresh recompute — the customer confirms one price and a different one
-    // persists; the CAS below cannot catch it because the commit reads the
-    // already-updated row (codex #3684 r1 P1). The dry run returns the row
-    // version it priced against; the commit requires it back and refuses on
-    // mismatch so the page re-previews with real numbers. Restores have no
-    // preview step and skip the requirement. Both sides of the comparison pass
-    // through the same JS Date millisecond truncation — never compare a JS
-    // ms date to the raw µs column value. Removals AND restores both bind:
-    // a restore is the same whole-estimate reprice, and committing one
-    // without its preview would change tier, fees and per-application prices
-    // sight-unseen (pre-push codex P1 on 9e0c894).
+    // The commit must be bound to the preview the customer confirmed —
+    // removals AND restores alike (pre-push codex P1 on 9e0c894). The row
+    // version alone is not enough: preview and commit independently re-run
+    // the recompute, which syncs mutable pricing config and checks live
+    // membership, so the OUTPUT can drift with no write to the row (pre-push
+    // codex P0 on 094deab). previewBasis is therefore an HMAC digest over the
+    // row version AND the computed money outputs; the commit re-derives it
+    // from its own recompute and refuses on any mismatch — a changed row, a
+    // changed config, or a changed membership verdict all surface as
+    // estimate_changed_since_preview and the page re-previews with real
+    // numbers. Both row-version reads pass through the same JS Date
+    // millisecond truncation — never a JS ms date against the raw µs column.
     const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
-    if (!dryRun) {
-      const previewBasis = typeof req.body?.previewBasis === 'string' ? req.body.previewBasis : null;
-      if (!previewBasis || previewBasis !== rowBasis) {
-        return res.status(409).json({ error: 'estimate_changed_since_preview' });
-      }
-    }
+    const optOutPreviewDigest = (nextTotals, impactState) => crypto
+      .createHmac('sha256', process.env.JWT_SECRET || 'estimate-opt-out-preview')
+      .update(JSON.stringify({
+        rowBasis,
+        serviceKey,
+        included,
+        m: nextTotals.monthlyTotal,
+        a: nextTotals.annualTotal,
+        o: nextTotals.onetimeTotal,
+        w: nextTotals.waveGuardTier || null,
+        // The DISPLAYED terms, not just the aggregates: a config change can
+        // redistribute per-application prices among surviving lines while the
+        // totals stay put (pre-push codex P0 on 2d9fd6e). Disclosures carry
+        // every money sentence the customer confirmed; afterPerApplication
+        // pins the full per-line map even where no disclosure fired.
+        d: impactState.disclosures,
+        p: impactState.afterPerApplication,
+      }))
+      .digest('hex');
 
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
@@ -14286,6 +14309,40 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
         if (p != null && !priors.includes(p)) priors.push(p);
       }
     }
+    // A surviving recurring flag in a replay shape — the reconciler deletes
+    // these for lapsed members, so one still standing is (normally) a verified
+    // active member whose only marker may be that flag. Same truthy coercion
+    // as the reconciler's own trigger (codex #3684 r4 P1).
+    const survivingRecurringFlag = [
+      parsedData.engineInputs, parsedData.inputs, parsedData.engineRequest?.options,
+    ].filter((s) => s && typeof s === 'object').some((s) => {
+      const v = s.recurringCustomer ?? s.isRecurringCustomer;
+      if (v == null || v === false) return false;
+      const normalized = String(v).trim().toLowerCase();
+      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+    });
+    const memberEvidence = parsedData.membershipSnapshot?.isExistingCustomer === true
+      || priors.length > 0 || survivingRecurringFlag;
+    // STRICT verification before member pricing can be WRITTEN (pre-push
+    // codex P0 on e77857d): reconcileFrozenMembershipSnapshot never throws —
+    // a failed live-plan lookup leaves member artifacts standing unverified,
+    // and every other consumer of the reconciled blob only RENDERS. This
+    // route persists. So member-granting evidence requires its own live
+    // check here, and any failure — lookup error, no linked customer, or a
+    // lapsed plan whose artifacts the reconciler failed to clean — fails
+    // CLOSED with the same 409 the reprice rail uses. Nothing is previewed
+    // and nothing is written.
+    if (memberEvidence) {
+      let activeVerified = false;
+      try {
+        activeVerified = !!estimate.customer_id && await isActivePlanCustomer(db, estimate.customer_id);
+      } catch (_) {
+        return res.status(409).json({ error: 'reprice_unavailable' });
+      }
+      if (!activeVerified) {
+        return res.status(409).json({ error: 'reprice_unavailable' });
+      }
+    }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
@@ -14293,8 +14350,11 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       // computeMembershipContext persists a snapshot even for a linked NEW
       // customer (isExistingCustomer: false) — snapshot presence alone must not
       // force the existing-customer perk onto retained one-time work (codex
-      // #3684 r1 P1). The explicit flag, never truthiness.
-      recurringCustomer: parsedData.membershipSnapshot?.isExistingCustomer === true || priors.length > 0,
+      // #3684 r1 P1). The explicit flag, never truthiness. memberEvidence
+      // (snapshot flag, priors in any carrier, or a surviving recurring flag
+      // — codex r4 P1) was LIVE-verified against the customer's plan above;
+      // this handler fails closed before reaching here when it cannot be.
+      recurringCustomer: memberEvidence,
     });
     // Fail CLOSED. Nothing is written and nothing is shown — never fall back to
     // arithmetic or to the stale totals.
@@ -14355,13 +14415,21 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       }
     }
 
+    // One digest for both directions: the dry run hands it out, the commit
+    // re-derives it from its OWN recompute and refuses on any mismatch.
+    const previewDigest = optOutPreviewDigest(next, impact);
     if (dryRun) {
       return res.json({
         success: true, dryRun: true, serviceKey, label, included,
         previous, next, disclosures: impact.disclosures,
-        // Echo this back on the commit; the write refuses if the row moved.
-        previewBasis: rowBasis,
+        // Echo this back on the commit; the write refuses if the row, the
+        // pricing config, or the membership verdict moved since this preview.
+        previewBasis: previewDigest,
       });
+    }
+    const submittedBasis = typeof req.body?.previewBasis === 'string' ? req.body.previewBasis : null;
+    if (!submittedBasis || submittedBasis !== previewDigest) {
+      return res.status(409).json({ error: 'estimate_changed_since_preview' });
     }
 
     // ── commit ──────────────────────────────────────────────────────────

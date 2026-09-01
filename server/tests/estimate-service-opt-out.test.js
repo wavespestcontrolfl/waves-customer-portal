@@ -245,6 +245,16 @@ describe('the audit record', () => {
     expect(applied.removedInputs.engineInputs.termite_bait).toEqual({ stations: 12 });
   });
 
+  it('a profile-less engineRequest is NOT eligible — the recompute refuses that carrier (r4 P1)', () => {
+    // serverRecomputeFromEstimateData translates engineRequest only when
+    // req.profile exists; selectedServices alone would advertise a control
+    // whose every dry-run 409s.
+    const data = { engineRequest: { selectedServices: ['PEST'] } };
+    expect(serviceIsPresentInInputs(data, 'pest_control')).toBe(false);
+    const withProfile = { engineRequest: { profile: { homeSqFt: 2000 }, selectedServices: ['PEST'] } };
+    expect(serviceIsPresentInInputs(withProfile, 'pest_control')).toBe(true);
+  });
+
   it('an inputs-only estimate is NOT eligible — the canonical recompute cannot replay it', () => {
     // serverRecomputeFromEstimateData accepts only engineRequest/engineInputs;
     // advertising removability off `inputs` alone would 409 every preview

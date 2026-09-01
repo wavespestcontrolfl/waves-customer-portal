@@ -4978,7 +4978,13 @@ function EstimateViewPageInner() {
         setCtaPhase('configure');
         setSlotsRefreshSignal((v) => v + 1);
         setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
-        await loadEstimate({ preserveSelection: true });
+        // preserveSelection: FALSE — a locally-picked cadence was chosen
+        // against the old mix, and the preview the customer just confirmed
+        // priced from the STORED cadence. Keeping the local pick would let
+        // accept charge a different per-application amount than the panel
+        // disclosed (codex #3684 r4 P1); the reload resets every section to
+        // the server's cadence, the one the confirmed numbers describe.
+        await loadEstimate({ preserveSelection: false });
         scrollToPriceSection();
       } catch (err) {
         setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });

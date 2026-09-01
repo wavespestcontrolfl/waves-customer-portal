@@ -168,8 +168,12 @@ function serviceIsPresentInInputs(parsedData, sectionKey) {
   const engineInputs = parsedData?.engineInputs;
   if (isPlainObject(engineInputs) && isPlainObject(engineInputs.services)
     && spec.engine.some((k) => engineInputs.services[k] != null)) return true;
+  // engineRequest counts only when it is actually replayable — the recompute
+  // translates it only when req.profile exists, so a legacy request carrying
+  // selectedServices without a profile would advertise a control whose every
+  // dry-run 409s (codex #3684 r4 P1).
   const req = parsedData?.engineRequest;
-  if (isPlainObject(req) && Array.isArray(req.selectedServices)) {
+  if (isPlainObject(req) && isPlainObject(req.profile) && Array.isArray(req.selectedServices)) {
     if (req.selectedServices.some((t) => spec.selected.includes(String(t).toUpperCase()))) return true;
   }
   return false;

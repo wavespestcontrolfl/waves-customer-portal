@@ -92,6 +92,26 @@ describe('optOutImpact per-application disclosures (owner price-copy rule — no
     expect(pa.message).toBe('Pest Control changes from $103.00 to $114.00 per application.');
   });
 
+  it('prefers manualFinalAnnual — the operator-discounted FINAL amount — over annualAfterDiscount (r4 P1)', () => {
+    // annualAfterDiscount is only post-WaveGuard; on an operator-discounted
+    // quote the customer's real amount is manualFinalAnnual, and disclosing
+    // the higher figure would overstate the confirmed dollars.
+    const side = (manualFinalAnnual, annualAfterDiscount) => ({
+      recurring: {
+        services: [{
+          service: 'lawn_care', name: 'Lawn Care',
+          perTreatment: 120, visitsPerYear: 6, annualAfterDiscount, manualFinalAnnual,
+        }],
+      },
+    });
+    const impact = optOutImpact({
+      beforeResult: side(600, 660), afterResult: side(636, 700),
+      beforeData: {}, afterData: {}, label: 'Mosquito',
+    });
+    const pa = impact.disclosures.find((d) => d.code === 'recurring_per_application');
+    expect(pa.message).toBe('Lawn Care changes from $100.00 to $106.00 per application.');
+  });
+
   it('stays silent on a line whose per-application price did not move', () => {
     const impact = optOutImpact({
       beforeResult: mk('Gold', 103), afterResult: mk('Gold', 103),
