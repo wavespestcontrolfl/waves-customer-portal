@@ -111,38 +111,66 @@ function aliasInsertPatterns(src, token) {
 // literal either is leads-shaped (the main scan owns it) or provably is not.
 // Everything else must appear in DYNAMIC_TABLE_INSERTS with a reason its
 // table set can never contain 'leads'.
-// Newline-preserving comment/string blanking for the dynamic scan — a regex
-// or label STRING that spells `.into(table)` (contract-tests/validators)
-// must not read as a dynamic insert. Newlines survive so line numbers stay
-// aligned with the original source.
+// Newline- and length-preserving comment/string blanking — a regex or label
+// STRING that spells `.into(table)` must not read as a dynamic insert, and a
+// string containing '/*' must not swallow the live code after it. A SINGLE
+// lexical pass tracks string vs. comment state, so delimiters inside strings
+// are string content, never syntax. Template literals blank their text but
+// PRESERVE the code inside ${...} substitutions — db(`${schema}.leads`)
+// leaves `schema` visible and reads as a dynamic argument. (Regex literals
+// are not lexed; a quote inside one can over-blank to end-of-line, which
+// only errs toward flagging.)
 function blankCommentsAndStrings(code) {
-  const blank = (s) => s.replace(/[^\n]/g, ' ');
-  // Template literals: blank the string TEXT but PRESERVE the code inside
-  // ${...} substitutions (length- and newline-preserving) — so
-  // db(`${schema}.leads`) leaves `schema` visible, reads as a non-blank
-  // argument, and is classified dynamic instead of vanishing entirely.
-  const blankTemplate = (s) => {
-    let out = '';
-    let depth = 0;
-    for (let i = 0; i < s.length; i += 1) {
-      const c = s[i];
-      if (depth === 0 && c === '$' && s[i + 1] === '{') { depth = 1; out += '  '; i += 1; continue; }
-      if (depth > 0) {
-        if (c === '{') depth += 1;
-        else if (c === '}') { depth -= 1; out += ' '; continue; }
-        out += c === '\n' || depth > 0 ? c : ' ';
-        continue;
-      }
-      out += c === '\n' ? c : ' ';
+  const n = code.length;
+  let out = '';
+  const blank = (c) => { out += c === '\n' ? '\n' : ' '; };
+  let i = 0;
+  while (i < n) {
+    const c = code[i];
+    const d = code[i + 1];
+    if (c === '/' && d === '/') {
+      while (i < n && code[i] !== '\n') { blank(code[i]); i += 1; }
+      continue;
     }
-    return out;
-  };
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, blank)
-    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p) => p + blank(m.slice(p.length)))
-    .replace(/'(?:\\.|[^'\\\n])*'/g, blank)
-    .replace(/"(?:\\.|[^"\\\n])*"/g, blank)
-    .replace(/`(?:\\.|[^`\\])*`/g, blankTemplate);
+    if (c === '/' && d === '*') {
+      blank(c); blank(d); i += 2;
+      while (i < n && !(code[i] === '*' && code[i + 1] === '/')) { blank(code[i]); i += 1; }
+      if (i < n) { blank('*'); blank('/'); i += 2; }
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      blank(c); i += 1;
+      while (i < n && code[i] !== c && code[i] !== '\n') {
+        if (code[i] === '\\') { blank(code[i]); i += 1; }
+        if (i < n) { blank(code[i]); i += 1; }
+      }
+      if (i < n) { blank(code[i]); i += 1; }
+      continue;
+    }
+    if (c === '`') {
+      blank(c); i += 1;
+      let depth = 0;
+      while (i < n) {
+        if (depth === 0 && code[i] === '\\') { blank(code[i]); i += 1; if (i < n) { blank(code[i]); i += 1; } continue; }
+        if (depth === 0 && code[i] === '`') { blank(code[i]); i += 1; break; }
+        if (depth === 0 && code[i] === '$' && code[i + 1] === '{') { depth = 1; blank('$'); blank('{'); i += 2; continue; }
+        if (depth > 0) {
+          if (code[i] === '{') depth += 1;
+          else if (code[i] === '}') {
+            depth -= 1;
+            if (depth === 0) { blank('}'); i += 1; continue; }
+          }
+          out += code[i]; i += 1;
+          continue;
+        }
+        blank(code[i]); i += 1;
+      }
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
 }
 
 // ANY table argument, running over BLANKED code: a pure string-literal
@@ -212,10 +240,11 @@ function scanSourceForDynamicTableInserts(src) {
   // offsets are interchangeable). Same rule as the knex shapes: resolved
   // only by a SCREAMING_SNAKE module const, else allowlist or reject.
   const RAW_DYNAMIC_RES = [
-    // Optional identifier quote around the interpolated target —
-    // `INSERT INTO "${table}"` is valid PostgreSQL.
-    /\binsert\s+into\s+(?:only\s+)?["'`]?\$\{([^}]+)\}/gi,
-    /\binsert\s+into\s+(?:only\s+)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
+    // Optional literal schema qualifier and/or identifier quote around the
+    // interpolated target — `INSERT INTO public.${table}` and
+    // `INSERT INTO "${table}"` are both valid PostgreSQL.
+    /\binsert\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?["'`]?\$\{([^}]+)\}/gi,
+    /\binsert\s+into\s+(?:only\s+)?(?:[\w$]+\.)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
     // Knex identifier bindings at the table position — positional (??) or
     // named (:table:), with an optional literal schema qualifier
     // (`public.??`) — the bound value is runtime data, so it is dynamic by
@@ -440,6 +469,14 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       'await db.raw(`INSERT INTO "${table}" (a) VALUES (?)`, [a]);'
     );
     expect(quotedRawTemplate).toHaveLength(1);
+    const schemaRawTemplate = scanSourceForDynamicTableInserts(
+      'await db.raw(`INSERT INTO public.${table} (a) VALUES (?)`, [a]);'
+    );
+    expect(schemaRawTemplate).toHaveLength(1);
+    const stringWithCommentDelims = scanSourceForDynamicTableInserts(
+      "const start = '/*';\nawait db(table).insert(row);\nconst end = '*/';"
+    );
+    expect(stringWithCommentDelims).toHaveLength(1);
     const factoryDynamic = scanSourceForDynamicTableInserts('await getDb()(table).insert(row);');
     expect(factoryDynamic).toHaveLength(1);
     // A literal raw table with interpolated VALUES stays with the literal scan.
@@ -521,6 +558,10 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // (`table: resolveTable(...)`) fails unless explicitly allowValues'd.
         const src = files.find((f) => f.rel === w.file).src;
         const propAlt = cc.props.map(escapeRe).join('|');
+        // Object SHORTHAND of a listed prop ({ table, … }) binds a runtime
+        // variable no matcher can validate — rejected outright.
+        const shorthand = [...src.matchAll(new RegExp(String.raw`[{,]\s*(?:${propAlt})\s*(?=[,}])`, 'g'))];
+        expect(shorthand.map((s) => s[0].trim())).toEqual([]);
         const assignments = [...src.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*('[\w.]+'|[^,}\n]+)`, 'g'))];
         const literals = [];
         for (const a of assignments) {
@@ -559,14 +600,24 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           let m;
           while ((m = re.exec(src))) {
             callers += 1;
-            const after = src.slice(re.lastIndex, re.lastIndex + 400);
-            const objectLiteral = /^\s*\{/.test(after);
+            const after = src.slice(re.lastIndex, re.lastIndex + 600);
+            const openIdx = after.search(/\S/);
+            const objectLiteral = after[openIdx] === '{';
             expect({ caller: `${rel}@${m.index}`, objectLiteral })
               .toEqual({ caller: `${rel}@${m.index}`, objectLiteral: true });
+            // Balanced-brace extraction of THIS call's object literal, so an
+            // adjacent call's binding cannot be borrowed.
+            let depth = 0;
+            let end = openIdx;
+            for (; end < after.length; end += 1) {
+              if (after[end] === '{') depth += 1;
+              else if (after[end] === '}') { depth -= 1; if (depth === 0) break; }
+            }
+            const arg = after.slice(openIdx, end + 1);
             const bindRe = new RegExp(
               String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}` : ''})`
             );
-            const bound = after.match(bindRe);
+            const bound = arg.match(bindRe);
             expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
               .toEqual({ caller: `${rel}@${m.index}`, bound: true });
             if (bound[1]) assertNotLeads(rel, bound[1]);
@@ -660,23 +711,12 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     return lines.slice(start, end + 1).join('\n');
   }
 
-  // Strip comments and string/template literals so `// TODO: use
-  // findReusableCallLead` or a log string is not resolver evidence — only an
-  // identifier in live code counts. Regex-based, not a lexer: `://` inside a
-  // string survives the line-comment pass (the (^|[^:]) guard), and any
-  // over-stripping only makes the check STRICTER, never lets evidence in.
-  // The evidence bar stays "identifier appears in code", not "call
-  // expression" — two registered resolvers (dedupEmail, nameConflicts) are
-  // variables driving inline lookups, not callables.
-  function stripCommentsAndStrings(code) {
-    return code
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/(^|[^:])\/\/[^\n]*/gm, '$1')
-      .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
-      .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
-      .replace(/`(?:\\.|[^`\\])*`/g, '``');
-  }
-
+  // Resolver evidence runs on blankCommentsAndStrings output — `// TODO: use
+  // findReusableCallLead` or a log string is not evidence; only an
+  // identifier in live code (template substitutions included) counts. The
+  // evidence bar stays "identifier appears in code", not "call expression" —
+  // two registered resolvers (dedupEmail, nameConflicts) are variables
+  // driving inline lookups, not callables.
   test("'none' requires a reason; a named resolver must be referenced in live code within the insert's enclosing function", () => {
     for (const w of LEAD_WRITERS) {
       if (w.identityResolver === 'none') {
@@ -687,7 +727,7 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       const lines = fs.readFileSync(path.join(SERVER_ROOT, w.file), 'utf8').split('\n');
       const anchorIdx = lines.findIndex((l) => l.trim() === w.anchor);
       expect({ site: key(w), anchorFound: anchorIdx >= 0 }).toEqual({ site: key(w), anchorFound: true });
-      const span = stripCommentsAndStrings(enclosingFunctionSpan(lines, anchorIdx));
+      const span = blankCommentsAndStrings(enclosingFunctionSpan(lines, anchorIdx));
       const identifier = w.identityResolver.split(/[\s(]/)[0];
       const referenced = new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(span);
       expect({ site: key(w), resolver: identifier, referenced }).toEqual({ site: key(w), resolver: identifier, referenced: true });
