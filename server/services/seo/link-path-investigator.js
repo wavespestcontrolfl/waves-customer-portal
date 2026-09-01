@@ -368,6 +368,7 @@ function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
 async function upsertPath(trx, domainId, row, { replacesPathId = null, now }) {
   const existing = await trx('seo_link_acquisition_paths')
     .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('*');
+  let id;
   if (existing) {
     const bump = {
       revision_payment: changedInputs(existing, row, PAYMENT_INPUTS),
@@ -381,26 +382,30 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now }) {
     if (bump.revision_execution) patch.revision_execution = Number(existing.revision_execution) + 1;
     if (bump.revision_payment || bump.revision_communication || bump.revision_execution) patch.revision = Number(existing.revision) + 1;
     await trx('seo_link_acquisition_paths').where({ id: existing.id }).update(patch);
-    return existing.id;
+    id = existing.id;
+  } else {
+    await trx('seo_link_acquisition_paths')
+      .insert({ domain_id: domainId, ...row })
+      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore();
+    const inserted = await trx('seo_link_acquisition_paths')
+      .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('id');
+    id = inserted && inserted.id;
   }
-  await trx('seo_link_acquisition_paths')
-    .insert({ domain_id: domainId, ...row })
-    .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore();
-  const inserted = await trx('seo_link_acquisition_paths')
-    .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('id');
-  const newId = inserted && inserted.id;
   // §3.2 supersession, step-3 minimal form (nothing executes yet — no
   // purchases, approvals or authority instances exist to pin or carry):
   // mark the matched predecessor superseded and repoint its placements.
-  if (newId && replacesPathId) {
+  // Runs for BOTH branches — the replacement may already exist as an active
+  // row (a re-investigation reporting the same successor again), and the
+  // predecessor must still retire.
+  if (id && replacesPathId && replacesPathId !== id) {
     const old = await trx('seo_link_acquisition_paths')
       .where({ id: replacesPathId, domain_id: domainId }).whereNull('superseded_by').first('id');
-    if (old && old.id !== newId) {
-      await trx('seo_link_acquisition_paths').where({ id: old.id }).update({ superseded_by: newId, superseded_at: now, updated_at: now });
-      await trx('seo_link_prospects').where({ path_id: old.id }).update({ path_id: newId, updated_at: now });
+    if (old) {
+      await trx('seo_link_acquisition_paths').where({ id: old.id }).update({ superseded_by: id, superseded_at: now, updated_at: now });
+      await trx('seo_link_prospects').where({ path_id: old.id }).update({ path_id: id, updated_at: now });
     }
   }
-  return newId;
+  return id;
 }
 
 // ---------------------------------------------------------------------------

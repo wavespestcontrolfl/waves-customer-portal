@@ -506,6 +506,29 @@ describe('full run', () => {
     expect(v.verification.currency_evidence).toBe('processor_currency_unverifiable_static');
   });
 
+  test('supersession also fires when the replacement path ALREADY exists in place (Codex r8 P1)', async () => {
+    const d = domainRow();
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
+      path_key: 'paid_listing:https://example.com/old-join', superseded_by: null, baseline: false, confidence: 0.5,
+      last_investigated_at: null, revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const existingReplacement = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: null, revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath, existingReplacement], seo_link_prospects: [placement] });
+    const replacing = modelPath({ replaces_path_id: oldPath.id }); // same key as existingReplacement → update branch
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
+    expect(r.superseded).toBe(1);
+    const old = db._tables.seo_link_acquisition_paths.find((p) => p.id === oldPath.id);
+    expect(old.superseded_by).toBe(existingReplacement.id);
+    expect(db._tables.seo_link_prospects[0].path_id).toBe(existingReplacement.id);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(2); // no third row
+  });
+
   test('a redirect that leaves the domain is rejected as model input and evidence (Codex r3 P1)', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });
