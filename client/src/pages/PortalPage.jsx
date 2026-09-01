@@ -427,6 +427,12 @@ const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_SOFT = CUSTOMER_SURFACE.soft;
 const ESTIMATE_SOFT_BORDER = CUSTOMER_SURFACE.softBorder;
 
+// WebKit before 15.4 (inside Capacitor's iOS 14 deployment floor) has no
+// dvh unit — an inline declaration using it is DISCARDED, not fallen back
+// from, scroll-locking sheets out of reach. Detect once; vh is the degraded
+// but safe budget on old engines.
+const DVH = (typeof CSS !== 'undefined' && CSS.supports && CSS.supports('height', '100dvh')) ? 'dvh' : 'vh';
+
 const PORTAL_SHELL = {
   page: ESTIMATE_BG,
   surface: '#FFFFFF',
@@ -9539,7 +9545,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         position: 'relative',
         width: '100%',
         maxWidth: 860,
-        maxHeight: compact ? 'calc(100dvh - 10px)' : 'calc(100dvh - 40px)',
+        maxHeight: compact ? `calc(100${DVH} - 10px)` : `calc(100${DVH} - 40px)`,
         overflowY: 'auto',
         background: PORTAL_SHELL.page,
         border: `1px solid ${PORTAL_SHELL.border}`,
@@ -14650,7 +14656,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         animation: 'moreSheetUp 0.25s ease',
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
         // dvh: 100vh over-measures behind the iOS Safari toolbar.
-        maxHeight: 'calc(100dvh - 16px)',
+        maxHeight: `calc(100${DVH} - 16px)`,
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
@@ -14929,7 +14935,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           boxSizing: 'border-box',
           borderRadius: compact ? '8px 8px 0 0' : 8,
           maxHeight: compact
-            ? (viewportH ? `min(85dvh, ${viewportH}px)` : '85dvh')
+            ? (viewportH ? `min(85${DVH}, ${viewportH}px)` : `85${DVH}`)
             : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
@@ -15446,7 +15452,7 @@ export default function PortalPage() {
                 overflow: 'hidden',
                 // dvh + safe-area: the menu sits ~60px below the notch, so a
                 // plain 100vh budget pushed the last rows off-screen on iOS.
-                maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 84px)',
+                maxHeight: `calc(100${DVH} - env(safe-area-inset-top, 0px) - 84px)`,
                 overflowY: 'auto',
                 WebkitOverflowScrolling: 'touch',
                 // Keep the menu's scroll from chaining to the page behind it.
