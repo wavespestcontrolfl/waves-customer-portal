@@ -2343,4 +2343,22 @@ describe('full run', () => {
     expect(r.investigated).toBe(1);
     expect(fetched.some((u) => u.startsWith('https://www.example.com/'))).toBe(true);
   });
+
+  test('supersession onto a gated or paid successor re-derives the placement policy with the classifier rules (local Codex P1)', async () => {
+    const d = domainRow();
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'self_service_free', submission_url: 'https://example.com/old-join',
+      path_key: 'self_service_free:https://example.com/old-join', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const signup = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect', claimed_at: null, target_url: 'https://example.com/old-join', automation_policy: 'submit_free' };
+    const outreach = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect', claimed_at: null, target_url: 'https://example.com/old-join', automation_policy: null };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath], seo_link_prospects: [signup, outreach] });
+    const goneFetch = async (url) => (url.includes('/old-join') ? { status: 404, finalUrl: url, html: null, blocked: false } : okFetch(url));
+    // the successor is a PAID listing (modelPath default: paid_listing, payment_required true, no account)
+    await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ replaces_path_id: oldPath.id, account_required: false, email_verification: false })]) }) }));
+    const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
+    expect(signup).toMatchObject({ path_id: fresh.id, target_url: 'https://example.com/join', automation_policy: 'pay_and_submit', last_classified_at: NOW });
+    expect(outreach).toMatchObject({ path_id: fresh.id, target_url: 'https://example.com/join', automation_policy: null }); // not in the signup lane — policy stays null
+  });
 });

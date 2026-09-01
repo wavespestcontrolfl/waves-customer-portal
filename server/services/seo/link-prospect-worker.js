@@ -125,13 +125,21 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // closed: a settlement error aborts the claim (nothing leased).
     const settled = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: ids, now: new Date() });
     if (settled) {
-      const moved = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url');
+      const moved = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url', 'automation_policy', 'last_classified_at');
       const byId = new Map((moved || []).map((m) => [m.id, m]));
       rows = rows.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }));
+      // The safety filter above ran against the PRE-settlement policy.
+      // Settlement re-derives automation_policy from the successor's gates
+      // (registry.successorPolicy), so a row whose policy just changed is
+      // no longer eligible for THIS claim: it stays un-leased under its new
+      // policy for the lane that owns it (a human, or the pay lane).
+      if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
+      if (rows.length === 0) return [];
     }
+    const leaseIds = rows.map((r) => r.id);
     const now = new Date();
     await trx('seo_link_prospects')
-      .whereIn('id', ids)
+      .whereIn('id', leaseIds)
       .update({ claimed_at: now, claimed_by: WORKER, updated_at: now });
 
     // lease_token = the claim timestamp; the worker echoes it back in /report so

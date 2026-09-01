@@ -615,7 +615,7 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
       frontier = rows.map((r) => r.id).filter((x) => x !== id && !retired.includes(x));
       retired.push(...frontier);
     }
-    await registry.settleRetiredPlacements(trx, { pathIds: retired, successor: { id, submission_url: row.submission_url }, now });
+    await registry.settleRetiredPlacements(trx, { pathIds: retired, successor: { ...row, id }, now });
   }
   return id;
 }
