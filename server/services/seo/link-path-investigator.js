@@ -816,7 +816,10 @@ async function investigatePaths(db, {
           })
           .filter((p) => {
             if (!p.rejectedClaim) return true;
-            logger.info(`[link-investigator] ${host}: discarded model path (${p.rejectedClaim}) ${JSON.stringify(p.offhost)}`);
+            // hostnames only — an untrusted URL's query/userinfo can carry
+            // tokens or emails, and logs are no place for either
+            const offhostHosts = Object.values(p.offhost).map((u) => { try { return new URL(u).hostname; } catch { return 'unparseable'; } });
+            logger.info(`[link-investigator] ${host}: discarded model path (${p.rejectedClaim})${offhostHosts.length ? ` offhost: ${offhostHosts.join(', ')}` : ''}`);
             return false;
           });
 
