@@ -104,6 +104,17 @@ function aliasInsertPatterns(src, token) {
   while ((decl = declRe.exec(src))) {
     patterns.push(new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
   }
+  // Arrow FACTORY returning the builder — `const baseQuery = () =>
+  // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
+  // idiom). Parenthesized or bare parameter lists both count.
+  const factoryRe = new RegExp(
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    'g'
+  );
+  let fac;
+  while ((fac = factoryRe.exec(src))) {
+    patterns.push(new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
+  }
   return patterns;
 }
 
@@ -245,7 +256,8 @@ function scanSourceForDynamicTableInserts(src) {
     // the insert may read a different binding, so it stays dynamic.
     const indentedDecl = new RegExp(String.raw`^[\t ]+(?:const|let|var)\s+(?:\{[^{}\n]*)?\b${escapeRe(root)}\b`, 'm');
     const paramBinding = new RegExp(String.raw`[(,]\s*(?:\{[^{}]*)?\b${escapeRe(root)}\b[^()]*\)\s*(?:=>|\{)`);
-    return !indentedDecl.test(code) && !paramBinding.test(code);
+    const bareArrowParam = new RegExp(String.raw`\b${escapeRe(root)}\s*=>`);
+    return !indentedDecl.test(code) && !paramBinding.test(code) && !bareArrowParam.test(code);
   };
   const record = (index, matchLen, expr) => {
     if (!expr.trim()) return; // pure string literal, blanked — the literal scan owns it
@@ -273,6 +285,19 @@ function scanSourceForDynamicTableInserts(src) {
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, decl[2]);
   }
+  // Arrow FACTORY over a dynamic table — `const q = (t) => db(t); …
+  // q(x).insert(row)` — the dynamic mirror of the literal factory pass.
+  const dynFactoryRe = new RegExp(
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    'g'
+  );
+  let fac;
+  while ((fac = dynFactoryRe.exec(code))) {
+    if (!fac[2].trim() || isResolved(fac[2])) continue;
+    const useRe = new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g');
+    let use;
+    while ((use = useRe.exec(code))) record(use.index, use[0].length, fac[2]);
+  }
   // Raw SQL with a DYNAMIC target — `INSERT INTO ${table}` or
   // `'INSERT INTO ' + table` — scanned on the ORIGINAL source (the SQL text
   // lives in strings blanking removes; blanking is length-preserving, so
@@ -283,7 +308,9 @@ function scanSourceForDynamicTableInserts(src) {
     // interpolated target — `INSERT INTO public.${table}` and
     // `INSERT INTO "${table}"` are both valid PostgreSQL.
     /\binsert\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?["'`]?\$\{([^}]+)\}/gi,
-    /\binsert\s+into\s+(?:only\s+)?(?:[\w$]+\.)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
+    // Concatenated target — a bare identifier/member OR a parenthesized
+    // expression (`'INSERT INTO ' + (kind ? 'leads' : 'audit')`).
+    /\binsert\s+into\s+(?:only\s+)?(?:[\w$]+\.)?['"`]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)/gi,
     // Knex identifier bindings at the table position — positional (??) or
     // named (:table:), with an optional literal schema qualifier
     // (`public.??`) — the bound value is runtime data, so it is dynamic by
@@ -405,6 +432,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['inline comment in builder call', "await db(/* primary table */ 'leads').insert(row);"],
     ['assigned-later stored builder', "let target;\ntarget = db('leads');\nawait target.insert(row);"],
     ['factory-returned stored builder', "const target = getDb()('leads');\nawait target.insert(row);"],
+    ['arrow factory returning the builder', "const baseQuery = () => db('leads');\nawait baseQuery().insert(row);"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -541,6 +569,18 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       "const TABLE = 'audit';\nasync function f(TABLE, row) {\n  await db(TABLE).insert(row);\n}"
     );
     expect(shadowedUpper).toHaveLength(1);
+    const bareArrowShadow = scanSourceForDynamicTableInserts(
+      "const TABLE = 'audit';\nconst write = TABLE => db(TABLE).insert(row);"
+    );
+    expect(bareArrowShadow).toHaveLength(1);
+    const parenConcatRaw = scanSourceForDynamicTableInserts(
+      "await db.raw('INSERT INTO ' + (kind ? 'lead_things' : 'audit') + ' (a) VALUES (?)', [a]);"
+    );
+    expect(parenConcatRaw).toHaveLength(1);
+    const dynArrowFactory = scanSourceForDynamicTableInserts(
+      'const q = (t) => db(t);\nawait q(x).insert(row);'
+    );
+    expect(dynArrowFactory).toHaveLength(1);
   });
 
   test('dynamic-table scan: two dynamic inserts on one line surface as TWO sites', () => {
@@ -630,6 +670,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         }
         const objText = code.slice(openIdx, end + 1);
         const objBare = bare.slice(openIdx, end + 1);
+        // The config must stay IMMUTABLE after declaration — a later
+        // property write (TYPES.lawn.table = x) or Object.assign /
+        // defineProperty over it would feed the insert a runtime table.
+        const mutation = bare.match(new RegExp(
+          String.raw`\b${escapeRe(cc.object)}\b\s*(?:\.[\w$]+|\[[^\]]*\])+\s*=[^=]|Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\s*\([^)]*\b${escapeRe(cc.object)}\b`
+        ));
+        expect({ file: w.file, mutation: mutation && mutation[0].trim() })
+          .toEqual({ file: w.file, mutation: null });
         expect({ file: w.file, spreads: (objBare.match(/\.\.\./g) || []).length })
           .toEqual({ file: w.file, spreads: 0 });
         const propAlt = cc.props.map(escapeRe).join('|');
@@ -675,6 +723,19 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           assertNotLeads(`${w.file} ${cc.helper}`, lit[1]);
         }
         expect(callCount).toBeGreaterThanOrEqual(cc.minCallers);
+        // Aliasing the in-file helper (const upsert = upsertChunked) would
+        // route calls around the name-based enumeration — a bare (non-call)
+        // reference in live code is rejected. Module-internal, so there is
+        // no require/exports exception.
+        const bareFile = blankCommentsAndStrings(files.find((f) => f.rel === w.file).src);
+        const refRe2 = new RegExp(String.raw`\b${escapeRe(cc.helper)}\b(?!\s*\()`, 'g');
+        let r2;
+        while ((r2 = refRe2.exec(bareFile))) {
+          const ls = bareFile.lastIndexOf('\n', r2.index) + 1;
+          const le = bareFile.indexOf('\n', r2.index);
+          const lt = bareFile.slice(ls, le === -1 ? bareFile.length : le).trim();
+          expect({ ref: `${w.file}: ${lt}`, aliased: true }).toEqual({ ref: `${w.file}: ${lt}`, aliased: false });
+        }
       } else if (cc.kind === 'object-call') {
         // Exported helper: EVERY invocation anywhere under server/ — not
         // just object-literal ones — is enumerated. A call passing a
@@ -719,8 +780,11 @@ describe('lead-writer registry (#3137 groundwork)', () => {
               .toEqual({ caller: `${rel}@${m.index}`, topSpreads: 0 });
             const bindCount = (top.match(new RegExp(String.raw`\b${escapeRe(cc.prop)}\s*:`, 'g')) || []).length;
             expect({ caller: `${rel}@${m.index}`, bindCount }).toEqual({ caller: `${rel}@${m.index}`, bindCount: 1 });
+            // The COMPLETE value must be the literal or the indirect
+            // expression — a delimiter must follow, so `'lead' + 's'` and
+            // `config.photoTableSuffix` don't pass on a prefix.
             const bindRe = new RegExp(
-              String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}` : ''})`
+              String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}\\b` : ''})\s*(?=[,}\n])`
             );
             const bound = top.match(bindRe);
             expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
