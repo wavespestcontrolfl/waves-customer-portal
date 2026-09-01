@@ -240,6 +240,14 @@ describe('cancelled customer — read allowance (gate on)', () => {
     expect(login.status).toBe(401);
   });
 
+  test('cancelledAt is the EASTERN calendar day of the churn stamp — a late-evening ET cancellation must not show tomorrow (codex pre-push P1)', async () => {
+    // 2026-08-23T00:30:00Z = Aug 22, 8:30pm ET.
+    tables.customers.find((c) => c.id === 'cust-churned').churned_at = new Date('2026-08-23T00:30:00Z');
+    const me = await call('GET', '/api/auth/me', bearer('cust-churned'));
+    expect(me.status).toBe(200);
+    expect(me.body.cancelledAt).toBe('2026-08-22');
+  });
+
   // In-app account deletion (App Store 5.1.1(v)) is the one write besides
   // restart a cancelled customer keeps — the confirm dialog must not land on
   // a 401 (codex GH r5 P1).

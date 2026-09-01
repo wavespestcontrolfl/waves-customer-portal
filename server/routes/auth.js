@@ -4,6 +4,7 @@ const Sentry = require('@sentry/node');
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const { etDateString } = require('../utils/datetime-et');
 const CustomerCredit = require('../services/customer-credit');
 const TwilioService = require('../services/twilio');
 const {
@@ -454,9 +455,16 @@ router.get('/me', authenticate, async (req, res, next) => {
     credits,
     annualPrepay,
     // C4: the cancelled state the portal renders read-only. cancelledAt is
-    // the ET calendar date the processor stamped (customers.churned_at).
+    // the ET calendar date the processor stamped (customers.churned_at) —
+    // churned_at is a timestamptz, so the UTC slice would show the NEXT day
+    // for any 8pm–midnight ET cancellation (codex pre-push P1); the term
+    // dates above stay on dateOnlyForApi because they are date-only columns.
     cancelled: req.customerInactive === true,
-    cancelledAt: req.customerInactive === true ? dateOnlyForApi(customer.churned_at) : null,
+    cancelledAt: req.customerInactive === true && customer.churned_at
+      ? (typeof customer.churned_at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(customer.churned_at)
+        ? customer.churned_at
+        : etDateString(new Date(customer.churned_at)))
+      : null,
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,
