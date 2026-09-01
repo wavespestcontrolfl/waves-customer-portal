@@ -103,6 +103,12 @@ const {
 const {
   createEstimateAddServiceRequest,
 } = require('../services/estimate-add-service-request');
+const {
+  rawEngineInputs,
+  estimateLawnFloorArmed,
+  lawnRowsShowFloorEnforcement,
+  savedFloorReplaySignals,
+} = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
 const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
@@ -136,6 +142,29 @@ const commercialInteriorSwitchLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   skip: () => !commercialInteriorOptionGateOn(),
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
+// Customer service opt-out (PUT /:token/service-opt-out). 40/hr rather than
+// the 30 the two switchers above use, for two reasons: every removal is TWO
+// calls (dryRun preflight, then commit) and every restore two more, so 30
+// leaves a real customer ~7 round trips before being locked out of their own
+// estimate mid-decision; and rateLimitKey collapses unauthenticated traffic to
+// a /64 IP, so a NAT'd household or a shared office shares one bucket. The
+// budget also bounds compute — each dryRun runs syncConstantsFromDB plus a
+// full generateEstimate on an unauthenticated public route.
+//
+// The skip is REQUIRED, not stylistic (same lesson as the add-service limiter
+// below): this limiter runs BEFORE the handler's gate check, so without it a
+// probe distinguishes the dark route by a 429 on the 41st request instead of
+// the promised generic 404.
+const serviceOptOutLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  skip: () => !serviceOptOutGateOn(),
   message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
 });
 
@@ -1720,6 +1749,11 @@ function buildEstimateInvoiceModeDraft({
   // labeled-discount itemization as the standard accept leg (codex 2652 r2:
   // invoice-mode accepts previously dropped the promised label).
   manualDiscountItemization = null,
+  // Frozen rodent bait-station setup the accepted estimate disclosed
+  // (EstimateConverter.frozenRodentBaitSetupAmount) — the recurring
+  // invoice-mode draft bills it beside the first application exactly like
+  // the standard accept leg (codex #3591 r15 P1).
+  rodentSetupAmount = 0,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -1815,11 +1849,20 @@ function buildEstimateInvoiceModeDraft({
       unit_price: amount,
     }];
 
+  const setupAmount = roundInvoiceAmount(rodentSetupAmount) || 0;
+  if (setupAmount > 0) {
+    recurringLineItems.push({
+      description: 'Bait Station Setup — one-time setup fee',
+      quantity: 1,
+      unit_price: setupAmount,
+    });
+  }
+
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
-    amount,
-    title: `${svcType} — first ${visitNoun}`,
+    amount: Math.round((amount + setupAmount) * 100) / 100,
+    title: setupAmount > 0 ? `${svcType} — first ${visitNoun} + bait station setup` : `${svcType} — first ${visitNoun}`,
     lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
@@ -1919,7 +1962,7 @@ const SERVICE_COPY = {
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
     askChips: [
       'How long does each visit last?',
-      'Pet & kid safe?',
+      'What precautions should I follow for pets and children?',
       'When does the season start?',
       'What about my pool area?',
     ],
@@ -1983,12 +2026,7 @@ const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
@@ -2000,7 +2038,7 @@ const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets & kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'What product is used for Bora-Care?',
       'When should this be done?',
     ],
@@ -2023,6 +2061,30 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for lawn care.",
     },
   },
+  wdo_inspection: {
+    headline: "Hey {first}, here's your WDO inspection quote.",
+    aiEyebrow: 'Your inspection',
+    aiTitle: 'Your WDO inspection was prepared for this property',
+    aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
+    askChips: [],
+    priceWording: {},
+  },
+  termite_foam: {
+    headline: "Hey {first}, here's your termite foam treatment quote.",
+    aiEyebrow: 'Your treatment plan',
+    aiTitle: 'This quote was prepared for the targeted termite treatment area',
+    aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
+    priceWording: {},
+  },
+  trap_only: {
+    headline: "Hey {first}, here's your trap-only monitoring plan.",
+    aiEyebrow: 'Your monitoring plan',
+    aiTitle: 'This trap-only plan was prepared for your property',
+    aiBody: 'The plan separates the initial setup and inspection from the ongoing trap-monitoring service and its scheduled cadence.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',
@@ -2032,7 +2094,7 @@ const SERVICE_COPY = {
       'What is included in this plan?',
       'How do you handle ants?',
       'How does your lawn assessment tech work?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
@@ -2176,10 +2238,10 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
-const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+const SAFETY_ASK_CHIP = 'What precautions should I follow for pets and children?';
 // Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
 // borate-specific answer instead of the generic label-direction safety copy.
-const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+const BORA_CARE_SAFETY_ASK_CHIP = 'What precautions should I follow with Bora-Care around pets and children?';
 // Bora-Care service chip — shared between the SSR prompt builder and the React
 // pricing contract so a Bora-Care add-on surfaces it on both paths.
 const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
@@ -2831,6 +2893,10 @@ function buildStandardPayPerApplicationInvoiceCopy({
   setupAmount = 0,
   firstApplicationAmount = 0,
   fallbackNoPaymentCopy = 'No payment is charged on this page. Your first service visit will be billed after completion.',
+  // What the setup share IS — 'WaveGuard setup' (membership fee), 'bait
+  // station setup' (a non-member's rodent plan), or both. The copy must
+  // name what the invoice bills (codex #3591 r9 P1).
+  setupLabel = 'WaveGuard setup',
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -2846,7 +2912,7 @@ function buildStandardPayPerApplicationInvoiceCopy({
       firstApplicationAmount: firstApplication,
       totalAmount: total,
       payAfterBody: `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes WaveGuard setup + first application (${fmtMoney(total)}).`,
+      payPrefCardSub: `Invoice includes ${setupLabel} + first application (${fmtMoney(total)}).`,
       billingSmall: `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
     };
   }
@@ -2858,8 +2924,8 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the WaveGuard setup invoice for ${fmtMoney(setup)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes WaveGuard setup (${fmtMoney(setup)}).`,
+      payAfterBody: `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
+      payPrefCardSub: `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
       billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
     };
   }
@@ -3074,7 +3140,7 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || /\bpre\s+slab\b/.test(words)) return 'pre_slab_termiticide';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || raw.includes('slab_pretreat') || /\bpre\s+slab\b|\bslab\s+pre\s?treat\b/.test(words)) return 'pre_slab_termiticide';
   if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -3089,7 +3155,17 @@ function recurringServiceReceivesTierDiscount(svc = {}) {
     return svc.excludeFromPctDiscount !== true;
   }
   if (lineFlagsBlockPercentDiscount(svc) || svc.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE') return false;
-  if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
+  // rodent_bait follows the canonical predicates since 2026-08-29 (member;
+  // codex #3591 r2 P1) — but ONLY rows carrying new-model evidence
+  // (perApplicationBilled / stations). A bare legacy-shaped row (no flags,
+  // no marker) was priced with NO discount and must not have the tier %
+  // applied to it at view time — same conservative default as the
+  // rodentBaitLineBillsMonthly billing gate. The bare 'rodent' alias
+  // resolves non-qualifying through serviceCountsTowardWaveGuardTier.
+  if (key === 'rodent_bait'
+    && svc.perApplicationBilled !== true
+    && !(Number(svc.stations) > 0)) return false;
+  if (key === 'palm_injection') return false;
   if (serviceExcludedFromPercentDiscount(key)) return false;
   return serviceCountsTowardWaveGuardTier(key);
 }
@@ -3117,6 +3193,9 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
@@ -3143,7 +3222,7 @@ function isPreSlabOneTimeItem(item = {}) {
     .join(' ')
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return raw.includes('pre slab')
+  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
     && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
 }
 
@@ -3191,6 +3270,19 @@ function boraCareCustomerCopy() {
   return {
     note: 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi.',
   };
+}
+
+function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|slab pre ?treat/i.test(
+    [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
+  );
+  return recurringRows.some(isRegulatedRow)
+    || oneTimeRows.some((row) => (
+      ['wdo_inspection', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(row))
+      || isRegulatedRow(row)
+    ));
 }
 
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
@@ -3596,6 +3688,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
+        // Billing-unit marker (2026-08-29): new rodent bait lines bill per
+        // application; legacy lines never carry it and stay monthly-billed.
+        ...(item.perApplicationBilled === true ? { perApplicationBilled: true } : {}),
         // Carry the engine line's taxability so the annual-prepay blended rate
         // (resolveCommercialPrepayTaxRate) taxes the taxable commercial pest /
         // mosquito / termite / rodent share — engine-backed (quote-wizard) accepts
@@ -3639,24 +3734,45 @@ function recurringServicesWithSupplements(estResult = {}) {
     });
   }
 
+  // 2026-08-29+: rodent bait can be a REAL recurring.services row (WaveGuard
+  // member, per-application billed); the scalar rides as legacy display
+  // fallback. The merge PREFERS supplement values, so when a row already
+  // covers rodent bait the scalar contributes only cadence ENRICHMENT —
+  // never money figures or discount flags (the legacy
+  // `waveGuardDiscountEligible: false` would clobber the row's membership).
   const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
   if (rodentMonthly) {
     const visitsPerYear = firstPositiveNumber(resultStats.rodBaitVisitsPerYear, resultStats.rodentBait?.visitsPerYear) || 4;
     const annual = Math.round(rodentMonthly * 12 * 100) / 100;
     const size = resultStats.rodBaitSize || resultStats.rodentBait?.size || null;
+    // Only a NEW-MODEL row (service key exactly 'rodent_bait' — the mapper
+    // stamps it) is authoritative over the scalar; a sparse LEGACY row
+    // ("Legacy Rodent Monitoring" etc. that merely canonicalizes to the
+    // key) keeps the pre-2026-08-29 behavior where the scalar supplies the
+    // money figures and the no-discount posture it was priced under.
+    const existingRodentIdx = indexByKey.get('rodent_bait');
+    const hasRodentRow = existingRodentIdx != null
+      && String(services[existingRodentIdx]?.service || '') === 'rodent_bait';
     upsertSupplement('rodent_bait', {
       service: 'rodent_bait',
       name: 'Rodent Bait Stations',
       displayName: 'Rodent Bait Stations',
-      mo: rodentMonthly,
-      monthly: rodentMonthly,
-      annual,
-      perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
-      visitsPerYear,
       cadenceLabel: 'Quarterly monitoring',
-      detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
-      waveGuardDiscountEligible: false,
       tierLabel: 'Recurring service',
+      // With a new-model row present, NO money fields ride the supplement
+      // (codex #3591 r7 P1): the scalar is a ROUNDED monthly equivalent, so
+      // reconstructing perTreatment from it drifts ($89 → $29.67/mo →
+      // $89.01) and first-application invoicing consumes that figure. The
+      // row's engine-authorized amounts are already exact.
+      ...(hasRodentRow ? {} : {
+        mo: rodentMonthly,
+        monthly: rodentMonthly,
+        annual,
+        perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
+        visitsPerYear,
+        detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
+        waveGuardDiscountEligible: false,
+      }),
     });
   }
 
@@ -5126,22 +5242,36 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : null;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
+  // Disclosed rodent bait-station setup (owner 2026-08-29): the accept path
+  // bills the FROZEN amount on the standard invoice and the prepay path
+  // bills it on the prepay invoice (estimate-converter), so every total
+  // this card shows must carry it too — the customer was shown an invoice
+  // $99 under the one actually created (codex #3591 r9 P1). Same frozen
+  // resolver the accept uses; a locked estimate discloses nothing.
+  const rodentSetupDueToday = !locked
+    ? require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData)
+    : 0;
+  const standardSetupDue = Math.round((setupDueToday + rodentSetupDueToday) * 100) / 100;
+  const standardSetupLabel = setupDueToday > 0 && rodentSetupDueToday > 0
+    ? 'WaveGuard + bait station setup'
+    : (rodentSetupDueToday > 0 ? 'bait station setup' : 'WaveGuard setup');
   const standardInvoiceFirstApplicationAmount = !selectedServiceTierBillsMonthlyForView
     && firstServiceVisitTotal != null
     && firstServiceVisitTotal > 0
     ? firstServiceVisitTotal
     : 0;
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
-    setupAmount: setupDueToday,
+    setupAmount: standardSetupDue,
+    setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
-  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
+  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
   const standardInvoiceBillingSmallHtml = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
     ? `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`
     : (standardInvoiceCopy.hasSetup
-        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setupDueToday)} setup invoice so you can pay in-flow.`
+        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
         : (standardInvoiceCopy.hasFirstApplication
             ? `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`
             : escapeHtml(pageCopy.noPaymentCopy)));
@@ -5174,7 +5304,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
   const prepayRefreshFloor = annualPrepayWaivesMembership ? 0 : prepayComponents.protectedFloor;
   const prepayRefreshRate = annualPrepayWaivesMembership ? 0 : prepayComponents.discountRate;
-  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"`;
+  // The setup attr is emitted only when a setup is due, so the attribute
+  // shape of every non-rodent page stays byte-identical.
+  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"${rodentSetupDueToday > 0 ? ` data-prepay-setup-due="${Number(rodentSetupDueToday)}"` : ''}`;
   // Effective rate can drop below 1% when the lawn program minimum (or the
   // non-discountable margin floor) protects most of the base — show one
   // decimal there so the copy never reads "save 0%".
@@ -5189,19 +5321,29 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // case and hide the prepay option instead of advertising ~$0 savings.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
+  // The prepay invoice carries the disclosed bait-station setup as its own
+  // line (converter, codex r4) — never waived by prepay — so the displayed
+  // total includes it (codex #3591 r9 P1); on a taxable commercial prepay
+  // the setup line is taxed with the rest (converter r7), so it joins the
+  // subtotal BEFORE tax.
   const prepayInvoiceTotal = annualPrepayWaivesMembership
-    ? annualTotal
+    ? Math.round((annualTotal + rodentSetupDueToday) * 100) / 100
     : (() => {
-      const base = Math.max(0, prepayResolved.amount);
+      const base = Math.round((Math.max(0, prepayResolved.amount) + rodentSetupDueToday) * 100) / 100;
       // Commercial prepay is taxed on the taxable pest share — quote the
       // TAX-INCLUSIVE total here so the page matches the invoice/PaymentIntent
       // the converter creates (same blended rate + post-discount allocation +
       // the customer's effective rate resolved in handleEstimateView). Mirror
       // InvoiceService's rounding (tax dollars to cents, then add).
       if (!commercialManualAccept) return base;
+      // The setup joins the taxable base at the FULL effective rate, exactly
+      // as the converter blends it (codex #3591 r62/r68 P1) — a mixed
+      // taxable-bait + non-taxable-lawn prepay otherwise shows a total the
+      // exact-total guard rejects as stale.
       const taxRate = require('../services/estimate-converter').resolveCommercialPrepayTaxRate(recurring, {
         prepayDiscountApplied: prepayResolved.discount > 0,
         baseRate: opts.prepayBaseRate,
+        taxableOneTimeAmount: rodentSetupDueToday,
       });
       const tax = Math.round(base * taxRate * 100) / 100;
       return Math.round((base + tax) * 100) / 100;
@@ -5246,8 +5388,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
+          ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong data-rodent-setup-due="${Number(rodentSetupDueToday)}">${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
+          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
@@ -5266,6 +5409,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
+          ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong>${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">${est.depositPolicy?.required
@@ -5516,7 +5660,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  const intelligence = isRegulatedCertificateSurface
+    ? null
+    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -5724,7 +5871,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     pestRecurring,
     hasPestOneTime,
   );
-  const estimateAskEnabled = isEstimateAskAnswerable({
+  const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
   });
@@ -6510,7 +6657,7 @@ ${shellQuestionsBar()}
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
-  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(setupDueToday)};
+  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(standardSetupDue)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -6546,7 +6693,10 @@ ${shellQuestionsBar()}
       const protectedFloor = Number(el.dataset.prepayProtectedFloor || 0);
       const floor = Math.min(annual, protectedFloor);
       const discountable = Math.max(0, roundMoney(annual - floor));
-      return Math.max(0, roundMoney(floor + discountable * (1 - rate)));
+      // The disclosed bait-station setup rides the prepay invoice as its
+      // own (never-waived) line — same server-side total rule.
+      const setupDue = Number(el.dataset.prepaySetupDue || 0);
+      return Math.max(0, roundMoney(floor + discountable * (1 - rate) + setupDue));
     };
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
       el.textContent = fmt(prepayTotalFor(el));
@@ -8160,7 +8310,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // replay shape (legacy rows predating the save-time sanitizer), and the
     // top-level priorQualifyingServices even without a snapshot.
     // extractEngineInputs() replays all of them on every reprice.
-    const replayShapes = [estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+    // engineInput (SINGULAR) is the public-wizard save shape (codex #3591
+    // r80 P1): public-quote persists its setup-waiver evidence there, so
+    // omitting it left a lapsed wizard waiver invisible to this
+    // reconciliation and acceptance omitted the now-owed setup.
+    const replayShapes = [estData.engineInputs, estData.engineInput, estData.inputs, estData.engineRequest?.options]
       .filter((shape) => shape && typeof shape === 'object');
     // Mirror the engine's truthy coercion: generateEstimate treats ANY truthy
     // recurring value (boolean true, 'true', legacy strings, form 'YES') as
@@ -8176,27 +8330,122 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       || truthyRecurringFlag(shape.isRecurringCustomer)
       || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
       || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
-    if (!frozenSnapshot && !frozenRecurring) return;
-    if (await isActivePlanCustomer(db, estimate.customer_id)) return;
-    // Drop every frozen artifact derived from the stale "existing customer"
-    // classification, not just the snapshot: priorQualifyingServices is
-    // re-injected by extractEngineInputs() on every recompute (keeping the
-    // combined-tier discount), the recurring flags in the stored replay
-    // shapes re-grant the member perk the same way, and
-    // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
-    // the runtime cache (returning the old bundle with no waivable setup
-    // fee). Leaving any behind lets the lead keep member pricing /
-    // undercharge even after the snapshot is gone.
-    delete estData.membershipSnapshot;
-    delete estData.priorQualifyingServices;
-    for (const shape of replayShapes) {
-      delete shape.recurringCustomer;
-      delete shape.isRecurringCustomer;
-      // A prior-service list NESTED in a replay shape (legacy rows predate
-      // the save-time sanitizer) replays straight through extractEngineInputs
-      // and restores the combined-tier discount the top-level delete just
-      // removed.
-      delete shape.priorQualifyingServices;
+    // The account-wide rodent setup-waiver evidence (top-level or nested in a
+    // replay shape) arms the trigger on its own.
+    const hasSetupWaiverEvidence = (obj) => Array.isArray(obj?.setupWaiverPriorQualifyingServices)
+      && obj.setupWaiverPriorQualifyingServices.length > 0;
+    const frozenSetupWaiver = hasSetupWaiverEvidence(estData) || replayShapes.some(hasSetupWaiverEvidence);
+    // The INVERSE case arms the trigger too (codex #3591 r78 P1): an
+    // estimate saved with NO waiver carries a positive frozen bait-station
+    // setup — if the account GAINED a qualifying family since (a pest/lawn
+    // plan booked before viewing/accepting), the waiver rule now covers it
+    // and acceptance must not bill the frozen $99. Mirrors the booking
+    // handoff's gained-family re-read.
+    const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
+      && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
+    if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    // The rodent setup waiver is re-validated INDEPENDENTLY of plan
+    // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
+    // family (e.g. pest) and rodent bait never self-waives, so a still-active
+    // rodent-only member whose pest plan was cancelled must not replay the
+    // stale pest evidence and accept without the $99 setup. Re-read the
+    // canonical families; when nothing but rodent_bait remains — or the
+    // read fails (FAIL CLOSED: unprovable evidence never waives a fee) — the
+    // evidence is dropped and the quote repriced.
+    let setupWaiverStale = false;
+    // The probe's verified families (non-rodent) — retained so a still-valid
+    // waiver reaches the authoritative reprice below (codex #3591 r77 P1):
+    // serverRecomputeFromEstimateData injects [] unless the deps carry the
+    // server-derived list, so preserving the stored field alone still
+    // re-added the $99 for a tierless-but-qualifying customer.
+    let verifiedWaiverKeys = null;
+    if (frozenSetupWaiver) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+        // STRICT (codex #3591 r68 P1): the default loader swallows a failed
+        // membership/catalog read as "no plan" → [] — indistinguishable from
+        // a genuinely lapsed waiver — which would reprice a member's quote
+        // with the $99 instead of taking the quote-required path below.
+        // planGate: false (codex #3591 r73 P1): the waiver's validity is
+        // decided by live qualifying families, not the membership stamp —
+        // the same ungated read the grant side uses.
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
+        setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
+        if (!setupWaiverStale) verifiedWaiverKeys = liveKeys;
+      } catch (probeErr) {
+        // Validity UNKNOWN (codex #3591 r41 P1): neither keep the waiver
+        // (could under-bill) nor drop it and reprice (fabricates non-member
+        // terms — no tier deps reach the recompute, so a multi-property
+        // member would lose tier AND waiver). Fail CLOSED to a manual
+        // quote: the frozen evidence stays as sent and
+        // setupWaiverUnverifiedRequote makes resolveEstimateQuoteRequirement
+        // refuse self-serve accept until a request can verify it.
+        logger.warn(`[estimate-public] setup-waiver evidence re-check failed for estimate ${estimate.id}: ${probeErr.message} — quote-required until verifiable`);
+        estData.setupWaiverUnverifiedRequote = true;
+        invalidateSendSnapshotPricingBundle(estData);
+        estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
+        clearEstimatePricingCache(estimate.id);
+        return;
+      }
+    }
+    // Gained-family probe (codex #3591 r78 P1): the stored positive setup
+    // is re-checked against the LIVE families. Fail-open to the disclosed
+    // figure — gaining a waiver is a benefit, so an unprovable read leaves
+    // the agreed setup standing (no flag, no reprice) rather than blocking
+    // the accept.
+    if (frozenUnwaivedSetup) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id, { strict: true, planGate: false }) || [];
+        if (liveKeys.filter((key) => key !== 'rodent_bait').length > 0) {
+          verifiedWaiverKeys = liveKeys;
+          // Persist the server-derived evidence so later replays
+          // (extractEngineInputs) and the accept-side probes see the
+          // waiver the reprice below applies.
+          estData.setupWaiverPriorQualifyingServices = liveKeys;
+        }
+      } catch (probeErr) {
+        logger.warn(`[estimate-public] gained-family setup-waiver probe failed for estimate ${estimate.id}: ${probeErr.message} — the disclosed setup stands`);
+      }
+    }
+    if (activeMember && !setupWaiverStale && !(frozenUnwaivedSetup && verifiedWaiverKeys)) return;
+    // The gained-family case was the ONLY trigger and nothing was gained:
+    // done. When member artifacts also armed the trigger, the lapsed-member
+    // cleanup below still runs exactly as before.
+    if (frozenUnwaivedSetup && !verifiedWaiverKeys && !frozenSnapshot && !frozenRecurring) return;
+    if (setupWaiverStale) {
+      delete estData.setupWaiverPriorQualifyingServices;
+      for (const shape of replayShapes) delete shape.setupWaiverPriorQualifyingServices;
+    }
+    if (!activeMember) {
+      // Drop every frozen artifact derived from the stale "existing customer"
+      // classification, not just the snapshot: priorQualifyingServices is
+      // re-injected by extractEngineInputs() on every recompute (keeping the
+      // combined-tier discount), the recurring flags in the stored replay
+      // shapes re-grant the member perk the same way, and
+      // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
+      // the runtime cache (returning the old bundle with no waivable setup
+      // fee). Leaving any behind lets the lead keep member pricing /
+      // undercharge even after the snapshot is gone.
+      delete estData.membershipSnapshot;
+      delete estData.priorQualifyingServices;
+      // The setup-waiver list is NOT deleted here (codex #3591 r76 P1): its
+      // validity is decided by the strict family probe above (planGate:
+      // false policy — the waiver is qualifying families, never the
+      // membership stamp), so a tierless customer whose qualifying row the
+      // probe just verified keeps the waiver; only setupWaiverStale removes
+      // it (handled before this block). Deleting it on the stamp alone made
+      // the recompute add a $99 the rule waives.
+      for (const shape of replayShapes) {
+        delete shape.recurringCustomer;
+        delete shape.isRecurringCustomer;
+        // A prior-service list NESTED in a replay shape (legacy rows predate
+        // the save-time sanitizer) replays straight through extractEngineInputs
+        // and restores the combined-tier discount the top-level delete just
+        // removed.
+        delete shape.priorQualifyingServices;
+      }
     }
     // Clearing the flags alone is not enough: the discount is already BAKED
     // INTO the stored result/totals from save-time, and buildPricingBundle's
@@ -8224,7 +8473,15 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // DB, not posted by a browser), so its quote-time T&S knob snapshot is
     // trustworthy and must be reused — a membership lapse must not also
     // re-price the T&S line off knobs flipped after the quote was sent.
-    const reprice = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true });
+    // The verified waiver rides the reprice (codex #3591 r77 P1): the
+    // recompute overwrites identity fields from deps unconditionally, so
+    // the strict probe's live families must be passed or a valid waiver is
+    // replaced with [] and the $99 re-added. Tier deps stay empty — the
+    // membership lapse deliberately reprices at non-member tier.
+    const reprice = await serverRecomputeFromEstimateData(estData, {
+      replaySavedPricingKnobs: true,
+      ...(verifiedWaiverKeys ? { setupWaiverPriorQualifyingServices: verifiedWaiverKeys } : {}),
+    });
     if (reprice.recomputed) {
       estData.result = reprice.serverResult;
       // A successful authoritative reprice supersedes any earlier fail-closed
@@ -8894,6 +9151,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    // Restart accepts take the STORED offer verbatim (pre-push P0 after GH
+    // r21): the mint prices deterministic defaults and the accept-time
+    // revalidation compares attempt identity + families, not price mix —
+    // honoring body option selections here would let a crafted PUT accept
+    // a one-time mode the mint never offered. Same 409 code as the
+    // mutation-route guard so the portal messages it identically.
+    // selectedFrequency and serviceCadences are validated after bundle
+    // resolution instead (GH r22 P1 + its pre-push follow-on): the
+    // estimate page ALWAYS serializes both — defaults included — so bare
+    // nonempty checks bricked every normal restart accept.
+    if (String(estimate.source || '') === 'plan_restart' && requestedOneTime) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Billing choices are only meaningful for recurring accepts: the
     // converter creates the matching invoice after the slot is confirmed.
     // Reject up front rather than fulfill the request half-way.
@@ -9370,6 +9643,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
     }
+    // Frozen-restart cadence rule (GH r22 P1, relaxing the r21 guard): the
+    // estimate page ALWAYS serializes selectedFrequency — it falls back to
+    // the first offered frequency — so the submitted key is allowed only
+    // when it IS the stored offer's deterministic default; any other key
+    // would accept a cadence/price the mint never offered.
+    if (String(estimate.source || '') === 'plan_restart' && selectedFrequencyKey
+        && selectedFrequencyKey !== String(defaultFrequencyFromList(pricingFrequencies)?.key || '')) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
     // entries carry their own annualPrepayEligible (finalizePricingBundle);
     // that flag decides for the SELECTED tier — the stored-mix rule remains
@@ -9432,6 +9717,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // selected one must not carry prepay past this point.
       if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
+      // Frozen-restart combo rule (pre-push P1 after GH r22): the page
+      // always sends the cadence map for bundled offers — defaults
+      // included — so the map itself can't be rejected. The matched combo
+      // must BE the deterministic default: every non-pest axis key must
+      // equal its section's own default (the same derivation the page's
+      // defaultSelectedForServices uses for the initial selection; the
+      // pest axis rides selectedFrequencyKey, bound to the primary
+      // default above), and — belt on top of identity — the combo's
+      // server-stamped totals must equal the minted row's stored totals.
+      // Totals alone were not enough: equal-priced combos can differ in
+      // composition, and conversion schedules the combo.
+      if (String(estimate.source || '') === 'plan_restart') {
+        const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+        const defaultKeyFor = (axis) => {
+          const section = sections.find((s) => s && s.key === axis);
+          const freqs = Array.isArray(section?.frequencies) ? section.frequencies : [];
+          return String(section?.defaultFrequencyKey || freqs[0]?.key || '');
+        };
+        const comboSelection = selectedCombo.selection || {};
+        const nonDefaultAxis = Object.entries(comboSelection)
+          .some(([axis, key]) => axis !== 'pest_control' && String(key) !== defaultKeyFor(axis));
+        const centsOf = (v) => Math.round(Number(v || 0) * 100);
+        if (nonDefaultAxis
+          || centsOf(selectedCombo.monthly) !== centsOf(estimate.monthly_total)
+          || centsOf(selectedCombo.annual) !== centsOf(estimate.annual_total)) {
+          return res.status(409).json({
+            error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+            code: 'restart_quote_frozen',
+          });
+        }
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the
@@ -9531,13 +9847,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           recurringServices: recurringSvcList,
           estimateData: estData,
         });
-        const base = resolved.amount;
+        // The converter's prepay invoice carries the disclosed bait-station
+        // setup as its own (never-waived, taxed) line — the quoted/
+        // acknowledged total must include it or the exact-total check
+        // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
+        // #3591 r16 P1). Same frozen resolver the converter bills from.
+        const acknowledgedRodentSetup = converter.frozenRodentBaitSetupAmount(estData);
+        const base = Math.round((resolved.amount + acknowledgedRodentSetup) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
         // + PaymentIntent the converter creates (uses the same blended rate +
-        // post-discount allocation). Residential prepay is untaxed (rate 0).
+        // post-discount allocation, with the setup in the taxable base — codex
+        // #3591 r68 P1). Residential prepay is untaxed (rate 0).
         const taxRate = isCommercialAccept
-          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate })
+          ? converter.resolveCommercialPrepayTaxRate(recurringSvcList, { prepayDiscountApplied: resolved.discount > 0, baseRate: prepayDisplayBaseRate, taxableOneTimeAmount: acknowledgedRodentSetup })
           : 0;
         // Mirror InvoiceService EXACTLY: tax dollars rounded to cents, then added
         // to the base — so the messaged amount equals inv.total to the cent.
@@ -10168,6 +10491,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.status = 409;
           throw err;
         }
+      }
+      // Plan-restart accept revalidation (C4 codex GH r4 P1): the restart
+      // mint excludes families with residual live rows, but the published
+      // estimate stays acceptable until expiry — staff restoring a family
+      // or reactivating the account after the mint would let this token
+      // accept a quote containing a now-live recurring rate. Re-run the
+      // churn-stamp + residual-ownership checks under the estimate row lock
+      // taken just above; drifted or unreadable state refuses the accept
+      // (fail closed, 409 with a message the portal renders).
+      if (estimate.source === 'plan_restart') {
+        const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
+        await assertRestartAcceptEligible(trx, estimate);
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
@@ -10834,6 +11169,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,
+          rodentSetupAmount: treatAsOneTime
+            ? 0
+            : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own
@@ -10884,6 +11222,40 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         invoiceModeResult = true;
         invoiceIdResult = inv.id;
+        // Same immutable setup ledger as the standard-accept mint (codex
+        // #3591 r69 P1): the invoice-mode draft bills the frozen rodent
+        // setup as its own line, so a later void/refund of a renamed or
+        // repriced invoice must still restore the obligation onto the
+        // accepted rodent root.
+        const invoiceModeRodentSetup = treatAsOneTime
+          ? 0
+          : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing);
+        if (invoiceModeRodentSetup > 0) {
+          const plans = require('../services/secure-appointment-plans');
+          // Gained-family recheck under the customer-row lock (codex #3591
+          // r79 P1): the pre-transaction reconciliation ran unlocked — a
+          // qualifying booking that committed since waives this fee, so
+          // the accept refuses retryably instead of billing it. Commercial
+          // bait is never family-waived (owner 2026-08-29) — exempt.
+          if (!require('../services/estimate-converter').estimateRodentBaitIsCommercial(acceptedEstDataForPricing)) {
+            await plans.assertFrozenRodentSetupStillOwed(trx, customerId);
+          }
+          const invoiceModeRoots = await trx('scheduled_services')
+            .where({ source_estimate_id: estimate.id, customer_id: customerId })
+            .whereNull('recurring_parent_id')
+            .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+            .select('id', 'service_type', 'service_id');
+          let invoiceModeRodentRoot = null;
+          for (const root of invoiceModeRoots || []) {
+            if ((await plans.authoritativeServiceKey(trx, root)) === 'rodent_bait') { invoiceModeRodentRoot = root; break; }
+          }
+          await plans.recordSetupFeeClaimForInvoice(trx, {
+            invoiceId: inv.id,
+            anchorId: invoiceModeRodentRoot ? invoiceModeRodentRoot.id : null,
+            amount: invoiceModeRodentSetup,
+            estimateId: estimate.id,
+          });
+        }
         // The customer-facing amount is the invoice's actual after-tax,
         // after-credit total — the same figure the /pay page collects.
         invoiceAmountResult = Number(inv.total) || 0;
@@ -11188,7 +11560,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             billingTerm,
             recurringServices: conversionRecurringServices,
           });
-          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine)) {
+          // Disclosed rodent bait-station setup (owner 2026-08-29; codex
+          // #3591 r3 P1): a non-member's accepted estimate carries a
+          // one-time rodent_bait_setup row that the standard invoice must
+          // bill — frozen-disclosure rule: the amount comes from the STORED
+          // estimate (shared resolver; the annual-prepay branch bills the
+          // same figure), never a live constant.
+          // A one-time selection schedules NO rodent plan — its setup must
+          // not mint (codex #3591 r59 P1); the recurring conversion path is
+          // the only one that owes it.
+          const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
+          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
@@ -11199,6 +11581,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 description: 'WaveGuard Membership — one-time setup fee',
                 quantity: 1,
                 unit_price: acceptSetupFeeAmount,
+              });
+            }
+            if (acceptedRodentSetupAmount > 0) {
+              // Gained-family recheck under the customer-row lock (codex
+              // #3591 r79 P1): a qualifying booking committed since the
+              // unlocked reconciliation waives this fee — refuse retryably
+              // instead of billing it. Commercial bait is never
+              // family-waived (owner 2026-08-29) — exempt.
+              if (!EstimateConverter.estimateRodentBaitIsCommercial(conversionEstData)) {
+                await require('../services/secure-appointment-plans').assertFrozenRodentSetupStillOwed(trx, customerId);
+              }
+              lineItems.push({
+                description: 'Bait Station Setup — one-time setup fee',
+                quantity: 1,
+                unit_price: acceptedRodentSetupAmount,
               });
             }
             if (includesFirstApplicationLine) {
@@ -11230,13 +11627,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 });
               }
             }
-            const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
-              ? 'WaveGuard Membership Setup + First Application'
-              : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
-            const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee plus first application.`
-              : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee only.`
+            const anySetupLine = setupFeeApplies || acceptedRodentSetupAmount > 0;
+            const setupTitleWord = setupFeeApplies ? 'WaveGuard Membership Setup' : 'Bait Station Setup';
+            const invoiceTitle = anySetupLine && includesFirstApplicationLine
+              ? `${setupTitleWord} + First Application`
+              : (anySetupLine ? setupTitleWord : 'First Service Application');
+            const setupNotesParts = [
+              setupFeeApplies ? `$${acceptSetupFeeAmount.toFixed(2)} setup fee` : null,
+              acceptedRodentSetupAmount > 0 ? `$${acceptedRodentSetupAmount.toFixed(2)} bait-station setup` : null,
+            ].filter(Boolean);
+            const invoiceNotes = anySetupLine && includesFirstApplicationLine
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} plus first application.`
+              : (anySetupLine
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} only.`
                 : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
             const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
               firstApplicationAmount: standardFirstApplicationAmount,
@@ -11287,6 +11690,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             standardInvoiceMinted = true;
             standardInvoiceAttached = !!attachScheduledServiceId;
             invoiceIdResult = inv.id;
+            // Immutable ledger for the setup this invoice bills (codex #3591
+            // r68 P1) — the same setup_fee_claims record the prepay and
+            // completion mints write, so a later void/refund of a renamed
+            // or repriced invoice still restores the obligation onto the
+            // series (restoreRodentSetupObligationForReversedInvoice reads
+            // the claim first). Anchored to the rodent root this accept
+            // just scheduled; anchor-less when none exists yet.
+            if (acceptedRodentSetupAmount > 0) {
+              const plans = require('../services/secure-appointment-plans');
+              const acceptRoots = await trx('scheduled_services')
+                .where({ source_estimate_id: estimate.id, customer_id: customerId })
+                .whereNull('recurring_parent_id')
+                .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+                .select('id', 'service_type', 'service_id');
+              let acceptRodentRoot = null;
+              for (const root of acceptRoots || []) {
+                if ((await plans.authoritativeServiceKey(trx, root)) === 'rodent_bait') { acceptRodentRoot = root; break; }
+              }
+              await plans.recordSetupFeeClaimForInvoice(trx, {
+                invoiceId: inv.id,
+                anchorId: acceptRodentRoot ? acceptRodentRoot.id : null,
+                amount: acceptedRodentSetupAmount,
+                estimateId: estimate.id,
+              });
+            }
             // The customer-facing amount is the invoice's actual after-tax,
             // after-credit total — the same figure the /pay page collects.
             invoiceAmountResult = Number(inv.total) || 0;
@@ -13294,6 +13722,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -13305,6 +13734,31 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     }
 
     const previousTier = estimate.waveguard_tier || 'Bronze';
+
+    // Eligibility clamp for opted-out estimates. This route applies a FLAT tier
+    // percentage with no eligibility check of its own — harmless while the tier
+    // on the row is the one the engine wrote, but PUT /:token/service-opt-out
+    // makes a lower tier reachable on demand: remove a qualifying line (engine
+    // writes Silver), then call this with Gold and accept bills from the
+    // persisted totals. Scoped deliberately to estimates carrying an opt-out
+    // record — every other estimate keeps this route's existing behaviour.
+    const optOutRecord = parseEstimateDataSafe(estimate)?.serviceOptOut;
+    if (optOutRecord) {
+      // Ceiling = the tier the ENGINE wrote at the last opt-out commit, never
+      // the row's waveguard_tier — that column holds the customer's own last
+      // selection once this route writes it back, and clamping on it would
+      // make a dip to Bronze permanent (codex #3684 r1 P2). Fall back to the
+      // row only for a record predating the engineTier stamp.
+      const engineTier = String(optOutRecord.engineTier || estimate.waveguard_tier || 'Bronze');
+      const engineRank = ALLOWED_TIERS.findIndex((t) => t.toLowerCase() === engineTier.toLowerCase());
+      const requestedRank = ALLOWED_TIERS.indexOf(selectedTier);
+      if (engineRank >= 0 && requestedRank > engineRank) {
+        return res.status(400).json({
+          error: 'tier_not_available_for_current_services',
+          maxTier: ALLOWED_TIERS[engineRank],
+        });
+      }
+    }
 
     // Server-side pricing — never trust client totals.
     let parsedData = {};
@@ -13646,6 +14100,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     const term = req.body?.term;
     if (typeof term !== 'string' || !term) {
       return res.status(400).json({ error: 'term is required' });
@@ -13967,6 +14422,667 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
   }
 });
 
+// ── Customer service opt-out (owner 2026-08-31) ────────────────────────────
+// The customer drops ONE recurring service line from a sent estimate. Unlike
+// the bond and interior switchers above — which rewrite stored rows from a
+// QUOTE-TIME variant snapshot — a removal changes the service MIX, and the mix
+// drives WaveGuard tier, the solo setup fee, the prepay rate and the bundled
+// one-time items. No snapshot can express that, so this route re-runs the sole
+// dollar authority (serverRecomputeFromEstimateData → generateEstimate +
+// mapV1ToLegacyShape) on the pruned inputs. Delta arithmetic is NOT an option:
+// readV1Shape serves stored per-line dollars verbatim and never re-derives the
+// tier, so a subtraction helper would leave survivors at the old tier's
+// discount and accept would bill a Gold price on a Silver plan.
+//
+// dryRun runs every precondition and the full replay, then returns before/after
+// WITHOUT writing — the customer sees the real number before committing, which
+// is what makes a disclosed price INCREASE defensible (owner ruling: a removal
+// may raise the survivors; it must never do so silently).
+
+function optOutOneTimeRows(result) {
+  const oneTime = result?.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+  return [
+    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+    ...(Array.isArray(result?.specItems) ? result.specItems : []),
+  ].filter((row) => row && typeof row === 'object');
+}
+const optOutRowKey = (row) => String(row.service || row.name || row.label || '').trim().toLowerCase();
+const optOutRowPrice = (row) => Number(row.price ?? row.estimatedPrice ?? row.baseEstimatePrice ?? 0) || 0;
+// The mapper writes includedOnProgram through as onProg on the mapped one-time
+// rows (v1-legacy-mapper), so both spellings are the same fact.
+const optOutRowBundledFree = (row) => row.onProg === true || row.includedOnProgram === true;
+
+function optOutPrepayRate(result, estData) {
+  try {
+    const recurringServices = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+    return require('../services/estimate-converter')
+      .annualPrepayDiscountComponents({ recurringServices, estimateData: estData }).discountRate;
+  } catch (_) { return null; }
+}
+
+// Before-state resolution for the opt-out impact check. Engine-backed
+// estimates can store their original pricing ONLY in the raw engineResult (no
+// mapped result row), and a null before-state would blind the bundled-charge
+// refusal — the one move the owner ruled must never be self-serve. Resolve the
+// raw carrier through the canonical mapper so both sides of the comparison
+// share one shape — mapped top-level specItems retains the onProg rows the
+// guard reads (codex #3684 r1 P1). A sparse `result` (an empty scaffold with
+// no pricing rows) must not shadow a populated engineResult, and a removal
+// with NO trustworthy before-state fails closed at the route (pre-push codex
+// P0 on 9389704). Mapping errors propagate; the route refuses.
+function optOutResultHasPricingRows(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (Array.isArray(result?.recurring?.services) && result.recurring.services.length) return true;
+  if (Array.isArray(result?.oneTime?.items) && result.oneTime.items.length) return true;
+  if (Array.isArray(result?.oneTime?.specItems) && result.oneTime.specItems.length) return true;
+  if (Array.isArray(result?.specItems) && result.specItems.length) return true;
+  return false;
+}
+function resolveOptOutBeforeResult(parsedData) {
+  if (optOutResultHasPricingRows(parsedData?.result)) return parsedData.result;
+  if (parsedData?.engineResult && typeof parsedData.engineResult === 'object') {
+    const mapped = require('../services/pricing-engine/v1-legacy-mapper')
+      .mapV1ToLegacyShape(parsedData.engineResult);
+    if (optOutResultHasPricingRows(mapped)) return mapped;
+  }
+  // A rows-less mapped result is still better than nothing for the tier/fee
+  // disclosures; the route separately fails closed on removals when even this
+  // is absent.
+  if (parsedData?.result && typeof parsedData.result === 'object') return parsedData.result;
+  return null;
+}
+
+// What the removal does to money the customer did not touch. Returns the
+// disclosures the confirm panel renders, plus the one case the owner ruled must
+// never be self-serve. `mode` flips the wording for a restore — the same tier
+// move reads "Dropping X" one way and "Adding X back" the other.
+function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove' }) {
+  const disclosures = [];
+  const restoring = mode === 'restore';
+  const beforeRows = optOutOneTimeRows(beforeResult);
+  const afterRows = optOutOneTimeRows(afterResult);
+  const afterByKey = new Map(afterRows.map((r) => [optOutRowKey(r), r]));
+
+  // Owner ruling 2026-08-31: a one-time job that is free BECAUSE of a recurring
+  // line (priceStingingInsect's includedOnProgram — a tier-≤1 paper wasp or mud
+  // dauber on recurring pest) must not become a charge through a self-serve tap.
+  // It is the largest single move this feature can produce and it lands on the
+  // FIRST invoice. Route it to the office instead.
+  const wouldChargeBundled = [];
+  for (const row of beforeRows) {
+    if (!optOutRowBundledFree(row)) continue;
+    const after = afterByKey.get(optOutRowKey(row));
+    if (after && !optOutRowBundledFree(after) && optOutRowPrice(after) > 0) {
+      wouldChargeBundled.push({ name: row.name || row.service, price: optOutRowPrice(after) });
+    }
+  }
+
+  const beforeTier = beforeResult?.recurring?.waveGuardTier || beforeResult?.recurring?.tier || null;
+  const afterTier = afterResult?.recurring?.waveGuardTier || afterResult?.recurring?.tier || null;
+  if (beforeTier && afterTier && beforeTier !== afterTier) {
+    disclosures.push({
+      code: 'waveguard_tier_change',
+      message: restoring
+        ? `Adding ${label} back moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so your services are priced at the ${afterTier} rate.`
+        : `Dropping ${label} moves your WaveGuard tier from ${beforeTier} to ${afterTier}, so the services you keep are priced at the ${afterTier} rate.`,
+    });
+  }
+
+  const beforeFee = Number(beforeResult?.oneTime?.membershipFee || 0) || 0;
+  const afterFee = Number(afterResult?.oneTime?.membershipFee || 0) || 0;
+  if (afterFee > beforeFee) {
+    disclosures.push({
+      code: 'membership_setup_fee',
+      message: `A single-service plan includes the $${afterFee.toFixed(2)} WaveGuard setup fee, which the combined plan did not.`,
+    });
+  } else if (restoring && beforeFee > afterFee) {
+    disclosures.push({
+      code: 'membership_setup_fee',
+      message: afterFee > 0
+        ? `The WaveGuard setup fee changes from $${beforeFee.toFixed(2)} to $${afterFee.toFixed(2)}.`
+        : `The $${beforeFee.toFixed(2)} WaveGuard setup fee no longer applies.`,
+    });
+  }
+
+  const beforeRate = optOutPrepayRate(beforeResult, beforeData);
+  const afterRate = optOutPrepayRate(afterResult, afterData);
+  if (beforeRate != null && afterRate != null && afterRate !== beforeRate
+    && (restoring ? afterRate > beforeRate : afterRate < beforeRate)) {
+    disclosures.push({
+      code: 'annual_prepay_rate',
+      message: afterRate > 0
+        ? `The pay-in-full discount changes from ${Math.round(beforeRate * 100)}% to ${Math.round(afterRate * 100)}%.`
+        : 'The 5% pay-in-full-for-the-year discount does not apply to a single-service plan.',
+    });
+  }
+
+  // Per-application changes on the recurring lines present on BOTH sides —
+  // the number the customer actually pays per visit to each kept service.
+  // This is the customer-facing shape of a tier move: the owner's price-copy
+  // rule bans combined plan totals ("$X/mo") on estimate surfaces, so the
+  // confirm panel renders THESE per-application sentences instead. The dollars
+  // are the EFFECTIVE post-discount amount (annualAfterDiscount over the
+  // year's visits — engine-computed, so tier discounts and program floors are
+  // in it); perTreatment is the pre-discount list amount and would report "no
+  // change" on the very tier collapse being confirmed.
+  const svcRows = (result) => (Array.isArray(result?.recurring?.services) ? result.recurring.services : [])
+    .filter((r) => r && typeof r === 'object');
+  // Stored /preferences discounts (declined interior spray / exterior sweep)
+  // reduce the PEST line's per-application price, and the route persists the
+  // pref-adjusted totals — the disclosed pest dollars must match, or the
+  // customer confirms amounts higher than they will pay (codex #3684 r3 P1).
+  // Same derivation as the /preferences write, per side, converted back to
+  // per-application (monthlyOff × 12 ÷ visits).
+  const pestPrefPerAppOff = (result, data) => {
+    try {
+      const pest = detectPestRecurring(recurringServicesWithSupplements(result || {}));
+      const visits = Number(pest?.visitsPerYear || 0);
+      if (!pest || !(visits > 0)) return 0;
+      const { monthlyOff } = computePrefDiscount(data?.preferences, pest, false, 0);
+      return Math.round(((monthlyOff * 12) / visits) * 100) / 100;
+    } catch (_) { return 0; }
+  };
+  const beforePestOff = pestPrefPerAppOff(beforeResult, beforeData);
+  const afterPestOff = pestPrefPerAppOff(afterResult, afterData);
+  const effectivePerApplication = (row, prefOff = 0) => {
+    // manualFinalAnnual is the FINAL customer amount when an operator manual
+    // discount hit the row; annualAfterDiscount is only post-WaveGuard, and
+    // reading it alone overstates the disclosed dollars on manually
+    // discounted quotes (codex #3684 r4 P1).
+    const annual = Number(row.manualFinalAnnual ?? row.annualAfterDiscount ?? 0) || 0;
+    const visits = Number(row.visitsPerYear ?? 0) || 0;
+    const gross = annual > 0 && visits > 0
+      ? Math.round((annual / visits) * 100) / 100
+      : Number(row.perTreatment ?? 0) || 0;
+    const off = String(row.service || '') === 'pest_control' ? prefOff : 0;
+    return Math.max(0, Math.round((gross - off) * 100) / 100);
+  };
+  const afterSvcByKey = new Map(svcRows(afterResult).map((r) => [String(r.service || r.name || ''), r]));
+  for (const row of svcRows(beforeResult)) {
+    const after = afterSvcByKey.get(String(row.service || row.name || ''));
+    if (!after) continue;
+    const beforePA = effectivePerApplication(row, beforePestOff);
+    const afterPA = effectivePerApplication(after, afterPestOff);
+    if (!beforePA || !afterPA || beforePA === afterPA) continue;
+    disclosures.push({
+      code: 'recurring_per_application',
+      message: `${row.name || row.service} changes from $${beforePA.toFixed(2)} to $${afterPA.toFixed(2)} per application.`,
+    });
+  }
+
+  // Restore mode: the restored line itself is AFTER-only, so the loop above
+  // never prices it — and after multiple removals it can come back under a
+  // different tier/mix than its original quote. Its effective per-application
+  // amount must be on the panel before the customer confirms (codex #3684 r2
+  // P1).
+  if (restoring) {
+    const beforeKeys = new Set(svcRows(beforeResult).map((r) => String(r.service || r.name || '')));
+    for (const after of svcRows(afterResult)) {
+      if (beforeKeys.has(String(after.service || after.name || ''))) continue;
+      const pa = effectivePerApplication(after, afterPestOff);
+      if (!pa) continue;
+      disclosures.push({
+        code: 'restored_per_application',
+        message: `${after.name || after.service} comes back at $${pa.toFixed(2)} per application.`,
+      });
+    }
+  }
+
+  // Every other one-time line whose price moved as a side effect (e.g. top
+  // dressing re-prices on a 65% area basis without a recurring lawn program —
+  // it moves in the customer's favour, and it is still disclosed).
+  for (const row of beforeRows) {
+    const after = afterByKey.get(optOutRowKey(row));
+    if (!after) continue;
+    const wasFree = optOutRowBundledFree(row);
+    const beforePrice = optOutRowPrice(row);
+    const afterPrice = optOutRowPrice(after);
+    if (wasFree || beforePrice === afterPrice) continue;
+    disclosures.push({
+      code: 'one_time_reprice',
+      message: `${row.name || row.service} changes from $${beforePrice.toFixed(2)} to $${afterPrice.toFixed(2)}.`,
+    });
+  }
+
+  // Canonical after-side per-application terms, for the previewBasis digest:
+  // a pricing-config change can redistribute prices among surviving services
+  // while the aggregates stay put, and the digest must catch that too.
+  const afterPerApplication = svcRows(afterResult).map((r) => ({
+    s: String(r.service || r.name || ''),
+    pa: effectivePerApplication(r, afterPestOff),
+  }));
+
+  return { disclosures, wouldChargeBundled, afterPerApplication };
+}
+
+router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, next) => {
+  try {
+    // Dark posture is the GENERIC 404, not the bond/interior uniform 403: a
+    // dark removal advertises nothing, so the payload must stay byte-identical
+    // to an unknown token. The check is first, before any DB read.
+    if (!serviceOptOutGateOn()) return res.status(404).json({ error: 'Estimate not found' });
+    if (!BOND_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!estimate || !isEstimateAcceptActive(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
+    // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
+    // and price_locked_at is never cleared.
+    if (estimate.price_locked_at) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    // Reconcile a stale "existing customer" classification BEFORE this handler
+    // reprices and persists, exactly as select-tier and preferences do. This
+    // route replays the engine with priorQualifyingServices, so a lapsed
+    // member's frozen snapshot would otherwise re-grant the combined tier —
+    // and unlike those routes this one WRITES the repriced result back.
+    // In-memory only; the write below persists whatever it corrected.
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const serviceKey = String(req.body?.serviceKey || '');
+    if (!serviceKey) return res.status(400).json({ error: 'serviceKey is required' });
+    if (typeof req.body?.included !== 'boolean') {
+      return res.status(400).json({ error: 'included is required' });
+    }
+    const included = req.body.included;
+    const dryRun = req.body?.dryRun === true;
+
+    // The commit must be bound to the preview the customer confirmed —
+    // removals AND restores alike (pre-push codex P1 on 9e0c894). The row
+    // version alone is not enough: preview and commit independently re-run
+    // the recompute, which syncs mutable pricing config and checks live
+    // membership, so the OUTPUT can drift with no write to the row (pre-push
+    // codex P0 on 094deab). previewBasis is therefore an HMAC digest over the
+    // row version AND the computed money outputs; the commit re-derives it
+    // from its own recompute and refuses on any mismatch — a changed row, a
+    // changed config, or a changed membership verdict all surface as
+    // estimate_changed_since_preview and the page re-previews with real
+    // numbers. Both row-version reads pass through the same JS Date
+    // millisecond truncation — never a JS ms date against the raw µs column.
+    const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
+    const optOutPreviewDigest = (nextTotals, impactState) => crypto
+      .createHmac('sha256', process.env.JWT_SECRET || 'estimate-opt-out-preview')
+      .update(JSON.stringify({
+        rowBasis,
+        serviceKey,
+        included,
+        m: nextTotals.monthlyTotal,
+        a: nextTotals.annualTotal,
+        o: nextTotals.onetimeTotal,
+        w: nextTotals.waveGuardTier || null,
+        // The DISPLAYED terms, not just the aggregates: a config change can
+        // redistribute per-application prices among surviving lines while the
+        // totals stay put (pre-push codex P0 on 2d9fd6e). Disclosures carry
+        // every money sentence the customer confirmed; afterPerApplication
+        // pins the full per-line map even where no disclosure fired.
+        d: impactState.disclosures,
+        p: impactState.afterPerApplication,
+      }))
+      .digest('hex');
+
+    let parsedData = {};
+    try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
+    catch { parsedData = {}; }
+
+    const OptOut = require('../services/estimate-service-opt-out');
+    const optOutState = parsedData.serviceOptOut || null;
+    const alreadyOut = OptOut.currentlyOptedOutKeys(parsedData);
+
+    if (included === false) {
+      // ONE resolver for the /data stamp and this write, so the payload can
+      // never advertise an action the write refuses.
+      const bundle = await buildPricingBundle(estimate).catch(() => null);
+      const removable = OptOut.serviceOptOutRemovableKeys(
+        parsedData, bundle?.services || [], estimate.waveguard_tier,
+      );
+      if (!removable.has(serviceKey)) {
+        return res.status(400).json({ error: 'service_not_removable' });
+      }
+    } else if (!alreadyOut.includes(serviceKey)) {
+      return res.status(400).json({ error: 'service_not_removed' });
+    } else if (OptOut.serviceOptOutBlockedByProposal(parsedData)
+      || OptOut.serviceOptOutTierSelectionActive(parsedData, estimate.waveguard_tier)) {
+      // Same refusals as removals: a proposal added AFTER the removal is the
+      // authoritative billed quote, and a standing /select-tier choice takes
+      // the estimate out of self-serve mix changes — a restore is the same
+      // whole-estimate reprice (pre-push codex P0s on b6236b5 / 9389704).
+      return res.status(400).json({ error: 'service_not_removable' });
+    }
+
+    const label = OptOut.serviceOptOutLabel(serviceKey);
+    // Before-state for the impact/refusal check. If the stored raw result is
+    // the only carrier and cannot be mapped, refuse rather than run the
+    // bundled-charge guard against nothing (codex #3684 r1 P1).
+    let beforeResult = null;
+    try {
+      beforeResult = resolveOptOutBeforeResult(parsedData);
+    } catch (_) {
+      return res.status(409).json({ error: 'reprice_unavailable' });
+    }
+    // FAIL CLOSED on removals with no trustworthy before-state: without one
+    // the bundled-charge refusal cannot run, and that guard is an owner
+    // ruling, not a best-effort disclosure.
+    if (included === false && !optOutResultHasPricingRows(beforeResult)) {
+      return res.status(409).json({ error: 'reprice_unavailable' });
+    }
+    const beforeData = JSON.parse(JSON.stringify(parsedData));
+
+    // Provenance the prune would erase (the pest curve stamp above all) —
+    // captured BEFORE the inputs change, re-planted on restore.
+    const provenance = included === false
+      ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
+      : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
+    const restoreInputs = included === true
+      ? OptOut.readRemovedInputs(
+        (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),
+      )
+      : null;
+
+    const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
+      serviceKey, included, removedInputs: restoreInputs, provenance,
+    });
+    if (!applied.ok) return res.status(400).json({ error: applied.reason });
+
+    // SERVER-AUTHORITATIVE identity, loaded explicitly. serverRecompute sets
+    // priorQualifyingServices UNCONDITIONALLY, defaulting to [] — the membership
+    // reconciler passes nothing on purpose, so a lapsed member reprices as a
+    // non-member. Copying that here would reprice an EXISTING member as a brand
+    // new customer on every removal: combined tier stripped, $99 re-added,
+    // prepay restored — a large wrong price change with no removal-related cause.
+    // Priors live top-level on modern blobs, but legacy rows predating the
+    // save-time sanitizer nest them in a replay shape — the SAME carriers the
+    // membership reconciler recognizes and (for lapsed members) just cleaned.
+    // Anything still here survived the active-plan check, so it is a verified
+    // member's frozen list; reading only the top-level field would reprice a
+    // legacy member off the remaining cart and collapse the earned combined
+    // tier (codex #3684 r2 P1).
+    const priors = [];
+    for (const carrier of [
+      parsedData, parsedData.engineInputs, parsedData.inputs, parsedData.engineRequest?.options,
+    ]) {
+      if (!carrier || typeof carrier !== 'object') continue;
+      if (!Array.isArray(carrier.priorQualifyingServices)) continue;
+      for (const p of carrier.priorQualifyingServices) {
+        if (p != null && !priors.includes(p)) priors.push(p);
+      }
+    }
+    // A surviving recurring flag in a replay shape — the reconciler deletes
+    // these for lapsed members, so one still standing is (normally) a verified
+    // active member whose only marker may be that flag. Same truthy coercion
+    // as the reconciler's own trigger (codex #3684 r4 P1).
+    const survivingRecurringFlag = [
+      parsedData.engineInputs, parsedData.inputs, parsedData.engineRequest?.options,
+    ].filter((s) => s && typeof s === 'object').some((s) => {
+      const v = s.recurringCustomer ?? s.isRecurringCustomer;
+      if (v == null || v === false) return false;
+      const normalized = String(v).trim().toLowerCase();
+      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+    });
+    const memberEvidence = parsedData.membershipSnapshot?.isExistingCustomer === true
+      || priors.length > 0 || survivingRecurringFlag;
+    // STRICT verification before member pricing can be WRITTEN (pre-push
+    // codex P0 on e77857d): reconcileFrozenMembershipSnapshot never throws —
+    // a failed live-plan lookup leaves member artifacts standing unverified,
+    // and every other consumer of the reconciled blob only RENDERS. This
+    // route persists. So member-granting evidence requires its own live
+    // check here, and any failure — lookup error, no linked customer, or a
+    // lapsed plan whose artifacts the reconciler failed to clean — fails
+    // CLOSED with the same 409 the reprice rail uses. Nothing is previewed
+    // and nothing is written.
+    if (memberEvidence) {
+      let activeVerified = false;
+      try {
+        activeVerified = !!estimate.customer_id && await isActivePlanCustomer(db, estimate.customer_id);
+      } catch (_) {
+        return res.status(409).json({ error: 'reprice_unavailable' });
+      }
+      if (!activeVerified) {
+        return res.status(409).json({ error: 'reprice_unavailable' });
+      }
+    }
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const reprice = await serverRecomputeFromEstimateData(parsedData, {
+      replaySavedPricingKnobs: true,
+      priorQualifyingServices: priors,
+      // computeMembershipContext persists a snapshot even for a linked NEW
+      // customer (isExistingCustomer: false) — snapshot presence alone must not
+      // force the existing-customer perk onto retained one-time work (codex
+      // #3684 r1 P1). The explicit flag, never truthiness. memberEvidence
+      // (snapshot flag, priors in any carrier, or a surviving recurring flag
+      // — codex r4 P1) was LIVE-verified against the customer's plan above;
+      // this handler fails closed before reaching here when it cannot be.
+      recurringCustomer: memberEvidence,
+    });
+    // Fail CLOSED. Nothing is written and nothing is shown — never fall back to
+    // arithmetic or to the stale totals.
+    if (!reprice.recomputed) {
+      return res.status(409).json({ error: 'reprice_unavailable' });
+    }
+
+    const afterResult = reprice.serverResult;
+    const impact = optOutImpact({
+      beforeResult, afterResult, beforeData, afterData: parsedData, label,
+      mode: included === false ? 'remove' : 'restore',
+    });
+    if (included === false && impact.wouldChargeBundled.length) {
+      return res.status(400).json({
+        error: 'bundled_item_would_be_charged',
+        items: impact.wouldChargeBundled,
+      });
+    }
+
+    const previous = {
+      monthlyTotal: Number(estimate.monthly_total || 0),
+      annualTotal: Number(estimate.annual_total || 0),
+      onetimeTotal: Number(estimate.onetime_total || 0),
+      waveGuardTier: estimate.waveguard_tier || null,
+    };
+    const next = {
+      monthlyTotal: reprice.serverTotals.monthlyTotal ?? 0,
+      annualTotal: reprice.serverTotals.annualTotal ?? 0,
+      onetimeTotal: reprice.serverTotals.onetimeTotal ?? 0,
+      waveGuardTier: afterResult?.recurring?.waveGuardTier || afterResult?.recurring?.tier || null,
+    };
+
+    // Stored /preferences discounts (declined interior spray / exterior
+    // sweep) are a ROUTE-level overlay, not an engine input — the recompute
+    // knows nothing of them, but the renderer and accept path re-derive
+    // computePrefDiscount from the same stored preferences over whatever
+    // totals this write persists. Persisting the raw engine totals would
+    // drop the discount from the row while the page re-applies it, and the
+    // two would disagree forever (codex #3684 r2 P1). Same derivation as the
+    // /preferences write, run against the NEW result.
+    {
+      const prefs = normalizePrefs(parsedData.preferences || {});
+      const prefRecurringRows = recurringServicesWithSupplements(afterResult || {});
+      const prefOneTimeRows = oneTimeItemsForRender(afterResult || {}, parsedData);
+      const prefPestRecurring = detectPestRecurring(prefRecurringRows);
+      const prefHasPestOneTime = detectPestOneTime(prefOneTimeRows);
+      const prefPestOneTimeTotal = prefHasPestOneTime ? pestOneTimeBase(prefOneTimeRows) : 0;
+      const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(
+        prefs, prefPestRecurring, prefHasPestOneTime, prefPestOneTimeTotal,
+      );
+      if (prefMonthlyOff > 0) {
+        next.monthlyTotal = Math.max(0, Math.round((next.monthlyTotal - prefMonthlyOff) * 100) / 100);
+        // Same anchoring as the /preferences write, against the new result.
+        next.annualTotal = anchoredAnnualTotal({ ...parsedData, result: afterResult }, next.monthlyTotal);
+      }
+      if (prefOneTimeOff > 0) {
+        next.onetimeTotal = Math.max(0, Math.round((next.onetimeTotal - prefOneTimeOff) * 100) / 100);
+      }
+    }
+
+    // One digest for both directions: the dry run hands it out, the commit
+    // re-derives it from its OWN recompute and refuses on any mismatch.
+    const previewDigest = optOutPreviewDigest(next, impact);
+    if (dryRun) {
+      return res.json({
+        success: true, dryRun: true, serviceKey, label, included,
+        previous, next, disclosures: impact.disclosures,
+        // Echo this back on the commit; the write refuses if the row, the
+        // pricing config, or the membership verdict moved since this preview.
+        previewBasis: previewDigest,
+      });
+    }
+    const submittedBasis = typeof req.body?.previewBasis === 'string' ? req.body.previewBasis : null;
+    if (!submittedBasis || submittedBasis !== previewDigest) {
+      return res.status(409).json({ error: 'estimate_changed_since_preview' });
+    }
+
+    // ── commit ──────────────────────────────────────────────────────────
+    parsedData.result = afterResult;
+    // Replace the raw carrier IN THE SAME WRITE. acceptanceTermsApplyTo unions
+    // engineResult.lineItems with result.lineItems, so a stale raw result
+    // keeps classifying the reduced estimate by a service that is gone —
+    // removing termite bait would suppress the residential cancel-anytime
+    // terms forever (codex #3684 r1 P1). Same pairing serverRecompute's own
+    // persist path maintains (admin-estimate-persistence).
+    if (reprice.rawEngineResult && typeof reprice.rawEngineResult === 'object') {
+      parsedData.engineResult = reprice.rawEngineResult;
+    } else if (parsedData.engineResult) {
+      // Never keep a raw carrier the recompute could not refresh.
+      delete parsedData.engineResult;
+    }
+    // The recompute returns the curve it actually priced pest with SPECIFICALLY
+    // so the caller stamps it at the source; skipping this leaves the next
+    // replay to re-derive it from a result this write just rewrote.
+    if (reprice.pestPricingVersion) {
+      for (const carrier of [parsedData.engineInputs, parsedData.inputs]) {
+        if (carrier && typeof carrier === 'object' && carrier.services?.pest
+          && typeof carrier.services.pest === 'object') {
+          carrier.services.pest.version = reprice.pestPricingVersion;
+        }
+      }
+    }
+    // Frozen per-tier discount RATES: accept-time tier math prefers these over
+    // live rates, so a repriced mix must not keep the old mix's snapshot (the
+    // membership reconciler deletes both for the same reason).
+    if (parsedData.sendSnapshot && typeof parsedData.sendSnapshot === 'object') {
+      delete parsedData.sendSnapshot.tierDiscounts;
+    }
+    if (parsedData.pricingContext && typeof parsedData.pricingContext === 'object') {
+      delete parsedData.pricingContext.tierDiscounts;
+    }
+    invalidateSendSnapshotPricingBundle(parsedData);
+
+    OptOut.recordServiceOptOutEvent(parsedData, {
+      serviceKey,
+      label,
+      included,
+      at: new Date().toISOString(),
+      removedInputs: included === false ? applied.removedInputs : null,
+      provenance: provenance && Object.keys(provenance).length ? provenance : null,
+      previous,
+      next,
+      engineSource: reprice.source || null,
+    }, beforeData);
+    // The tier the ENGINE wrote for the current mix — the select-tier clamp's
+    // ceiling. The row's waveguard_tier is the customer's mutable choice once
+    // select-tier writes it back, so clamping on the row would lock a customer
+    // who dipped to Bronze out of the Gold they are still eligible for (codex
+    // #3684 r1 P2). Re-stamped on every commit, so restoring the removed
+    // lines restores the ceiling with them. This write only runs with NO
+    // standing tier selection (the selection-active refusal above), so the
+    // engine tier and the persisted row tier are the same value here.
+    parsedData.serviceOptOut.engineTier = next.waveGuardTier || null;
+    // The stored explicit base belongs to the OLD mix — a later select-tier
+    // call would resolve it as 'explicit' and price the new mix off it. The
+    // new result rows are the resolution source now.
+    delete parsedData.baseMonthly;
+
+    // service_interest is the service_summary in every delivery and follow-up
+    // email, the per-application line NAME on the proposal PDF, and a pest
+    // identity tiebreak — it must not keep naming a service that is gone.
+    // Force re-inference by NOT passing the persisted column. Both carriers
+    // (result and engineResult) were just replaced by the same recompute
+    // above, so the inference reads a consistent, current pair.
+    const serviceInterest = require('../services/estimate-service-lines')
+      .inferEstimateServiceInterest({ estimate_data: parsedData });
+
+    // One transaction for the price mutation and its audit row. The
+    // activity_log row is the specified audit surface for a customer-visible
+    // price rewrite — a best-effort insert after the update commits could
+    // leave the mutation with no durable audit entry (codex #3684 r1 P2). A
+    // failed insert rolls the whole write back; the customer retries against
+    // unchanged state.
+    let updateCount = 0;
+    await db.transaction(async (trx) => {
+      updateCount = await trx('estimates')
+        .where({ id: estimate.id })
+        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        .whereNull('price_locked_at')
+        .whereNull('archived_at')
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+        // Same ms-truncated CAS as the bond/interior writes: any concurrent
+        // write — an accept, a preference toggle, another opt-out — makes this
+        // a zero-row update and the caller reloads server truth.
+        .modify((q) => {
+          if (estimate.updated_at) {
+            q.andWhere(trx.raw(
+              "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+              [estimate.updated_at],
+            ));
+          }
+        })
+        .update({
+          estimate_data: JSON.stringify(parsedData),
+          monthly_total: next.monthlyTotal,
+          annual_total: next.annualTotal,
+          onetime_total: next.onetimeTotal,
+          waveguard_tier: next.waveGuardTier,
+          service_interest: serviceInterest,
+          // The margin audit only reads an unmatched engineResult row as
+          // removed-or-repriced when the row carries this stamp; without it the
+          // dropped line is costed in every future audit forever.
+          pricing_authority: 'SERVER',
+          server_computed_price: next.annualTotal,
+          updated_at: trx.fn.now(),
+        });
+      if (!updateCount) return;
+      // Rule 14: a deterministic green check auto-applies with an audit trail
+      // and NO bell. This row is the blob-independent copy and surfaces in the
+      // admin dashboard's Recent activity feed.
+      await trx('activity_log').insert({
+        customer_id: estimate.customer_id || null,
+        estimate_id: estimate.id,
+        action: included === false ? 'estimate_service_removed' : 'estimate_service_restored',
+        description: included === false
+          ? `Customer removed ${label} from their estimate.`
+          : `Customer added ${label} back to their estimate.`,
+        metadata: JSON.stringify({ serviceKey, label, previous, next }),
+      });
+    });
+    if (!updateCount) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+
+    clearEstimatePricingCache(estimate.id);
+    // The visit profile is cached per estimate id and SIZED from the service
+    // mix, so a stale profile would offer slots shaped for the old plan.
+    try {
+      require('../services/estimate-slot-availability').invalidateEstimate(estimate.id);
+    } catch (_) { /* cache invalidation is best-effort */ }
+
+    logger.info(`[estimate] ${estimate.id}: service ${included === false ? 'removed' : 'restored'} ${serviceKey} ($${next.monthlyTotal}/mo, $${next.annualTotal}/yr, tier ${next.waveGuardTier || 'none'})`);
+    return res.json({
+      success: true, serviceKey, label, included,
+      previous, next, disclosures: impact.disclosures,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
@@ -13980,6 +15096,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -14707,18 +15824,9 @@ function isAdminIp(ip) {
 // Derive engine inputs from stored estimate_data. Admin-UI estimates
 // carry { inputs, result, ... } (v1 client-engine shape). IB-sourced
 // estimates carry { engineInputs, engineResult }. Either works.
-// Raw stored inputs, no replay injection — the signal readers
-// (estimateLawnFloorArmed) use this to avoid recursing through the
-// injection below, which itself consults those readers.
-function rawEngineInputs(estData) {
-  if (!estData || typeof estData !== 'object') return null;
-  return (estData.engineInputs && typeof estData.engineInputs === 'object')
-    ? estData.engineInputs
-    : (estData.inputs && typeof estData.inputs === 'object')
-      ? estData.inputs
-      : null;
-}
-
+// rawEngineInputs (raw stored inputs, no replay injection) now lives in
+// estimate-floor-signal-replay alongside the signal readers that use it —
+// they must not recurse through the injection below, which consults them.
 function extractEngineInputs(estData) {
   const base = rawEngineInputs(estData);
   if (!base) return null;
@@ -14737,6 +15845,13 @@ function extractEngineInputs(estData) {
   // alone. Shallow copy so the stored object isn't mutated.
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
     out.priorQualifyingServices = estData.priorQualifyingServices;
+  }
+  // Account-wide setup-waiver evidence (codex #3591 r34 P1): persisted
+  // separately from the property-scoped tier list, same server-only
+  // round-trip rule — a grouped/secondary-property rodent quote must not
+  // re-add the $99 setup on replay when the account holds another plan.
+  if (Array.isArray(estData.setupWaiverPriorQualifyingServices) && estData.setupWaiverPriorQualifyingServices.length) {
+    out.setupWaiverPriorQualifyingServices = estData.setupWaiverPriorQualifyingServices;
   }
   // Operator-stated price adjustment (agent flows, owner decision 2026-07-23):
   // persisted OUTSIDE engineInputs (same round-trip rule as
@@ -14797,14 +15912,10 @@ function extractEngineInputs(estData) {
 // Input-level floor overrides for an engine replay of this stored estimate.
 // Only keys with an actual saved signal are set (absence = replay live).
 function savedFloorReplayOverrides(estData) {
-  const overrides = {};
-  const lawnArm = estimateLawnFloorArmed(estData);
-  if (typeof lawnArm === 'boolean') overrides.useLawnCostFloor = lawnArm;
-  const minSignal = require('../services/estimate-converter').estimateLawnProgramMinimumSignal(estData);
-  if (minSignal != null) overrides.lawnProgramMinimumMonthly = minSignal;
-  const pest = estimatePestFloorSignal(estData);
-  if (typeof pest.armed === 'boolean') overrides.pestProgramFloorArmed = pest.armed;
-  if (pest.perVisit != null) overrides.pestProgramFloorPerVisit = pest.perVisit;
+  // Lawn cost floor, lawn program minimum and pest program floor — the same
+  // reader serverRecomputeFromEstimateData's replaySavedPricingKnobs branch
+  // uses, so the authoritative recompute resolves what this read resolves.
+  const overrides = { ...savedFloorReplaySignals(estData) };
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
@@ -14818,66 +15929,27 @@ function savedFloorReplayOverrides(estData) {
   const { commercialFloorBoundServices } = require('../services/commercial-floor-replay');
   const commercialArmed = commercialFloorBoundServices(estData);
   overrides.commercialFloorsArmedServices = commercialArmed.length ? commercialArmed : undefined;
+  // Saved rodent-bait pricing pin (codex #3591 r2 P0) — shared with the
+  // authoritative recompute (admin-estimate-persistence), see the module.
+  const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  // Set even when EMPTY (undefined) — same posture as
+  // commercialFloorsArmedServices above: the key's presence in the spread
+  // neutralizes any pin persisted inside the browser-controlled stored
+  // inputs; the pin is server-derived from stored-RESULT evidence on every
+  // replay, never trusted from a stored blob.
+  overrides.rodentBaitLegacyReplay = rodentBaitLegacyReplaySignal(estData) || undefined;
+  // NEW-MODEL rodent posture freeze (codex #3591 r43 P1): a bracket-priced
+  // row froze the rodent_waveguard flags at save; the replay injects them so
+  // a later flag flip never moves a sent quote's tier or discounts. Same
+  // set-even-when-EMPTY posture as the pin above.
+  const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  overrides.rodentWaveguardPostureReplay = rodentWaveguardPostureReplaySignal(estData) || undefined;
   return overrides;
 }
 
 
-// Saved pest post-discount floor state: pricingMetadata stamps first, then
-// legacy row evidence — armed-era rows carry the floor metadata itself
-// (server tiers: programFloorPerVisit/programFloorAnnual; client-fallback
-// rows: floorPa/floorAnn, per-visit derived through the cadence discount).
-// armed stays null (inject nothing) when the estimate is silent.
-const CLIENT_PEST_CADENCE_DISC = { 4: 1.0, 6: 0.85, 12: 0.7 };
-function estimatePestFloorSignal(estData = {}) {
-  const armStamp = estData?.result?.pricingMetadata?.pestProgramFloorArmed
-    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorArmed
-    ?? estData?.pricingMetadata?.pestProgramFloorArmed
-    ?? estData?.result?.routingMetadata?.pestProgramFloorArmed;
-  const perVisitStamp = estData?.result?.pricingMetadata?.pestProgramFloorPerVisit
-    ?? estData?.engineResult?.pricingMetadata?.pestProgramFloorPerVisit
-    ?? estData?.pricingMetadata?.pestProgramFloorPerVisit
-    ?? estData?.result?.routingMetadata?.pestProgramFloorPerVisit;
-  if (typeof armStamp === 'boolean') {
-    const stampedPerVisit = Number(perVisitStamp);
-    return {
-      armed: armStamp,
-      perVisit: Number.isFinite(stampedPerVisit) && stampedPerVisit > 0 ? stampedPerVisit : null,
-    };
-  }
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
-  const rows = [];
-  if (Array.isArray(result?.results?.pestTiers)) rows.push(...result.results.pestTiers);
-  if (result?.results?.pest && typeof result.results.pest === 'object') rows.push(result.results.pest);
-  const lineItemSources = [
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-  ];
-  for (const li of lineItemSources) {
-    if ((li?.service || '') !== 'pest_control') continue;
-    rows.push(li);
-    if (Array.isArray(li.tiers)) rows.push(...li.tiers);
-  }
-  let armed = null;
-  let perVisit = null;
-  for (const row of rows) {
-    if (!row || typeof row !== 'object') continue;
-    const direct = Number(row.programFloorPerVisit);
-    if (Number.isFinite(direct) && direct > 0) {
-      armed = true;
-      perVisit = Math.max(perVisit ?? 0, direct);
-      continue;
-    }
-    const floorPa = Number(row.floorPa);
-    if (Number.isFinite(floorPa) && floorPa > 0) {
-      armed = true;
-      const disc = CLIENT_PEST_CADENCE_DISC[Number(row.apps)] ?? null;
-      if (disc) perVisit = Math.max(perVisit ?? 0, Math.round((floorPa / disc) * 100) / 100);
-    } else if (Number(row.programFloorAnnual) > 0 || Number(row.floorAnn) > 0) {
-      armed = true;
-    }
-  }
-  return { armed, perVisit };
-}
+// estimatePestFloorSignal moved to estimate-floor-signal-replay (shared
+// with the authoritative recompute); reached here via savedFloorReplaySignals.
 
 function canVaryPestFrequency(engineInputs) {
   return !!engineInputs?.services?.pest;
@@ -15899,6 +16971,11 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const membershipLapsedRequote = (
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   )?.membershipLapsedRequote === true;
+  // The account-wide rodent setup-waiver evidence could not be verified on
+  // this request (codex #3591 r41 P1) — never self-serve accept on it.
+  const setupWaiverUnverifiedRequote = (
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  )?.setupWaiverUnverifiedRequote === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -15908,7 +16985,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialLowConfidenceSiteQuote
     || retiredLawnRequote
     || retiredTreeShrubRequote
-    || membershipLapsedRequote;
+    || membershipLapsedRequote
+    || setupWaiverUnverifiedRequote;
 
   return {
     quoteRequired,
@@ -15920,7 +16998,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
         || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
-        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)),
+        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)
+        || (setupWaiverUnverifiedRequote ? 'setup_waiver_unverified_requote' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -16424,6 +17503,22 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
     && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
 }
 
+// Restart quotes are FROZEN offers (PR #3671, codex GH r21 P1): the mint
+// prices the cancelled composition at today's list and acceptance
+// revalidates that exact stored offer — the public reprice/mix routes
+// (the tier switch's flat tiered discounts included) would let the
+// customer rewrite the price before accepting it. One honorable price:
+// mutations 409 with a code the portal can message on; the customer
+// re-taps "Restart my plan" for a fresh mint instead.
+function refuseFrozenRestartMutation(estimate, res) {
+  if (String(estimate?.source || '') !== 'plan_restart') return false;
+  res.status(409).json({
+    error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+    code: 'restart_quote_frozen',
+  });
+  return true;
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   // A pending or full linkage invalidation kills acceptance the moment the
@@ -16490,6 +17585,12 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
+  // ruling requires every restart price to be a CURRENT recompute — the
+  // customer's path back is the Restart button, which re-prices; an
+  // auto-extension would revive the expired token's frozen dollars with no
+  // recompute in the loop.
+  if (String(estimate.source || '') === 'plan_restart') return false;
   if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
@@ -17361,6 +18462,9 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'bundle': return 'Recurring services';
     default: return fallback || recurringServiceDisplayName(category) || 'Service';
   }
@@ -17392,6 +18496,16 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
+  // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
+  // "not for real-estate transactions — use WDO for those") and stays OFF the
+  // regulated certificate surface; only the WDO report itself maps here.
+  if (service === 'wdo' || service === 'wdo_inspection') return 'wdo_inspection';
+  // Canonical catalog key for the slab pre-treat (completion-lane-registry routes
+  // it to pre_treatment_termite_certificate); the name-based matcher below
+  // covers its "Slab Pre-Treat Termite Service" label.
+  if (service === 'termite_slab_pretreat' || service.includes('slab_pretreat')) return 'pre_slab_termiticide';
+  if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
+  if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -17852,66 +18966,10 @@ function estimateManualDiscountFloorBreached(estData = {}) {
   return require('../services/estimate-converter').estimateManualDiscountFloorBreachAcknowledged(estData);
 }
 
-function estimateLawnFloorArmed(estData = {}) {
-  // Highest priority: the engine stamps its RESOLVED arm state into
-  // pricingMetadata on every post-#2827 pricing run — the authoritative
-  // record of what actually priced the saved result, covering estimates the
-  // GLOBAL switch armed without any explicit per-request flag (a later
-  // global flip must not change how a sent quote replays).
-  const stamped = estData?.result?.pricingMetadata?.lawnCostFloorArmed
-    ?? estData?.engineResult?.pricingMetadata?.lawnCostFloorArmed
-    ?? estData?.pricingMetadata?.lawnCostFloorArmed
-    ?? estData?.result?.routingMetadata?.lawnCostFloorArmed;
-  if (typeof stamped === 'boolean') return stamped;
-  // Admin V2 saves persist the exact /calculate-estimate payload under
-  // engineRequest ({ profile, selectedServices, options }); the adapter maps
-  // options.useLawnCostFloor into services.lawn.useLawnCostFloor at replay,
-  // so the raw option is that shape's arm signal.
-  const reqOptions = estData?.engineRequest?.options;
-  if (reqOptions && typeof reqOptions === 'object' && reqOptions.useLawnCostFloor != null) {
-    return !!reqOptions.useLawnCostFloor;
-  }
-  const engineInputs = rawEngineInputs(estData) || {};
-  const stored = engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor;
-  if (stored != null) return !!stored;
-  // Legacy engine-backed saves ({ engineInputs, engineResult }, pre-stamp,
-  // no explicit flag): the stored engine rows are the only evidence the
-  // quote was cost-floor priced — same enforcement-stamp rule as the v1
-  // ladder path (lawnRowsShowFloorEnforcement: reporting fields are NOT
-  // evidence). Without this, extractEngineInputs replays an already-sent
-  // floor-priced estimate under the current disarmed default and lowers
-  // view/accept (codex P2 round 11 on #2827). Evidence only arms — its
-  // absence stays null (tri-state preserved; caller falls to the global).
-  const engineRows = [];
-  for (const li of [
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
-    ...(Array.isArray(estData?.result?.lineItems) ? estData.result.lineItems : []),
-  ]) {
-    if ((li?.service || '') !== 'lawn_care') continue;
-    engineRows.push(li);
-    if (Array.isArray(li.tiers)) engineRows.push(...li.tiers);
-  }
-  if (engineRows.length && lawnRowsShowFloorEnforcement(engineRows)) return true;
-  return null;
-}
+// estimateLawnFloorArmed + lawnRowsShowFloorEnforcement moved to
+// estimate-floor-signal-replay and imported at the top of this file.
 
-// Legacy pre-disarm estimates (engine armed the cost floor by default, so
-// builder payloads never needed to persist the flag): the floor evidence
-// lives on the stored rows as ENFORCEMENT stamps. Only stamps the armed
-// machinery writes count — costFloorApplied, marginFloorGuardApplied, a
-// COST_FLOOR pricing source. The reporting fields
-// (minimumCollectedAnnualPrice / costFloorAnnual) ride every post-disarm
-// quote too and are deliberately NOT evidence, or every new estimate would
-// silently re-arm (the exact trap this branch closes).
-function lawnRowsShowFloorEnforcement(rows) {
-  return (Array.isArray(rows) ? rows : []).some((row) => (
-    row?.costFloorApplied === true
-    || row?.marginFloorGuardApplied === true
-    || row?.pricingSource === 'COST_FLOOR'
-    || row?.prov?.costFloorApplied === true
-    || row?.prov?.pricingSource === 'COST_FLOOR'
-  ));
-}
+
 
 // Clamp a customer-facing lawn ladder entry to the program minimum AFTER
 // discounts. Annual re-derives from the clamped monthly so monthly/annual/
@@ -19793,6 +20851,13 @@ function commercialInteriorOptionGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_COMMERCIAL_INTERIOR_OPTION || '').toLowerCase());
 }
 
+// Customer service opt-out kill switch (dark-ship, owner flips). Parsed at
+// CALL time like the two above so the revoke needs no redeploy and the route
+// tests can arm and disarm it around a request.
+function serviceOptOutGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_ESTIMATE_SERVICE_OPT_OUT || '').toLowerCase());
+}
+
 // Commercial interior-service selector payload (owner 2026-08-17): the
 // quote-time option snapshot + current selection ride the commercial_pest
 // section, and the customer toggles via PUT /:token/interior-service
@@ -20941,9 +22006,17 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // sections, so its chip is missing from the section-derived list. Prepend it (so
   // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
   // Waves prompt builder now reads.
-  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-    : askChipsBase;
+  // Regulated check sees the RAW normalized rows too: the contract's aligned
+  // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
+  // not surface on an FDACS certificate surface (pre-push codex P1).
+  const askChips = hasRegulatedCertificateServiceMix(services, [
+    ...oneTimeBreakdownItems,
+    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+  ])
+    ? []
+    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+      : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -22105,6 +23178,21 @@ async function buildPricingBundleInner(estimate) {
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
+  // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
+  // accept paths bill this frozen figure UP FRONT beside the first
+  // application (never waived by prepay), so the payment choice previews
+  // it as an invoice row and the after-completion extras note excludes
+  // it. Deliberately NOT a firstVisitFees row — those drive the fee cards
+  // and the breakdown exclusions; this row stays in the breakdown. Resolved
+  // ONCE here and attached to EVERY bundle shape (codex #3591 r34 P1): a
+  // quote-wizard save persists engineResult (engine_invocation shape) and a
+  // legacy row may carry only stored totals — acceptance bills the frozen
+  // setup for all of them, so all of them must preview it. Omitted entirely
+  // when no setup was disclosed (payload byte-identical).
+  const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
+  const rodentBaitSetupFeeField = frozenRodentSetupForPreview > 0
+    ? { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false } }
+    : {};
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
     if (!manual) return payload;
@@ -22393,6 +23481,7 @@ async function buildPricingBundleInner(estimate) {
       // for any older client build still reading the singular field.
       setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
+      ...rodentBaitSetupFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
       source: 'v1_engine_shape',
@@ -22486,6 +23575,7 @@ async function buildPricingBundleInner(estimate) {
         ?? (((Number(estimate.onetime_total || 0) || 0) + fallbackAnchorLift) || null),
       setupFee: fallbackFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees: fallbackFirstVisitFees,
+      ...rodentBaitSetupFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     }), estimate, estData);
@@ -22680,6 +23770,7 @@ async function buildPricingBundleInner(estimate) {
     oneTimeBreakdown,
     setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
+    ...rodentBaitSetupFeeField,
     source: 'engine_invocation',
   }), estimate, estData, { anchorEngineResult });
   setEstimatePricingCache(estimate, payload);
@@ -23366,10 +24457,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
+    // Category + regulated-surface decisions see the RAW normalized rows
+    // unioned with the bundle items (same union as the glass scope check
+    // below): alignOneTimeChoiceBreakdown (show_one_time_option) replaces raw
+    // rows with the synthetic choice + preserved pest/Bora add-ons, which
+    // would drop a WDO row and let the AI narrative + Ask bar render on an
+    // FDACS certificate surface (pre-push codex P1).
+    const oneTimeItemsForCategory = [
+      ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+    ];
     const serviceCategory = deriveServiceCategory(
       estimateDataForIntelligence,
       recurringServicesForIntelligence,
-      pricingBundle?.oneTimeBreakdown?.items || []
+      oneTimeItemsForCategory,
+    );
+    const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(
+      recurringServicesForIntelligence,
+      oneTimeItemsForCategory,
     );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
@@ -23389,29 +24494,33 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = buildWaveGuardIntelligencePayload(
-      {
-        ...estimate,
-        satelliteUrl: estimate.satellite_url || null,
-        tier: estimate.waveguard_tier || null,
-      },
-      estimateDataForIntelligence,
-      { pricingBundle, recurringServices: recurringServicesForIntelligence },
-    );
-    try {
-      const assistantContext = buildEstimateAssistantContext({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        selectedFrequency: '',
-        serviceMode: defaultServiceMode,
-      });
-      intelligence.supportSources = loadPublicEstimateSupportSources({
-        question: 'What is included in this WaveGuard estimate?',
-        context: assistantContext,
-      });
-    } catch (err) {
-      logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+    const intelligence = isRegulatedCertificateSurface
+      ? null
+      : buildWaveGuardIntelligencePayload(
+          {
+            ...estimate,
+            satelliteUrl: estimate.satellite_url || null,
+            tier: estimate.waveguard_tier || null,
+          },
+          estimateDataForIntelligence,
+          { pricingBundle, recurringServices: recurringServicesForIntelligence },
+        );
+    if (intelligence) {
+      try {
+        const assistantContext = buildEstimateAssistantContext({
+          estimate,
+          estData: estimateDataForIntelligence,
+          pricingBundle,
+          selectedFrequency: '',
+          serviceMode: defaultServiceMode,
+        });
+        intelligence.supportSources = loadPublicEstimateSupportSources({
+          question: 'What is included in this WaveGuard estimate?',
+          context: assistantContext,
+        });
+      } catch (err) {
+        logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+      }
     }
 
     const terminalState = (() => {
@@ -23729,6 +24838,39 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Services this customer has opted out of. Present only when there is
+      // something to report, so a gate-off (or never-used) response stays
+      // byte-identical to today. The page renders the "Add it back" row from
+      // this AND suppresses the mirror add-service offer with it — without the
+      // suppression the page answers "remove lawn" with "Add Lawn Care and save
+      // more" in three places.
+      ...((() => {
+        if (!serviceOptOutGateOn()) return {};
+        const {
+          currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
+          serviceOptOutTierSelectionActive,
+        } = require('../services/estimate-service-opt-out');
+        const projected = parseEstimateDataSafe(estimate);
+        const removedKeys = currentlyOptedOutKeys(projected);
+        if (!removedKeys.length) return {};
+        // A proposal that gained itemization after a removal — or a standing
+        // /select-tier choice — refuses restores (same guards as the PUT), so
+        // the "Add it back" control must not render. But the removed keys
+        // STILL ship: they also suppress the mirror add-service offer, and
+        // dropping the whole block would re-advertise "Add Lawn Care and save
+        // more" for the very service the customer removed (pre-push codex P1
+        // on 89ab43c). Suppression state and restore eligibility are
+        // independent facts.
+        const restoreBlocked = serviceOptOutBlockedByProposal(projected)
+          || serviceOptOutTierSelectionActive(projected, estimate.waveguard_tier);
+        return {
+          serviceOptOut: {
+            removedKeys,
+            removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
+            ...(restoreBlocked ? { restoreBlocked: true } : {}),
+          },
+        };
+      })()),
       // Acceptance terms (GATE_ESTIMATE_ACCEPTANCE_TERMS): the line + drawer
       // the page renders above Accept, served by the SERVER so the copy the
       // customer sees is the copy the accept route records. Absent when the
@@ -23843,11 +24985,26 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
           : (estimate.satellite_url || null),
         intelligence,
+        // The server's regulated-surface decision (WDO / pre-treatment
+        // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
+        // the raw one-time rows BEFORE any breakdown alignment. The React page
+        // consumes this ahead of its own row-based derivation, so a public
+        // breakdown that no longer carries the regulated row cannot resurrect
+        // the Ask bar (codex r5 P1). Present only when true so every other
+        // response stays byte-identical.
+        ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
+        // C4 restart quote (codex GH #3671 r27 P2): the offer is FROZEN —
+        // cadence, add-ons, bond, interior, and opt-out mutations all 409
+        // restart_quote_frozen, and accept refuses a non-default selection —
+        // so the page renders the deterministic default as fixed instead of
+        // offering controls that can only fail. Present only on restart rows
+        // so every other response stays byte-identical.
+        ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
         // What the customer booked (set at accept). Null for legacy accepts +
         // any non-accepted estimate; the accepted recap falls back to the
         // derived mode/frequency when null.
@@ -23880,6 +25037,35 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         ...(pricingBundle.oneTimeBreakdown
           ? { oneTimeBreakdown: sanitizePublicOneTimeBreakdown(stripInternalMarginFieldsDeep(pricingBundle.oneTimeBreakdown)) }
           : {}),
+        // Per-section opt-out eligibility, from the SAME resolver the write
+        // handler uses so the payload can never advertise an action the PUT
+        // refuses. Stamped in the projection rather than inside the bundle
+        // because the bundle is cached for 10 minutes and send-snapshotted,
+        // while removability is gate- and row-state-dependent.
+        // Include-when-TRUE only, never false: an explicit false would
+        // distinguish a real-but-ineligible token from an unknown one and break
+        // the generic-404 contract. A draft preview never offers it — the write
+        // 404s a draft, and a control that can only fail is worse than none.
+        ...((() => {
+          if (!serviceOptOutGateOn() || adminDraftPreview) return {};
+          if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at) return {};
+          const sections = Array.isArray(pricingBundle.services) ? pricingBundle.services : [];
+          if (!sections.length) return {};
+          const { serviceOptOutRemovableKeys } = require('../services/estimate-service-opt-out');
+          const removable = serviceOptOutRemovableKeys(
+            parseEstimateDataSafe(estimate), sections, estimate.waveguard_tier,
+          );
+          if (!removable.size) return {};
+          // depth 1 — the same depth the services array sits at inside the
+          // bundle spread above, so this override strips exactly what that
+          // strip would have, no more and no less.
+          return {
+            services: stripInternalMarginFieldsDeep(sections, 1)
+              .map((section) => (removable.has(section?.key)
+                ? { ...section, removable: true }
+                : section)),
+          };
+        })()),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
@@ -24005,6 +25191,7 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
@@ -24029,6 +25216,7 @@ module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationCol
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServiceMix;
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
@@ -24105,6 +25293,9 @@ module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
+module.exports.optOutImpact = optOutImpact;
+module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
+module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;

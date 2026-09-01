@@ -142,6 +142,9 @@ describe('canSplit (rev 5d membership freeze)', () => {
     ['link_issued', { linkIssued: true }],
     ['payment_attempted', { paymentAttempted: true }],
     ['visit_not_open', { status: 'closed' }],
+    // A reminder tier claimed inside its lease (owner mid-send, or delivered
+    // and not yet closed on every member row — GH codex #3699 r9 P2).
+    ['reminder_in_flight', { reminderClaimLive: true }],
   ])('%s freezes membership', (reason, patch) => {
     expect(canSplit({ ...untouched, ...patch })).toEqual({ ok: false, reason });
   });
@@ -227,3 +230,95 @@ describe('visitSummariesForRows (schedule payload)', () => {
     expect(rows[0].visit.liveCount).toBe(0);
   });
 });
+
+describe('effectTypeForKind / dedupeKeyFor (reminder rails, spec §4)', () => {
+  const { _test: { effectTypeForKind, dedupeKeyFor } } = require('../services/visit-groups');
+
+  test('tracker kinds keep their historical mapping — unknown falls back to arrived', () => {
+    expect(effectTypeForKind('en_route')).toBe('tracker_en_route');
+    expect(effectTypeForKind('arrived')).toBe('tracker_arrived');
+    expect(effectTypeForKind('on_site')).toBe('tracker_arrived');
+    expect(effectTypeForKind('anything_else')).toBe('tracker_arrived');
+  });
+
+  test('reminder kinds map to their own effect types', () => {
+    expect(effectTypeForKind('reminder_72h')).toBe('reminder_72h');
+    expect(effectTypeForKind('reminder_24h')).toBe('reminder_24h');
+  });
+
+  test('tracker dedupe keys are byte-identical to the historical shape (existing prod rows must keep matching)', () => {
+    const visit = { id: 'v1', scheduled_date: '2026-08-30' };
+    expect(dedupeKeyFor(visit, 'tracker_en_route')).toBe('v1:tracker_en_route');
+    expect(dedupeKeyFor(visit, 'tracker_arrived')).toBe('v1:tracker_arrived');
+  });
+
+  test('reminder keys carry the visit DATE — a moved visit claims fresh at the new date (fires once, never zero)', () => {
+    const visit = { id: 'v1', scheduled_date: '2026-08-30' };
+    expect(dedupeKeyFor(visit, 'reminder_72h')).toBe('v1:reminder_72h:2026-08-30');
+    expect(dedupeKeyFor(visit, 'reminder_24h')).toBe('v1:reminder_24h:2026-08-30');
+    const moved = { ...visit, scheduled_date: '2026-09-02' };
+    expect(dedupeKeyFor(moved, 'reminder_72h')).toBe('v1:reminder_72h:2026-09-02');
+    expect(dedupeKeyFor(moved, 'reminder_72h')).not.toBe(dedupeKeyFor(visit, 'reminder_72h'));
+    // pg Date instance normalizes to the same calendar day.
+    expect(dedupeKeyFor({ id: 'v1', scheduled_date: new Date('2026-08-30T00:00:00Z') }, 'reminder_72h'))
+      .toBe('v1:reminder_72h:2026-08-30');
+  });
+});
+
+describe('customerExcludedByAutopay (spec rev-2: autopay customers are not grouped)', () => {
+  // Enrollment signals only — the chargeability predicate is deliberately
+  // never consulted (GH r2/r3/r4 P0+P1s: pauses, expired cards, and
+  // pending ACH all read as "not on autopay" to customerOnAutopay while
+  // still representing enrollment).
+  const knexFor = (customerRow, methodRow) => (table) => ({
+    where: () => ({
+      first: async () => (table === 'customers' ? customerRow
+        : table === 'payment_methods' ? methodRow : undefined),
+    }),
+  });
+
+  afterEach(() => { jest.dontMock('../services/autopay-eligibility'); jest.resetModules(); });
+
+  const freshVG = (isPausedImpl = () => false) => {
+    jest.doMock('../services/autopay-eligibility', () => ({
+      isPaused: isPausedImpl,
+      customerOnAutopay: jest.fn(() => { throw new Error('chargeability predicate must not be consulted'); }),
+    }));
+    jest.resetModules();
+    return require('../services/visit-groups');
+  };
+
+  test('explicit enrollment flag decides first: true excludes, false admits (stale pause ignored)', async () => {
+    const vg = freshVG();
+    expect(await vg.customerExcludedByAutopay('c-auto', knexFor({ id: 'c-auto', autopay_enabled: true }))).toBe(true);
+    expect(await vg.customerExcludedByAutopay('c-off', knexFor({ id: 'c-off', autopay_enabled: false, autopay_paused_until: '2099-01-01' }))).toBe(false);
+  });
+
+  test('a PAUSED legacy enrollment (NULL flag) is excluded — only enrolled accounts pause', async () => {
+    const vg = freshVG((c) => Boolean(c.autopay_paused_until));
+    expect(await vg.customerExcludedByAutopay('c-legacy', knexFor({
+      id: 'c-legacy', autopay_enabled: null, autopay_paused_until: '2099-01-01',
+    }))).toBe(true);
+  });
+
+  test('a legacy enrollment with ANY autopay-enabled method is excluded, chargeable or not (GH r4 P1)', async () => {
+    const vg = freshVG();
+    // An expired card / pending ACH row still carries autopay_enabled=true.
+    expect(await vg.customerExcludedByAutopay('c-legacy', knexFor(
+      { id: 'c-legacy', autopay_enabled: null },
+      { id: 'pm-expired' },
+    ))).toBe(true);
+    // No autopay-enabled method at all ⇒ not enrolled.
+    expect(await vg.customerExcludedByAutopay('c-plain', knexFor(
+      { id: 'c-plain', autopay_enabled: null },
+      undefined,
+    ))).toBe(false);
+  });
+
+  test('fail closed: unreadable customer or a throwing read refuses grouping', async () => {
+    const vg = freshVG();
+    expect(await vg.customerExcludedByAutopay('c-missing', knexFor(undefined))).toBe(true);
+    expect(await vg.customerExcludedByAutopay('c-err', () => { throw new Error('db down'); })).toBe(true);
+  });
+});
+

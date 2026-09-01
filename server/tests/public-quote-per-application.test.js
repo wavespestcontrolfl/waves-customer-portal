@@ -394,6 +394,104 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(Number(lawnPestMix.summary.oneTimeTotal)).toBeGreaterThan(0);
   });
 
+  test('standalone rodent bait keeps its self-book funnel: the $99 setup share is carved out of the mixed-billing gate (codex #3591 r8)', () => {
+    // Non-member rodent-only quote: the engine attaches the intrinsic $99
+    // bait-station setup as a one-time line (oneTimeTotal 99) but reports
+    // its share, so the gate sees NO real one-time add-on.
+    const rodentOnly = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { rodentBait: {} },
+    });
+    expect(rodentOnly.lineItems.some((l) => l.service === 'rodent_bait_setup' && l.price === 99)).toBe(true);
+    expect(Number(rodentOnly.summary.oneTimeTotal)).toBe(99);
+    expect(Number(rodentOnly.summary.rodentBaitSetupTotal)).toBe(99);
+    expect(estimateBlocksBookingHandoff(rodentOnly)).toBe(false);
+    expect(estimateBlocksSelfBookLink(rodentOnly)).toBe(false);
+    // A REAL one-time add-on beside the rodent plan still blocks — only the
+    // setup share is exempt, not the whole one-time bucket.
+    const rodentPlusRoach = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { rodentBait: {}, pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    expect(Number(rodentPlusRoach.summary.rodentBaitSetupTotal)).toBe(0); // member → waived
+    expect(estimateBlocksBookingHandoff(rodentPlusRoach)).toBe(true);
+    const rodentPlusWeed = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { rodentBait: {}, oneTimeLawn: { treatmentType: 'weed' } },
+    });
+    expect(Number(rodentPlusWeed.summary.oneTimeTotal)).toBeGreaterThan(99);
+    expect(estimateBlocksBookingHandoff(rodentPlusWeed)).toBe(true);
+  });
+
+  test('the persisted setupFeeQuote basis carries the rodent setup obligation into self-booking (codex #3591 r17 P1)', () => {
+    const { setupFeeQuoteBasisForEstimate } = _internals;
+    const rodentOnly = generateEstimate({ ...BASE_PROPERTY, services: { rodentBait: {} } });
+    expect(setupFeeQuoteBasisForEstimate(rodentOnly)).toEqual({ qualifies: true, kind: 'rodent_bait_setup', amount: 99 });
+    const pestOnly = generateEstimate({ ...BASE_PROPERTY, services: { pest: { frequency: 'quarterly' } } });
+    expect(setupFeeQuoteBasisForEstimate(pestOnly)).toEqual({ qualifies: true, kind: 'waveguard_membership', amount: 99 });
+    // pest + rodent: no membership-fee solo mix, and rodent's setup is waived by pest.
+    const pestRodent = generateEstimate({ ...BASE_PROPERTY, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } });
+    expect(setupFeeQuoteBasisForEstimate(pestRodent)).toEqual({ qualifies: false, kind: null, amount: 0 });
+    expect(setupFeeQuoteBasisForEstimate(rodentOnly, { commercialDetected: true })).toEqual({ qualifies: false, kind: null, amount: 0 });
+  });
+
+  test('a ZERO rodent-setup decision strips the engine row + its one-time share from the draft, and the frozen resolver honors it (codex #3591 r26 P1)', () => {
+    const { stripWaivedRodentSetupFromDraft } = _internals;
+    const draft = {
+      oneTimeTotal: 99,
+      engineResult: {
+        summary: { oneTimeTotal: 99, rodentBaitSetupTotal: 99, year1Total: 455 },
+        lineItems: [{ service: 'rodent_bait', annual: 356 }, { service: 'rodent_bait_setup', price: 99 }],
+      },
+      setupFeeQuote: { amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' },
+    };
+    expect(stripWaivedRodentSetupFromDraft(draft)).toBe(99);
+    expect(draft.engineResult.lineItems.map((l) => l.service)).toEqual(['rodent_bait']);
+    expect(draft.oneTimeTotal).toBe(0);
+    expect(draft.engineResult.summary).toEqual({ oneTimeTotal: 0, rodentBaitSetupTotal: 0, year1Total: 356 });
+    const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+    // Belt: a draft that still carries the row but persisted the zero decision bills nothing.
+    expect(frozenRodentBaitSetupAmount({
+      engineResult: { lineItems: [{ service: 'rodent_bait_setup', price: 99 }] },
+      setupFeeQuote: { amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' },
+    })).toBe(0);
+    // The membership fee's zero waiver never suppresses a rodent setup line.
+    expect(frozenRodentBaitSetupAmount({
+      engineResult: { lineItems: [{ service: 'rodent_bait_setup', price: 99 }] },
+      setupFeeQuote: { amount: 0, waived: 'existing_member', kind: 'waveguard_membership' },
+    })).toBe(99);
+  });
+
+  test('the account-level member waiver applies to the membership fee only; a rodent-only member still owes the rodent setup (codex #3591 r18 P1)', () => {
+    const { resolveSetupFeeQuoteDecision } = _internals;
+    const membership = { qualifies: true, kind: 'waveguard_membership', amount: 99 };
+    const rodent = { qualifies: true, kind: 'rodent_bait_setup', amount: 99 };
+    expect(resolveSetupFeeQuoteDecision(membership, { activeMember: true })).toEqual({ amount: 0, waived: 'existing_member', kind: 'waveguard_membership' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { activeMember: true })).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+    // A queued claim elsewhere on the account waives the MEMBERSHIP fee, but
+    // the per-series rodent setup only when the claim was booked from THIS
+    // draft (codex #3591 r64 P1) — a second rodent program for another
+    // property never rides the first series' in-flight stamp.
+    expect(resolveSetupFeeQuoteDecision(membership, { feeAlreadyQueued: true })).toEqual({ amount: 0, waived: 'fee_already_queued', kind: 'waveguard_membership' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { feeAlreadyQueued: true })).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { feeAlreadyQueued: true, queuedForThisDraft: true })).toEqual({ amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' });
+    expect(resolveSetupFeeQuoteDecision(rodent, {})).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+  });
+
+  test('the queued-claim probes carry draft provenance for the rodent kind (source contracts, codex #3591 r64 P1)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    // The draft-provenance probe is its OWN query, never a comparison against
+    // one arbitrary account-wide `.first()` (codex #3591 r65 P1).
+    expect(publicQuote).toMatch(/const consumableClaimProbe = \(\) => q\('scheduled_services as claim'\)/);
+    expect(publicQuote).toMatch(/feeAlreadyQueued = !!\(await consumableClaimProbe\(\)\.first\('claim\.id'\)\);/);
+    expect(publicQuote).toMatch(/queuedForThisDraft = !!draftEstimateId\s+&& !!\(await consumableClaimProbe\(\)\.where\('claim\.source_estimate_id', draftEstimateId\)\.first\('claim\.id'\)\);/);
+    expect(publicQuote).toMatch(/decideSetupFeeQuote\(q, existingEst \? existingEst\.id : null\)/);
+    const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(booking).toMatch(/\.modify\(\(qb\) => \{ if \(rodentSetupQuote\) qb\.where\('claim\.source_estimate_id', freshPricingEst\.id\); \}\)/);
+  });
+
   test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {
     const bedBug = generateEstimate({
       ...BASE_PROPERTY,

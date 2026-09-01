@@ -279,7 +279,8 @@ describe('auto-secure — enrollment serialized with cancellation (Codex r26 P1)
     // status CAS; the enrollment rides the same transaction as a savepoint.
     const card = fs.readFileSync(path.join(__dirname, '../services/appointment-card-request.js'), 'utf8');
     const fnAt = card.indexOf('async function autoSecureFromSavedMethod');
-    const fnSlice = card.slice(fnAt, fnAt + 5000);
+    // Window sized for the function body — #3591 grew it past 5000 chars.
+    const fnSlice = card.slice(fnAt, fnAt + 9000);
     expect(fnSlice).toContain('const secured = await db.transaction(async (trx) => {');
     expect(fnSlice).toContain('.forUpdate()');
     expect(fnSlice).toContain('dbh: trx,');

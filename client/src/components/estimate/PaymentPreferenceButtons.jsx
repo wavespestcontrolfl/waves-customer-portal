@@ -108,6 +108,10 @@ export default function PaymentPreferenceButtons({
   // setup + first-application invoice (they're billed after completion).
   // Without this note, the invoice preview reads as the whole cost.
   oneTimeExtrasTotal = 0,
+  // Up-front rows beyond the membership setup — the rodent bait-station
+  // setup (codex #3591 r33 P1): invoiced WITH the first application by both
+  // accept paths, never deferred to "after completion". [{ label, amount }]
+  extraInvoiceRows = [],
   // GATE_PREPAY_CARD_AND_CHARGE (server /data recurringCardPolicy.prepayInLane):
   // prepay rides the card lane — the customer saves a card at checkout and
   // the 12-month total is charged on confirmation, so the copy must not
@@ -136,7 +140,14 @@ export default function PaymentPreferenceButtons({
   // customer from selecting a dead-end option.
   const offerPrepay = !invoiceMode && !isOneTime && !siteConfirmationHold && (annualPrepayEligible || !!waivableSetupFee);
   const setupAmount = Number(setupFee?.amount);
-  const hasSetupInvoice = Number.isFinite(setupAmount) && setupAmount > 0;
+  const hasWaveGuardSetupRow = Number.isFinite(setupAmount) && setupAmount > 0;
+  const upFrontRows = [
+    ...(hasWaveGuardSetupRow ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
+    ...(Array.isArray(extraInvoiceRows) ? extraInvoiceRows : [])
+      .filter((row) => Number(row?.amount) > 0)
+      .map((row) => ({ label: row.label || 'Setup', amount: Math.round(Number(row.amount) * 100) / 100 })),
+  ];
+  const hasSetupInvoice = upFrontRows.length > 0;
   const firstVisit = firstVisitAmount(selectedFrequency || {});
 
   const btnBase = {
@@ -163,7 +174,7 @@ export default function PaymentPreferenceButtons({
   // figure would contradict the "$X–$Y, confirmed on site" range, and the
   // accept intentionally creates no invoice to open.
   const invoiceRows = heldRecurring ? [] : [
-    ...(hasSetupInvoice ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
+    ...upFrontRows,
     ...(firstVisit ? [{ label: 'Per application', amount: firstVisit }] : []),
   ];
   const invoiceTotal = Math.round(invoiceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100) / 100;
@@ -175,6 +186,13 @@ export default function PaymentPreferenceButtons({
   const annualAmount = firstPositiveNumber(selectedFrequency?.annual);
   const prepayRows = !heldRecurring && annualAmount ? [
     ...(hasSetupInvoice && waivableSetupFee ? [{ label: 'WaveGuard Membership Setup', amountText: 'Waived' }] : []),
+    // The rodent bait-station setup is NOT prepay-waived — the converter
+    // adds it to the annual prepay invoice as its own collectible line
+    // (codex #3591 r80 P2), so the preview must show it too or the
+    // customer approves a prepay $99 under the minted invoice.
+    ...(Array.isArray(extraInvoiceRows) ? extraInvoiceRows : [])
+      .filter((row) => Number(row?.amount) > 0)
+      .map((row) => ({ label: row.label || 'Setup', amountText: fmtMoney(Math.round(Number(row.amount) * 100) / 100) })),
     { label: '12-month plan', amountText: fmtMoney(annualAmount) },
   ] : [];
   const invoiceBox = {

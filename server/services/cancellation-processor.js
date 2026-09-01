@@ -7,6 +7,11 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
 const CHURN_REASON = 'Customer cancellation request';
+// The reason the portal request routes pass ("Portal cancellation request
+// <id>") — persisted verbatim on each cancelled row's cancellation_reason,
+// so anything matching customer-driven cancellations by reason must accept
+// this prefix alongside the bare CHURN_REASON default.
+const PORTAL_CANCEL_REASON_PREFIX = 'Portal cancellation request';
 // Status/track-state vocabulary lives in cancellation-eligibility so the
 // POST /api/requests gate, the /api/schedule payload, and this sweep can
 // never drift; re-exported below for existing consumers.
@@ -168,7 +173,7 @@ async function familyScopedServiceIds(customerId, families) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const ids = new Set();
   for (const row of rows) {
     const family = familyOfServiceRow(row);
@@ -212,7 +217,7 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const owned = [];
   for (const row of rows) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
@@ -229,8 +234,14 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
   const discountAfter = tierDiscountRate(tierAfter);
 
   const components = await loadComponents(dbh, customerId);
-  const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';
-  const perApplicationLane = String(customer.billing_mode || '') === 'per_application';
+  // Lane via the canonical resolver (#3140): a positive monthly_rate on a
+  // per-visit / annual-prepay / one-time row is legacy residue, not dues —
+  // the old rate>0 shortcut demanded attribution and repriced monthly
+  // components for lanes the dues cron never bills (Codex #3669 r3 P2).
+  const { resolveBillingLane } = require('./billing-lane');
+  const laneMode = resolveBillingLane(customer).mode;
+  const monthlyLane = laneMode === 'monthly_membership';
+  const perApplicationLane = laneMode === 'per_application';
   const byFamily = new Map(components.map((c) => [c.family_key, Number(c.monthly_rate) || 0]));
   // A family on HOLD carries its real price in plan_holds.held_monthly_rate
   // (its component is 0) — reprice THAT and leave the component/source
@@ -678,7 +689,14 @@ async function processCancellationRequest({
   try {
     let stopQuery = db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
     if (scopedIds) stopQuery = stopQuery.whereIn('id', [...scopedIds]);
-    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, updated_at: new Date() });
+    // Stamp the attempt's reason on every row whose recurrence this stop
+    // clears (codex GH r8 P1): when the plan's only footprint was a
+    // COMPLETED series anchor riding recurring_ongoing=true, the flag
+    // itself is gone after this update and the row never turns
+    // 'cancelled' — the reason is the surviving request-correlated
+    // evidence restart's family recovery reads. Status is untouched; the
+    // tracker renders reasons only on cancelled-status rows.
+    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, cancellation_reason: cancelReason, updated_at: new Date() });
   } catch (err) {
     errors.push('stop_recurrence');
     logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
@@ -1283,5 +1301,5 @@ async function processCancellationRequest({
 module.exports = {
   processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState,
   planScopedWindDown, applyScopedWindDown, familyOfServiceRow,
-  CHURN_REASON, CANCELLABLE_STATUSES,
+  CHURN_REASON, PORTAL_CANCEL_REASON_PREFIX, CANCELLABLE_STATUSES,
 };

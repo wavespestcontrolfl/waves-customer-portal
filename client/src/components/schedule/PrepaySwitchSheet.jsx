@@ -497,6 +497,11 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
             {money(preview.setupFee.amount)} setup fee waived.
           </div>
         )}
+        {Number(preview.rodentSetupFee?.amount) > 0 && (
+          <div className="text-zinc-900" style={{ fontSize: 13, marginTop: 4 }}>
+            Includes the {money(preview.rodentSetupFee.amount)} bait station setup — billed once, not waived.
+          </div>
+        )}
       </div>
 
       {supersedes.length > 0 && (

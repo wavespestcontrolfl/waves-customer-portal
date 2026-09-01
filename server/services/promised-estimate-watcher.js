@@ -100,7 +100,9 @@ async function loadUnkeptPromises() {
           -- sent_at below (uncapped audit on 573ee332e): a delivery that
           -- predates the promise plus a suppressed later attempt (which
           -- advances sent_at but not this stamp) must not keep it.
-          AND (COALESCE(e.source, '') <> 'service_report_cta'
+          -- plan_restart mints share the shape (C4 restart taps publish
+          -- without delivery too — codex GH #3671 r8 P1).
+          AND (COALESCE(e.source, '') NOT IN ('service_report_cta', 'plan_restart')
                OR (COALESCE(e.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
                    AND (e.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > CASE
                      WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))

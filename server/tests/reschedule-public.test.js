@@ -18,7 +18,7 @@ const smsMigration = require('../models/migrations/20260702000011_reschedule_lin
 const emailMigration = require('../models/migrations/20260702000012_reschedule_link_email_templates');
 
 const {
-  eligibility, eligibilityAsync, bookingRange, searchParseOpts, apptDateStr, label12,
+  eligibility, eligibilityAsync, accountInactive, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
   seriesScopeMismatch,
@@ -522,5 +522,86 @@ describe('grouped visits are refused before slot selection (codex #3609 r4)', ()
     mockDb.mockClear();
     expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });
     expect(mockDb).not.toHaveBeenCalled();
+  });
+});
+
+// ── C4 (codex GH r4 P1): a cancelled/inactive account's tokenized page must
+// not stay a mutation side door after the portal itself went read-only.
+describe('reschedule-public inactive-account fail-closed (C4)', () => {
+  test('accountInactive: only an EXPLICITLY active customer passes — false, NULL, and a missing join column all refuse', () => {
+    expect(accountInactive({ customer_active: true })).toBe(false);
+    expect(accountInactive({ customer_active: false })).toBe(true);
+    expect(accountInactive({ customer_active: null })).toBe(true);
+    expect(accountInactive({})).toBe(true);
+  });
+
+  describe('routes refuse before any eligibility/availability work', () => {
+    const express = require('express');
+    const TOKEN = 'a'.repeat(64);
+    let server;
+    let base;
+    beforeAll((done) => {
+      const app = express();
+      app.use(express.json());
+      app.use('/api/public/reschedule', reschedulePublicRouter);
+      server = app.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${server.address().port}`; done(); });
+    });
+    afterAll((done) => { server.close(done); });
+
+    const svcRow = (overrides = {}) => ({
+      id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-07-10',
+      window_start: '09:00', window_end: '11:00', service_type: 'Quarterly Pest Control',
+      is_recurring: true, visit_id: null, customer_deleted_at: null, cust_first_name: 'Pat',
+      ...overrides,
+    });
+    function wireSvc(svc) {
+      mockDb.raw = (sql) => sql;
+      mockDb.mockImplementation(() => {
+        const api = { leftJoin: () => api, where: () => api, orderBy: () => api, first: async () => svc };
+        return api;
+      });
+    }
+
+    test('GET: an inactive (cancelled) customer renders not_reschedulable / account_inactive, no availability', async () => {
+      wireSvc(svcRow({ customer_active: false }));
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.state).toBe('not_reschedulable');
+      expect(body.reason).toBe('account_inactive');
+      expect(body.availability).toBeNull();
+    });
+
+    test('GET: active NULL refuses the same way (explicit stamp only)', async () => {
+      wireSvc(svcRow({ customer_active: null }));
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`);
+      const body = await res.json();
+      expect(body.state).toBe('not_reschedulable');
+      expect(body.reason).toBe('account_inactive');
+    });
+
+    test('POST: an inactive customer cannot commit a reschedule (409 account_inactive)', async () => {
+      wireSvc(svcRow({ customer_active: false }));
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ date: '2099-07-11', start_time: '09:00' }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.reason).toBe('account_inactive');
+    });
+
+    test('POST find-slots: refused too (409 account_inactive)', async () => {
+      wireSvc(svcRow({ customer_active: false }));
+      const res = await fetch(`${base}/api/public/reschedule/${TOKEN}/find-slots`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query: 'next friday morning' }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.reason).toBe('account_inactive');
+    });
   });
 });

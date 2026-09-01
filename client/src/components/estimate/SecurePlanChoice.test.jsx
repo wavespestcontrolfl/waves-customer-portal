@@ -43,6 +43,16 @@ describe('SecurePlanChoice', () => {
     expect(oneTime).toBeEmptyDOMElement();
   });
 
+  it('renders ONLY the per-application option (with its setup disclosure) when the server suppresses prepay', () => {
+    const onSelect = vi.fn();
+    render(<SecurePlanChoice planContext={{ ...FEE_WAIVER_CONTEXT, planClass: 'discount', prepay: null, setupFee: { amount: 99, waivedWithPrepay: false } }} onSelect={onSelect} />);
+    expect(screen.getByText('Pay per application')).toBeInTheDocument();
+    expect(screen.getByText('$99.00 setup fee applies')).toBeInTheDocument();
+    expect(screen.queryByText(/Prepay the year/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Pay per application'));
+    expect(onSelect).toHaveBeenCalledWith('per_application');
+  });
+
   it('fee-waiver mix: setup fee amount and waiver copy come from the payload (no hardcoded $99)', () => {
     render(<SecurePlanChoice planContext={FEE_WAIVER_CONTEXT} selected={null} onSelect={() => {}} />);
     expect(screen.getByText('Pay per application')).toBeInTheDocument();
@@ -51,6 +61,25 @@ describe('SecurePlanChoice', () => {
     // Waiver class shows no strikethrough/percent framing.
     expect(screen.getByText('Prepay the year')).toBeInTheDocument();
     expect(screen.queryByText(/save \d/i)).not.toBeInTheDocument();
+  });
+
+  it('unwaived setup (non-member rodent bait): prepay copy says the fee is INCLUDED, never waived (codex #3591 r9 P1)', () => {
+    render(<SecurePlanChoice planContext={{
+      ...DISCOUNT_CONTEXT,
+      prepay: { total: 437.2, coverageTotal: 338.2, setupAmount: 99, discount: 17.8, ratePctLabel: '5%' },
+      annualBase: 356,
+      setupFee: { amount: 99, waivedWithPrepay: false },
+    }} selected={null} onSelect={() => {}} />);
+    expect(screen.getByText(/Plus a one-time \$99\.00 setup fee on your first visit's invoice/)).toBeInTheDocument();
+    expect(screen.getByText(/Includes the one-time \$99\.00 setup fee\. Pay once today\./)).toBeInTheDocument();
+    expect(screen.queryByText(/setup fee is waived/)).toBeNull();
+    expect(screen.queryByText(/setup fee waived/)).toBeNull();
+    expect(screen.getByText('You save $17.80')).toBeInTheDocument();
+    expect(screen.getByText('$437.20')).toBeInTheDocument();
+    // The struck pay-per-application-year comparison includes the same
+    // unwaived setup (356 + 99), never a figure below the offer (codex #3591 r25 P2).
+    expect(screen.getByText('$455.00')).toBeInTheDocument();
+    expect(screen.queryByText('$356.00')).toBeNull();
   });
 
   it('discount mix: percent label, strikethrough base, and savings badge from the payload', () => {

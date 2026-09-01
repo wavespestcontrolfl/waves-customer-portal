@@ -67,7 +67,7 @@ async function familyUpcomingVisits(customerId, familyKey) {
     })
     .whereRaw("(s.track_state IS NULL OR s.track_state NOT IN ('complete', 'en_route', 'on_property'))")
     .orderBy('s.scheduled_date', 'asc')
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   return rows.filter((row) => familyOfServiceRow(row) === familyKey);
 }
 
@@ -121,9 +121,13 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   if (prior) throw codedError('hold_cooldown', 'This service was already held in the last 12 months');
 
   // Money first (fail closed): a monthly-lane family we cannot attribute
-  // cannot promise "no charges".
-  const customer = await db('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'tier_protected_until');
-  const monthlyLane = Number(customer?.monthly_rate) > 0 && String(customer?.billing_mode || '') !== 'per_application';
+  // cannot promise "no charges". Lane via the canonical resolver (#3140) —
+  // the monthly dues charge the hold suspends only exists on the
+  // monthly_membership lane; the old rate>0 shortcut demanded attribution
+  // for prepay/per-visit rows the dues cron never bills (Codex #3669 r3 P2).
+  const customer = await db('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
+  const { resolveBillingLane } = require('../billing-lane');
+  const monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
   let heldRate = null;
   if (monthlyLane) {
     const component = await db('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey }).first('monthly_rate');

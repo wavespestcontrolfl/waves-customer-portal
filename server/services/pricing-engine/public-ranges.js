@@ -87,10 +87,59 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTime
 // tier discount (up to 20% at platinum) to qualifying recurring lines after
 // the whole bundle is known — the individual pricers never see it, so the
 // published lows must include these post-discount amounts.
+// Live rodent ladder sample points: each configured bracket's inclusive
+// max plus every extension step to the public 20,000 sf cap (codex #3591
+// r9/r15). Computed per call — a post-sync bracket edit reshapes the grid.
+const RODENT_PUBLIC_MAX_SQFT = 20000;
+function rodentBaitSweepFootprints() {
+  const brackets = Array.isArray(constants.RODENT.baitBrackets) ? constants.RODENT.baitBrackets : [];
+  const ext = constants.RODENT.baitBracketExtension || {};
+  // Only boundaries a residential public quote can reach (public-quote clamps
+  // homes to 20,000 sf — codex #3591 r26 P2); the cap itself is always sampled.
+  const points = brackets.map((b) => Number(b.maxSqFt))
+    .filter((n) => Number.isFinite(n) && n > 0 && n <= RODENT_PUBLIC_MAX_SQFT);
+  const top = points.length ? Math.max(...points) : 0;
+  const step = Number(ext.perSqFt) > 0 ? Number(ext.perSqFt) : 1000;
+  // The extension is monotonic (+stations/+$ per step), so its extrema are
+  // the FIRST step past the top bracket and the public cap — never every
+  // increment (a tiny per_sq_ft would otherwise enumerate tens of thousands
+  // of engine runs per sweep — codex #3591 r25 P2).
+  if (top + step < RODENT_PUBLIC_MAX_SQFT) points.push(top + step);
+  points.push(RODENT_PUBLIC_MAX_SQFT);
+  return [...new Set(points)];
+}
+
 function waveGuardBundleValues() {
   const { generateEstimate } = require('./estimate-engine');
   const FOOTPRINTS_SQFT = footprintsFromBrackets();
-  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [] };
+  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [], rodentBait: [] };
+  // Rodent's DISCOUNTED values must come from the same live ladder points
+  // the raw sweep uses (codex #3591 r15 P2): an operator-added narrow
+  // bracket absent from the pest-derived grid would otherwise price a real
+  // Silver–Platinum per-application charge below the published low.
+  for (const footprint of rodentBaitSweepFootprints()) {
+    if (FOOTPRINTS_SQFT.includes(footprint)) continue;
+    for (const mix of [
+      { pest: { frequency: 'quarterly' } },
+      { pest: { frequency: 'quarterly' }, lawn: {}, mosquito: {}, treeShrub: {} },
+    ]) {
+      const est = generateEstimate({
+        propertyType: 'single_family',
+        footprint,
+        lotSqFt: 8000,
+        lawnSqFt: 6000,
+        features: { shrubs: 'light', complexity: 'simple' },
+        services: { ...mix, rodentBait: {} },
+      });
+      for (const li of est.lineItems || []) {
+        if (li.service !== 'rodent_bait' || !Number.isFinite(li.perApp)) continue;
+        const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
+          ? li.annualAfterDiscount / li.annualBeforeDiscount
+          : 1;
+        out.rodentBait.push(li.perApp * ratio);
+      }
+    }
+  }
   for (const footprint of FOOTPRINTS_SQFT) {
     for (const lotSqFt of [5000, 8000, 20000]) {
       for (const propertyType of ['single_family', 'condo_upper']) {
@@ -108,7 +157,7 @@ function waveGuardBundleValues() {
         lotSqFt,
         lawnSqFt: optionSet.lawnSqFt,
         features: { shrubs: 'light', complexity: 'simple' },
-        services: { lawn: optionSet.lawn, pest: { frequency }, mosquito: {}, treeShrub: optionSet.treeShrub, termiteBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
+        services: { lawn: optionSet.lawn, pest: { frequency }, mosquito: {}, treeShrub: optionSet.treeShrub, termiteBait: {}, rodentBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
       });
       for (const li of est.lineItems || []) {
         const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
@@ -120,6 +169,9 @@ function waveGuardBundleValues() {
           out.mosquito.push(li.annualAfterDiscount / li.visits);
         }
         if (li.service === 'tree_shrub' && Number.isFinite(li.monthlyAfterDiscount)) out.treeShrub.push(li.monthlyAfterDiscount);
+        // Rodent bait takes the tier % since 2026-08-29 — the published low
+        // must include the discounted per-application rate (codex #3591 r4).
+        if (li.service === 'rodent_bait' && Number.isFinite(li.perApp)) out.rodentBait.push(li.perApp * ratio);
         if (li.service === 'palm_injection' && Number.isFinite(li.perVisit) && li.palmCount > 0
           && li.annualBeforeCredits > 0 && Number.isFinite(li.annualAfterCredits)) {
           // perVisit already carries the per-visit minimum; apply the credit
@@ -423,24 +475,40 @@ function buildRows() {
     notes: 'Single-visit knockdown or 2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
   }));
 
+  const formatSetupFee = (v) => {
+    const n = Math.round(Number(v) * 100) / 100;
+    return Number.isInteger(n) ? String(n) : n.toFixed(2);
+  };
   add('rodent_bait_program', () => rangeRow({
     key: 'rodent_bait_program',
     name: 'Rodent Bait Station Program',
-    unit: 'per month',
+    unit: 'per application',
+    // Footprint brackets (owner 2026-08-29): lot size, roof type, and the
+    // retired post-exclusion modifier no longer move the price — one sweep
+    // over the footprint axis covers the full ladder. The pest-derived
+    // FOOTPRINTS_SQFT tops out at 6,000 sf, but public residential quotes
+    // accept up to 20,000 sf and the ladder EXTENDS above 6,750 (codex
+    // #3591 r3 P2) — sweep the bracket boundaries and the supported upper
+    // footprint too so the published high matches the largest exact quote.
+    // Sample points come from the LIVE ladder (codex #3591 r9 P2): each
+    // configured bracket's inclusive max (every bracket is flat inside, so
+    // its boundary IS its price) plus every extension step up to the public
+    // 20,000 sf cap — an operator-edited/added bracket is always sampled,
+    // never a second hardcoded ladder here.
     values: sweepValues(
-      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
-      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, {}),
-      (r) => r.monthly).concat(sweepValues(
-      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
-      // Tile-roof properties carry the derived rodentRoofAdj the estimate
-      // path forwards.
-      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: 50 } }),
-      (r) => r.monthly)).concat(sweepValues(
-      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
-      // Metal roofs carry the negative adjustment property lookup forwards.
-      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: -5 } }),
-      (r) => r.monthly)),
-    notes: `Monthly-billed monitoring program with ${Number(constants.RODENT.baitVisitsPerYear) || 4} service visits per year.`,
+      [...new Set([...FOOTPRINTS_SQFT, ...rodentBaitSweepFootprints()])].map((f) => ({ f })),
+      ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
+      // Tier-discounted customer-paid values (rodent takes the WaveGuard %
+      // since 2026-08-29) widen the low — same pattern as pest/lawn.
+      (r) => r.perVisit).concat(bundle('rodentBait')),
+    // Setup copy tracks the LIVE value to the cent and disappears when the
+    // fee is disabled (0) — the public surface must match the live charge
+    // (codex #3591 r10 P2).
+    notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size${
+      Number(constants.RODENT.baitSetupFee) > 0
+        ? `; a one-time $${formatSetupFee(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`
+        : '.'
+    }`,
   }));
 
   add('rodent_trapping', () => rangeRow({

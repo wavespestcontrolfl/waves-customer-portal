@@ -46,7 +46,27 @@ function resolveStoredPestPricingVersion(estimateData) {
     || (Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : [])
       .find((li) => li?.service === 'pest_control')
     || null;
-  if (!storedPestLine) return null;
+  if (!storedPestLine) {
+    // No stored pest line normally means pest was just added (caller keeps the
+    // live default) — but a service opt-out DELETES the stored rows, and its
+    // removal event captured this very resolver's answer at removal time
+    // precisely because the evidence was about to disappear. Without the
+    // fallback, an Admin V2 estimate replaying from engineRequest (no flat
+    // input carrier to re-stamp) restores pest onto the live default curve
+    // instead of the customer's quote-time curve (codex #3684 r1 P1). Latest
+    // removal event wins — its provenance was captured while the line still
+    // existed.
+    const events = estimateData?.serviceOptOut?.events;
+    if (Array.isArray(events)) {
+      const lastRemoval = events
+        .filter((e) => e && e.serviceKey === 'pest_control' && e.included === false
+          && e.provenance && typeof e.provenance === 'object')
+        .pop();
+      const captured = lastRemoval?.provenance?.pestPricingVersion;
+      if (captured) return captured === 'v2' ? 'v2' : 'v1';
+    }
+    return null;
+  }
   return storedPestLine.pricingVersion === 'v2' ? 'v2' : 'v1';
 }
 

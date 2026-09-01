@@ -36,6 +36,8 @@ function fakeDb({
   addonQueryThrows = false,
   mintedInvoiceLinks = [],
   mintedProbeThrows = false,
+  estimateRows = [],
+  estimatesQueryThrows = false,
   // Opt-in catalog-join support. WITHOUT catalogRows the builder has no
   // leftJoin at all, so the catalog and cadence loaders throw and degrade
   // exactly as they did before this parameter existed — every pre-existing
@@ -50,6 +52,8 @@ function fakeDb({
   prepaidTerms = [],
   prepaidTermsQueryThrows = false,
   cadenceQueryThrows = false,
+  // knex_migrations row for the rodent realignment — the rollout instant.
+  migrationRow = null,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -93,6 +97,7 @@ function fakeDb({
       first: async () => {
         if (table === 'customers') return customer;
         if (table === 'annual_prepay_terms') return prepaidTerm;
+        if (table === 'knex_migrations') return migrationRow;
         return null;
       },
       select: async (...cols) => {
@@ -126,6 +131,10 @@ function fakeDb({
           return prepaidTerms;
         }
         if (table === 'scheduled_services') return scheduledRows;
+        if (table === 'estimates') {
+          if (estimatesQueryThrows) throw new Error('relation does not exist');
+          return estimateRows;
+        }
         if (table === 'invoices') {
           if (probesServiceIds) {
             if (mintedProbeThrows) throw new Error('relation does not exist');
@@ -172,7 +181,7 @@ function futurePestRows() {
 }
 
 describe('computeMembershipContext', () => {
-  test('account spend lists non-tier recurring work without using it for WaveGuard qualification', async () => {
+  test('account spend: rodent bait qualifies for WaveGuard (2026-08-29 owner directive); palm stays non-tier', async () => {
     const database = fakeDb({
       scheduledRows: [
         { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
@@ -186,15 +195,16 @@ describe('computeMembershipContext', () => {
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
-    expect(spend.existingServiceKeys).toEqual(['pest_control']);
+    // Pest + rodent bait = 2 qualifying services = Silver.
+    expect(spend.existingServiceKeys).toEqual(['pest_control', 'rodent_bait']);
     expect(spend).toEqual(expect.objectContaining({
-      currentTier: 'bronze',
-      currentTierLabel: 'Bronze',
-      currentDiscountPct: 0,
+      currentTier: 'silver',
+      currentTierLabel: 'Silver',
+      currentDiscountPct: 10,
     }));
     expect(spend.currentServices).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'pest_control', currentPerVisit: 117, qualifiesForWaveGuard: true }),
-      expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 42, qualifiesForWaveGuard: false }),
+      expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 42, qualifiesForWaveGuard: true }),
     ]));
     expect(spend.currentSpendPerVisitTotal).toBe(159);
   });
@@ -209,7 +219,8 @@ describe('computeMembershipContext', () => {
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
-    expect(spend.existingServiceKeys).toEqual([]);
+    // Rodent bait qualifies since 2026-08-29; palm stays non-tier.
+    expect(spend.existingServiceKeys).toEqual(['rodent_bait']);
     expect(spend.currentServices.map((service) => service.key).sort()).toEqual(['palm_injection', 'rodent_bait']);
   });
 
@@ -2255,6 +2266,74 @@ describe('existing-service tier extension snapshot', () => {
     expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
     expect(ctx.existingServices).toEqual([]);
     expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: a GRANDFATHERED rodent bait plan counts toward the tier but is never extension-repriced; a new-model one is (codex #3591 r14 P1)', async () => {
+    mockExtendExistingGate = true;
+    const legacyRows = [
+      { id: 'r1', service_type: 'Rodent Bait Stations', scheduled_date: '2099-02-05', estimated_price: 147, source_estimate_id: 'est-legacy' },
+      { id: 'r2', service_type: 'Rodent Bait Stations', scheduled_date: '2099-05-05', estimated_price: 147, source_estimate_id: 'est-legacy' },
+    ];
+    const legacyEstimate = { id: 'est-legacy', estimate_data: { result: { recurring: { services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49 }] } } } };
+    const legacy = await computeMembershipContext(fakeDb({
+      scheduledRows: legacyRows,
+      estimateRows: [legacyEstimate],
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(legacy.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(legacy.existingServices).toEqual([]);
+
+    const newRows = legacyRows.map((row) => ({ ...row, estimated_price: 89, source_estimate_id: 'est-new' }));
+    const newEstimate = { id: 'est-new', estimate_data: { result: { recurring: { services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 }] } } } };
+    const fresh = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows,
+      estimateRows: [newEstimate],
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(fresh.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
+
+    // No source estimate AND no readable creation date → cannot prove
+    // new-model → left alone. Probe failure → fail closed.
+    const unsourced = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(unsourced.existingServices).toEqual([]);
+    // A DIRECT series (admin/call/secure booking — no estimate by design)
+    // whose ROOT was created at/after the realignment ROLLOUT INSTANT (the
+    // 20260829000040 migration_time in THIS database) is bracket-priced
+    // new-model and DOES extend (codex #3591 r36/r37 P1)…
+    // rolloutMs = migration_time + the 30-min deploy-overlap drain (r51).
+    const rollout = { migration_time: '2026-08-29T18:30:00.000Z' };
+    const directNew = await computeMembershipContext(fakeDb({
+      migrationRow: rollout,
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T19:00:01.000Z' })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(directNew.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
+    // …while a direct series booked the SAME DAY but before the deploy —
+    // or INSIDE the 30-min old-writer drain window (r51) — keeps its
+    // snapshotted rate…
+    const directOld = await computeMembershipContext(fakeDb({
+      migrationRow: rollout,
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T18:45:00.000Z' })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(directOld.existingServices).toEqual([]);
+    // …and with NO migration row (env never rolled out) nothing qualifies.
+    const noRollout = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-02T14:00:00.000Z' })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(noRollout.existingServices).toEqual([]);
+    // Future CHILDREN with no stamp under a completed estimate-origin ROOT
+    // classify through the root's estimate (codex #3591 r37 P1).
+    const childrenUnderRoot = await computeMembershipContext(fakeDb({
+      estimateRows: [newEstimate],
+      scheduledRows: [
+        { id: 'root', service_type: 'Rodent Bait Stations', scheduled_date: '2026-02-05', status: 'completed', estimated_price: 89, source_estimate_id: 'est-new', recurring_parent_id: null },
+        ...newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: 'root' })),
+      ],
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(childrenUnderRoot.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', rowIds: ['r1', 'r2'] })]);
+    const failed = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows, estimateRows: [newEstimate], estimatesQueryThrows: true,
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(failed.existingServices).toEqual([]);
   });
 
   test('gate on: Bronze→Silver lawn add-on lists existing pest at the delta rate with its upcoming visits', async () => {

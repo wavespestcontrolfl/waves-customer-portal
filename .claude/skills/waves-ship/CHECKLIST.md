@@ -21,7 +21,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 
 ## Codex clean gate (all four, on the FINAL commit)
 - [ ] Issue comment exists with Reviewed-commit SHA == final HEAD
-- [ ] PR reviews + inline comments polled with `--paginate`; count stable for ~90s
+- [ ] PR reviews + inline comments polled with `--paginate`; count stable for 15 min after the wrapper (inline findings have lagged it by up to ~12 min — #3669 r4)
 - [ ] Every finding on the current head (`original_commit_id` checked for staleness) — including P2s — is either fixed or rebutted inline with file:line evidence; nothing self-downgraded to a follow-up
 - [ ] No finding left silently unaddressed
 

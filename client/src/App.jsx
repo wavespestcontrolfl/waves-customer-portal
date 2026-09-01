@@ -573,6 +573,8 @@ export default function App() {
             <Route path="data-hygiene" element={<Navigate to="/admin/agents?tab=hygiene" replace />} />
             <Route path="agents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agents...</div>}><AgentsHubPage /></Suspense>} />
             <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
+            {/* The documented owner-approval queue URL (feature-gates.js, service docs) — the queue lives as a hub tab. */}
+            <Route path="drafts" element={<Navigate to="/admin/agents?tab=drafts" replace />} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge...</div>}><KnowledgeHubPage /></Suspense>} />
             <Route path="referrals" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading referrals...</div>}><AdminReferralsPage /></Suspense>} />

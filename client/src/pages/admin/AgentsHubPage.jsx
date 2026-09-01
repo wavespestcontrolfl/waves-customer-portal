@@ -1,8 +1,10 @@
 /**
  * <AgentsHubPage> — unified agent oversight surface at /admin/agents.
- * Three tabs rendered as one centered pill:
+ * Tabs rendered as one centered pill:
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue)
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
+ *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
+ *                            parked message_drafts; approve/revise sends)
  *   - "Shadow Drafts"      — AgentShadowDraftsPage (brand-voice loop:
  *                            silent SMS drafts + nightly judge scores)
  *
@@ -29,11 +31,12 @@
  */
 import React, { useState, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Bot, LayoutGrid, ListChecks, MessageSquareDashed, DatabaseZap, RefreshCw } from "lucide-react";
+import { Bot, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
 import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
+import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
@@ -41,12 +44,14 @@ const TAB_KEY = "tab";
 const TABS = {
   OVERVIEW: "overview",
   DECISIONS: "decisions",
+  DRAFTS: "drafts",
   SHADOW: "shadow",
   HYGIENE: "hygiene",
 };
 const TAB_LIST = [
   { key: TABS.OVERVIEW, label: "Overview", Icon: LayoutGrid },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
+  { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
   { key: TABS.HYGIENE, label: "Data Hygiene", Icon: DatabaseZap },
 ];
@@ -104,7 +109,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName="grid-cols-2 md:grid-cols-4"
+        navGridClassName="grid-cols-2 md:grid-cols-5"
         action={
           tab === TABS.OVERVIEW
             ? {
@@ -121,6 +126,8 @@ export default function AgentsHubPage() {
           <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
+        ) : tab === TABS.DRAFTS ? (
+          <PendingDraftsTab embedded />
         ) : tab === TABS.SHADOW ? (
           <AgentShadowDraftsPage embedded />
         ) : (

@@ -70,6 +70,24 @@ function makeReviseDatabase({
       };
       return leadChain;
     }
+    if (String(table).startsWith('scheduled_services')) {
+      // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
+      // (planGate: false): it reaches the live rows even for a non-member
+      // customer, so the fake must serve an empty account instead of
+      // throwing (a real lookup failure here 503s the save by design).
+      // leftJoin + the aliased table name serve the canonical catalog join
+      // the waiver read runs regardless of the auto-tier gate (r79 P1).
+      const rowsChain = {
+        where: () => rowsChain,
+        whereNotIn: () => rowsChain,
+        whereNull: () => rowsChain,
+        leftJoin: () => rowsChain,
+        columnInfo: async () => ({ is_recurring: {} }),
+        select: async () => [],
+        first: async () => null,
+      };
+      return rowsChain;
+    }
     if (table !== 'estimates') {
       // Any side lookup (prior qualifying services, pricing sync) is
       // best-effort in the pipeline — throwing here proves the fallback path.
@@ -446,6 +464,30 @@ describe('reviseAdminEstimate', () => {
     const next2 = { reportCtaMint: mark, deliveryState: { ...fresh } };
     preserveClickMintMarkersAcrossRevise(next2, { reportCtaMint: mark, deliveryState: stale });
     expect(next2.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
+  });
+
+  test('a plan_restart quote refuses in-place revision — scope is the cancellation\'s, price is always the mint\'s (codex GH r16+r17 P1 on #3671)', async () => {
+    // A wholesale rewrite either dropped planRestart (bricked acceptance)
+    // or, force-preserved, let a changed composition restart work outside
+    // the cancellation scope — so the revise gate refuses the source
+    // outright, and the builder preflight surfaces the same message.
+    const restartRow = {
+      ...sentEstimate,
+      source: 'plan_restart',
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        planRestart: { families: ['pest_control'], cancellationCaseId: 'case-3', cancellationRequestId: 'req-3' },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: restartRow });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
   });
 
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {

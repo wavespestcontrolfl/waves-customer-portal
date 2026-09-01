@@ -42,6 +42,11 @@ import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudi
 import { formatAddress } from "../../utils/format-address";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
+// Only the process route's documented 409 conflict is a classifiable process
+// outcome; any other non-2xx keeps the server's own message rather than
+// being flattened into "did not confirm the run" (pre-push audit P1).
+const processConflict = (err) => (err?.status === 409 && err?.body?.reason ? err.body : null);
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple/gray fold to zinc tokens. Semantic green/amber/red preserved.
 const D = {
@@ -84,8 +89,25 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Surface the server's message (e.g. the 409 already-processing
+      // explanation) instead of a bare status code, and carry the parsed
+      // BODY on the error: a 409 blocked claim is still a classifiable
+      // result, and describeProcessResult turns it into the precise
+      // "nothing ran, wait and hit Process again" line rather than a
+      // generic failure.
+      let message = `HTTP ${r.status}`;
+      let payload = null;
+      try {
+        payload = await r.json();
+        message = payload?.error || payload?.message || message;
+      } catch { /* non-JSON error body */ }
+      const error = new Error(message);
+      error.status = r.status;
+      error.body = payload;
+      throw error;
+    }
     return r.json();
   });
 }
@@ -238,7 +260,14 @@ export default function CallRecordingsPanel() {
       const result = await adminFetch("/admin/call-recordings/process-all", {
         method: "POST",
       });
-      showToast(`Processed ${result.processed} recording(s)`);
+      const parts = [`Processed ${result.processed ?? 0}`];
+      if (result.skipped) parts.push(`skipped ${result.skipped}`);
+      if (result.failed) parts.push(`failed ${result.failed}`);
+      // A batch that failed outright came back 200 — per-record failures are
+      // counted, not thrown — so without a severity an entirely failed run
+      // rendered in the green success style (pre-push audit P1).
+      const severity = result.failed ? "failed" : (result.skipped ? "blocked" : "ok");
+      showToast(`${parts.join(" · ")} recording(s)`, severity);
       loadData();
     } catch (e) {
       showToast(`Failed: ${e.message}`, "failed");
@@ -248,7 +277,9 @@ export default function CallRecordingsPanel() {
 
   const processOne = async (callSid, { force = false } = {}) => {
     try {
-      const qs = force ? "?force=true" : "";
+      // operator on every click — a human pressed the button. force only when
+      // the row already finished, since it also changes extraction policy.
+      const qs = force ? "?force=true&operator=true" : "?operator=true";
       const res = await adminFetch(
         `/admin/call-recordings/process/${callSid}${qs}`,
         { method: "POST" },
@@ -259,7 +290,13 @@ export default function CallRecordingsPanel() {
       showToast(verdict.text, verdict.severity);
       loadData();
     } catch (e) {
-      showToast(`Failed: ${e.message}`, "failed");
+      // A 409 arrives here as a thrown error but is a real, classifiable
+      // outcome — read it as one rather than reporting a bare failure.
+      const conflict = processConflict(e);
+      if (conflict) {
+        const verdict = describeProcessResult(conflict);
+        showToast(verdict.text, verdict.severity);
+      } else showToast(`Failed: ${e.message}`, "failed");
     }
   };
 
@@ -524,10 +561,15 @@ export default function CallRecordingsPanel() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        // User-initiated tap → always force, so a row wedged at
-                        // 'processing' from a crashed run isn't blocked by the
-                        // concurrent-run guard.
-                        processOne(r.twilio_call_sid, { force: true });
+                        // A human tap is `operator` (the short quiet window for
+                        // a wedged claim) on every row. `force` ONLY on a row
+                        // that already finished: it also changes extraction
+                        // policy, so sending it on a first run bypassed the
+                        // retry cap and backoff and left caller-stated name
+                        // corrections review-only (codex #3677 P1).
+                        processOne(r.twilio_call_sid, {
+                          force: r.processing_status === "processed",
+                        });
                       }}
                       style={{
                         ...sBtn(D.teal, D.white),
@@ -671,7 +713,11 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
     setProcessVerdict(null);
     try {
       const res = await adminFetch(
-        `/admin/call-recordings/process/${r.twilio_call_sid}`,
+        // operator, not force: a human asking on purpose selects the shorter
+        // quiet window, while force would also change extraction policy on
+        // what may be a first run. The heartbeat still protects a live pass —
+        // reclaim is on silence, not on age.
+        `/admin/call-recordings/process/${r.twilio_call_sid}?operator=true`,
         { method: "POST" },
       );
       if (!stillShowing()) return;
@@ -695,7 +741,10 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
       }
     } catch (e) {
       if (!stillShowing()) return;
-      setProcessVerdict({
+      // Same as processOne: a 409 blocked claim is a classifiable outcome,
+      // not a bare failure.
+      const conflict = processConflict(e);
+      setProcessVerdict(conflict ? describeProcessResult(conflict) : {
         didWork: false,
         severity: "failed",
         text: `Process failed — ${e.message || "unknown error"}`,

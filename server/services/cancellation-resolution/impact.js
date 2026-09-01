@@ -41,7 +41,7 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
 
   // Coverage identity for the keep-through exemption — the LIVE term's
   // canonical covered rows (keepVisitIds, from coverageRowsForTerm), exactly

@@ -528,7 +528,15 @@ async function buildAgentEstimateContext(leadId) {
   const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
     (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadSmsThread(phoneKey, { limit: 60 }),
     (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadPriorEstimates(phoneKey, { limit: 8 }),
-    db('lead_activities').where({ lead_id: lead.id }).orderBy('created_at', 'desc').limit(30)
+    // shared_phone_note carries ANOTHER prospect's name/estimate state — the
+    // same cross-person material the shared-phone suppressions above keep
+    // out of the evidence pack, so it must not enter via local activities
+    // (estimate-tools accepts activity descriptions as quote evidence).
+    db('lead_activities').where({ lead_id: lead.id })
+      // IS DISTINCT FROM, not <>: activity_type is nullable and NULL-typed
+      // legacy rows must stay in the evidence pack.
+      .whereRaw("activity_type IS DISTINCT FROM 'shared_phone_note'")
+      .orderBy('created_at', 'desc').limit(30)
       .select('activity_type', 'description', 'metadata', 'created_at').catch(() => []),
     lead.estimate_id
       ? db('estimates').where({ id: lead.estimate_id }).first('id', 'token', 'status', 'source',

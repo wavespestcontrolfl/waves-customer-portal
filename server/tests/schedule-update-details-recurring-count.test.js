@@ -21,6 +21,14 @@ jest.mock('../services/job-status', () => ({
   nextClaimTs: jest.fn(() => 'claim-token-1'),
   transitionJobStatus: jest.fn().mockResolvedValue(undefined),
 }));
+// The extend gate resolves the completion profile through the catalog; the
+// scripted conn has no catalog, so serve a resolved untyped profile (what
+// the real resolver synthesizes for an unknown service) and reject it only
+// where a test wants the unknown-profile stand-down.
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
+}));
 
 const fs = require('fs');
 const path = require('path');
@@ -31,6 +39,7 @@ const {
   MAX_SERIES_VISIT_COUNT,
 } = adminScheduleRouter._test;
 const { transitionJobStatus } = require('../services/job-status');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
@@ -119,6 +128,10 @@ function scenario({
   // Weekly days-off JSON served through the fake conn (getBlackoutDates reads
   // via the caller's conn/trx).
   weeklyDaysOff = null,
+  // The customers row the billable-amount gate reads on extend. Null (the
+  // default for the older scenarios) models an unreadable customer, which
+  // skips the gate exactly as the make-recurring spawn does.
+  customer = null,
 }) {
   const parent = {
     id: 10,
@@ -188,6 +201,7 @@ function scenario({
       }
       return [];
     }
+    if (table === 'customers') return op === 'first' ? customer : [];
     if (table === 'system_settings') {
       return weeklyDaysOff ? { value: weeklyDaysOff } : null;
     }
@@ -509,6 +523,115 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     const r2 = await reconcile(over.conn, over.parent, 3, { ongoingSeries: true });
     expect(r2.cancelledIds).toHaveLength(0);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend (Codex P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // A self-pay customer with no number anywhere: null lane, zero rate, no tier.
+  const unpricedCustomer = { id: 5, billing_mode: null, monthly_rate: 0, waveguard_tier: null, per_application_fee: null };
+
+  test('refuses to grow an unpriced, zero-rate plan through the count raise', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 2, customer: unpricedCustomer });
+    await expect(reconcile(conn, parent, 4)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
+    });
+    expect(inserted).toHaveLength(0);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('the fixed→ongoing flip is gated the same way — it is the same writer', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 1, customer: unpricedCustomer });
+    await expect(reconcile(conn, parent, 3, { ongoingSeries: true })).rejects.toMatchObject({
+      code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
+    });
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a typed one-time profile is a mint trigger — a priced series on one extends without the stamp', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ synthesized: false, billingType: 'one_time' });
+    const { conn, parent } = scenario({
+      upcoming: 2, customer: unpricedCustomer,
+      parentOverrides: { estimated_price: '185.00', create_invoice_on_complete: false },
+    });
+    const result = await reconcile(conn, parent, 4);
+    expect(result.added).toHaveLength(2);
+  });
+
+  test('a priced series with the create-invoice stamp extends', async () => {
+    const { conn, parent, inserted } = scenario({
+      upcoming: 2, customer: unpricedCustomer, parentOverrides: { estimated_price: '185.00' },
+    });
+    const result = await reconcile(conn, parent, 4);
+    expect(result.added).toHaveLength(2);
+    for (const row of inserted) expect(Number(row.estimated_price)).toBe(185);
+  });
+
+  test('dues cover a monthly member with a rate — no price stamp needed', async () => {
+    const member = { id: 5, billing_mode: 'monthly_membership', monthly_rate: 120, waveguard_tier: 'silver', per_application_fee: null };
+    const { conn, parent, inserted } = scenario({ upcoming: 2, customer: member });
+    const result = await reconcile(conn, parent, 4);
+    expect(result.added).toHaveLength(2);
+    expect(inserted).toHaveLength(2);
+  });
+
+  test('a monthly member with NO rate is refused — the tier alone collects nothing', async () => {
+    const member = { id: 5, billing_mode: 'monthly_membership', monthly_rate: 0, waveguard_tier: 'silver', per_application_fee: null };
+    const { conn, parent } = scenario({ upcoming: 2, customer: member });
+    await expect(reconcile(conn, parent, 4)).rejects.toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+  });
+
+  test('a failed completion-profile read fails CLOSED with a retryable verdict on a PRICED series (pre-push Codex P1 + P0)', async () => {
+    // Priced, no create-invoice stamp: a typed one-time profile is the one
+    // trigger that could mint, and it could not be read — refuse, but as
+    // "unverified, retry", not "no billable amount".
+    resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('catalog read failed'));
+    const priced = scenario({
+      upcoming: 2, customer: unpricedCustomer,
+      parentOverrides: { estimated_price: '185.00', create_invoice_on_complete: false },
+    });
+    await expect(reconcile(priced.conn, priced.parent, 4)).rejects.toMatchObject({
+      statusCode: 409, code: 'RECURRING_BILLING_UNVERIFIED',
+    });
+    expect(priced.inserted).toHaveLength(0);
+    // Unpriced: no profile could make a $0 visit bill, so the same failed
+    // read takes the ordinary refusal.
+    resolveCompletionProfileForScheduledService.mockRejectedValueOnce(new Error('catalog read failed'));
+    const unpriced = scenario({ upcoming: 2, customer: unpricedCustomer });
+    await expect(reconcile(unpriced.conn, unpriced.parent, 4)).rejects.toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+    expect(unpriced.inserted).toHaveLength(0);
+  });
+
+  test('a shortening or an unchanged count never consults the gate', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 4, customer: unpricedCustomer });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toHaveLength(2);
+    expect(inserted).toHaveLength(0);
+    const same = scenario({ upcoming: 2, customer: unpricedCustomer });
+    await expect(reconcile(same.conn, same.parent, 2)).resolves.toMatchObject({ added: [] });
+  });
+
+  test('the gate sits before the insert loop, through the shared extension verdict', () => {
+    const fn = src.slice(src.indexOf('async function reconcileRecurringSeriesVisitCount('));
+    const gate = fn.indexOf('const unbillableExtend = await seriesExtensionUnbillable(trx, {');
+    const loop = fn.indexOf('for (const nd of extendDates) {');
+    expect(gate).toBeGreaterThan(-1);
+    expect(loop).toBeGreaterThan(gate);
+    // The helper prices exactly as the insert loops stamp (same financials call).
+    const helper = src.slice(src.indexOf('async function seriesExtensionUnbillable('), src.indexOf("router.get('/', async (req, res, next) => {"));
+    expect(helper).toContain('calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope)');
+    expect(helper).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
+  });
+
+  test('every OFFICE series writer consults the shared verdict; the completion auto-extend deliberately does not (owner ruling: warn at completion)', () => {
+    // reconcile (count raise + ongoing flip) + the two alert-action loops.
+    expect((src.match(/await seriesExtensionUnbillable\(trx, \{/g) || []).length).toBe(3);
+    const from = src.indexOf('async function runRecurringSeriesMaintenanceLocked(');
+    const autoExtend = src.slice(from, src.indexOf('\nasync function ', from + 10));
+    expect(autoExtend).toContain("insert(nextData)");
+    expect(autoExtend).not.toContain('seriesExtensionUnbillable(');
   });
 });
 

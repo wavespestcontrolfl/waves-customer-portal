@@ -37,6 +37,9 @@ const KNOWN_SOURCES = [
   // Report click-to-estimate mints (#3391) — the conversion lane this card
   // exists to measure must not fold into 'other'.
   'service_report_cta',
+  // Plan-restart mints (C4) — same publish-without-delivery shape, own
+  // bucket so restart taps don't contaminate the catch-all.
+  'plan_restart',
 ];
 const SOURCE_ORDER = [...KNOWN_SOURCES, 'other'];
 
@@ -142,7 +145,9 @@ async function sourcePerformance({ days = 90 } = {}) {
     // an operator LATER really delivered it — and latency runs to that
     // handoff (sendEstimateNow refreshes sent_at at delivery), never to
     // the self-serve view the tap's redirect produces seconds after mint.
-    if (String(row.source || '') === 'service_report_cta') {
+    // plan_restart mints share the shape (C4 restart taps publish without
+    // delivery too — codex GH #3671 r8 P1): same real-delivery witness.
+    if (['service_report_cta', 'plan_restart'].includes(String(row.source || ''))) {
       if (row.cta_first_delivered_at) {
         bucket.sent += 1;
         const created = new Date(row.created_at).getTime();

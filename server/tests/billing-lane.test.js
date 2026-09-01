@@ -163,15 +163,15 @@ describe('predictCompletionBilling', () => {
     expect(predictCompletionBilling({ ...perApp, autopayActive: false }))
       .toEqual({ kind: 'invoice', amount: 98, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perApp, isCallback: true }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
     expect(predictCompletionBilling({ ...perApp, perApplicationFee: null }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' });
   });
 
   test('per-application honors always-free service types (Codex r1)', () => {
     const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
     expect(predictCompletionBilling({ ...perApp, serviceType: 'Pest Control Re-Service' }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'always_free_service_type' });
     expect(predictCompletionBilling({ ...perApp, serviceType: 'Quarterly Pest Control Service' }).kind)
       .toBe('auto_charge');
   });
@@ -197,7 +197,7 @@ describe('predictCompletionBilling', () => {
       .toBe('covered_annual');
     // Uncovered + unpriced = renewal flow's problem, nothing bills here.
     expect(predictCompletionBilling(annual))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'annual_renewal_owned' });
     // Uncovered + priced add-on bills normally.
     expect(predictCompletionBilling({ ...annual, estimatedPrice: 150 }))
       .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
@@ -213,9 +213,9 @@ describe('predictCompletionBilling', () => {
   test('explicit non-monthly lanes never invoice the lingering monthly rate (Codex r4)', () => {
     const exMember = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: 33.33, estimatedPrice: null };
     expect(predictCompletionBilling(exMember))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' });
     expect(predictCompletionBilling({ ...exMember, billingMode: 'one_time', lane: 'one_time' }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' });
     // NULL (legacy) keeps the historical monthly-rate fallback.
     expect(predictCompletionBilling({ ...memberBase, billingMode: null, autopayActive: false }))
       .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
@@ -226,18 +226,18 @@ describe('predictCompletionBilling', () => {
     expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129 }))
       .toEqual({ kind: 'invoice', amount: 129, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perVisit, isCallback: true }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
   });
 
   test('per-visit lane: a PRICED callback or always-free visit predicts no charge — the completion gate will not bill it (Codex r7)', () => {
     const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null };
     expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129, isCallback: true }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
     expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129, serviceType: 'Pest Control Re-Service' }))
-      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'always_free_service_type' });
     expect(predictCompletionBilling({
       ...perVisit, billingMode: 'one_time', lane: 'one_time', estimatedPrice: 129, isCallback: true,
-    })).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    })).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
   });
 
   test('a stale annual-prepay stamp amount never reads as prepaid — completion excludes it from the numeric fallback (Codex r7)', () => {
