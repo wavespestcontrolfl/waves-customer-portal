@@ -1674,9 +1674,14 @@ violations at the severity noted.
   `serviceOptOut.staffOfferedKeys` and the page words them as an offer.
   Best-effort by design — any refusal sends the full bundle as today, never
   a blocked send — a row that already carries `serviceOptOut` is never
-  re-shaped on resend, and a send that delivers on NO channel (sent:false
-  OR a throw after the park) restores the parked line through the same rail
-  after the delivery claim is released (`revertLeadServiceForSend`). Members (snapshot flag or priors in any carrier) are
+  re-shaped on resend, and a send that delivers on NO channel (sent:false,
+  or a throw before any provider handoff — `leadShapeRef.delivered` is the
+  handoff witness, so a throw AFTER a successful SMS/email never reverts a
+  quote the customer already holds) restores the parked line through the
+  same rail after the delivery claim is released
+  (`revertLeadServiceForSend`); that staff restore alone admits a
+  `send_failed` row (the pre-delivery verdict's abort status), every other
+  CAS predicate unchanged. Members (snapshot flag or priors in any carrier) are
   never parked. Treat the two gates, the customer-only add branch
   (`actor !== 'customer'` → 400), the fail-closed no-new-row check and the
   member exclusion as security-critical.

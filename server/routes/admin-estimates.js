@@ -1237,7 +1237,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // its return value) so a throw after the park — the invalidation verdict,
   // a provider error — still reaches the compensation below (pre-push codex
   // P1).
-  const leadShapeRef = { parkedKey: null };
+  const leadShapeRef = { parkedKey: null, delivered: false };
   let result;
   let thrown = null;
   try {
@@ -1247,13 +1247,15 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
   }
-  // When NO channel delivered (sent:false, or the send threw), the customer
-  // never saw the single-service shape, so the park is compensated — the
-  // line is restored through the same rail — after the delivery claim is
-  // released (the rail's write refuses while a claim is live). Best-effort:
-  // a failed revert is logged and the row keeps the offer shape a resend
-  // would carry anyway.
-  if (leadShapeRef.parkedKey && (thrown || (result && result.sent === false))) {
+  // When NO channel delivered, the customer never saw the single-service
+  // shape, so the park is compensated — the line is restored through the
+  // same rail — after the delivery claim is released (the rail's write
+  // refuses while a claim is live). `delivered` is the provider-handoff
+  // witness: a throw AFTER a successful handoff (snapshot read, status
+  // finalize) must not revert a quote the customer already holds (GH codex
+  // P1). Best-effort: a failed revert is logged and the row keeps the offer
+  // shape a resend would carry anyway.
+  if (leadShapeRef.parkedKey && !leadShapeRef.delivered && (thrown || (result && result.sent === false))) {
     await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
   }
   if (thrown) throw thrown;
@@ -1573,6 +1575,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
+  // A provider handoff succeeded: the customer holds the single-service
+  // quote, so the send-time park must NEVER be reverted from here on — even
+  // if the snapshot read or the status finalize below throws (GH codex P1).
+  if (options.leadShapeRef && sentChannels.length > 0) options.leadShapeRef.delivered = true;
   // Channels whose delivery counts as a first response: sms only when the
   // provider send was REAL (not a suppression sentinel); email's ok already
   // implies a real handoff.

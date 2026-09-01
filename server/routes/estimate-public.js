@@ -15026,7 +15026,15 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     await db.transaction(async (trx) => {
       updateCount = await trx('estimates')
         .where({ id: estimate.id })
-        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        // The staff REVERT of a send-time park runs after the pre-delivery
+        // verdict may already have flipped the row to send_failed (a
+        // linkage invalidation or reprice-pending abort): that row was never
+        // delivered and must be restorable, so send_failed is admitted for
+        // exactly that actor+mode (GH codex P1). Every other predicate —
+        // lock, archive, invalidation markers, live claim, CAS — still holds.
+        .whereNotIn('status', actor === 'staff' && mode === 'restore'
+          ? ['accepted', 'declined', 'expired', 'draft', 'scheduled']
+          : ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
         .whereNull('price_locked_at')
         .whereNull('archived_at')
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
