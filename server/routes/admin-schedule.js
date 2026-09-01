@@ -15,6 +15,7 @@ const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { openInvoiceFacts } = require('../services/visit-context/balance');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
@@ -3424,18 +3425,7 @@ router.get('/', async (req, res, next) => {
       // failing the whole schedule payload.
       let openInvoices = { balance: 0, count: 0, overdue: false };
       try {
-        const inv = await db('invoices')
-          .where({ customer_id: s.customer_id })
-          .whereIn('status', ['sent', 'viewed', 'overdue'])
-          // Payer-billed invoices are the third party's AR — never the
-          // homeowner's balance (Codex r1).
-          .whereNull('payer_id')
-          .first(
-            db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
-            db.raw('COUNT(*)::int as count'),
-            db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
-          );
-        if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
+        openInvoices = await openInvoiceFacts(s.customer_id);
       } catch { /* non-blocking */ }
       let duesPaidThisMonth = null;
       // Visit-month dues for the coverage prediction — keyed on the VISIT's
@@ -3975,18 +3965,7 @@ router.get('/week', async (req, res, next) => {
         // failing the whole schedule payload.
         let openInvoices = { balance: 0, count: 0, overdue: false };
         try {
-          const inv = await db('invoices')
-            .where({ customer_id: s.customer_id })
-            .whereIn('status', ['sent', 'viewed', 'overdue'])
-            // Payer-billed invoices are the third party's AR — never the
-            // homeowner's balance (Codex r1).
-            .whereNull('payer_id')
-            .first(
-              db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
-              db.raw('COUNT(*)::int as count'),
-              db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
-            );
-          if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
+          openInvoices = await openInvoiceFacts(s.customer_id);
         } catch { /* non-blocking */ }
         let duesPaidThisMonth = null;
         // Visit-month dues for the prediction (see day view).

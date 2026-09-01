@@ -2,6 +2,8 @@
 // The schedule feed attaches a shared `visit` summary to every row that
 // belongs to a visit group; rows without one are their own stop. Pure —
 // unit-tested without React.
+// Client copy of server/services/visit-context/statuses.js
+// TERMINAL_ROW_STATUSES — keep the two in sync.
 export const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
 
 function stopKeyOf(service) {

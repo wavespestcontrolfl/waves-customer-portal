@@ -31,6 +31,7 @@ jest.mock('../models/db', () => {
       },
       whereNotIn(col, arr) { preds.push((r) => !arr.includes(r[col])); return api; },
       whereIn(col, arr) { preds.push((r) => arr.includes(r[col])); return api; },
+      whereNull(col) { preds.push((r) => r[col] == null); return api; },
       whereILike() { return api; },
       whereRaw() { return api; },
       orderBy() { return api; },
