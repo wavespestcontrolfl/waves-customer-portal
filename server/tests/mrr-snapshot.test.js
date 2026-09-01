@@ -137,8 +137,11 @@ describe('customerRateRows', () => {
     // from month M+1, so the Net MRR bridge would report the successful
     // collection as churned MRR (mrr-bridge prior-only branch).
     const capture = {};
-    getPaymentPendingCustomerIds.mockResolvedValueOnce(new Set(['cust-pending-1']));
+    // No mockResolvedValueOnce here: customerRateRows must not even CALL the
+    // pending lookup (a queued once-value would leak into later tests).
+    getPaymentPendingCustomerIds.mockClear();
     await customerRateRows(makeFakeDb({ customerRows: [], capture }));
+    expect(getPaymentPendingCustomerIds).not.toHaveBeenCalled();
     expect(capture.pendingUnion).toBeUndefined();
     expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
@@ -208,6 +211,30 @@ describe('recordCustomerMrrSnapshots', () => {
 describe('recordMrrSnapshot', () => {
   beforeEach(() => {
     computeMrrBreakdown.mockResolvedValue({ total: 1000, committed: 800, atRisk: 200, totalCount: 25, atRiskCount: 4 });
+  });
+
+  test('a PRE-BOUNDARY month is never written at all — aggregate included (Codex #3669 r14)', async () => {
+    computeMrrBreakdown.mockClear();
+    const capture = {};
+    const db = makeFakeDb({ tierRows: [], customerRows: [], capture });
+    const out = await recordMrrSnapshot('2026-08-01', db);
+    expect(out).toEqual({ period_month: '2026-08-01', skipped: 'lane_definition_boundary' });
+    expect(capture.row).toBeUndefined(); // no aggregate upsert
+    expect(computeMrrBreakdown).not.toHaveBeenCalled();
+  });
+
+  test('a FAILED pending-prepay lookup skips the write — an empty union must never be persisted as truth (Codex #3669 r14)', async () => {
+    const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
+    computeMrrBreakdown.mockClear();
+    getPaymentPendingCustomerIds.mockReset(); // drop any stale once-queue before rejecting
+    getPaymentPendingCustomerIds.mockRejectedValueOnce(new Error('prepay table down'));
+    const capture = {};
+    const db = makeFakeDb({ tierRows: [], customerRows: [], capture });
+    const out = await recordMrrSnapshot('2026-10-01', db);
+    expect(out).toEqual({ period_month: '2026-10-01', skipped: 'pending_prepay_unavailable' });
+    expect(capture.row).toBeUndefined(); // previous snapshot row stands
+    expect(computeMrrBreakdown).not.toHaveBeenCalled();
+    getPaymentPendingCustomerIds.mockImplementation(async () => new Set()); // restore default for later tests
   });
 
   test('upserts the aggregate snapshot AND per-customer rows', async () => {

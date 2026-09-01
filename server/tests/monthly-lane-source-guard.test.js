@@ -175,6 +175,11 @@ const RAW_PREDICATE = /\b(?:\w+\.)?monthly_rate(?:::numeric)?\s*>=?\s*'?0(?:\.0+
 // r10 — the wrap moves the operator away from the column token, so the raw
 // regex alone would silently pass it).
 const COALESCE_PREDICATE = /\bcoalesce\(\s*(?:\w+\.)?monthly_rate\s*,\s*0\s*\)(?:::numeric)?\s*>=?\s*'?0(?:\.0+)?'?\b/gi;
+// parameterized raw spelling: whereRaw('monthly_rate > ?', [0]) — the bound
+// placeholder hides the zero from the literal regexes (Codex #3669 r14).
+// Any bound >-comparison of monthly_rate is treated as a lane-shortcut
+// candidate; a genuine variable-threshold filter earns an allowlist entry.
+const PARAM_PREDICATE = /\b(?:\w+\.)?monthly_rate(?:::numeric)?\s*>=?\s*\?/g;
 // row-level JS lane classifier: monthly_rate positivity (any of the
 // `Number(x.monthly_rate) > 0` / `(x.monthly_rate || 0) > 0` wrappings)
 // with LANE/MEMBERSHIP vocabulary in the SAME STATEMENT — a hand-rolled
@@ -259,8 +264,9 @@ function findOffenders() {
       KNEX_PREDICATE.lastIndex = 0;
       RAW_PREDICATE.lastIndex = 0;
       COALESCE_PREDICATE.lastIndex = 0;
+      PARAM_PREDICATE.lastIndex = 0;
       const jsClassifier = isJsLaneClassifier(lines, idx);
-      if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line) && !COALESCE_PREDICATE.test(line)) return;
+      if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line) && !COALESCE_PREDICATE.test(line) && !PARAM_PREDICATE.test(line)) return;
       if (seen.has(idx)) return;
       seen.add(idx);
       // A JS classifier's "chain" is its statement window, so an ALLOWLIST
@@ -341,10 +347,12 @@ describe('monthly-lane source guard (#3140)', () => {
       'if (c.monthly_rate > 0) {',
       'AND COALESCE(monthly_rate, 0) > 0',
       "ELSE coalesce(cu.monthly_rate, 0) > '0'",
+      "whereRaw('monthly_rate > ?', [0])",
+      "whereRaw('c.monthly_rate >= ?', [0])",
     ];
     for (const s of shapes) {
-      KNEX_PREDICATE.lastIndex = 0; RAW_PREDICATE.lastIndex = 0; COALESCE_PREDICATE.lastIndex = 0;
-      expect(KNEX_PREDICATE.test(s) || RAW_PREDICATE.test(s) || COALESCE_PREDICATE.test(s)).toBe(true);
+      KNEX_PREDICATE.lastIndex = 0; RAW_PREDICATE.lastIndex = 0; COALESCE_PREDICATE.lastIndex = 0; PARAM_PREDICATE.lastIndex = 0;
+      expect(KNEX_PREDICATE.test(s) || RAW_PREDICATE.test(s) || COALESCE_PREDICATE.test(s) || PARAM_PREDICATE.test(s)).toBe(true);
     }
     const nonShapes = [
       'Number(customer?.monthly_rate || 0) > 0',

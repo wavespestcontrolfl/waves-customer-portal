@@ -474,6 +474,7 @@ async function getMrrTrend(months) {
   // recomputed months — the exact #3140 distortion — and current lane is no
   // less historical than the current rate the same query already sums.
   const currentMonthStart = etMonthStart(now);
+  const { LANE_DEFINITION_BOUNDARY } = require('../mrr-bridge');
   const snapshotsByMonth = {};
   try {
     const snaps = await db('mrr_snapshots').whereIn('period_month', windows.map(w => w.startDay));
@@ -502,8 +503,10 @@ async function getMrrTrend(months) {
   // is TODAY's transient set, so it applies only to the current window — a
   // historical fallback month gets the plain lane predicate, or today's
   // pending customers would inflate months they weren't pending (or even
-  // prepay) in (Codex r4). Fail-soft set, shared with the snapshot writer.
-  const pendingIds = await pendingPrepayIds(db);
+  // prepay) in (Codex r4). A FAILED lookup (null) degrades to no union on
+  // this read surface — the chart heals on the next request; the snapshot
+  // WRITER, unlike this, refuses to persist on a failed lookup (r14).
+  const pendingIds = (await pendingPrepayIds(db)) || [];
 
   function customersActiveAsOf(endIso, { includePendingUnion = false } = {}) {
     const unionIds = includePendingUnion ? pendingIds : [];
@@ -529,8 +532,17 @@ async function getMrrTrend(months) {
   // Batch: one query per month, all in parallel (instead of sequential awaits)
   const settled = await Promise.all(windows.map(async w => {
     // Use the snapshot for any COMPLETED month that has one; recompute the
-    // current month live (snapshots only freeze at month rollover).
-    const snap = w.startDay !== currentMonthStart ? snapshotsByMonth[w.startDay] : null;
+    // current month live (snapshots only freeze at month rollover) — UNLESS
+    // the current month predates the lane-definition boundary (deploy lands
+    // mid-month): its snapshot is the old wide population and the writer
+    // deliberately leaves it that way (recordMrrSnapshot pre-boundary skip),
+    // so recomputing it narrow here would put the population step INSIDE
+    // the pre-boundary series. Prefer the wide snapshot; the boundary month
+    // is then deterministically the first narrow point (Codex #3669 r14).
+    const currentIsPreBoundary = currentMonthStart < LANE_DEFINITION_BOUNDARY;
+    const snap = (w.startDay !== currentMonthStart || currentIsPreBoundary)
+      ? snapshotsByMonth[w.startDay]
+      : null;
     if (snap) {
       return {
         month: w.label,
@@ -569,23 +581,18 @@ async function getMrrTrend(months) {
 
   const results = settled;
 
-  // Growth rates. Never computed across the lane-definition step (#3669,
-  // Codex r8+r9): pre-boundary points hold the old wide population, and —
-  // unlike the per-customer snapshots, whose writer refuses pre-boundary
-  // rewrites — the DEPLOY month's AGGREGATE is already narrow (this
-  // function recomputes it live, and recordMrrSnapshot overwrites it at
-  // month-end). So the first narrowed aggregate point can be the deploy
-  // month itself, one month before LANE_DEFINITION_BOUNDARY. Suppress
-  // every pair whose earlier point predates the boundary AND whose later
-  // point is at or after the aggregate step floor (the earliest month this
-  // change can deploy into) — Jul→Aug and Aug→Sep both null, exact growth
-  // resumes with Sep→Oct; avg_growth_pct already skips nulls.
-  const { LANE_DEFINITION_BOUNDARY } = require('../mrr-bridge');
-  const AGGREGATE_STEP_FLOOR = '2026-08-01';
+  // Growth rates. Never computed across the lane-definition boundary
+  // (#3669, Codex r8+r14): pre-boundary points hold the old wide
+  // population — guaranteed on BOTH deploy timings, because the writer
+  // skips pre-boundary snapshot writes and the recompute above prefers a
+  // pre-boundary current month's wide snapshot. Exactly one pair crosses
+  // (into the boundary month); it reads null and drops out of
+  // avg_growth_pct, which already skips nulls. Same rule and constant as
+  // the Net MRR bridge.
   for (let i = 1; i < results.length; i++) {
     const prev = results[i - 1];
-    const crossesLaneStep = prev.date < LANE_DEFINITION_BOUNDARY && results[i].date >= AGGREGATE_STEP_FLOOR;
-    results[i].growth_pct = (!crossesLaneStep && prev.mrr > 0)
+    const crossesLaneBoundary = prev.date < LANE_DEFINITION_BOUNDARY && results[i].date >= LANE_DEFINITION_BOUNDARY;
+    results[i].growth_pct = (!crossesLaneBoundary && prev.mrr > 0)
       ? Math.round((results[i].mrr - prev.mrr) / prev.mrr * 100)
       : null;
   }

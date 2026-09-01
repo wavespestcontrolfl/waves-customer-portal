@@ -238,6 +238,10 @@ router.get('/', dashboardCache, async (req, res, next) => {
     // ONE pending-prepay set shared by the headline breakdown and the tier
     // rows, so revenueByTier sums to the same response's MRR tile even
     // across a transient lookup failure (Codex #3669 r4/r8).
+    // A FAILED lookup (null) flows through: computeMrrBreakdown and
+    // tierBreakdown each degrade it to their own fail-soft read — this is a
+    // read surface, and the snapshot writer (not this route) is what must
+    // refuse to persist on a failed lookup (r14).
     const { pendingPrepayIds } = require('../services/mrr-snapshot');
     const pendingIds = await pendingPrepayIds(db);
 
