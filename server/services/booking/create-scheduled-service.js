@@ -139,7 +139,13 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
     }
   }
   if (!insertData.scheduled_date) throw contractError('scheduled_date is required');
-  const sourceAction = source?.sourceAction || insertData.source_action;
+  // Attribution values are judged and stamped TRIMMED: null, '' and a
+  // whitespace-only string all count as absent, so '   ' can neither
+  // satisfy the requirement nor be persisted as provenance (pre-push Codex
+  // r6 P1, same rule as the idempotency key).
+  const blank = (v) => v == null || String(v).trim() === '';
+  const trimmed = (v) => (blank(v) ? null : String(v).trim());
+  const sourceAction = trimmed(source?.sourceAction) || trimmed(insertData.source_action);
   if (!sourceAction) {
     throw contractError('source attribution is required: pass source.sourceAction (e.g. admin_manual, voice_agent, admin_ib)');
   }
@@ -148,13 +154,13 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
 
   // Attribution stamps are part of the ungated contract — they add
   // provenance, never change scheduling/billing behavior. A caller's
-  // NON-EMPTY value always wins; null/'' counts as absent (a fixed-shape
-  // payload carrying source_action: null must not persist blank
-  // provenance past the requirement check — GH Codex P2).
-  const blank = (v) => v == null || v === '';
-  if (cols.source_action && blank(data.source_action)) data.source_action = sourceAction;
-  if (cols.booking_source && blank(data.booking_source) && source?.bookingSource) {
-    data.booking_source = source.bookingSource;
+  // NON-BLANK value always wins; a blank one counts as absent (a
+  // fixed-shape payload carrying source_action: null must not persist
+  // blank provenance past the requirement check — GH Codex P2).
+  if (cols.source_action) data.source_action = trimmed(data.source_action) || sourceAction;
+  if (cols.booking_source) {
+    const bookingSource = trimmed(data.booking_source) || trimmed(source?.bookingSource);
+    if (bookingSource) data.booking_source = bookingSource;
   }
 
   if (!isEnabled('bookingStampingContract')) return data;

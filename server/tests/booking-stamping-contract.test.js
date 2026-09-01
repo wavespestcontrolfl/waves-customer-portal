@@ -109,11 +109,21 @@ describe('validation (ungated)', () => {
       .resolves.toBeTruthy();
   });
 
-  test('a null/blank payload source_action is treated as absent — the supplied source stamps over it', async () => {
-    for (const empty of [null, '']) {
+  test('a null/blank/whitespace payload source_action is treated as absent — the supplied source stamps over it', async () => {
+    for (const empty of [null, '', '   ']) {
       const out = await run({ ...BASE, source_action: empty });
       expect(out.source_action).toBe('test_lane');
     }
+  });
+
+  test('whitespace-only attribution never satisfies the requirement nor gets stamped', async () => {
+    // Trimmed on both sides (pre-push Codex r6 P1): '   ' from the option
+    // is absent, and a whitespace bookingSource is not persisted.
+    await expect(run(BASE, { source: { sourceAction: '   ' } })).rejects.toThrow(/source attribution/);
+    await expect(run({ ...BASE, source_action: '   ' }, { source: { sourceAction: '  ' } })).rejects.toThrow(/source attribution/);
+    const out = await run(BASE, { source: { sourceAction: ' admin_ib ', bookingSource: '   ' } });
+    expect(out.source_action).toBe('admin_ib');
+    expect(out).not.toHaveProperty('booking_source');
   });
 });
 
