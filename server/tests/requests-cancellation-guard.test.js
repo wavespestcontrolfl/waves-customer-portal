@@ -9,11 +9,14 @@
 // The per-customer create limiter (8/hr) is real express-rate-limit and its
 // counter is shared across this suite's requests — not under test here.
 jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
+// Per-test: the inactive-account retry branch (churned customer, unexpired
+// portal JWT) is entered by flipping this before the request.
+let mockAuthInactive = false;
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => next(),
   authenticateAllowInactive: (req, _res, next) => {
     req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
-    req.customerInactive = false;
+    req.customerInactive = mockAuthInactive;
     next();
   },
 }));
@@ -28,6 +31,7 @@ jest.mock('../services/account-membership-email', () => ({
 // The portal cancellation paths serialize on the shared admin cancel lock.
 jest.mock('../services/admin-cancellation', () => ({
   acquireCancelCommitLock: jest.fn(async () => async () => {}),
+  adminCoverageBoundaryInForce: jest.fn(async () => false),
 }));
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: jest.fn().mockResolvedValue({
@@ -78,8 +82,11 @@ function builderFor(table) {
       const group = {
         where(col, op, val) { current.push(colCond(col, op, val)); return group; },
         orWhere(col, op, val) { disjuncts.push(current); current = [colCond(col, op, val)]; return group; },
+        // The inactive retry's portal-origin predicate (source IS NULL OR source <> 'admin').
+        whereNull(col) { current.push((r) => r[col] == null); return group; },
+        orWhereNot(col, val) { disjuncts.push(current); current = [(r) => r[col] !== val]; return group; },
       };
-      criteria.call(group);
+      criteria.call(group, group); // knex hands the builder as `this` AND the first argument
       disjuncts.push(current);
       conds.push((r) => disjuncts.some((ds) => ds.every((c) => c(r))));
     } else if (typeof criteria === 'string') {
@@ -138,6 +145,7 @@ function postCancellation(baseUrl, body = {}) {
 }
 
 beforeEach(() => {
+  mockAuthInactive = false;
   mockState = {
     // dupe check + prior-cancellation lookup both read service_requests.
     service_requests: [],
@@ -168,6 +176,50 @@ describe('POST /api/requests cancellation guard', () => {
     // repair paths instead of racing the admin commit unlocked.
     expect(res.status).toBe(201);
     expect(processCancellationRequest).not.toHaveBeenCalled();
+  }));
+
+  test('a deduped portal retry PARKS while an admin end-of-coverage decision governs the account — never a boundary-less sweep of the retained paid visits', () => withServer(async (baseUrl) => {
+    const { adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    // The portal row parked behind the admin commit 10s ago (busy lock);
+    // its committed scope is recoverable, so only the guard stands between
+    // the retry and the processor.
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: [] }];
+    adminCoverageBoundaryInForce.mockResolvedValueOnce(true);
+    const parked = await postCancellation(baseUrl);
+    expect(parked.status).toBe(200);
+    const parkedBody = await parked.json();
+    expect(parkedBody.deduped).toBe(true);
+    expect(parkedBody.cancellation.processed).toBe(false);
+    expect(processCancellationRequest).not.toHaveBeenCalled();
+    // No admin boundary: the ordinary idempotent re-run.
+    const rerun = await (await postCancellation(baseUrl)).json();
+    expect(rerun.deduped).toBe(true);
+    expect(processCancellationRequest).toHaveBeenCalledTimes(1);
+    expect(processCancellationRequest).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-portal' }));
+  }));
+
+  test('an inactive-account retry PARKS the same way — a churned customer\'s portal row never replays over the admin boundary', () => withServer(async (baseUrl) => {
+    const { adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+    mockAuthInactive = true;
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: [] }];
+    adminCoverageBoundaryInForce.mockResolvedValueOnce(true);
+    const parked = await postCancellation(baseUrl);
+    expect(parked.status).toBe(200);
+    expect(processCancellationRequest).not.toHaveBeenCalled();
+    // Boundary gone (coverage lapsed / decision superseded): the repair
+    // re-runs against the customer's own request, as before.
+    const rerun = await postCancellation(baseUrl);
+    expect(rerun.status).toBe(200);
+    expect(processCancellationRequest).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-portal' }));
   }));
 
   test('ongoing recurring series → allowed, processor runs', () => withServer(async (baseUrl) => {

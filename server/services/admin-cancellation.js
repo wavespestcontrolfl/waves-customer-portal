@@ -631,6 +631,38 @@ function refundFactsMatch(a, b) {
     && a.remainingVisits === b.remainingVisits;
 }
 
+// Does an admin END-OF-COVERAGE decision currently govern this account?
+// That commit churns the account while deliberately KEEPING its prepaid
+// covered visits through the term boundary (keepThrough/keepVisitIds). The
+// portal's replay paths (60s dedupe, inactive-account retry) re-run the
+// processor for a PORTAL request with no boundary at all — the shared lock
+// only serializes them, it does not reconcile a portal row parked behind
+// (or created before) the admin run — so they ask here first and park
+// instead of sweeping the retained paid visits. In force = an admin
+// end_of_coverage acceptance that is still OPEN (in flight or repairing), or
+// one accepted alongside the CURRENT churn transition (the acceptance row
+// is written moments before the processor stamps pipeline_stage_changed_at;
+// the same anchor plan-restart uses). A decision from before a win-back is
+// history and does not block a later cancel.
+async function adminCoverageBoundaryInForce(customerId) {
+  const rows = await db('service_requests')
+    .where({ customer_id: customerId, category: 'cancellation', source: 'admin' })
+    .orderBy('created_at', 'desc')
+    .limit(10)
+    .select('id', 'status', 'created_at', 'metadata');
+  const boundaries = (rows || []).filter((r) => {
+    const cp = requestCancelPlanMeta(r);
+    return !!cp && cp.effectiveDate === 'end_of_coverage';
+  });
+  if (!boundaries.length) return false;
+  if (boundaries.some((r) => r.status === 'new')) return true;
+  const customer = await db('customers').where({ id: customerId }).first('pipeline_stage', 'pipeline_stage_changed_at');
+  if (!customer || customer.pipeline_stage !== 'churned') return false;
+  const churnedAt = customer.pipeline_stage_changed_at ? new Date(customer.pipeline_stage_changed_at).getTime() : NaN;
+  if (!Number.isFinite(churnedAt)) return true; // unanchored churn — fail safe, keep the paid visits
+  return boundaries.some((r) => new Date(r.created_at).getTime() >= churnedAt - 60 * 60 * 1000);
+}
+
 async function decideTermCancel(term, actorUserId, notes) {
   const { recordDecision } = require('./annual-prepay-renewals');
   const decided = term.renewal_decision === 'cancel'
@@ -1951,4 +1983,8 @@ module.exports = {
   // a term's renewal decision serializes on this lock so a renew can never
   // land between the cancel's destructive wind-down and its term decision.
   acquireCancelCommitLock,
+  // Portal replay guard (requests.js dedupe + inactive retry): never re-run
+  // a portal cancellation without the boundary an admin end-of-coverage
+  // decision holds.
+  adminCoverageBoundaryInForce,
 };

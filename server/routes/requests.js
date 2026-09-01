@@ -225,12 +225,19 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         try {
           const recoveredScope = await committedScopeFor(dupe.id);
           if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
+          const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+          // An admin end_of_coverage decision governs this account: its
+          // paid covered visits are deliberately retained, and this replay
+          // carries no boundary — the lock only serializes, it cannot
+          // reconcile a portal row parked behind that commit. Park (the
+          // durable row + alert stand; staff already own the cancel).
+          if (await adminCoverageBoundaryInForce(req.customer.id)) throw new Error('admin end-of-coverage cancellation in force — retry parked');
           // Same customer-scoped lock as the admin commit: an unlocked
           // portal run racing an admin end_of_coverage confirm can pull the
           // paid visits the admin sweep is deliberately keeping. Busy or
           // unacquirable throws into this catch — the request parks for
           // review instead of processing unlocked.
-          const releaseCancelLock = await require('../services/admin-cancellation').acquireCancelCommitLock(req.customer.id);
+          const releaseCancelLock = await acquireCancelCommitLock(req.customer.id);
           let retry;
           try {
             retry = await processCancellationRequest({
@@ -320,9 +327,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // Fail closed exactly like the dedupe branch: an unrecoverable
         // scope must never widen into a whole-account churn (codex P0).
         if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
+        const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
+        // A PORTAL row accepted beside an admin end_of_coverage run (parked
+        // on the busy lock, or submitted just before it) must not replay
+        // here without that run's boundary — see the dedupe branch.
+        if (await adminCoverageBoundaryInForce(req.customer.id)) throw new Error('admin end-of-coverage cancellation in force — retry parked');
         // Locked like every other cancellation writer (see the dedupe
         // branch above) — never process unlocked beside an admin commit.
-        const releaseCancelLock = await require('../services/admin-cancellation').acquireCancelCommitLock(req.customer.id);
+        const releaseCancelLock = await acquireCancelCommitLock(req.customer.id);
         let retry;
         try {
           retry = await processCancellationRequest({
