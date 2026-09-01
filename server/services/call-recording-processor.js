@@ -6496,7 +6496,14 @@ const CallRecordingProcessor = {
           .where('processing_token', procToken)
           .update(transcriptUpdate);
         if (!wroteTranscript) {
-          logger.warn(`[call-proc] transcript write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+          // STOP, do not merely skip the write. A zero-row fence here proves
+          // a peer owns the call, and everything after this point —
+          // the unified-message update, extraction, the lead and appointment
+          // writes — is side-effectful work that peer is also doing. This is
+          // the earliest checkpoint at which a superseded pass can know, so
+          // it is where it gets out (codex P1).
+          logger.warn(`[call-proc] transcript write skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer; abandoning this pass`);
+          return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
         }
         await updateUnifiedVoiceMessage(
           { ...call, transcription },
