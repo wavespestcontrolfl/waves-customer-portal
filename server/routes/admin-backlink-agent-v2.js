@@ -391,6 +391,7 @@ router.patch('/registry/:id', async (req, res, next) => {
     if (action === 'reopen') {
       patch.investigate_after = null;
       patch.investigate_failures = 0;
+      patch.probe_coverage_mask = 0; // the reopened investigation re-earns probe coverage
       const cleared = String(domain.score_reasons || '').replace(/\s*·?\s*downgraded: terminal verdict deferred: unfetched candidate URLs remain/, '').trim();
       if (cleared !== String(domain.score_reasons || '').trim()) patch.score_reasons = cleared || null;
     }

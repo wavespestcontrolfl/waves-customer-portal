@@ -36,7 +36,7 @@ const { fetchPage } = require('./contact-finder');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 const { parsePriceTextCents, collectJsonLdOffers } = require('../price-scan/extract');
 const { WAVES_CONTEXT } = require('./prospect-scorer');
-const { validateInvestigation, INVESTIGATION_SCHEMA, URL_REQUIRED_ACQUISITION_TYPES } = require('./link-path-investigation-schema');
+const { validateInvestigation, INVESTIGATION_SCHEMA, URL_REQUIRED_ACQUISITION_TYPES, MAX_MODEL_PATHS } = require('./link-path-investigation-schema');
 const registry = require('./link-registry');
 
 const LOCK_KEY = 'link-path-investigator';
@@ -87,6 +87,7 @@ const PROBE_PATHS = Object.freeze([
   '/submit', '/add-listing', '/join', '/membership', '/members', '/vendors',
   '/sponsors', '/advertise', '/directory', '/resources', '/contact', '/signup', '/register',
 ]);
+const FULL_PROBE_MASK = (1 << PROBE_PATHS.length) - 1; // one coverage bit per probe
 
 // Domain states the investigator may claim and finish (stamp a verdict on).
 // acquiring/acquired/rejected belong to other lanes; their paths are still
@@ -167,7 +168,7 @@ function hostBound(host, url) {
 }
 
 /** URLs worth fetching for a domain, own-host only, deduped, uncapped (the fetch loop caps). */
-function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [], probeOffset = 0 } = {}) {
+function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [], probeOffset = 0, probeMask = 0 } = {}) {
   const seen = new Set();
   const out = [];
   const push = (raw) => {
@@ -194,11 +195,18 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
     for (const m of String(t.source_detail || '').match(/https?:\/\/[^\s"'<>]+/g) || []) push(m);
   }
   // The probe list is longer than what the fetch cap leaves after the
-  // homepage and hints, so it ROTATES by pass (the hourly sweep advances
-  // the offset): the capped tail of one pass leads a later one instead of
-  // the same prefix repeating forever.
+  // homepage and hints, so probes the domain has NEVER been offered (per
+  // its cumulative coverage mask) go first — guaranteed progress toward
+  // full probe coverage — with the pass offset rotating within that set so
+  // a failing first probe doesn't monopolize the remaining slots.
   const n = PROBE_PATHS.length;
-  for (let i = 0; i < n; i++) push(`https://${host}${PROBE_PATHS[(i + (probeOffset % n) + n) % n]}`);
+  const uncovered = [];
+  const covered = [];
+  for (let i = 0; i < n; i++) ((probeMask >> i) & 1 ? covered : uncovered).push(i);
+  const m = uncovered.length || 1;
+  const start = ((probeOffset % m) + m) % m;
+  const order = [...uncovered.slice(start), ...uncovered.slice(0, start), ...covered];
+  for (const i of order) push(`https://${host}${PROBE_PATHS[i]}`);
   return out;
 }
 
@@ -542,8 +550,10 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // same truncation: "USD 95 million" never verifies "USD 95"
     const multiplierNext = /\d$/.test(q) && /^\s+(k|m|mm|bn|hundred|thousand|million|billion)\b/.test(t.slice(idx + q.length));
     // A digit-final quote continued by a RANGE separator is a truncated
-    // range: "USD 95–150" (or "95-150", "95 – 150") never verifies "USD 95"
-    const rangeNext = /\d$/.test(q) && /^\s*[-–—]\s*\d/.test(t.slice(idx + q.length));
+    // range: "USD 95–150", "95-150", "USD 95 to USD 150", "95 – USD 150"
+    // never verify "USD 95" — the separator may be a dash or the word
+    // "to", and the upper bound may repeat the currency marker/symbol
+    const rangeNext = /\d$/.test(q) && /^\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?\d/.test(t.slice(idx + q.length));
     // …and a quote directly preceded by a pricing qualifier is a starting/
     // promo price, not the price — the same tokens the price parser rejects
     const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));
@@ -757,13 +767,17 @@ async function investigatePaths(db, {
           const t = (x) => (x.last_investigated_at ? new Date(x.last_investigated_at).getTime() : 0);
           return t(a) - t(b);
         });
-        const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths, probeOffset: Math.floor(now.getTime() / (60 * 60 * 1000)) });
+        const priorProbeMask = Number(domain.probe_coverage_mask) || 0;
+        const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths, probeOffset: Math.floor(now.getTime() / (60 * 60 * 1000)), probeMask: priorProbeMask });
+        const probeIndexByUrl = new Map(PROBE_PATHS.map((p, i) => [`https://${host}${p}`, i]));
+        let passProbeMask = 0; // probes OFFERED a fetch attempt this pass (success or failure both count)
         const pages = [];
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
         let cappedTail = false;
         for (const url of urls) {
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
+          if (probeIndexByUrl.has(url)) passProbeMask |= 1 << probeIndexByUrl.get(url);
           out.fetches += 1;
           const page = await fetcher(url);
           const finalUrl = (page && page.finalUrl) || url;
@@ -1140,7 +1154,15 @@ async function investigatePaths(db, {
               .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
               .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
               .select('id', 'investigation', 'submission_url'))
-              .filter((s) => !s.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(s.submission_url)) || goneKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
+              // A verdict AT the response cap may have been FORCED to omit
+              // real paths — omission then proves nothing, and only the
+              // deterministic 404/410 disproof still applies.
+              .filter((s) => {
+                const k = s.submission_url ? registry.normalizeSubmissionUrl(s.submission_url) : null;
+                if (k && goneKeys.has(k)) return true;
+                if ((verdict.paths || []).length >= MAX_MODEL_PATHS) return false;
+                return !k || coverageKeys.has(k);
+              });
             for (const s of stale) {
               const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
               const urlGone = !!s.submission_url && goneKeys.has(registry.normalizeSubmissionUrl(s.submission_url));
@@ -1174,7 +1196,8 @@ async function investigatePaths(db, {
           // never-stamped path re-select it on every hourly sweep and
           // re-spend a model call each time.
           const unsettled = unstampedIds.size > 0 || uncoveredEcho;
-          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null };
+          const newProbeMask = priorProbeMask | passProbeMask;
+          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null, probe_coverage_mask: newProbeMask };
           if (decideState) {
             // Defensive downgrades, both directions: a qualified verdict with
             // no executable best path parks `watching` (never a qualified
@@ -1187,14 +1210,16 @@ async function investigatePaths(db, {
             let downgradeNote = null;
             if (verdict.verdict === 'qualified' && !best) { effectiveVerdict = 'watching'; downgradeNote = 'qualified verdict carried no executable path'; }
             if (verdict.verdict === 'not_reproducible' && best) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered active path remains'; }
-            // A TERMINAL close is also deferred — ONCE — while the fetch cap
-            // left candidate URLs unfetched: the route may live on a page
-            // this pass never requested, and the rotated probe offset covers
-            // the tail on the deferred re-pass. The stored downgrade note is
-            // the bound: a domain already deferred for its tail closes on
-            // the next terminal verdict instead of parking forever.
-            const alreadyTailDeferred = /unfetched candidate URLs remain/.test(String(domain.score_reasons || ''));
-            if (verdict.verdict === 'not_reproducible' && !best && cappedTail && !alreadyTailDeferred) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: unfetched candidate URLs remain'; tailDeferred = true; }
+            // A TERMINAL close is also deferred while probe routes the
+            // domain has NEVER been offered remain: the route may live on a
+            // page no pass has requested yet, and the uncovered-first probe
+            // ordering guarantees each deferred re-pass makes progress. The
+            // cumulative probe_coverage_mask is the bound — closure fires
+            // once every probe has had its attempt, or when a pass adds no
+            // new probes (hints consumed every slot: nothing more to learn).
+            const probesRemain = (newProbeMask & FULL_PROBE_MASK) !== FULL_PROBE_MASK;
+            const probeProgress = newProbeMask !== priorProbeMask;
+            if (verdict.verdict === 'not_reproducible' && !best && cappedTail && probesRemain && probeProgress) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: unfetched candidate URLs remain'; tailDeferred = true; }
             patch.agent_state = effectiveVerdict === 'qualified' ? 'qualified' : effectiveVerdict === 'watching' ? 'watching' : 'not_reproducible';
             // A downgrade caused by TRANSIENT verification (an unstamped
             // path — failed probe, inconclusive terms, exhausted budget)

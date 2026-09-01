@@ -371,8 +371,8 @@ describe('full run', () => {
   });
 
   test('a URL-less outreach path IS domain-covered: a negative verdict retires it and clears best_path_id (Codex r13 P1)', async () => {
-    // tail already offered on a prior deferred pass — the close may proceed
-    const d = domainRow({ agent_state: 'investigating', best_path_id: null, score_reasons: 'prior pass · downgraded: terminal verdict deferred: unfetched candidate URLs remain' });
+    // full probe coverage already earned — the close may proceed
+    const d = domainRow({ agent_state: 'investigating', best_path_id: null, probe_coverage_mask: (1 << 13) - 1 });
     const outreachPath = {
       id: uid(), domain_id: d.id, acquisition_type: 'editorial_outreach', submission_url: null,
       path_key: 'editorial_outreach:-', superseded_by: null, baseline: false, confidence: 0.8,
@@ -511,8 +511,8 @@ describe('full run', () => {
   });
 
   test('not_reproducible verdict closes the domain honestly; unknown/not_reproducible path types are never rows', async () => {
-    // tail already offered on a prior deferred pass — the close may proceed
-    const d = domainRow({ score_reasons: 'prior pass · downgraded: terminal verdict deferred: unfetched candidate URLs remain' });
+    // full probe coverage already earned — the close may proceed
+    const d = domainRow({ probe_coverage_mask: (1 << 13) - 1 });
     const db = makeDb({ seo_link_domains: [d] });
     const paths = [modelPath({ acquisition_type: 'unknown', payment_required: false, fee_scope: null })];
     const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf(paths, 'not_reproducible') }) }));
@@ -624,8 +624,8 @@ describe('full run', () => {
   });
 
   test('a negative re-investigation invalidates the stale executable path and clears best_path_id (Codex r1 P1)', async () => {
-    // tail already offered on a prior deferred pass — the close may proceed
-    const d = domainRow({ agent_state: 'investigating', best_path_id: null, score_reasons: 'prior pass · downgraded: terminal verdict deferred: unfetched candidate URLs remain' });
+    // full probe coverage already earned — the close may proceed
+    const d = domainRow({ agent_state: 'investigating', best_path_id: null, probe_coverage_mask: (1 << 13) - 1 });
     const oldPath = {
       id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
       path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false,
@@ -1153,8 +1153,8 @@ describe('full run', () => {
   });
 
   test('investigator-owned aggregates re-decide on refresh: disproven qualified closes; rediscovered not_reproducible reopens (Codex PR r4 P1)', async () => {
-    // tail already offered on a prior deferred pass — the close may proceed
-    const d = domainRow({ agent_state: 'qualified', score_reasons: 'prior pass · downgraded: terminal verdict deferred: unfetched candidate URLs remain' });
+    // full probe coverage already earned — the close may proceed
+    const d = domainRow({ agent_state: 'qualified', probe_coverage_mask: (1 << 13) - 1 });
     const stale = {
       id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
       path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
@@ -1343,10 +1343,12 @@ describe('full run', () => {
       const text = `Directory listing page with membership details and vendor information. ${body}. Applications are reviewed within five business days.`;
       return [{ url: 'https://example.com/join', excerpt: text, text, html: '' }];
     };
-    const claim = (pages) => verifyPriceEvidence(pages, modelPath({ renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null }));
-    expect(claim(mk('Join for USD 95k per placement')).price_text).toBeNull(); // 95k is not 95
-    expect(claim(mk('Join for USD 95 million sponsorships served')).price_text).toBeNull(); // spelled multiplier
-    expect(claim(mk('Join for USD 95 / year')).price_text).toBe('USD 95 / year'); // the real quote still verifies
+    // the claim is the exact substring the page carries — the NEGATIVES must
+    // fail on the boundary logic, not on a quote that is simply absent
+    const claim = (pages, quote = 'USD 95') => verifyPriceEvidence(pages, modelPath({ price_text: quote, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null })).price_text;
+    expect(claim(mk('Join for USD 95k per placement'))).toBeNull(); // 95k is not 95
+    expect(claim(mk('Join for USD 95 million sponsorships served'))).toBeNull(); // spelled multiplier
+    expect(claim(mk('Join for USD 95 / year'), 'USD 95 / year')).toBe('USD 95 / year'); // the real quote still verifies
   });
 
   test('a binary 2xx body is never page evidence — no prompt, no coverage, no disproof (Codex PR r7 P1)', async () => {
@@ -1458,7 +1460,7 @@ describe('full run', () => {
     row.merchant_binding = JSON.stringify({ merchant_account_id: 'acct_real', observed: true });
     row.last_investigated_at = new Date('2026-05-01');
     d.agent_state = 'qualified';
-    d.score_reasons = 'downgraded: terminal verdict deferred: unfetched candidate URLs remain';
+    d.probe_coverage_mask = (1 << 13) - 1;
     await investigatePaths(db, runOpts(db, { domainIds: [d.id], llmDispatch: async () => ({ ok: true, json: verdictOf([claimed]) }) }));
     const kept = db._tables.seo_link_acquisition_paths[0];
     expect(JSON.parse(kept.merchant_binding).merchant_account_id).toBe('acct_real');
@@ -1537,12 +1539,12 @@ describe('full run', () => {
       const text = `Directory listing page with membership details and vendor information. ${body}. Applications are reviewed within five business days.`;
       return [{ url: 'https://example.com/join', excerpt: text, text, html: '' }];
     };
-    const claim = (pages) => verifyPriceEvidence(pages, modelPath({ renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null }));
-    expect(claim(mk('Listings cost USD 95\u2013150 per year')).price_text).toBeNull(); // en-dash range
-    expect(claim(mk('Listings cost USD 95-150 per year')).price_text).toBeNull(); // hyphen range
-    expect(claim(mk('Listings from USD 95 per year')).price_text).toBeNull(); // starting price
-    expect(claim(mk('Listings starting at USD 95 per year')).price_text).toBeNull();
-    expect(claim(mk('Listings cost USD 95 / year')).price_text).toBe('USD 95 / year'); // the plain quote still verifies
+    const claim = (pages, quote = 'USD 95') => verifyPriceEvidence(pages, modelPath({ price_text: quote, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null })).price_text;
+    expect(claim(mk('Listings cost USD 95\u2013150 per year'))).toBeNull(); // en-dash range
+    expect(claim(mk('Listings cost USD 95-150 per year'))).toBeNull(); // hyphen range
+    expect(claim(mk('Listings from USD 95 per year'))).toBeNull(); // starting price
+    expect(claim(mk('Listings starting at USD 95 per year'))).toBeNull();
+    expect(claim(mk('Listings cost USD 95 / year'), 'USD 95 / year')).toBe('USD 95 / year'); // the plain quote still verifies
   });
 
   test('the terms rotation start avalanches — a 6h-stride retry cannot pin the same two of three URLs (Codex PR r10 P1)', async () => {
@@ -1577,7 +1579,7 @@ describe('full run', () => {
   });
 
   test('a deterministic 404 on a path URL is disproof — the dead path retires and stamps (Codex PR r10 P1)', async () => {
-    const d = domainRow({ agent_state: 'qualified', score_reasons: 'downgraded: terminal verdict deferred: unfetched candidate URLs remain' });
+    const d = domainRow({ agent_state: 'qualified', probe_coverage_mask: (1 << 13) - 1 });
     const dead = {
       id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
       path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
@@ -1596,6 +1598,67 @@ describe('full run', () => {
     expect(p.last_investigated_at).not.toBeNull(); // stamped — no eternal re-selection
     expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
     expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // closes instead of a 30-day watching park
+  });
+
+  test('a hint-rich domain defers terminal closure until EVERY probe has been offered (Codex PR r11 P1)', async () => {
+    const d = domainRow();
+    // 5 hints: each pass fits homepage + 5 hints + 2 probes — the probe tail
+    // needs many passes, and closure must wait for all 13
+    const touches = Array.from({ length: 5 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/hint-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    const fetched = new Set();
+    const fetcher = jest.fn(async (url) => { fetched.add(url); return okFetch(url); });
+    const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    let passes = 0;
+    while (db._tables.seo_link_domains[0].agent_state !== 'not_reproducible' && passes < 12) {
+      const dom = db._tables.seo_link_domains[0];
+      dom.watch_recheck_at = new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000); // due
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000), domainIds: [dom.id] });
+      passes += 1;
+    }
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // it DOES close in the end
+    const probePaths = ['/submit', '/add-listing', '/join', '/membership', '/members', '/vendors', '/sponsors', '/advertise', '/directory', '/resources', '/contact', '/signup', '/register'];
+    for (const pp of probePaths) expect(fetched.has(`https://example.com${pp}`)).toBe(true); // every probe ran first
+    expect(passes).toBeGreaterThan(2); // the close genuinely waited for coverage
+  });
+
+  test('a pass that can offer NO probes closes instead of deferring forever (Codex PR r11 P1)', async () => {
+    const d = domainRow();
+    // 12 hints exhaust every slot — no probe can ever run; nothing more to learn
+    const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/hint-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible');
+  });
+
+  test('worded and currency-prefixed ranges never verify the truncated bound (Codex PR r11 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const mk = (body) => {
+      const text = `Directory listing page with membership details and vendor information. ${body}. Applications are reviewed within five business days.`;
+      return [{ url: 'https://example.com/join', excerpt: text, text, html: '' }];
+    };
+    const claim = (pages, quote = 'USD 95') => verifyPriceEvidence(pages, modelPath({ price_text: quote, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null })).price_text;
+    expect(claim(mk('Listings cost USD 95 to USD 150 per year'))).toBeNull(); // worded range
+    expect(claim(mk('Listings cost USD 95\u2013USD 150 per year'))).toBeNull(); // dash + repeated marker
+    expect(claim(mk('Listings cost USD 95 to $150 per year'))).toBeNull(); // symbol upper bound
+    expect(claim(mk('Join for USD 95 to get listed today'))).toBe('USD 95'); // "to" + a non-price word is NOT a range
+  });
+
+  test('a verdict AT the response cap disproves nothing by omission (Codex PR r11 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const mkPath = (n) => ({
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: `https://example.com/join-${n}`,
+      path_key: `paid_listing:https://example.com/join-${n}`, superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    const existing = Array.from({ length: 7 }, (_, i) => mkPath(i));
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: existing });
+    // the model echoes six (the schema cap) — the seventh is covered but CANNOT fit
+    const echoed = existing.slice(0, 6).map((e) => modelPath({ submission_url: e.submission_url, price_page_url: e.submission_url, renewal_price_page_url: e.submission_url }));
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf(echoed) }) }));
+    const seventh = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing[6].id);
+    expect(Number(seventh.confidence)).toBe(0.7); // omission at the cap proves nothing
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {

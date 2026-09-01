@@ -150,6 +150,11 @@ const PATH_SCHEMA = {
   ],
 };
 
+// The response contract caps the paths array — a verdict AT the cap may
+// have been forced to omit real paths, so omission at the cap is never
+// treated as disproof by the investigator.
+const MAX_MODEL_PATHS = 6;
+
 const INVESTIGATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -157,7 +162,7 @@ const INVESTIGATION_SCHEMA = {
   properties: {
     verdict: { type: 'string', enum: [...VERDICTS] },
     watch_reason: nullableString(500),
-    paths: { type: 'array', maxItems: 6, items: PATH_SCHEMA },
+    paths: { type: 'array', maxItems: MAX_MODEL_PATHS, items: PATH_SCHEMA },
   },
   allOf: [
     {
@@ -224,4 +229,4 @@ function validateInvestigation(data) {
   };
 }
 
-module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, URL_REQUIRED_ACQUISITION_TYPES, validateInvestigation };
+module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, URL_REQUIRED_ACQUISITION_TYPES, MAX_MODEL_PATHS, validateInvestigation };
