@@ -3074,12 +3074,14 @@ const AppointmentReminders = {
               } else {
                 const ownsNight = Boolean(nightClaim && nightClaim.state === 'owner');
                 const nightLabel = await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null });
-                // Lease renewal at the provider boundary — see the 72h twin.
+                const nightCopy = ownsNight ? await visitReminderCopyInputs(svcVisitId, r) : null;
+                // Lease renewal AFTER all copy prep, immediately before the
+                // provider call — see the 72h twin (and codex P1: prep
+                // reads must not eat the lease after renewal).
                 if (ownsNight && !(await vgNight.renewNotificationLease(svcVisitId, 'reminder_24h', nightClaim.token, { dedupeKey: nightClaim.dedupeKey }))) {
                   logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
                   continue;
                 }
-                const nightCopy = ownsNight ? await visitReminderCopyInputs(svcVisitId, r) : null;
                 const emailRes = await sendAppointmentNoticeEmail({
                   kind: '24h',
                   customerId: r.customer_id,
