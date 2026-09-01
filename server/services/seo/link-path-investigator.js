@@ -61,6 +61,9 @@ const TERMS_FETCH_BUDGET = 2;
 // fetched page corresponds to — a hallucinated or injected same-host URL
 // must not become an executable path on the model's word alone.
 const SUBMISSION_VERIFY_BUDGET = 3;
+// A real agreement has substantive text; a client-rendered shell canonicalizes
+// to (almost) nothing and must never produce a binding legal_terms_hash.
+const MIN_TERMS_TEXT_CHARS = 200;
 const PAGE_EXCERPT_CHARS = 6000;
 const REINVESTIGATE_AFTER_DAYS = 90;
 const WATCH_RECHECK_DAYS = 30;
@@ -90,7 +93,13 @@ const CLAIMABLE_STATES = Object.freeze(['new', 'investigating']);
 const USD_MARKER_RE = /\bUSD\b|US\$/i;
 // Confirmed non-USD markers: symbols and ISO codes. A bare `$` matches neither
 // set and stays 'unknown' (Canadian/Australian merchants use the same symbol).
-const FOREIGN_MARKER_RE = /€|£|¥|₹|₩|C\$|CA\$|A\$|AU\$|NZ\$|R\$|\b(CAD|AUD|EUR|GBP|NZD|MXN|JPY|CNY|CHF|SEK|NOK|DKK|ZAR|BRL|INR|PLN|SGD|HKD)\b/;
+// The ISO set is broad and case-insensitive; codes that double as English
+// words (TRY, ALL) are matched case-SENSITIVELY so ordinary copy ("try",
+// "all plans") can never mark a quote foreign.
+const FOREIGN_SYMBOL_RE = /€|£|¥|₹|₩|C\$|CA\$|A\$|AU\$|NZ\$|R\$/;
+const FOREIGN_ISO_RE = /\b(CAD|AUD|EUR|GBP|NZD|MXN|JPY|CNY|CHF|SEK|NOK|DKK|ZAR|BRL|INR|PLN|SGD|HKD|AED|THB|PHP|MYR|IDR|VND|KRW|TWD|CZK|HUF|RON|ILS|SAR|QAR|KWD|BHD|OMR|EGP|CLP|COP|PEN|ARS|RUB|UAH|BGN|ISK)\b/i;
+const FOREIGN_AMBIGUOUS_ISO_RE = /\b(TRY|ALL)\b/; // case-sensitive on purpose
+const isForeignMarker = (s) => FOREIGN_SYMBOL_RE.test(s) || FOREIGN_ISO_RE.test(s) || FOREIGN_AMBIGUOUS_ISO_RE.test(s);
 
 /**
  * deriveCurrency({ price_text, renewal_price_text, currency_evidence })
@@ -105,9 +114,9 @@ function deriveCurrency(path) {
   const ev = path.currency_evidence;
   const evidenceMarker = ev && typeof ev.marker === 'string' ? ev.marker.trim() : '';
   const evidenceUsd = !!evidenceMarker && USD_MARKER_RE.test(evidenceMarker);
-  const evidenceForeign = !!evidenceMarker && !evidenceUsd && FOREIGN_MARKER_RE.test(evidenceMarker);
+  const evidenceForeign = !!evidenceMarker && !evidenceUsd && isForeignMarker(evidenceMarker);
   const quoteUsd = USD_MARKER_RE.test(quotes);
-  const quoteForeign = FOREIGN_MARKER_RE.test(quotes);
+  const quoteForeign = isForeignMarker(quotes);
   if (evidenceForeign || (quoteForeign && !evidenceUsd && !quoteUsd)) return 'foreign';
   if ((evidenceUsd || quoteUsd) && !quoteForeign && !evidenceForeign) return 'USD';
   if ((evidenceUsd || quoteUsd) && (quoteForeign || evidenceForeign)) return 'unknown'; // conflicting — fail closed
@@ -154,10 +163,15 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
     seen.add(key);
     out.push(s);
   };
+  // Existing paths come RIGHT after the homepage — a stale/never-investigated
+  // path is often WHY the domain was selected, and a hint-rich domain must
+  // not exhaust the fetch cap before that path's page is ever covered (an
+  // uncovered path is neither stamped nor disproven and would re-select the
+  // domain every sweep).
   push(`https://${host}`);
-  for (const t of touches) push(t.source_detail);
-  for (const u of competitorUrls) push(u);
   for (const p of existingPaths) push(p.submission_url);
+  for (const u of competitorUrls) push(u);
+  for (const t of touches) push(t.source_detail);
   for (const p of PROBE_PATHS) push(`https://${host}${p}`);
   return out;
 }
@@ -254,6 +268,9 @@ const TYPE_WEIGHT = Object.freeze({
 });
 
 const pathValue = (p) => {
+  // A legal-attestation path with no captured terms hash is INVALID under
+  // §6.3 — it must never outrank a lower-confidence VALID alternative.
+  if (p.legal_attestation && !p.legal_terms_hash) return 0;
   const conf = Number(p.confidence);
   const c = Number.isFinite(conf) ? conf : 0;
   return c * (TYPE_WEIGHT[p.acquisition_type] || 0.3) * (p.payment_required ? 0.8 : 1);
@@ -261,8 +278,10 @@ const pathValue = (p) => {
 
 /** 0–100 registry score + human-readable reasons from enrichment × best path confidence. */
 function scoreDomain(domain, bestPath) {
-  const dr = Number.isFinite(Number(domain.domain_rating)) ? Number(domain.domain_rating) : null;
-  const spam = Number.isFinite(Number(domain.spam_score)) ? Number(domain.spam_score) : null;
+  // nullish first — Number(null) is 0, which would score an unenriched
+  // domain as DR 0 instead of taking the unknown-DR fallback
+  const dr = domain.domain_rating != null && Number.isFinite(Number(domain.domain_rating)) ? Number(domain.domain_rating) : null;
+  const spam = domain.spam_score != null && Number.isFinite(Number(domain.spam_score)) ? Number(domain.spam_score) : null;
   const linked = Number.isFinite(Number(domain.competitors_linked)) ? Number(domain.competitors_linked) : 0;
   const conf = bestPath ? Number(bestPath.confidence) || 0 : 0;
   const raw = 0.6 * (dr == null ? 20 : dr) + 0.2 * Math.min(100, linked * 10) + 20 * conf - 0.4 * (spam == null ? 0 : spam);
@@ -326,7 +345,11 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     const rows = await notSeen(db('seo_link_domains as d')
       .join('seo_link_acquisition_paths as p', 'p.domain_id', 'd.id')
       .whereNull('p.superseded_by').whereNull('p.last_investigated_at')
-      .where(backoffDue('d.investigate_after')))
+      .where(backoffDue('d.investigate_after'))
+      // Owner actions bind the refresh lanes too: a rejected domain is never
+      // re-fetched, and a watching one waits for its recheck date.
+      .whereNotIn('d.agent_state', ['rejected'])
+      .where((b) => b.whereNot('d.agent_state', 'watching').orWhere('d.watch_recheck_at', '<=', now)))
       .groupBy('d.id')
       .select('d.*')
       .orderByRaw("CASE WHEN d.discovery_priority = 'owner_seed' THEN 0 ELSE 1 END")
@@ -339,7 +362,9 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     const rows = await notSeen(db('seo_link_domains as d')
       .join('seo_link_acquisition_paths as p', 'p.domain_id', 'd.id')
       .whereNull('p.superseded_by').where('p.last_investigated_at', '<', cutoff)
-      .where(backoffDue('d.investigate_after')))
+      .where(backoffDue('d.investigate_after'))
+      .whereNotIn('d.agent_state', ['rejected'])
+      .where((b) => b.whereNot('d.agent_state', 'watching').orWhere('d.watch_recheck_at', '<=', now)))
       .groupBy('d.id')
       .select('d.*')
       .orderByRaw('MIN(p.last_investigated_at) asc')
@@ -453,7 +478,25 @@ const findPage = (pages, pageUrl) => {
 };
 const quoteOnPage = (pages, pageUrl, quote) => {
   const page = findPage(pages, pageUrl);
-  return !!(page && quote && normQuote(page.text).includes(normQuote(quote)));
+  if (!page || !quote) return false;
+  // Token-boundary containment, never a plain substring: the page's "USD 950"
+  // must not verify a claimed "USD 95" (the truncated claim would mint the
+  // wrong cents). The match may not sit inside a longer number: no digit
+  // directly before it, and no digit (or decimal continuation) after it.
+  const t = normQuote(page.text);
+  const q = normQuote(quote);
+  if (!q) return false;
+  let idx = t.indexOf(q);
+  while (idx !== -1) {
+    const before = idx > 0 ? t[idx - 1] : '';
+    const after = t[idx + q.length] || '';
+    const afterNext = t[idx + q.length + 1] || '';
+    const digitBefore = /\d/.test(before);
+    const digitAfter = /\d/.test(after) || (/[.,]/.test(after) && /\d/.test(afterNext));
+    if (!digitBefore && !digitAfter) return true;
+    idx = t.indexOf(q, idx + 1);
+  }
+  return false;
 };
 
 /**
@@ -609,8 +652,10 @@ async function investigatePaths(db, {
             const text = canonicalizeTerms(page.html);
             redirectMap.set(registry.normalizeSubmissionUrl(url), registry.normalizeSubmissionUrl(finalUrl));
             // html/text stay only for THIS domain's evidence verification —
-            // never persisted, never prompted beyond the excerpt.
-            pages.push({ url: finalUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html });
+            // never persisted, never prompted beyond the excerpt. `truncated`
+            // rides along: a byte-capped page is positive evidence but never
+            // COVERAGE (the model didn't see past the cut).
+            pages.push({ url: finalUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
           } else if (page && page.html && !page.blocked && !page.error) {
             // the request was host-bound but a redirect left the domain —
             // an off-site page must never become model input or evidence
@@ -618,6 +663,16 @@ async function investigatePaths(db, {
           } else {
             fetchErrors.push({ url, reason: (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}` });
           }
+        }
+
+        // An evidence-less pass proves nothing: when every candidate fetch
+        // failed (transient DNS, timeouts, blocks), a verdict would close or
+        // reshape the domain on its NAME alone — treat it as a failed
+        // investigation (backoff applies) and spend no model call.
+        if (!pages.length) {
+          out.failed.push({ id: domain.id, domain: host, reason: 'no_page_evidence' });
+          await deferFailedDomain(db, domain, now, { claim: claimState });
+          continue;
         }
 
         // Reason phase — one WORKHORSE call, one repair retry.
@@ -665,7 +720,13 @@ async function investigatePaths(db, {
         // budget) confirms it exists on the domain. Anything else keeps its
         // claim in the evidence but writes with confidence 0 — never a best
         // path, never past a §6.3 floor — until a later pass verifies it.
+        // Two different questions, two sets: EXISTENCE (any successful fetch,
+        // truncated included, or a resolveOnly probe — enough to make a
+        // submission URL executable) vs CONTENT COVERAGE (a complete,
+        // untruncated page the model fully saw — the only basis for stamping
+        // a path investigated or disproving an omitted one).
         const fetchedKeys = new Set(pages.map((pg) => registry.normalizeSubmissionUrl(pg.url)));
+        const coverageKeys = new Set(pages.filter((pg) => !pg.truncated).map((pg) => registry.normalizeSubmissionUrl(pg.url)));
         let verifyAttempts = 0;
         for (const p of writable) {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
@@ -697,12 +758,14 @@ async function investigatePaths(db, {
           const t = await fetcher(p.legal_terms_url);
           // same redirect rule as candidate pages: an agreement that redirects
           // off the registry domain is never hashed as this domain's terms —
-          // and neither is a TRUNCATED body (600 KB cap / cut stream): the
-          // hash binds legal acceptance (§3.2), so a partial agreement must
-          // stay unhashed (path stays INVALID under §6.3 → owner-manual)
-          // rather than freeze a snapshot missing its later clauses.
+          // and neither is a TRUNCATED body (600 KB cap / cut stream) nor an
+          // EMPTY shell (a client-rendered page of scripts canonicalizes to
+          // nothing): the hash binds legal acceptance (§3.2), so a partial or
+          // absent agreement must stay unhashed (path stays INVALID under
+          // §6.3 → owner-manual) rather than freeze a snapshot of nothing.
           if (t && t.html && !t.blocked && !t.error && !t.truncated && hostBound(host, t.finalUrl || p.legal_terms_url)) {
-            termsHashByUrl.set(p.legal_terms_url, sha256(canonicalizeTerms(t.html)));
+            const termsText = canonicalizeTerms(t.html);
+            if (termsText.length >= MIN_TERMS_TEXT_CHARS) termsHashByUrl.set(p.legal_terms_url, sha256(termsText));
           }
         }
 
@@ -774,7 +837,7 @@ async function investigatePaths(db, {
             .where({ domain_id: domain.id }).whereNull('superseded_by').select('id', 'submission_url');
           const stampIds = new Set(writtenIds);
           for (const ap of activeAll) {
-            if (!ap.submission_url || fetchedKeys.has(registry.normalizeSubmissionUrl(ap.submission_url))) stampIds.add(ap.id);
+            if (!ap.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(ap.submission_url))) stampIds.add(ap.id);
           }
           if (stampIds.size) {
             await trx('seo_link_acquisition_paths').whereIn('id', [...stampIds]).update({ last_investigated_at: now, updated_at: now });
@@ -800,7 +863,7 @@ async function investigatePaths(db, {
               .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
               .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
               .select('id', 'investigation', 'submission_url'))
-              .filter((s) => !s.submission_url || fetchedKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
+              .filter((s) => !s.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
             for (const s of stale) {
               const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
               await trx('seo_link_acquisition_paths').where({ id: s.id }).update({

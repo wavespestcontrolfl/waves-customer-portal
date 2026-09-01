@@ -76,6 +76,7 @@ function makeDb(seed = {}) {
           const preds = [];
           const sub = {
             whereNull(col) { preds.push((row, get) => get(row, col) == null); return sub; },
+            whereNot(col, val) { preds.push((row, get) => get(row, col) !== val); return sub; },
             orWhere(col, op, val) {
               preds.push(val === undefined
                 ? (row, get) => get(row, col) === op
@@ -550,7 +551,10 @@ describe('full run', () => {
     const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/page-${i}`, source_ref: null }));
     const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
     const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
-    const fetcher = jest.fn(okFetch);
+    const agreement = `<html><body>Membership agreement. ${'By joining you agree to the listing terms and renewal policy. '.repeat(8)}</body></html>`;
+    const fetcher = jest.fn(async (url) => (url.includes('/terms')
+      ? { status: 200, finalUrl: url, html: agreement, blocked: false, truncated: false }
+      : okFetch(url)));
     const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([legal]) }) }));
     expect(fetcher.mock.calls.map(([u]) => u)).toContain('https://example.com/terms');
     const p = db._tables.seo_link_acquisition_paths[0];
@@ -678,20 +682,128 @@ describe('full run', () => {
   test('a redirect that leaves the domain is rejected as model input and evidence (Codex r3 P1)', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });
-    // every fetch redirects off-domain
-    const redirecting = async (url) => ({ status: 200, finalUrl: 'https://evil.example.net/landing', html: '<html>Join for USD 95 / year</html>', blocked: false, truncated: false });
+    // /submit and /terms redirect off-domain; everything else loads on-host
+    const redirecting = async (url) => (url.includes('/submit') || url.includes('/terms')
+      ? { status: 200, finalUrl: 'https://evil.example.net/landing', html: '<html>Off-site content</html>', blocked: false, truncated: false }
+      : okFetch(url));
     const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
     const llm = jest.fn(async (route, payload) => {
       expect(payload.text).not.toContain('evil.example.net'); // off-site page never reaches the prompt
+      expect(payload.text).not.toContain('Off-site content');
       return { ok: true, json: verdictOf([legal]) };
     });
     await investigatePaths(db, runOpts(db, { fetchPage: redirecting, llmDispatch: llm }));
     const p = db._tables.seo_link_acquisition_paths[0];
     expect(p.legal_terms_hash).toBeNull(); // the terms redirect is not this domain's agreement
-    expect(p.currency).toBe('unknown'); // the quote had no on-domain page to verify against
-    expect(p.estimated_cost_cents).toBeNull();
     const evidence = JSON.parse(p.investigation);
-    expect(evidence.fetch_errors.every((f) => f.reason === 'offsite_redirect')).toBe(true);
+    expect(evidence.fetch_errors).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'offsite_redirect' })]));
+  });
+
+  test('an evidence-less pass (every fetch failed) spends NO model call and backs off (Codex PR r2 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const failing = jest.fn(async (url) => ({ status: null, finalUrl: null, html: null, blocked: false, error: 'dns_error' }));
+    const llm = jest.fn();
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: failing, llmDispatch: llm }));
+    expect(llm).not.toHaveBeenCalled();
+    expect(r.failed).toEqual([expect.objectContaining({ reason: 'no_page_evidence' })]);
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('investigating'); // never closed on its name alone
+    expect(dom.investigate_after).toEqual(new Date(NOW.getTime() + _internals.INVESTIGATE_BACKOFF_BASE_MS));
+  });
+
+  test('the model claiming a SUBSTRING of the page price is not verification (Codex PR r2 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const pages = [{ url: 'https://example.com/join', text: 'membership costs usd 950 per year', html: '<html/>', truncated: false }];
+    const v = verifyPriceEvidence(pages, { price_text: 'USD 95', price_page_url: 'https://example.com/join' });
+    expect(v.price_text).toBeNull(); // USD 95 must not verify against USD 950
+    const exact = verifyPriceEvidence(pages, { price_text: 'USD 950', price_page_url: 'https://example.com/join' });
+    expect(exact.price_text).toBe('USD 950');
+  });
+
+  test('a TRUNCATED candidate page proves existence but never coverage (Codex PR r2 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const stalePath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [stalePath] });
+    const truncFetch = jest.fn(async (url, opts) => ({ ...(await okFetch(url)), truncated: url.includes('/join') }));
+    // the model omits the stale path (its page was only PARTIALLY seen)
+    const other = modelPath({ acquisition_type: 'business_claim', submission_url: 'https://example.com/register', payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null });
+    await investigatePaths(db, runOpts(db, { fetchPage: truncFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([other]) }) }));
+    const stale = db._tables.seo_link_acquisition_paths.find((p) => p.id === stalePath.id);
+    expect(Number(stale.confidence)).toBe(0.7); // NOT disproven — the model never saw past the cut
+    expect(stale.last_investigated_at).toEqual(new Date('2026-05-01')); // NOT stamped
+    // …but a truncated fetch still proves the URL exists: no extra resolveOnly probe needed
+    expect(truncFetch.mock.calls.some(([u, o]) => u === 'https://example.com/join' && o && o.resolveOnly)).toBe(false);
+  });
+
+  test('refresh selection honors owner actions: rejected never re-fetches, watching waits for its recheck (Codex PR r2 P1)', async () => {
+    const { selectTargets } = _internals;
+    const rejected = domainRow({ domain: 'rejected.com', agent_state: 'rejected' });
+    const watchingNotDue = domainRow({ domain: 'later.com', agent_state: 'watching', watch_recheck_at: new Date('2026-09-30') });
+    const paths = [rejected, watchingNotDue].map((dom) => ({
+      id: uid(), domain_id: dom.id, path_key: 'unknown:-', superseded_by: null, last_investigated_at: null,
+    }));
+    const db = makeDb({ seo_link_domains: [rejected, watchingNotDue], seo_link_acquisition_paths: paths });
+    expect(await selectTargets(db, { limit: 10, now: NOW })).toHaveLength(0);
+  });
+
+  test('an unenriched domain scores with the unknown-DR fallback, never DR 0 (Codex PR r2 P2)', () => {
+    const { scoreDomain } = _internals;
+    const { score, reasons } = scoreDomain({ domain_rating: null, spam_score: null, competitors_linked: 0 }, { acquisition_type: 'self_service_free', confidence: 0.5 });
+    expect(reasons).toContain('DR unknown');
+    expect(score).toBe(Math.round(0.6 * 20 + 20 * 0.5)); // fallback 20, not 0
+  });
+
+  test('extended foreign-currency markers, with ambiguous ISO codes case-sensitive (Codex PR r2 P2)', () => {
+    const { deriveCurrency } = _internals;
+    expect(deriveCurrency({ price_text: 'AED 350 / year' })).toBe('foreign');
+    expect(deriveCurrency({ price_text: '95 THB' })).toBe('foreign');
+    expect(deriveCurrency({ price_text: '950 php' })).toBe('foreign');
+    expect(deriveCurrency({ price_text: '95 cad' })).toBe('foreign');
+    expect(deriveCurrency({ price_text: 'TRY 95' })).toBe('foreign');
+    expect(deriveCurrency({ price_text: 'try our plans: $95' })).toBe('unknown'); // lowercase 'try' is English
+    expect(deriveCurrency({ price_text: 'all plans $95' })).toBe('unknown'); // lowercase 'all' is English
+  });
+
+  test('an empty terms shell is never hashed; a hash-less legal path never outranks a valid alternative (Codex PR r2 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    // the terms page is a client-rendered script shell — canonicalizes to nothing
+    const shellFetch = async (url) => (url.includes('/terms')
+      ? { status: 200, finalUrl: url, html: '<html><script src="app.js"></script><body></body></html>', blocked: false, truncated: false }
+      : okFetch(url));
+    const legalHigh = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms', confidence: 0.9 });
+    const freeLow = modelPath({
+      acquisition_type: 'self_service_free', submission_url: 'https://example.com/register', payment_required: false,
+      fee_scope: null, account_required: false, email_verification: false, confidence: 0.4,
+      price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null,
+      currency_evidence: null, renewal_period: null,
+    });
+    await investigatePaths(db, runOpts(db, { fetchPage: shellFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([legalHigh, freeLow]) }) }));
+    const legal = db._tables.seo_link_acquisition_paths.find((p) => p.acquisition_type === 'paid_listing');
+    const free = db._tables.seo_link_acquisition_paths.find((p) => p.acquisition_type === 'self_service_free');
+    expect(legal.legal_terms_hash).toBeNull(); // empty shell never binds acceptance
+    expect(db._tables.seo_link_domains[0].best_path_id).toBe(free.id); // the VALID lower-confidence path wins
+  });
+
+  test('existing paths outrank hint URLs in the fetch order — a hint-rich domain cannot starve its due path (Codex PR r2 P1)', async () => {
+    const d = domainRow();
+    const stale = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/deep/hidden-join',
+      path_key: 'paid_listing:https://example.com/deep/hidden-join', superseded_by: null, baseline: false, confidence: 0.6,
+      last_investigated_at: null, revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const touches = Array.from({ length: 10 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/page-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [stale], seo_link_domain_sources: touches });
+    const fetcher = jest.fn(okFetch);
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
+    const pageFetches = fetcher.mock.calls.filter(([, o]) => !(o && o.resolveOnly)).map(([u]) => u);
+    expect(pageFetches).toContain('https://example.com/deep/hidden-join'); // fetched despite 10 hints
   });
 
   test('a claim lost during the network window aborts every write (Codex r3 P1)', async () => {

@@ -2974,10 +2974,13 @@ function BacklinkRegistryCard() {
     }
     setExpandedId(id);
     setDetail(null);
+    // detail carries the row id it answers — a slow response for a row the
+    // operator has since left never renders under the newly expanded one
     try {
-      setDetail(await adminFetch(`/admin/backlink-agent/registry/${id}`));
+      const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
+      setDetail({ forId: id, ...r });
     } catch (e) {
-      setDetail({ error: e?.message || "Detail load failed" });
+      setDetail({ forId: id, error: e?.message || "Detail load failed" });
     }
   };
 
@@ -3214,9 +3217,9 @@ function BacklinkRegistryCard() {
                 {expandedId === d.id && (
                   <tr>
                     <td style={{ ...tdStyle, fontFamily: "inherit", background: D.bg }} colSpan={9}>
-                      {!detail && <span style={{ color: D.muted }}>Loading…</span>}
-                      {detail?.error && <span style={{ color: D.red }}>{detail.error}</span>}
-                      {detail && !detail.error && (
+                      {detail?.forId !== d.id && <span style={{ color: D.muted }}>Loading…</span>}
+                      {detail?.forId === d.id && detail.error && <span style={{ color: D.red }}>{detail.error}</span>}
+                      {detail?.forId === d.id && !detail.error && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                           {d.score_reasons && (
                             <div style={{ fontSize: 12, color: D.muted }}>{d.score_reasons}</div>
