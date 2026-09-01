@@ -94,8 +94,9 @@ function leadsTableTokens(src) {
 function aliasInsertPatterns(src, token) {
   // Declaration keyword OPTIONAL — a builder stored by a later assignment
   // (`let target; target = db('leads');`) is the same stored-builder form.
+  // Optional factory call after the head identifier — `getDb()('leads')`.
   const declRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${token}\s*\)`,
     'g'
   );
   const patterns = [];
@@ -233,7 +234,7 @@ function scanSourceForDynamicTableInserts(src) {
   // Stored builders over a dynamic table — `const target = db(table);
   // await target.insert(row);` — the dynamic mirror of the alias pass.
   const dynDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*\.\s*table)?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   let decl;
@@ -374,6 +375,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['callable-factory builder', "await getDb()('leads').insert(row);"],
     ['inline comment in builder call', "await db(/* primary table */ 'leads').insert(row);"],
     ['assigned-later stored builder', "let target;\ntarget = db('leads');\nawait target.insert(row);"],
+    ['factory-returned stored builder', "const target = getDb()('leads');\nawait target.insert(row);"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -568,31 +570,42 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       expect({ site: key(w), kind: cc && cc.kind }).toEqual({ site: key(w), kind: expect.any(String) });
 
       if (cc.kind === 'config-literals') {
-        // EVERY assignment of a listed prop in the entry's own file — not
-        // just the ones that happen to be literals. A runtime value
-        // (`table: resolveTable(...)`) fails unless explicitly allowValues'd.
+        // Scoped to the DECLARED config object (balanced-brace extraction),
+        // where every listed prop must be a direct literal assignment.
+        // Spreads (`...runtimeConfig`), object SHORTHAND, and QUOTED or
+        // COMPUTED keys are rejected outright — each would source a table
+        // from runtime past this matcher.
         const src = files.find((f) => f.rel === w.file).src;
+        const code = blankComments(src);
+        const bare = blankCommentsAndStrings(src); // same offsets, strings gone
+        const declMatch = code.match(new RegExp(String.raw`\b(?:const|let|var)\s+${escapeRe(cc.object)}\s*=\s*\{`));
+        expect({ file: w.file, object: cc.object, found: Boolean(declMatch) })
+          .toEqual({ file: w.file, object: cc.object, found: true });
+        const openIdx = code.indexOf('{', declMatch.index);
+        let depth = 0;
+        let end = openIdx;
+        for (; end < code.length; end += 1) {
+          if (bare[end] === '{') depth += 1;
+          else if (bare[end] === '}') { depth -= 1; if (depth === 0) break; }
+        }
+        const objText = code.slice(openIdx, end + 1);
+        const objBare = bare.slice(openIdx, end + 1);
+        expect({ file: w.file, spreads: (objBare.match(/\.\.\./g) || []).length })
+          .toEqual({ file: w.file, spreads: 0 });
         const propAlt = cc.props.map(escapeRe).join('|');
-        // Object SHORTHAND of a listed prop ({ table, … }) binds a runtime
-        // variable no matcher can validate — rejected outright. So are
-        // QUOTED ("table":) and COMPUTED (['table']:) keys, which would
-        // dodge the assignment matcher below.
-        const shorthand = [...src.matchAll(new RegExp(String.raw`[{,]\s*(?:${propAlt})\s*(?=[,}])`, 'g'))];
+        const shorthand = [...objBare.matchAll(new RegExp(String.raw`[{,]\s*(?:${propAlt})\s*(?=[,}])`, 'g'))];
         expect(shorthand.map((s) => s[0].trim())).toEqual([]);
-        const noncanonical = [...src.matchAll(new RegExp(String.raw`(?:["'\x60](?:${propAlt})["'\x60]\s*:|\[\s*["'\x60](?:${propAlt})["'\x60]\s*\])`, 'g'))];
+        const noncanonical = [...objText.matchAll(new RegExp(String.raw`(?:["'\x60](?:${propAlt})["'\x60]\s*:|\[\s*["'\x60](?:${propAlt})["'\x60]\s*\])`, 'g'))];
         expect(noncanonical.map((s) => s[0])).toEqual([]);
-        const assignments = [...src.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*('[\w.]+'|[^,}\n]+)`, 'g'))];
+        const assignments = [...objText.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*('[\w.]+'|[^,}\n]+)`, 'g'))];
         const literals = [];
         for (const a of assignments) {
           const v = a[1].trim();
           const lit = v.match(/^'([\w.]+)'$/);
-          const allowed = Boolean(lit) || (cc.allowValues || []).includes(v);
-          expect({ file: w.file, assignment: a[0].trim(), allowed })
-            .toEqual({ file: w.file, assignment: a[0].trim(), allowed: true });
-          if (lit) {
-            literals.push(lit[1]);
-            assertNotLeads(`${w.file} config`, lit[1]);
-          }
+          expect({ file: w.file, assignment: a[0].trim(), literal: Boolean(lit) })
+            .toEqual({ file: w.file, assignment: a[0].trim(), literal: true });
+          literals.push(lit[1]);
+          assertNotLeads(`${w.file} config`, lit[1]);
         }
         expect(literals.length).toBeGreaterThanOrEqual(cc.minValues);
       } else if (cc.kind === 'positional-call') {
@@ -649,10 +662,20 @@ describe('lead-writer registry (#3137 groundwork)', () => {
               else if (after[end] === '}') { depth -= 1; if (depth === 0) break; }
             }
             const arg = after.slice(openIdx, end + 1);
+            // Only TOP-LEVEL properties of the call's object count — a
+            // matching prop nested one level down ({ options: { table: … } })
+            // is not the binding the helper reads. Nested braces blank out.
+            let d2 = 0;
+            let top = '';
+            for (const ch of arg) {
+              if (ch === '{') { d2 += 1; top += d2 === 1 ? ch : ' '; continue; }
+              if (ch === '}') { d2 -= 1; top += d2 === 0 ? ch : ' '; continue; }
+              top += d2 === 1 ? ch : ' ';
+            }
             const bindRe = new RegExp(
               String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}` : ''})`
             );
-            const bound = arg.match(bindRe);
+            const bound = top.match(bindRe);
             expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
               .toEqual({ caller: `${rel}@${m.index}`, bound: true });
             if (bound[1]) assertNotLeads(rel, bound[1]);
@@ -672,7 +695,11 @@ describe('lead-writer registry (#3137 groundwork)', () => {
             const lineStart = code.lastIndexOf('\n', r.index) + 1;
             const lineEnd = code.indexOf('\n', r.index);
             const lineText = code.slice(lineStart, lineEnd === -1 ? code.length : lineEnd);
-            const allowed = /\brequire\s*\(|\bmodule\.exports\b/.test(lineText);
+            // require / module.exports lines are allowed ONLY without a
+            // rename: `{ helper: alias }` or `{ alias: helper }` re-routes
+            // calls around the name scan and is rejected.
+            const renamed = new RegExp(String.raw`\b${escapeRe(cc.helper)}\s*:|:\s*${escapeRe(cc.helper)}\b`).test(lineText);
+            const allowed = /\brequire\s*\(|\bmodule\.exports\b/.test(lineText) && !renamed;
             expect({ ref: `${rel}: ${lineText.trim()}`, allowed })
               .toEqual({ ref: `${rel}: ${lineText.trim()}`, allowed: true });
           }
@@ -738,6 +765,12 @@ describe('lead-writer registry (#3137 groundwork)', () => {
   const FUNCTION_HEADER_RE = /(?:\bfunction\b|=>|^\s*(?:async\s+)?(?!if\b|for\b|while\b|switch\b|catch\b|return\b)[\w$]+\s*\([^()]*\)\s*{\s*$|^\s*[\w$]+\s*:\s*(?:async\b|function\b|\())/;
   const indentOf = (l) => l.match(/^\s*/)[0].length;
   function enclosingFunctionSpan(lines, idx) {
+    // The anchor line ITSELF being a function header (a same-line arrow
+    // body — `const mint = () => db('leads').insert(row)`) means the
+    // function IS that line: the span must not expand to siblings.
+    if (FUNCTION_HEADER_RE.test(lines[idx]) && !/\{\s*$/.test(lines[idx])) {
+      return lines[idx];
+    }
     let threshold = indentOf(lines[idx]);
     let start = 0;
     for (let i = idx - 1; i >= 0; i--) {

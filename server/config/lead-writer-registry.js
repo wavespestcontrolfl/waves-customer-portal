@@ -202,10 +202,10 @@ const DYNAMIC_TABLE_INSERTS = [
     anchor: 'const [row] = await db(config.table).insert({',
     expr: 'config.table',
     reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' (routes/admin-photo-assessments.js), never leads",
-    // allowValues: non-literal assignments the contract accepts — here the
-    // storeFunnelPhotos caller binding table: config.photoTable, which the
-    // object-call contract's allowIndirect covers.
-    callerContract: { kind: 'config-literals', props: ['table', 'photoTable'], minValues: 4, allowValues: ['config.photoTable'] },
+    // Scoped to the named config OBJECT (balanced-brace extraction), where
+    // spreads, shorthand, and noncanonical keys are rejected and every
+    // listed prop must be a literal.
+    callerContract: { kind: 'config-literals', object: 'TYPES', props: ['table', 'photoTable'], minValues: 4 },
   },
   {
     file: 'services/property-lookup/manatee-permit-sync.js',
