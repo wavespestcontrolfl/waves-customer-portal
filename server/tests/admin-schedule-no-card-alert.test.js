@@ -67,6 +67,17 @@ describe('unbilledVisitAlert (day-view money-gap flag)', () => {
     }
   });
 
+  test('a priced visit that will NOT mint reads as its own reason, not a missing rate', () => {
+    const priced = { kind: 'invoice', amount: 183, conflictStampedPrice: false };
+    expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: priced, willMint: false }))
+      .toEqual({ type: 'unbilled_visit', text: 'NOTHING WILL BILL — this visit is priced but no invoice will be created' });
+    expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: { ...priced, kind: 'auto_charge' }, willMint: false }).text)
+      .toBe('NOTHING WILL BILL — this visit is priced but no invoice will be created');
+    // Unknown (null) is never a gap; true is money moving.
+    expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: priced, willMint: null })).toBeNull();
+    expect(unbilledVisitAlert({ hasChargeableMethod: false, prediction: priced, willMint: true })).toBeNull();
+  });
+
   test('stays silent whenever money IS moving', () => {
     for (const kind of ['invoice', 'auto_charge', 'payer', 'prepaid', 'covered_membership', 'covered_annual']) {
       expect(unbilledVisitAlert({
@@ -192,5 +203,30 @@ describe('recurringWithoutBillableAmount — typed one-time profile (Codex P1)',
     // Defaulting true would let any priced visit satisfy the typed-one-time
     // branch and silently undo the mint-decision fix.
     expect(recurringWithoutBillableAmount(base)).toBeTruthy();
+  });
+});
+
+describe('enrichBillingLaneWithWalletGap wiring (source guards)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const fn = src.slice(
+    src.indexOf('async function enrichBillingLaneWithWalletGap('),
+    src.indexOf('function recurringWithoutBillableAmount('),
+  );
+
+  test('auto_charge predictions reach the mint verdict instead of returning early (Codex P1)', () => {
+    expect(fn).toContain("const needsWallet = ['invoice', 'auto_charge', 'payer'].includes(billingLane?.prediction?.kind)");
+  });
+
+  test('the no-card badge is derived AFTER the mint verdict and suppressed when nothing mints (Codex P2)', () => {
+    const verdict = fn.indexOf('const gap = unbilledCompletionGap({ prediction: billingLane.prediction, hasChargeableMethod, willMint });');
+    const noCard = fn.indexOf('noCardOnFileAlert({ hasChargeableMethod, prediction: billingLane.prediction })');
+    expect(verdict).toBeGreaterThan(-1);
+    expect(noCard).toBeGreaterThan(verdict);
+    expect(fn).toContain("const noCardAlert = gap?.reason === 'no_invoice_will_mint'\n      ? null\n      : noCardOnFileAlert(");
+    // One alert writer for the money-gap line: the helper, fed the verdict.
+    expect(fn).toContain('unbilledVisitAlert({ hasChargeableMethod, prediction: billingLane.prediction, willMint })');
+    expect((fn.match(/alerts\.push\(/g) || []).length).toBe(2);
   });
 });

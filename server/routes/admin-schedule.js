@@ -3185,15 +3185,18 @@ function noCardOnFileAlert({ hasChargeableMethod, prediction }) {
 // completion pre-gate. Sibling of noCardOnFileAlert rather than an extension
 // of it: that badge means "money is due and you must collect it here", this
 // one means "no money is due at all and it should have been".
-function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
-  const gap = unbilledCompletionGap({ prediction, hasChargeableMethod });
+function unbilledVisitAlert({ hasChargeableMethod, prediction, willMint = null }) {
+  const gap = unbilledCompletionGap({ prediction, hasChargeableMethod, willMint });
   if (!gap) return null;
-  return {
-    type: 'unbilled_visit',
-    text: gap.noPaymentMethod === true
-      ? 'NOTHING WILL BILL — no rate set and no card on file'
-      : 'NOTHING WILL BILL — no rate or price set for this visit',
-  };
+  let text;
+  if (gap.reason === 'no_invoice_will_mint') {
+    text = 'NOTHING WILL BILL — this visit is priced but no invoice will be created';
+  } else if (gap.noPaymentMethod === true) {
+    text = 'NOTHING WILL BILL — no rate set and no card on file';
+  } else {
+    text = 'NOTHING WILL BILL — no rate or price set for this visit';
+  }
+  return { type: 'unbilled_visit', text };
 }
 
 // Wallet read + money-gap enrichment for an appointment payload. Shared by
@@ -3208,8 +3211,11 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
 async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, completionContext = null }) {
   const customerId = svc?.customer_id;
   const achStatus = svc?.ach_status;
-  const needsWallet = billingLane?.prediction?.kind === 'invoice'
-    || billingLane?.prediction?.kind === 'payer'
+  // auto_charge is in this list for the MINT question below, not the badge:
+  // an active-autopay visit predicts auto_charge and still mints nothing
+  // when no mint trigger applies, and returning early on it left that gap
+  // unreachable (Codex P1).
+  const needsWallet = ['invoice', 'auto_charge', 'payer'].includes(billingLane?.prediction?.kind)
     || !!unbilledCompletionGap({ prediction: billingLane?.prediction });
   if (!needsWallet) return billingLane;
   let hasChargeableMethod = true;
@@ -3233,12 +3239,6 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
       });
     });
   } catch { hasChargeableMethod = true; }
-  if (Array.isArray(alerts)) {
-    const noCardAlert = noCardOnFileAlert({ hasChargeableMethod, prediction: billingLane.prediction });
-    if (noCardAlert) alerts.push(noCardAlert);
-    const unbilledAlert = unbilledVisitAlert({ hasChargeableMethod, prediction: billingLane.prediction });
-    if (unbilledAlert) alerts.push(unbilledAlert);
-  }
   // Will an invoice actually EXIST? The prediction answers what the visit
   // would bill; only shouldAutoInvoiceCompletion answers whether anything
   // gets minted, and the two diverge (Codex GH P1 — the same divergence the
@@ -3291,11 +3291,17 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
     } catch { willMint = null; }
   }
   const gap = unbilledCompletionGap({ prediction: billingLane.prediction, hasChargeableMethod, willMint });
-  if (Array.isArray(alerts) && gap && gap.reason === 'no_invoice_will_mint') {
-    alerts.push({
-      type: 'unbilled_visit',
-      text: 'NOTHING WILL BILL — this visit is priced but no invoice will be created',
-    });
+  if (Array.isArray(alerts)) {
+    // Alerts derive from the mint verdict, so both are computed AFTER it: a
+    // priced visit that mints nothing has nothing to collect on site, and
+    // the no-card badge would tell the tech to collect for an invoice that
+    // will never exist, right beside the NOTHING WILL BILL line (Codex P2).
+    const noCardAlert = gap?.reason === 'no_invoice_will_mint'
+      ? null
+      : noCardOnFileAlert({ hasChargeableMethod, prediction: billingLane.prediction });
+    if (noCardAlert) alerts.push(noCardAlert);
+    const unbilledAlert = unbilledVisitAlert({ hasChargeableMethod, prediction: billingLane.prediction, willMint });
+    if (unbilledAlert) alerts.push(unbilledAlert);
   }
   billingLane.unbilledGap = gap;
   return billingLane;
@@ -11416,6 +11422,52 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
+  // SAME billable-amount gate as POST creation and the make-recurring spawn
+  // (Codex P1): this writer is the third path that mints recurring rows —
+  // the Edit Appointment count raise and the fixed→ongoing flip both arrive
+  // with spawnRecurringChildren=false and never reached the spawn-branch
+  // gate, so an unpriced, zero-rate plan kept growing through here. Priced
+  // from the SAME template and date-filtered add-ons the insert loop below
+  // stamps (applyStoredVisitFinancials), minimum across the dates it will
+  // actually write, with the sibling-resolved create-invoice stamp the rows
+  // get. An operator-scoped explicit $0 series is free BY DESIGN (the
+  // price/service-scope lane writes 0 to mean "made free", and completion
+  // honors it), so it is not a money gap. An unreadable customer skips the
+  // gate, as the spawn branch does — the writer never fails on a read the
+  // insert itself does not need.
+  if (extendDates.length) {
+    const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first().catch(() => null);
+    const scopedFreeSeries = isEnabled('editApptPriceServiceScope')
+      && parseTemplateOverrides(parent?.recurring_template_overrides)?.estimated_price === 0;
+    if (gateCustomer && !scopedFreeSeries) {
+      const gatePriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
+      const extendFloor = extendDates.reduce((min, d) => {
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, extendBlackoutDates, skipParent);
+        const f = calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope);
+        return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
+      }, Infinity);
+      const extendProfile = await resolveCompletionProfileForScheduledService(parent, trx).catch(() => null);
+      // The PARENT's own label — asks whether the series' service is
+      // always-free; children still resolve the live catalog identity at
+      // insert (same convention as the spawn gate, so the child-identity
+      // golden master stays strict).
+      const extendSeriesServiceType = parent.service_type;
+      const unbillableExtend = recurringWithoutBillableAmount({
+        isRecurring: true,
+        recurringFloorPrice: Number.isFinite(extendFloor) ? extendFloor : 0,
+        customer: gateCustomer,
+        createInvoiceOnComplete: !!(cols.create_invoice_on_complete
+          && (seriesCioc !== undefined ? seriesCioc : parent.create_invoice_on_complete)),
+        typedOneTimeBilling: String(extendProfile?.billingType || '').toLowerCase() === 'one_time'
+          && parent.followup_included !== true,
+        isCallback: !!parent.is_callback,
+        serviceType: extendSeriesServiceType,
+      });
+      if (unbillableExtend) {
+        throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
+      }
+    }
+  }
   for (const nd of extendDates) {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {

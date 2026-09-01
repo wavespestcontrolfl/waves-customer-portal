@@ -119,6 +119,10 @@ function scenario({
   // Weekly days-off JSON served through the fake conn (getBlackoutDates reads
   // via the caller's conn/trx).
   weeklyDaysOff = null,
+  // The customers row the billable-amount gate reads on extend. Null (the
+  // default for the older scenarios) models an unreadable customer, which
+  // skips the gate exactly as the make-recurring spawn does.
+  customer = null,
 }) {
   const parent = {
     id: 10,
@@ -188,6 +192,7 @@ function scenario({
       }
       return [];
     }
+    if (table === 'customers') return op === 'first' ? customer : [];
     if (table === 'system_settings') {
       return weeklyDaysOff ? { value: weeklyDaysOff } : null;
     }
@@ -509,6 +514,72 @@ describe('reconcileRecurringSeriesVisitCount — extending a plan', () => {
     const r2 = await reconcile(over.conn, over.parent, 3, { ongoingSeries: true });
     expect(r2.cancelledIds).toHaveLength(0);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend (Codex P1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // A self-pay customer with no number anywhere: null lane, zero rate, no tier.
+  const unpricedCustomer = { id: 5, billing_mode: null, monthly_rate: 0, waveguard_tier: null, per_application_fee: null };
+
+  test('refuses to grow an unpriced, zero-rate plan through the count raise', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 2, customer: unpricedCustomer });
+    await expect(reconcile(conn, parent, 4)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
+    });
+    expect(inserted).toHaveLength(0);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('the fixed→ongoing flip is gated the same way — it is the same writer', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 1, customer: unpricedCustomer });
+    await expect(reconcile(conn, parent, 3, { ongoingSeries: true })).rejects.toMatchObject({
+      code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
+    });
+    expect(inserted).toHaveLength(0);
+  });
+
+  test('a priced series with the create-invoice stamp extends', async () => {
+    const { conn, parent, inserted } = scenario({
+      upcoming: 2, customer: unpricedCustomer, parentOverrides: { estimated_price: '185.00' },
+    });
+    const result = await reconcile(conn, parent, 4);
+    expect(result.added).toHaveLength(2);
+    for (const row of inserted) expect(Number(row.estimated_price)).toBe(185);
+  });
+
+  test('dues cover a monthly member with a rate — no price stamp needed', async () => {
+    const member = { id: 5, billing_mode: 'monthly_membership', monthly_rate: 120, waveguard_tier: 'silver', per_application_fee: null };
+    const { conn, parent, inserted } = scenario({ upcoming: 2, customer: member });
+    const result = await reconcile(conn, parent, 4);
+    expect(result.added).toHaveLength(2);
+    expect(inserted).toHaveLength(2);
+  });
+
+  test('a monthly member with NO rate is refused — the tier alone collects nothing', async () => {
+    const member = { id: 5, billing_mode: 'monthly_membership', monthly_rate: 0, waveguard_tier: 'silver', per_application_fee: null };
+    const { conn, parent } = scenario({ upcoming: 2, customer: member });
+    await expect(reconcile(conn, parent, 4)).rejects.toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
+  });
+
+  test('a shortening or an unchanged count never consults the gate', async () => {
+    const { conn, parent, inserted } = scenario({ upcoming: 4, customer: unpricedCustomer });
+    const result = await reconcile(conn, parent, 2);
+    expect(result.cancelledIds).toHaveLength(2);
+    expect(inserted).toHaveLength(0);
+    const same = scenario({ upcoming: 2, customer: unpricedCustomer });
+    await expect(reconcile(same.conn, same.parent, 2)).resolves.toMatchObject({ added: [] });
+  });
+
+  test('the gate sits before the insert loop, priced from the same template the loop stamps', () => {
+    const fn = src.slice(src.indexOf('async function reconcileRecurringSeriesVisitCount('));
+    const gate = fn.indexOf('const unbillableExtend = recurringWithoutBillableAmount({');
+    const loop = fn.indexOf('for (const nd of extendDates) {');
+    expect(gate).toBeGreaterThan(-1);
+    expect(loop).toBeGreaterThan(gate);
+    expect(fn.slice(0, loop)).toContain('calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope)');
   });
 });
 

@@ -33,6 +33,26 @@ const unbilledShape = {
 };
 
 describe('no_charge reason split', () => {
+  test('a positive out-of-band prepayment on an unpriced visit is PAID, not a money gap (Codex P2)', () => {
+    // Completion's prepaidCovered is prepaid_amount > 0 AND >= the amount —
+    // a $0 amount is covered by any positive cash/Zelle stamp, so the sheet
+    // must not warn (or offer a card link) on a visit the office collected.
+    const p = predictCompletionBilling({ ...unbilledShape, prepaidAmount: 50, prepaidMethod: 'cash' });
+    expect(p).toEqual({ kind: 'prepaid', amount: 50, conflictStampedPrice: false });
+    expect(unbilledCompletionGap({ prediction: p })).toBeNull();
+    // Per-application lane, same shape: no fee on file but a hand prepayment.
+    const perApp = predictCompletionBilling({
+      ...unbilledShape, lane: 'per_application', billingMode: 'per_application', perApplicationFee: null,
+      prepaidAmount: 25, prepaidMethod: 'zelle',
+    });
+    expect(perApp).toEqual({ kind: 'prepaid', amount: 25, conflictStampedPrice: false });
+    // A zero/null stamp is not coverage; a STALE annual stamp never counts.
+    expect(predictCompletionBilling({ ...unbilledShape, prepaidAmount: 0, prepaidMethod: 'cash' }).reason).toBe('no_amount_on_file');
+    expect(predictCompletionBilling({ ...unbilledShape, prepaidAmount: 50, prepaidMethod: 'annual_prepay_invoice' }).reason).toBe('no_amount_on_file');
+    // Free-by-design still wins over a stray prepayment stamp.
+    expect(predictCompletionBilling({ ...unbilledShape, isCallback: true, prepaidAmount: 50, prepaidMethod: 'cash' }).reason).toBe('callback');
+  });
+
   test('an unpriced self-pay visit is a money gap, not a free visit', () => {
     const p = predictCompletionBilling(unbilledShape);
     expect(p.kind).toBe('no_charge');

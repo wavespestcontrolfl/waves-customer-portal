@@ -310,7 +310,14 @@ function predictCompletionBilling({
     });
     // Per-application lane with no fee on file — the acceptance fee never
     // got stamped. A money gap, not a free visit.
-    if (!(amount > 0)) return noCharge('no_amount_on_file');
+    if (!(amount > 0)) {
+      // A POSITIVE out-of-band prepayment (cash/Zelle stamped through
+      // /:id/prepaid) on an unpriced visit is what completion calls covered
+      // — prepaid_amount > 0 AND >= the $0 amount — so it is paid, not a
+      // money gap (Codex P2). Same ordering as the self-pay lane below.
+      if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+      return noCharge('no_amount_on_file');
+    }
     // Completion only suppresses when the prepayment covers the WHOLE
     // amount; a partial prepay is applied as credit and the remainder
     // still collects (Codex r1).
@@ -340,7 +347,16 @@ function predictCompletionBilling({
   // anywhere — no stamped visit price, no monthly rate. Nothing bills, and
   // nothing about the visit says it should be free.
   if (!(amount > 0)) {
-    return noCharge((isCallback || isAlwaysFreeServiceType(serviceType)) ? (isCallback ? 'callback' : 'always_free_service_type') : 'no_amount_on_file');
+    if (isCallback || isAlwaysFreeServiceType(serviceType)) {
+      return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+    }
+    // Mirrors completion's prepaidCovered (prepaid_amount > 0 AND >= the
+    // amount): a positive cash/Zelle prepayment stamped on an unpriced visit
+    // covers its $0 amount, so completion mints nothing BECAUSE it is paid.
+    // Asked before the money-gap verdict, or the sheet warns — and offers a
+    // card link — on a visit the office already collected for (Codex P2).
+    if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    return noCharge('no_amount_on_file');
   }
   if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
   return {
