@@ -2871,7 +2871,45 @@ async function createSelfBooking(payload = {}) {
                   ? JSON.parse(freshPricingEst.estimate_data)
                   : (freshPricingEst.estimate_data || {});
                 const frozenFee = Number(estData?.setupFeeQuote?.amount);
-                if (!(Number.isFinite(frozenFee) && frozenFee > 0)) return;
+                if (!(Number.isFinite(frozenFee) && frozenFee > 0)) {
+                  // A ZERO/ABSENT setup on a rodent draft is a WAIVER that
+                  // can lapse (codex #3591 r80 P1): the quote waived the
+                  // $99 on another qualifying family — if that family was
+                  // cancelled before this self-booking, the series would
+                  // commit with no fee, permanently. Re-derive under the
+                  // customer lock; families quoted ON THIS DRAFT still
+                  // waive (the owner rule counts estimate + account). A
+                  // claim already queued for this draft is not
+                  // family-based and stays honored.
+                  const draftLineServices = (estData?.engineResult?.lineItems || [])
+                    .map((l) => String(l?.service || '').toLowerCase());
+                  const rodentDraft = draftLineServices.includes('rodent_bait')
+                    || estData?.setupFeeQuote?.kind === 'rodent_bait_setup';
+                  if (!rodentDraft) return;
+                  if (estData?.setupFeeQuote?.kind === 'rodent_bait_setup'
+                    && estData?.setupFeeQuote?.waived === 'fee_already_queued') return;
+                  const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
+                  if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
+                  await sp('customers').where({ id: custId }).forUpdate().first('id');
+                  const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+                  const liveFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false }) || [])
+                    .filter((key) => key !== 'rodent_bait');
+                  if (liveFamilies.length > 0) return;
+                  // LAPSED. The booking route keeps the booked visit through
+                  // stamp errors by design (the seeding catch logs and the
+                  // visit stays), and the $99 was never disclosed to this
+                  // customer, so neither refusing nor silently stamping is
+                  // available — this is the exception lane: page the office
+                  // to re-quote or bill the setup deliberately.
+                  logger.error(`[booking:confirm] FIX: rodent quote ${freshPricingEst.id} waived the bait-station setup on a family that has since lapsed — booking ${custId} commits without the $99; office must re-quote or bill it`);
+                  await require('../services/notification-service').notifyAdmin(
+                    'billing',
+                    'Rodent booking: setup waiver lapsed before self-booking',
+                    'A self-booked rodent bait quote had its $99 setup waived by another service that is no longer active. The booking stands without the fee — re-quote or add the setup deliberately.',
+                    { link: `/admin/customers/${custId}`, metadata: { customerId: custId, estimateId: freshPricingEst.id } },
+                  ).catch(() => {});
+                  return;
+                }
                 // Bind the stamp to the QUOTED plan: the handoff token and
                 // the slot signature verify independently, so a fee-bearing
                 // quote could otherwise be submitted with an unrelated

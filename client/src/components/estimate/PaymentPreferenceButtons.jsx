@@ -186,6 +186,13 @@ export default function PaymentPreferenceButtons({
   const annualAmount = firstPositiveNumber(selectedFrequency?.annual);
   const prepayRows = !heldRecurring && annualAmount ? [
     ...(hasSetupInvoice && waivableSetupFee ? [{ label: 'WaveGuard Membership Setup', amountText: 'Waived' }] : []),
+    // The rodent bait-station setup is NOT prepay-waived — the converter
+    // adds it to the annual prepay invoice as its own collectible line
+    // (codex #3591 r80 P2), so the preview must show it too or the
+    // customer approves a prepay $99 under the minted invoice.
+    ...(Array.isArray(extraInvoiceRows) ? extraInvoiceRows : [])
+      .filter((row) => Number(row?.amount) > 0)
+      .map((row) => ({ label: row.label || 'Setup', amountText: fmtMoney(Math.round(Number(row.amount) * 100) / 100) })),
     { label: '12-month plan', amountText: fmtMoney(annualAmount) },
   ] : [];
   const invoiceBox = {

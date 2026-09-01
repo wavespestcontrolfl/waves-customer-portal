@@ -676,6 +676,26 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(migrationSrc).toMatch(/if \(migrationOwnsRuleCycle && ruleAudit\?\.old_value && rule && rule\.tier_qualifier === true && rule\.exclude_from_pct_discount === false\) \{/);
   });
 
+  test('lapsed zero-waiver self-bookings page the office · wizard engineInput joins the reconciliation · prepay preview carries the setup (codex #3591 r80)', () => {
+    // A rodent draft with a ZERO/ABSENT setup re-derives the waiver under
+    // the customer lock; draft-internal families still waive; a lapse pages
+    // billing (the booking route keeps the visit through stamp errors by
+    // design, and an undisclosed fee is never silently stamped).
+    const bookingSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(bookingSrc).toMatch(/const rodentDraft = draftLineServices\.includes\('rodent_bait'\)[\s\S]*?const DRAFT_WAIVING_FAMILIES = \['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'\];[\s\S]*?loadExistingQualifyingServiceKeys\(sp, custId, \{ strict: true, planGate: false \}\)[\s\S]*?notifyAdmin\(\s+'billing',\s+'Rodent booking: setup waiver lapsed before self-booking',/);
+    expect(bookingSrc).toMatch(/waived === 'fee_already_queued'\) return;/);
+    // The public wizard's SINGULAR engineInput shape arms and is cleaned by
+    // the membership/waiver reconciliation.
+    const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(estimatePublicSrc).toMatch(/const replayShapes = \[estData\.engineInputs, estData\.engineInput, estData\.inputs, estData\.engineRequest\?\.options\]/);
+    // The prepay preview shows the non-waived rodent setup line the
+    // converter bills on the prepay invoice.
+    const prefButtons = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'components', 'estimate', 'PaymentPreferenceButtons.jsx'), 'utf8');
+    const prepayRowsAt = prefButtons.indexOf('const prepayRows =');
+    expect(prepayRowsAt).toBeGreaterThan(-1);
+    expect(prefButtons.slice(prepayRowsAt, prefButtons.indexOf('] : [];', prepayRowsAt))).toContain('extraInvoiceRows');
+  });
+
   test('accept-side gained-family guard under the customer lock (residential only) · C360 retire lock · gate-independent waiver qualification (codex #3591 r79 P1)', () => {
     const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
     // The guard locks the customer row, re-probes ungated+strict, and

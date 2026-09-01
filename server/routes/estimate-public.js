@@ -8243,7 +8243,11 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // replay shape (legacy rows predating the save-time sanitizer), and the
     // top-level priorQualifyingServices even without a snapshot.
     // extractEngineInputs() replays all of them on every reprice.
-    const replayShapes = [estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+    // engineInput (SINGULAR) is the public-wizard save shape (codex #3591
+    // r80 P1): public-quote persists its setup-waiver evidence there, so
+    // omitting it left a lapsed wizard waiver invisible to this
+    // reconciliation and acceptance omitted the now-owed setup.
+    const replayShapes = [estData.engineInputs, estData.engineInput, estData.inputs, estData.engineRequest?.options]
       .filter((shape) => shape && typeof shape === 'object');
     // Mirror the engine's truthy coercion: generateEstimate treats ANY truthy
     // recurring value (boolean true, 'true', legacy strings, form 'YES') as
