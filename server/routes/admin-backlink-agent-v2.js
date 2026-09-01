@@ -369,11 +369,14 @@ router.patch('/registry/:id', async (req, res, next) => {
     // An explicit Reopen is a fresh mandate: clear the failure backoff so the
     // very next sweep picks the domain up instead of honoring a stale defer.
     if (action === 'reopen') { patch.investigate_after = null; patch.investigate_failures = 0; }
-    // Guard is IN the update: a lane can move the row to acquiring/acquired
-    // between read and write, so the condition rides the UPDATE and a zero
-    // count means the race (or a delete) was lost — never overwrite it.
+    // Guard is IN the update: a lane can move the row to a lane-owned
+    // aggregate (ready_to_acquire = a placement holds stamped pending
+    // authority; acquiring/acquired) between read and write, so the
+    // condition rides the UPDATE and a zero count means the race (or a
+    // delete) was lost — never overwrite it: a domain-only flip would
+    // contradict the placements and authority behind it.
     const n = await db('seo_link_domains')
-      .where({ id: domain.id }).whereNotIn('agent_state', ['acquiring', 'acquired'])
+      .where({ id: domain.id }).whereNotIn('agent_state', ['ready_to_acquire', 'acquiring', 'acquired'])
       .update(patch);
     if (!n) {
       const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');

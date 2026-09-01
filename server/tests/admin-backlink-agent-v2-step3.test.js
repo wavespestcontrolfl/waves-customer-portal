@@ -5,7 +5,7 @@
  *  - GET /registry attaches the best-path summary to each row (§11 table).
  *  - GET /registry/:id returns domain + paths + touches + placements.
  *  - PATCH /registry/:id: watch / reject / reopen only; lane-owned aggregate
- *    states (acquiring/acquired) are refused; unknown action → 400.
+ *    states (ready_to_acquire/acquiring/acquired) are refused; unknown action → 400.
  * Handlers are invoked directly off the router stack (no supertest at root).
  */
 const mockState = {
@@ -146,7 +146,7 @@ describe('PATCH /registry/:id', () => {
     const r = await call(patch(), { params: { id: 'nope' }, body: { action: 'watch' } });
     expect(r.status).toBe(404);
   });
-  test.each([['acquiring'], ['acquired']])('lane-owned state %s is refused with 409', async (agentState) => {
+  test.each([['ready_to_acquire'], ['acquiring'], ['acquired']])('lane-owned state %s is refused with 409', async (agentState) => {
     mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: agentState };
     const r = await call(patch(), { params: { id: 'd1' }, body: { action: 'reject' } });
     expect(r.status).toBe(409);

@@ -2932,7 +2932,7 @@ const REGISTRY_STATES = [
   "not_reproducible",
   "rejected",
 ];
-const LANE_OWNED_STATES = ["acquiring", "acquired"];
+const LANE_OWNED_STATES = ["ready_to_acquire", "acquiring", "acquired"];
 
 function BacklinkRegistryCard() {
   const [rows, setRows] = useState([]);
