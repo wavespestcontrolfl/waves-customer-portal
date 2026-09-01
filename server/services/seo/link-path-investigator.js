@@ -150,10 +150,18 @@ function deriveCurrency(path) {
   return 'unknown';
 }
 
-// A MINIMUM-price quote ("USD 95+", "USD 95 and up", "minimum USD 95") is
-// not an exact price: the charge may be higher, so it never derives cents —
-// the price parser sees one numeric token and would otherwise accept it.
-const MIN_PRICE_QUOTE_RE = /\d\s*\+|\b(?:and up|or more|and above|and over|or higher|and higher|minimum|at least)\b|\bmin\./i;
+// Price-text vocabulary (matched case-insensitively / on lowercased text): a
+// currency marker that may repeat on a range's upper bound, and a cadence
+// suffix that may follow an amount ("/year", "per year", "a month", "each
+// year", "annually") — before a range separator OR a minimum-price "+".
+const CURRENCY_MARKERS = '(?:usd|us\\$|ca\\$|au\\$|nz\\$|r\\$|[$€£¥₹₱₽₺₪฿])';
+const CADENCE_SUFFIX = '(?:\\s*\\/\\s*[a-z]+|\\s+per\\s+[a-z]+|\\s+(?:a|an|each|every)\\s+[a-z]+|\\s+(?:annually|yearly|monthly|weekly|daily|quarterly|annual|year|yr|month|mo|week|day))?';
+const MINIMUM_WORDS = '(?:and up|or more|and above|and over|or higher|and higher|minimum|at least)\\b|min\\.';
+// A MINIMUM-price quote ("USD 95+", "USD 95/year +", "USD 95 per year+",
+// "USD 95 and up", "minimum USD 95") is not an exact price: the charge may
+// be higher, so it never derives cents — the price parser sees one numeric
+// token and would otherwise accept it.
+const MIN_PRICE_QUOTE_RE = new RegExp(`\\d${CADENCE_SUFFIX}\\s*\\+|\\b${MINIMUM_WORDS}`, 'i');
 const centsFor = (currency, text) => (currency === 'USD' && !MIN_PRICE_QUOTE_RE.test(String(text || '')) ? parsePriceTextCents(text) : null);
 
 // ---------------------------------------------------------------------------
@@ -458,26 +466,30 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
   // all run in the database (indexed on path_id and (outcome, created_at)),
   // so a growing attempt ledger never becomes an unbounded scan per sweep.
   const failedAttemptRows = async ({ seedOnly = false } = {}) => {
+    // Domain ELIGIBILITY (backoff, not rejected, watching only when due,
+    // seed-only for the seed pass) is a sub-select on the attempts query
+    // itself, so the LIMIT ranks only failures the sweep can act on — a
+    // prefix of newer failures on rejected / backed-off / not-yet-due
+    // domains can never hide an older eligible one.
+    let eligible = db('seo_link_domains').select('id')
+      .where(backoffDue())
+      .whereNotIn('agent_state', ['rejected'])
+      .where((b) => b.whereNot('agent_state', 'watching').orWhere('watch_recheck_at', '<=', now));
+    if (seedOnly) eligible = eligible.where({ discovery_priority: 'owner_seed' });
     let due = db('seo_link_attempts as a')
       .join('seo_link_acquisition_paths as p', 'p.id', 'a.path_id')
       .whereNull('p.superseded_by')
       .whereIn('a.outcome', FAILED_ATTEMPT_OUTCOMES)
       .where('a.created_at', '>', new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000))
-      .where((b) => b.whereNull('p.last_investigated_at').orWhere('a.created_at', '>', db.ref('p.last_investigated_at')));
+      .where((b) => b.whereNull('p.last_investigated_at').orWhere('a.created_at', '>', db.ref('p.last_investigated_at')))
+      .whereIn('p.domain_id', eligible);
     if (seen.size) due = due.whereNotIn('p.domain_id', [...seen]);
-    // the seed pass bounds ITS query to seed domains too — a seed's failure
-    // must not be crowded out of the LIMIT by ordinary domains' failures
-    if (seedOnly) due = due.whereIn('p.domain_id', db('seo_link_domains').select('id').where({ discovery_priority: 'owner_seed' }));
     const dueRows = await due.groupBy('p.domain_id').select('p.domain_id').orderByRaw('MAX(a.created_at) DESC').limit(limit);
     const dueDomainIds = [...new Set((dueRows || []).map((r) => r.domain_id).filter(Boolean))];
     if (!dueDomainIds.length) return [];
-    let q = notSeen2(db('seo_link_domains')
-      .whereIn('id', dueDomainIds)
-      .where(backoffDue())
-      .whereNotIn('agent_state', ['rejected'])
-      .where((b) => b.whereNot('agent_state', 'watching').orWhere('watch_recheck_at', '<=', now)));
-    if (seedOnly) q = q.where({ discovery_priority: 'owner_seed' });
-    return q.select('*').limit(limit);
+    const rows = await notSeen2(db('seo_link_domains').whereIn('id', dueDomainIds).select('*'));
+    const rank = new Map(dueDomainIds.map((id, i) => [id, i]));
+    return (rows || []).sort((x, y) => rank.get(x.id) - rank.get(y.id)); // keep newest-failure-first
   };
   // Owner seeds jump the WHOLE queue (§5), refresh work included: seed
   // claims, then seed refreshes (never-investigated, failed-attempt, stale),
@@ -655,11 +667,6 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
 // ---------------------------------------------------------------------------
 
 const normQuote = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-// Range recognition vocabulary (lowercased text): a currency marker that may
-// repeat on the upper bound, and a cadence suffix that may follow either
-// bound ("/year", "per year", "a month", "each year", "annually").
-const CURRENCY_MARKERS = '(?:usd|us\\$|ca\\$|au\\$|nz\\$|r\\$|[$€£¥₹₱₽₺₪฿])';
-const CADENCE_SUFFIX = '(?:\\s*\\/\\s*[a-z]+|\\s+per\\s+[a-z]+|\\s+(?:a|an|each|every)\\s+[a-z]+|\\s+(?:annually|yearly|monthly|weekly|daily|quarterly|annual|year|yr|month|mo|week|day))?';
 const findPage = (pages, pageUrl) => {
   if (!pageUrl) return null;
   const key = registry.normalizeSubmissionUrl(pageUrl);
@@ -708,7 +715,8 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     const rangeNext = new RegExp(`^${CADENCE_SUFFIX}\\s*(?:[-–—]|to\\b${betweenBefore ? '|and\\b' : ''})\\s*(?:${CURRENCY_MARKERS}\\s*)?\\d`).test(t.slice(idx + q.length));
     // …and a quote continued by MINIMUM-price syntax is a truncated lower
     // bound the same way: "USD 95+" / "USD 95 and up" never verify "USD 95"
-    const minimumNext = /^\s*(?:\+|and up\b|or more\b|and above\b|and over\b|or higher\b|and higher\b|minimum\b|min\.)/.test(t.slice(idx + q.length));
+    // (the "+" may also sit after a cadence suffix: "USD 95/year +", "USD 95 per year+")
+    const minimumNext = new RegExp(`^${CADENCE_SUFFIX}\\s*(?:\\+|${MINIMUM_WORDS})`).test(t.slice(idx + q.length));
     // …and the UPPER bound of a range is the same truncation from the
     // other side: "USD 95–USD 150" / "USD 95 to 150" / "USD 95/year – USD
     // 150/year" never verify "USD 150" — a lower amount (with an optional
@@ -752,6 +760,23 @@ function jsonLdOffers(html) {
 }
 
 /**
+ * The ONE currency a page's structured offers bind to a verified amount —
+ * or null. An amount alone cannot bind: an unrelated product offer at the
+ * same price beside a bare-dollar membership must never lend it a currency.
+ * So the binding is deterministic and fail-closed: EVERY priced offer on
+ * the page carries that amount (nothing else the quote could refer to) and
+ * every declared currency among them agrees. Multi-offer pages stay
+ * 'unknown' (step 4's price-entry card), never a guess.
+ */
+function boundOfferCurrency(html, cents) {
+  if (cents == null) return null;
+  const priced = jsonLdOffers(html).filter((o) => o.priceCents != null);
+  if (!priced.length || priced.some((o) => o.priceCents !== cents)) return null;
+  const currencies = new Set(priced.map((o) => o.priceCurrency).filter(Boolean));
+  return currencies.size === 1 ? [...currencies][0] : null;
+}
+
+/**
  * verifyPriceEvidence(pages, modelPath) → { price_text, renewal_price_text,
  * currency_evidence, verification } — verified fields only; failures nulled.
  * Evidence kinds: 'quote' verifies against a verified quote's own text;
@@ -790,8 +815,10 @@ function verifyPriceEvidence(pages, p) {
         priceOk && samePage(p.price_page_url) ? parsePriceTextCents(p.price_text) : null,
         renewalOk && samePage(p.renewal_price_page_url) ? parsePriceTextCents(p.renewal_price_text) : null,
       ].filter((c) => c != null);
-      const offerMatches = page && verifiedCents.length && jsonLdOffers(page.html)
-        .some((o) => o.priceCurrency === marker && o.priceCents != null && verifiedCents.includes(o.priceCents));
+      // …and bound the same fail-closed way as the derived path: the page's
+      // priced offers must ALL carry the verified amount and agree on the
+      // claimed currency (an unrelated same-price offer binds nothing)
+      const offerMatches = !!page && verifiedCents.some((c) => boundOfferCurrency(page.html, c) === marker);
       if (offerMatches) evidence = ev;
       else verification.currency_evidence = page ? 'jsonld_offer_not_bound_to_verified_quote' : 'jsonld_not_on_fetched_page';
     } else {
@@ -809,12 +836,10 @@ function verifyPriceEvidence(pages, p) {
     const derived = new Map(); // currency → page_url
     for (const [ok, text, pageUrl] of [[priceOk, p.price_text, p.price_page_url], [renewalOk, p.renewal_price_text, p.renewal_price_page_url]]) {
       if (!ok) continue;
-      const cents = parsePriceTextCents(text);
       const page = findPage(pages, pageUrl);
-      if (cents == null || !page) continue;
-      for (const o of jsonLdOffers(page.html)) {
-        if (o.priceCurrency && o.priceCents === cents) derived.set(o.priceCurrency, pageUrl);
-      }
+      if (!page) continue;
+      const bound = boundOfferCurrency(page.html, parsePriceTextCents(text));
+      if (bound) derived.set(bound, pageUrl);
     }
     if (derived.size === 1) {
       const [[marker, pageUrl]] = [...derived.entries()];
@@ -856,6 +881,7 @@ async function deferFailedDomain(db, domain, now, { claim = true, observedState 
       patch.agent_state = 'watching';
       patch.watch_recheck_at = new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000);
       patch.investigate_after = null;
+      patch.probe_coverage_mask = 0; // a long-term park CONCLUDES the generation — the recheck re-earns probe coverage
       patch.score_reasons = `parked: ${failures} consecutive investigation failures`;
     } else {
       // Refresh targets (lane-owned aggregate states) never get re-parked —
@@ -985,7 +1011,14 @@ async function investigatePaths(db, {
         // coverage bit (host-boundness is enforced separately)
         const probePathIndex = new Map(PROBE_PATHS.map((pp, i) => [pp, i]));
         const probeIdxFor = (u) => {
-          try { const path = new URL(u).pathname.replace(/\/$/, '') || '/'; return probePathIndex.get(path); } catch { return undefined; }
+          try {
+            const parsed = new URL(u);
+            // a QUERY variant (/register?invite=…) can serve different content
+            // than the public route: it is a hint, never coverage of the probe
+            if (parsed.search) return undefined;
+            const path = parsed.pathname.replace(/\/$/, '') || '/';
+            return probePathIndex.get(path);
+          } catch { return undefined; }
         };
         let passProbeMask = 0; // probes whose fetch reached a DEFINITIVE outcome this pass
         const pages = [];
@@ -1458,7 +1491,7 @@ async function investigatePaths(db, {
           // path outside the fetch budget or whose page failed to load stays
           // eligible for a later pass instead of hiding for 90 days.
           const activeAll = await trx('seo_link_acquisition_paths')
-            .where({ domain_id: domain.id }).whereNull('superseded_by').select('id', 'submission_url');
+            .where({ domain_id: domain.id }).whereNull('superseded_by').select('id', 'submission_url', 'investigation');
           const stampIds = new Set(writtenIds.filter((id) => !unstampedIds.has(id)));
           for (const ap of activeAll) {
             if (unstampedIds.has(ap.id)) continue; // transient verification failure — retryable next pass

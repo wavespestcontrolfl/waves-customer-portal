@@ -67,19 +67,22 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
 
   // path_key of every currently linked path, one query — a board edit
   // (link_type / target_url) must relink, not keep a stale path forever.
-  // …but ONLY while the linked path is still a legacy-shaped placeholder:
-  // once the investigator has stamped it (registry-owned truth) or retired
-  // it into a successor (its repoint moves the placement — deferred only
-  // while the placement is leased), target_url is no longer the identity
-  // and a relink here would resurrect the superseded path's key as a new
-  // active row and re-execute through its obsolete URL.
+  // …but ONLY while the linked path is still a legacy-shaped placeholder
+  // (this backfill's own rows: no investigation evidence, never stamped,
+  // never superseded). Anything the registry wrote — an investigator path
+  // (its `investigation` evidence is present even while a terms/URL check
+  // is still inconclusive and the stamp is null), a baseline import, or a
+  // retired predecessor (its repoint moves the placement at claim time) —
+  // is registry-owned: target_url is no longer the identity, and a relink
+  // here would resurrect the old key as a new active row and re-execute
+  // through its obsolete URL.
   const linkedIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
   const pathKeys = new Map();
   const registryOwned = new Set();
   if (linkedIds.length) {
-    for (const p of await q('seo_link_acquisition_paths').whereIn('id', linkedIds).select('id', 'path_key', 'superseded_by', 'last_investigated_at')) {
+    for (const p of await q('seo_link_acquisition_paths').whereIn('id', linkedIds).select('id', 'path_key', 'superseded_by', 'last_investigated_at', 'investigation')) {
       pathKeys.set(p.id, p.path_key);
-      if (p.superseded_by || p.last_investigated_at) registryOwned.add(p.id);
+      if (p.superseded_by || p.last_investigated_at || p.investigation != null) registryOwned.add(p.id);
     }
   }
 

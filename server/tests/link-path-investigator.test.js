@@ -2491,4 +2491,81 @@ describe('full run', () => {
     expect(dom.agent_state).toBe('watching');
     expect(Number(dom.probe_coverage_mask) & registerBit).toBe(0);
   });
+
+  // ---- Codex PR round 21 -------------------------------------------------
+
+  test('cadence-suffixed minimum prices never derive cents nor verify a truncated quote (Codex PR r21 P1)', () => {
+    const { verifyPriceEvidence, centsFor } = _internals;
+    for (const text of ['USD 95/year +', 'USD 95 per year+', 'USD 95 a month +', 'USD 95 annually+']) expect(centsFor('USD', text)).toBeNull();
+    expect(centsFor('USD', 'USD 95 per year')).toBe(9500);
+    const claim = (price_text) => modelPath({ price_text, renewal_price_text: null, renewal_price_page_url: null, quotes: [price_text] });
+    const text = 'Directory listing page with membership details. Sponsor packages: USD 95 per year+ for all members.';
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html: '' }], claim('USD 95 per year')).price_text).toBeNull();
+  });
+
+  test('a query variant of a probe route is a hint, never coverage of the fixed probe (Codex PR r21 P1)', async () => {
+    const registerBit = 1 << investigator.PROBE_PATHS.indexOf('/register');
+    const d = domainRow({ agent_state: 'investigating', probe_coverage_mask: ((1 << investigator.PROBE_PATHS.length) - 1) & ~registerBit });
+    const touches = [{ domain_id: d.id, source: 'competitor_gap', source_detail: 'https://example.com/register?invite=abc123', source_ref: null }];
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url === 'https://example.com/register') return { status: null, finalUrl: null, html: null, blocked: false, error: 'timeout' }; // the PUBLIC route is unreachable this pass
+      return okFetch(url);
+    };
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    expect(fetched).toContain('https://example.com/register?invite=abc123'); // the hint was fetched…
+    expect(fetched).toContain('https://example.com/register'); // …and the bare probe still got its reserved slot
+    const dom = db._tables.seo_link_domains[0];
+    expect(Number(dom.probe_coverage_mask) & registerBit).toBe(0); // the invite variant covers nothing
+    expect(dom.agent_state).toBe('watching'); // no close on an uninspected public route
+  });
+
+  test('an unrelated same-price JSON-LD offer never lends a bare-dollar quote its currency (Codex PR r21 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const text = `Directory listing page with membership details. Join for $95 / year. Also in our shop: the field guide. ${'Copy. '.repeat(10)}`;
+    const membershipOnly = `<html><script type="application/ld+json">{"@type":"Offer","price":"95","priceCurrency":"USD"}</script><body>${text}</body></html>`;
+    const withProduct = `<html><script type="application/ld+json">[{"@type":"Product","name":"Field guide","offers":{"@type":"Offer","price":"95","priceCurrency":"USD"}},{"@type":"Offer","price":"250","priceCurrency":"USD"}]</script><body>${text}</body></html>`;
+    const claim = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null });
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html: membershipOnly }], claim).currency_evidence).toMatchObject({ marker: 'USD', derived: true });
+    const multi = verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html: withProduct }], claim);
+    expect(multi.currency_evidence).toBeNull(); // two priced things on the page — the amount alone binds nothing
+    // the model-cited kind is bound the same way
+    const cited = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } });
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html: withProduct }], cited).currency_evidence).toBeNull();
+    expect(verifyPriceEvidence([{ url: 'https://example.com/join', excerpt: text, text, html: membershipOnly }], cited).currency_evidence).toEqual({ marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' });
+  });
+
+  test('failed-attempt selection ranks only ELIGIBLE domains — an ineligible newer prefix cannot hide an older eligible failure (Codex PR r21 P2)', async () => {
+    const { selectTargets } = _internals;
+    const mkPath = (d) => ({
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: `https://${d.domain}/join`,
+      path_key: `paid_listing:https://${d.domain}/join`, superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    const rejected = domainRow({ domain: 'rejected.com', agent_state: 'rejected' });
+    const notDue = domainRow({ domain: 'notdue.com', agent_state: 'watching', watch_recheck_at: new Date(NOW.getTime() + 24 * 60 * 60 * 1000) });
+    const backedOff = domainRow({ domain: 'backoff.com', agent_state: 'qualified', investigate_after: new Date(NOW.getTime() + 60 * 60 * 1000) });
+    const eligible = domainRow({ domain: 'eligible.com', agent_state: 'qualified' });
+    const paths = [rejected, notDue, backedOff, eligible].map(mkPath);
+    const attempt = (path, created_at) => ({ id: uid(), path_id: path.id, prospect_id: null, provider: 'deterministic_runner', action: 'submit', outcome: 'failed', created_at });
+    const db = makeDb({
+      seo_link_domains: [rejected, notDue, backedOff, eligible], seo_link_acquisition_paths: paths,
+      seo_link_attempts: [attempt(paths[0], new Date('2026-08-30')), attempt(paths[1], new Date('2026-08-29')), attempt(paths[2], new Date('2026-08-28')), attempt(paths[3], new Date('2026-08-20'))],
+    });
+    const picked = await selectTargets(db, { limit: 1, now: NOW });
+    expect(picked.map((t) => t.domain.domain)).toEqual(['eligible.com']); // the three newer failures are on domains the sweep cannot act on
+  });
+
+  test('a failure park CONCLUDES the generation — probe coverage resets for the 30-day recheck (Codex PR r21 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating', investigate_failures: 5, probe_coverage_mask: 0x7f });
+    const db = makeDb({ seo_link_domains: [d] });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: false, reason: 'provider_down' }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    expect(dom.score_reasons).toContain('parked: 6 consecutive investigation failures');
+    expect(Number(dom.probe_coverage_mask)).toBe(0); // month-old coverage never survives into the recheck
+  });
 });
