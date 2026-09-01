@@ -43,7 +43,7 @@ describe('POST /process/:callSid skip semantics', () => {
       const body = await res.json();
       expect(body.skipped).toBe(true);
       expect(body.reason).toBe('already_processing');
-      expect(body.error).toMatch(/already being processed/i);
+      expect(body.error).toMatch(/still working this call/i);
     });
   });
 
@@ -72,6 +72,32 @@ describe('POST /process/:callSid skip semantics', () => {
 // nothing done, which would prompt a needless reprocess of a call that was
 // correctly classified. An ownership loss is the opposite: it finished
 // NOTHING and must never land in `processed`.
+// The retry window differs by caller: a forced run takes over 3 quiet
+// minutes after a claim stops beating, an unforced one waits 10. Telling
+// every operator the long number cost about seven minutes on a hot call.
+describe('the 409 names the retry window that actually applies', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const conflictFor = (query) => {
+    CallRecordingProcessor.processRecording.mockResolvedValue({
+      success: false, skipped: true, reason: 'already_processing',
+    });
+    return withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/process/${SID}${query}`, { method: 'POST' });
+      expect(res.status).toBe(409);
+      return (await res.json()).error;
+    });
+  };
+
+  test('a forced run is told 3 minutes', async () => {
+    expect(await conflictFor('?force=true')).toMatch(/about 3 minutes/);
+  });
+
+  test('an unforced run is told 10', async () => {
+    expect(await conflictFor('')).toMatch(/about 10 minutes/);
+  });
+});
+
 describe('processAllPending counters', () => {
   const { summarizeBatch } = jest.requireActual('../services/call-recording-processor')._test;
 

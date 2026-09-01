@@ -6767,6 +6767,11 @@ const CallRecordingProcessor = {
         await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       } else {
         logger.warn(`[call-proc] extraction_failed release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+        // Ownership loss, not an extraction failure: this pass wrote nothing
+        // and a peer owns the row. Reporting the extraction error would put
+        // a failure on a call the reclaiming pass may well complete, and
+        // would burn nothing but the operator's attention (codex P2).
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }

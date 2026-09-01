@@ -140,9 +140,15 @@ router.post('/process/:callSid', async (req, res, next) => {
     // call sat unprocessed). Other skip reasons (e.g. a rejected
     // transcription) completed real work and stay 200.
     if (result?.skipped && result?.reason === 'already_processing') {
+      // The retry window differs by caller and only the SERVER knows it: a
+      // forced run (the reprocess buttons) takes over a claim 3 quiet minutes
+      // after it stops beating, an unforced one waits the conservative 10.
+      // Telling every operator "ten minutes" cost about seven of them on a
+      // hot call in the exact recovery flow this route exists for (codex P2).
+      const quietMinutes = force ? 3 : 10;
       return res.status(409).json({
         ...result,
-        error: 'This call is already being processed (or a recent claim is still winding down). Try again in a few minutes.',
+        error: `Another pass is still working this call. If it has stalled, try again about ${quietMinutes} minutes after it goes quiet.`,
       });
     }
     res.json(result);

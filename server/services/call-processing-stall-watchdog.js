@@ -147,10 +147,19 @@ function computeStalledCalls(rows, { now = new Date() } = {}) {
     // the grace window: measured against the grace window a crash-reclaim
     // loop refreshed the claim faster than it could ever look stale.
     if (status === 'processing') {
-      const beat = r.processing_heartbeat_at || r.processing_started_at;
+      // A beat only speaks for the claim that WROTE it: one left behind by a
+      // previous pass is older than this claim's start, and reading it as
+      // this claim's silence rings a false stall on a freshly claimed row
+      // during a rolling deploy. Same rule as the processor's reclaim
+      // predicate (codex P2).
+      const started = r.processing_started_at ? new Date(r.processing_started_at) : null;
+      const rawBeat = r.processing_heartbeat_at ? new Date(r.processing_heartbeat_at) : null;
+      const currentBeat = rawBeat && !Number.isNaN(rawBeat.getTime())
+        && (!started || Number.isNaN(started.getTime()) || rawBeat >= started)
+        ? rawBeat : null;
+      const beat = currentBeat || r.processing_started_at;
       const claimed = beat ? new Date(beat) : null;
       const beating = claimed && !Number.isNaN(claimed.getTime()) && claimed > claimCutoff;
-      const started = r.processing_started_at ? new Date(r.processing_started_at) : null;
       const withinCeiling = !started || Number.isNaN(started.getTime()) || started > ceilingCutoff;
       if (beating && withinCeiling) continue;
     }

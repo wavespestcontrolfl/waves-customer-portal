@@ -200,15 +200,31 @@ describe('computeStalledCalls', () => {
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
   });
 
-  test('a claim whose heartbeat STOPPED is wedged, however recently it started', () => {
+  test('a claim whose heartbeat STOPPED is wedged', () => {
+    // The beat is after the claim start (so it belongs to this claim) but has
+    // since gone quiet past the threshold.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 30),
+      processing_status: 'processing',
+      processing_started_at: mins(CLAIM_STALE_MINUTES + 6),
+      processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 2),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
+  });
+
+  test('a beat older than the claim start belongs to a PREVIOUS pass', () => {
+    // A freshly claimed row carrying a stale beat from an earlier attempt
+    // must not read as this claim's silence — that rang a false stall during
+    // a rolling deploy.
     const rows = [{
       ...base,
       created_at: mins(GRACE_MINUTES + 30),
       processing_status: 'processing',
       processing_started_at: mins(2),
-      processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 2),
+      processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 20),
     }];
-    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
   });
 
   test('a hung pass that keeps beating is still a stall past the ceiling', () => {
