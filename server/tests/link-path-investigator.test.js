@@ -1622,13 +1622,24 @@ describe('full run', () => {
     expect(passes).toBeGreaterThan(2); // the close genuinely waited for coverage
   });
 
-  test('a pass that can offer NO probes closes instead of deferring forever (Codex PR r11 P1)', async () => {
+  test('hints can never take the reserved probe slots — even a hint-saturated domain probes and closes (Codex PR r11+r12 P1)', async () => {
     const d = domainRow();
-    // 12 hints exhaust every slot — no probe can ever run; nothing more to learn
+    // 12 hints would exhaust every slot without the reservation
     const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/hint-${i}`, source_ref: null }));
     const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
-    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
-    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible');
+    const fetched = new Set();
+    const fetcher = async (url) => { fetched.add(url); return okFetch(url); };
+    const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    let passes = 0;
+    while (db._tables.seo_link_domains[0].agent_state !== 'not_reproducible' && passes < 12) {
+      const dom = db._tables.seo_link_domains[0];
+      dom.watch_recheck_at = new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000);
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000), domainIds: [dom.id] });
+      passes += 1;
+    }
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // bounded — it closes
+    // the reserve guaranteed real probe attempts despite the hint flood
+    expect([...fetched].some((u) => u === 'https://example.com/register')).toBe(true);
   });
 
   test('worded and currency-prefixed ranges never verify the truncated bound (Codex PR r11 P1)', () => {
@@ -1642,6 +1653,10 @@ describe('full run', () => {
     expect(claim(mk('Listings cost USD 95\u2013USD 150 per year'))).toBeNull(); // dash + repeated marker
     expect(claim(mk('Listings cost USD 95 to $150 per year'))).toBeNull(); // symbol upper bound
     expect(claim(mk('Join for USD 95 to get listed today'))).toBe('USD 95'); // "to" + a non-price word is NOT a range
+    // a cadence suffix on the lower bound must not hide the range (Codex PR r12 P1)
+    expect(claim(mk('Listings cost USD 95/year \u2013 USD 150/year'), 'USD 95/year')).toBeNull();
+    expect(claim(mk('Listings cost USD 95/year to USD 150/year'), 'USD 95/year')).toBeNull();
+    expect(claim(mk('Join for USD 95 / year \u2014 cancel anytime'), 'USD 95 / year')).toBe('USD 95 / year'); // dash + words is not a range
   });
 
   test('a verdict AT the response cap disproves nothing by omission (Codex PR r11 P1)', async () => {

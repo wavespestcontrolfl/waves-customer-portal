@@ -88,6 +88,7 @@ const PROBE_PATHS = Object.freeze([
   '/sponsors', '/advertise', '/directory', '/resources', '/contact', '/signup', '/register',
 ]);
 const FULL_PROBE_MASK = (1 << PROBE_PATHS.length) - 1; // one coverage bit per probe
+const PROBE_SLOT_RESERVE = 2; // fetch slots per pass that hints can never take from uncovered probes
 
 // Domain states the investigator may claim and finish (stamp a verdict on).
 // acquiring/acquired/rejected belong to other lanes; their paths are still
@@ -207,6 +208,19 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   const start = ((probeOffset % m) + m) % m;
   const order = [...uncovered.slice(start), ...uncovered.slice(0, start), ...covered];
   for (const i of order) push(`https://${host}${PROBE_PATHS[i]}`);
+  // RESERVED probe slots: a hint-rich domain must never spend every fetch
+  // slot before any uncovered probe runs (zero probe progress would let a
+  // terminal verdict close routes nothing ever fetched). The last
+  // PROBE_SLOT_RESERVE pre-cap positions are given to uncovered probes;
+  // displaced hints queue after them for any remaining budget.
+  const allProbeUrls = new Set(PROBE_PATHS.map((pp) => `https://${host}${pp}`));
+  const uncoveredProbeUrls = new Set(uncovered.map((i) => `https://${host}${PROBE_PATHS[i]}`));
+  const probeBlock = out.filter((u) => allProbeUrls.has(u)); // keeps uncovered-first order
+  if (probeBlock.some((u) => uncoveredProbeUrls.has(u))) {
+    const others = out.filter((u) => !allProbeUrls.has(u));
+    const head = Math.max(0, MAX_FETCHES_PER_DOMAIN - PROBE_SLOT_RESERVE);
+    return [...others.slice(0, head), ...probeBlock, ...others.slice(head)];
+  }
   return out;
 }
 
@@ -549,11 +563,13 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // …and a digit-final quote followed by a spelled-out multiplier is the
     // same truncation: "USD 95 million" never verifies "USD 95"
     const multiplierNext = /\d$/.test(q) && /^\s+(k|m|mm|bn|hundred|thousand|million|billion)\b/.test(t.slice(idx + q.length));
-    // A digit-final quote continued by a RANGE separator is a truncated
-    // range: "USD 95–150", "95-150", "USD 95 to USD 150", "95 – USD 150"
-    // never verify "USD 95" — the separator may be a dash or the word
-    // "to", and the upper bound may repeat the currency marker/symbol
-    const rangeNext = /\d$/.test(q) && /^\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?\d/.test(t.slice(idx + q.length));
+    // A quote continued by a RANGE separator is a truncated range:
+    // "USD 95–150", "USD 95 to USD 150", and unit-suffixed lower bounds
+    // like "USD 95/year – USD 150/year" never verify the lower bound —
+    // the separator may be a dash or the word "to", the upper bound may
+    // repeat the currency marker/symbol, and the check runs regardless of
+    // how the quote itself ends (a cadence suffix must not hide the range)
+    const rangeNext = /^\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?\d/.test(t.slice(idx + q.length));
     // …and a quote directly preceded by a pricing qualifier is a starting/
     // promo price, not the price — the same tokens the price parser rejects
     const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));

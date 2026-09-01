@@ -3268,8 +3268,10 @@ function BacklinkRegistryCard() {
                                         // a distinct renewal charge renders separately — "$95.00/annual"
                                         // would present the initial fee as the recurring amount
                                         p.renewal_cost_cents != null
-                                          ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period ? `/${p.renewal_period}` : ""}`
-                                          : p.renewal_period ? `/${p.renewal_period}` : ""
+                                          ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period && p.renewal_period !== "none" ? `/${p.renewal_period}` : ""}`
+                                          : p.renewal_period === "none"
+                                            ? " · one-time"
+                                            : p.renewal_period ? ` · renews ${p.renewal_period}, amount unverified` : ""
                                       }`
                                     : " · free"}
                                   {p.superseded_by ? " · superseded" : ""}
