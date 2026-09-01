@@ -391,7 +391,7 @@ export default function PendingDraftsTab({ embedded = false }) {
         <button
           type="button"
           onClick={load}
-          disabled={loading}
+          disabled={loading || busyId !== null}
           style={{ marginLeft: "auto", background: "#FFFFFF", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: "5px 12px", fontSize: 13, fontWeight: 500, cursor: loading ? "default" : "pointer" }}
         >
           Refresh
@@ -428,7 +428,7 @@ export default function PendingDraftsTab({ embedded = false }) {
         <button
           type="button"
           onClick={loadOlder}
-          disabled={loadingMore}
+          disabled={loadingMore || busyId !== null}
           style={{ justifySelf: "start", background: "#FFFFFF", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: "7px 14px", fontSize: 14, fontWeight: 500, cursor: loadingMore ? "default" : "pointer" }}
         >
           {loadingMore ? "Loading older drafts" : "Load older drafts"}
