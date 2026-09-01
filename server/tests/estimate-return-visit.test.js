@@ -115,6 +115,18 @@ describe('buildReturnVisitPayload', () => {
     expect(out.changes[0].label).not.toMatch(/\byou\b/i);
   });
 
+  test('a mutation made during the CURRENT sitting (then refreshed) is not announced either (pre-push codex P1)', () => {
+    const out = buildReturnVisitPayload({
+      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z')],
+      estimateData: { serviceOptOut: { events: [
+        { serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-31T09:00:00Z' },
+        { serviceKey: 'lawn_care', label: 'Lawn Care', included: false, at: '2026-09-01T12:04:00Z' },
+      ] } },
+    });
+    expect(out.changes.map((c) => c.kind)).toEqual(['service_removed']);
+    expect(out.changes[0].label).toMatch(/^Mosquito/);
+  });
+
   test('malformed sessions and events are dropped, not thrown', () => {
     const out = buildReturnVisitPayload({
       sessions: [s('2026-08-30T10:00:00Z'), null, { endedAt: 'garbage' }, s('2026-09-01T12:00:00Z')],

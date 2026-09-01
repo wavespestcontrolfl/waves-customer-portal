@@ -25,7 +25,7 @@ function toDate(value) {
 // events for one service collapse to the service's FINAL state after the
 // boundary, so a removal that was later restored is never described as
 // reflected in the current price (GH codex P2).
-function serviceOptOutChanges(estimateData, since) {
+function serviceOptOutChanges(estimateData, since, until = null) {
   const events = estimateData?.serviceOptOut?.events;
   if (!Array.isArray(events)) return [];
   let serviceOptOutLabel = (key) => key;
@@ -36,6 +36,10 @@ function serviceOptOutChanges(estimateData, since) {
   for (const e of events) {
     const at = toDate(e?.at);
     if (!at || !e?.serviceKey || at <= since) continue;
+    // Upper bound: a click made during the CURRENT sitting (the page then
+    // re-fetches with refresh=1) is not "since your last visit" either
+    // (pre-push codex P1).
+    if (until && at >= until) continue;
     const prev = latestByKey.get(e.serviceKey);
     if (!prev || at > prev.at) latestByKey.set(e.serviceKey, { event: e, at });
   }
@@ -83,8 +87,10 @@ function buildReturnVisitPayload({
   // minutes after the last open is exactly the case) and compares against
   // the previous visit's end itself (GH codex P2 on #3708).
   const sinceMutation = new Date(previousEnd.getTime() + sessionGapMinutes * 60000);
+  const current = list[list.length - 1];
+  const currentStart = toDate(current.startedAt);
   const changes = [
-    ...serviceOptOutChanges(estimateData, sinceMutation),
+    ...serviceOptOutChanges(estimateData, sinceMutation, currentStart),
     ...extensionChange(extensionAutoGrantedAt, previousEnd),
   ].sort((a, b) => a.at.localeCompare(b.at));
   return {
