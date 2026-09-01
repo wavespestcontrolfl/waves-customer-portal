@@ -2721,4 +2721,4 @@ async function resolveActiveTechnicianById(id) {
   return db('technicians').where('id', id).where('active', true).first();
 }
 
-module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById };
+module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS };

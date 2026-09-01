@@ -48,6 +48,15 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 
 jest.mock('../services/intelligence-bar/tools', () => ({
   TOOLS: [],
+  // Mirror of the executor's sanitizer allowlist — the proposal's
+  // refuse-don't-drop key check (GH r20 P2) reads it.
+  UPDATABLE_FIELDS: {
+    first_name: 'first_name', last_name: 'last_name', email: 'email',
+    phone: 'phone', city: 'city', state: 'state', zip: 'zip',
+    address_line1: 'address_line1', address_line2: 'address_line2', waveguard_tier: 'waveguard_tier',
+    pipeline_stage: 'pipeline_stage', lead_source: 'lead_source',
+    monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
+  },
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),

@@ -847,6 +847,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
       }
     }
+    if ((toolUse.name === 'update_customer' || toolUse.name === 'bulk_update_customers')
+      && params.updates && typeof params.updates === 'object') {
+      // Refuse-don't-drop (GH r20 P2): the card is built from the raw
+      // updates map, but the executors sanitize through UPDATABLE_FIELDS —
+      // an unsupported key would be DISPLAYED as an approved effect and
+      // then silently dropped at commit. Unknown keys refuse the proposal
+      // instead, naming them so the model can correct the call.
+      const { UPDATABLE_FIELDS } = require('../services/intelligence-bar/tools');
+      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS));
+      if (unsupported.length) {
+        return { failed: true, modelResult: { error: `These fields cannot be updated by this tool: ${unsupported.join(', ')} — nothing was proposed. Supported fields: ${Object.keys(UPDATABLE_FIELDS).join(', ')}.` } };
+      }
+    }
     if ((toolUse.name === 'create_appointment' || toolUse.name === 'update_customer') && params.customer_id) {
       // Name the human on the card (GH r8 P1): contract cards hide raw
       // params, so a uuid-only effect line leaves the operator unable to
