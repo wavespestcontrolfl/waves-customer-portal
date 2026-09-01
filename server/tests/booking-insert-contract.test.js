@@ -22,6 +22,19 @@
  * stale entry (site no longer present) also fails, so the map always
  * mirrors reality.
  *
+ * SCOPE — a ratchet, not a sandbox. This scan is textual. It recognizes
+ * every insert form in the repository today plus the ordinary Knex
+ * spellings a new writer would reach for (fluent chains, aliases,
+ * constants, string/object table aliases, .into/.table, batchInsert,
+ * bracket links, raw SQL), and it treats a helper-completed payload as
+ * compliant only under conservative fail-closed rules. It is NOT a proof
+ * against a writer deliberately hiding an insert (dynamic table names,
+ * computed property access, wrapping knex under another name, eval).
+ * Adversarial evasion is a code-review concern, not this test's; the
+ * ratchet exists so an honest new bare insert is caught mechanically.
+ * Further evasion shapes are accepted when they are plausible ordinary
+ * code, and rebutted otherwise.
+ *
  * Matcher shape: each `('scheduled_services')` table ref (the string may
  * sit on its own line inside the call) is followed through its COMPLETE
  * chained expression — balanced parentheses, string-safe, comments
@@ -42,8 +55,17 @@ const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', '
 
 // The contract module itself — the ONLY file allowed to hold a bare
 // insert. Exempting the whole services/booking directory would let a new
-// sibling module become a parallel booking mechanism (GH Codex P2).
+// sibling module become a parallel booking mechanism (GH Codex P2), and
+// exempting the whole FILE would let the module most likely to gain
+// booking code grow an insert that skips its own helper (GH Codex r13
+// P2): the module is scanned like any other, and exactly these sites —
+// the createScheduledService wrapper's two inserts of the
+// completeScheduledServiceInsert output — are certified.
 const CONTRACT_MODULE = 'server/services/booking/create-scheduled-service.js';
+const CONTRACT_MODULE_CERTIFIED_SITES = [
+  "createScheduledService :: const [row] = await trx( scheduled_services').insert(data",
+  "createScheduledService :: const [row] = await trx( scheduled_services').insert(data",
+];
 
 // Frozen 2026-09-01 inventory (re-frozen at the origin/main merge base of
 // this PR — main reworked admin-dispatch's schedule-followup insert while
@@ -333,14 +355,9 @@ function isContractCompleted(source, arg) {
     else if (!/^\s*\[\s*\]\s*;?\s*$/.test(value)) return false;
   }
   if (!completed) return false;
-  const mutated = new RegExp(
-    // Any depth of property/index segments: `rows[0].source_action = …`
-    // is a mutation of the tracked value too (GH Codex r10 P2).
-    `\\b${text}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
-    + `|\\bdelete\\s+${text}\\b`
-    + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${text}\\b`,
-  );
-  if (mutated.test(source)) return false;
+  // Any depth of property/index segments: `rows[0].source_action = …` is
+  // a mutation of the tracked value too (GH Codex r10 P2).
+  if (mutatesIdentifier(source, text)) return false;
   // A completed value that ESCAPES into another binding (`const alias =
   // data;`) could be mutated under that name, which the check above can't
   // see — fail closed (GH Codex r9 P2). Reads of a property, spreads and
@@ -372,10 +389,31 @@ function isContractCompleted(source, arg) {
   const methodRe = new RegExp(`\\b${text}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\(`, 'g');
   let mm;
   while ((mm = methodRe.exec(source)) !== null) {
-    if (mm[1] === 'push' || READ_ONLY_METHODS.has(mm[1])) continue;
-    return false;
+    if (mm[1] === 'push') continue;
+    if (!READ_ONLY_METHODS.has(mm[1])) return false;
+    // A read-only method's CALLBACK can still mutate the element it is
+    // handed (`rows.forEach((row) => { row.source_action = null; })`) —
+    // inspect the callback body for writes through its element parameter
+    // (GH Codex r13 P2). reduce hands the element second.
+    const open = mm.index + mm[0].length - 1;
+    const cb = topLevelArgs(source.slice(open + 1, balancedParens(source, open) - 1))[0] || '';
+    const params = /^\s*(?:async\s*)?(?:\(([^)]*)\)|([A-Za-z_$][\w$]*))\s*=>/.exec(cb) || /^\s*(?:async\s*)?function\s*[\w$]*\s*\(([^)]*)\)/.exec(cb);
+    if (!params) continue;
+    const list = (params[1] ?? params[2] ?? '').split(',').map((x) => x.trim().replace(/=.*$/, '').trim());
+    const el = mm[1] === 'reduce' ? list[1] : list[0];
+    if (el && /^[A-Za-z_$][\w$]*$/.test(el) && mutatesIdentifier(cb, el)) return false;
   }
   return true;
+}
+
+// Property/index assignment (any depth, compound operators included),
+// Object.assign onto it, or delete of a property — on `id`.
+function mutatesIdentifier(text, id) {
+  return new RegExp(
+    `\\b${id}\\s*(?:\\.\\s*[A-Za-z_$][\\w$]*|\\[[^\\]]*\\])+\\s*(?:[-+*/%|&^]|\\*\\*|\\?\\?|\\|\\||&&)?=(?![=>])`
+    + `|\\bdelete\\s+${id}\\b`
+    + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${id}\\b`,
+  ).test(text);
 }
 const READ_ONLY_METHODS = new Set(['map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'slice', 'includes', 'indexOf', 'join', 'concat', 'reduce', 'flat', 'flatMap', 'entries', 'keys', 'values', 'at', 'toString', 'hasOwnProperty', 'toJSON']);
 const NON_MUTATING_CALLEES = new Set(['completeScheduledServiceInsert', 'JSON.stringify', 'structuredClone', 'Object.keys', 'Object.values', 'Object.entries', 'Object.freeze', 'Array.isArray', 'String']);
@@ -674,7 +712,6 @@ describe('booking insert-site contract', () => {
   const found = new Map(); // repo-relative path -> fingerprint multiset
   for (const file of files) {
     const rel = relRepo(file);
-    if (rel === CONTRACT_MODULE) continue;
     const sites = collectInsertSites(fs.readFileSync(file, 'utf8'));
     if (sites.length > 0) found.set(rel, sites);
   }
@@ -719,6 +756,11 @@ describe('booking insert-site contract', () => {
       expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${smuggle}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     }
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nconst ids = rows.map((r) => r.customer_id);\nif (rows.some((r) => !r.customer_id)) throw new Error('x');\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
+    // …and a callback that mutates the element it is handed is a mutation too (r13 P2)…
+    for (const cb of ['rows.forEach((row) => { row.source_action = null; });', 'rows.map(function (row) { delete row.source_action; return row; });', 'rows.reduce((acc, row) => { row.status = "x"; return acc; }, []);', 'rows.forEach(row => Object.assign(row, raw));']) {
+      expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\n${cb}\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
+    }
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows.forEach((row) => { if (row.status === 'x') count += 1; });\nawait trx.batchInsert('scheduled_services', rows);`)).toEqual([]);
     // …unless a completed row is mutated in place afterwards (r10 P2).
     expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, opts));\nrows[0].source_action = null;\nawait trx.batchInsert('scheduled_services', rows);`)).toHaveLength(1);
     // Table-FIRST fluent forms are sites (GH Codex r8 P2)…
@@ -826,6 +868,11 @@ describe('booking insert-site contract', () => {
   test('no NEW or MODIFIED scheduled_services insert sites outside the booking contract', () => {
     const violations = [];
     for (const [rel, sites] of found) {
+      if (rel === CONTRACT_MODULE) {
+        const extra = multisetMissing(sites, CONTRACT_MODULE_CERTIFIED_SITES);
+        if (extra.length) violations.push(`${rel}: insert site(s) [${extra.join(' | ')}] beyond the certified wrapper — every insert in the contract module must be of completeScheduledServiceInsert's output, inside createScheduledService.`);
+        continue;
+      }
       const frozen = FROZEN_LEGACY_INSERT_SITES_2026_09[rel];
       if (frozen === undefined) {
         violations.push(`${rel}: ${sites.length} site(s) — new file. Route the insert through ${CONTRACT_MODULE}.`);
@@ -848,6 +895,8 @@ describe('booking insert-site contract', () => {
 
   test('the frozen inventory mirrors reality (stale entries must be removed)', () => {
     const stale = [];
+    const wrapperGone = multisetMissing(CONTRACT_MODULE_CERTIFIED_SITES, found.get(CONTRACT_MODULE) || []);
+    if (wrapperGone.length) stale.push(`${CONTRACT_MODULE}: certified wrapper site(s) no longer present [${wrapperGone.join(' | ')}] — update CONTRACT_MODULE_CERTIFIED_SITES with the wrapper.`);
     for (const [rel, frozen] of Object.entries(FROZEN_LEGACY_INSERT_SITES_2026_09)) {
       const gone = multisetMissing(frozen, found.get(rel) || []);
       if (gone.length) {
