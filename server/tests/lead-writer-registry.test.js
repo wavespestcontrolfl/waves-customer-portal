@@ -28,9 +28,10 @@ const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 // `db('leads').returning('*').insert(...)` — with paren-free arguments; it
 // also covers the multi-line `db('leads')\n  .insert({` form (zero segments,
 // `\s*` spans the newline).
-// Segment arguments allow ONE level of nested parens, so a chain like
-// `.modify((qb) => qb.where('active', true))` doesn't stop the walk.
-const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\((?:[^()]|\([^()]*\))*\))*`;
+// Segment arguments allow TWO levels of nested parens, so ordinary Knex
+// callback chains — `.modify((qb) => qb.where('active', true))` and
+// `.modify(qb => qb.whereIn('id', ids.map(fn)))` — don't stop the walk.
+const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*`;
 const Q = '[\'"`]'; // quote class incl. backtick
 // Optional schema qualifier INSIDE the literal too — knex accepts
 // `db('public.leads')` as a schema-qualified table name.
@@ -171,7 +172,9 @@ function scanSourceForDynamicTableInserts(src) {
     if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+)*$/.test(expr)) return false; // computed — never resolved
     const root = expr.split('.')[0];
     if (!/^[A-Z][A-Z0-9_]*$/.test(root)) return false; // shadowable name
-    return new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}`, 'm').test(src);
+    // The declaration must TERMINATE right after the literal — a computed
+    // initializer (`const TABLE = 'lead' + suffix`) proves nothing.
+    return new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}\s*;?\s*$`, 'm').test(src);
   };
   const record = (index, matchLen, expr) => {
     if (!expr.trim()) return; // pure string literal, blanked — the literal scan owns it
@@ -198,6 +201,20 @@ function scanSourceForDynamicTableInserts(src) {
     const useRe = new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g');
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, decl[2]);
+  }
+  // Raw SQL with a DYNAMIC target — `INSERT INTO ${table}` or
+  // `'INSERT INTO ' + table` — scanned on the ORIGINAL source (the SQL text
+  // lives in strings blanking removes; blanking is length-preserving, so
+  // offsets are interchangeable). Same rule as the knex shapes: resolved
+  // only by a SCREAMING_SNAKE module const, else allowlist or reject.
+  const RAW_DYNAMIC_RES = [
+    /\binsert\s+into\s+(?:only\s+)?\$\{([^}]+)\}/gi,
+    /\binsert\s+into\s+(?:only\s+)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
+  ];
+  for (const re of RAW_DYNAMIC_RES) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(src))) record(m.index, m[0].length, m[1]);
   }
   return [...endsByLine.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -301,6 +318,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['constant table name through stored builder', "const TABLE = 'leads';\nconst b = trx(TABLE);\nawait b.insert({ a: 1 });"],
     ['schema-qualified table literal', "await db('public.leads').insert({ a: 1 });"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
+    ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
@@ -370,6 +388,27 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(interpolated).toHaveLength(1);
     const plain = scanSourceForDynamicTableInserts('await db(`other_things`).insert(row);');
     expect(plain).toEqual([]);
+  });
+
+  test('dynamic-table scan: computed const initializer is not resolution; dynamic raw SQL targets are flagged', () => {
+    const computedConst = scanSourceForDynamicTableInserts(
+      "const TABLE = 'lead' + suffix;\nawait db(TABLE).insert(row);"
+    );
+    expect(computedConst).toHaveLength(1);
+    const rawTemplate = scanSourceForDynamicTableInserts(
+      'await db.raw(`INSERT INTO ${table} (a) VALUES (?)`, [a]);'
+    );
+    expect(rawTemplate).toHaveLength(1);
+    expect(rawTemplate[0].expr).toBe('table');
+    const rawConcat = scanSourceForDynamicTableInserts(
+      "await db.raw('INSERT INTO ' + table + ' (a) VALUES (?)', [a]);"
+    );
+    expect(rawConcat).toHaveLength(1);
+    // A literal raw table with interpolated VALUES stays with the literal scan.
+    const rawLiteralTable = scanSourceForDynamicTableInserts(
+      'await db.raw(`INSERT INTO other_things (a) VALUES (${a})`);'
+    );
+    expect(rawLiteralTable).toEqual([]);
   });
 
   test('dynamic-table scan: two dynamic inserts on one line surface as TWO sites', () => {
