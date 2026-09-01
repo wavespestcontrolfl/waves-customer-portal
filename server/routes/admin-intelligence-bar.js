@@ -1015,8 +1015,14 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // effects a no-op — refuse instead of carding it; a row whose filter
       // is MISSING proposes as a repair, and the contract describes exactly
       // that (re-apply onto the existing entry, no new row).
-      const blockEmail = params.email_address ? String(params.email_address).trim().toLowerCase() : null;
-      const blockDomain = !blockEmail && params.domain ? String(params.domain).trim().toLowerCase().replace(/^@/, '') : null;
+      // Same scope validation the executor runs (GH r21 P2): a missing/
+      // malformed scope or a protected domain refuses the proposal — never
+      // a card manualBlockSender deterministically rejects after Confirm.
+      const scope = require('../services/email/spam-blocker').validateManualBlockScope(params);
+      if (scope.error) {
+        return { failed: true, modelResult: { error: `${scope.error} Nothing was proposed.` } };
+      }
+      const { blockEmail, blockDomain } = scope;
       if (blockEmail || blockDomain) {
         const existing = blockEmail
           ? await db('blocked_email_senders').where('email_address', blockEmail).first('id', 'gmail_filter_id')
@@ -2524,6 +2530,15 @@ router.post('/confirm-action', async (req, res, next) => {
       return res.status(status).json({ error: message });
     }
     const action = claim.action;
+    // cancel_appointment is not card-confirmable (rails not pinnable) — a
+    // pending row minted by PRE-refusal code can still be claimed for its
+    // TTL during a rolling deploy (GH r21 P1): refuse it here too, never
+    // dispatch the stored tool.
+    if (action.tool_name === 'cancel_appointment') {
+      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
+      await PendingActions.recordResult(action.id, result);
+      return res.status(409).json(result);
+    }
 
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
       await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
@@ -2691,6 +2706,12 @@ router.post('/confirm-action', async (req, res, next) => {
         if ((action.tool_name === 'optimize_all_routes' || action.tool_name === 'optimize_tech_route')
           && Array.isArray(livePreview?.ordered_stops) && livePreview.ordered_stops.length) {
           execParams._verified_ordered_stops = livePreview.ordered_stops.map((s) => String(s.id));
+        }
+        // assign_technician (GH r21 P2): the fingerprint-verified preview's
+        // resolved technician ROW id rides to the executor — names are not
+        // unique, so identity is enforced by id, never by the name match.
+        if (action.tool_name === 'assign_technician' && livePreview?.would_assign_to_id) {
+          execParams._verified_tech_id = String(livePreview.would_assign_to_id);
         }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate

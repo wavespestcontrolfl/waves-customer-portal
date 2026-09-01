@@ -227,7 +227,11 @@ const MANUAL_DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
 // scope exactly: an email_address blocks that one sender; a domain (only
 // when no address is given) blocks the whole domain, refused for
 // protected/shared provider domains.
-async function manualBlockSender({ email_address, domain, reason } = {}) {
+// Scope normalization + validation shared by the executor AND the IB
+// proposal (GH r21 P2): a card must never promise a block manualBlockSender
+// deterministically rejects (missing scope, malformed input, protected
+// domain). Returns { error } or { blockEmail, blockDomain }.
+function validateManualBlockScope({ email_address, domain } = {}) {
   const blockEmail = email_address ? normalizeAddress(email_address) : null;
   const blockDomain = !blockEmail && domain
     ? String(domain).trim().toLowerCase().replace(/^@/, '') : null;
@@ -237,6 +241,13 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
   if (blockDomain && isProtectedDomain(blockDomain)) {
     return { error: 'Protected domains cannot be blocked domain-wide. Block a specific sender address instead.' };
   }
+  return { blockEmail, blockDomain };
+}
+
+async function manualBlockSender({ email_address, domain, reason } = {}) {
+  const scope = validateManualBlockScope({ email_address, domain });
+  if (scope.error) return { error: scope.error };
+  const { blockEmail, blockDomain } = scope;
   const filterFrom = blockEmail || `@${blockDomain}`;
 
   // Reuse an existing block of the SAME scope instead of stacking a second
@@ -627,6 +638,7 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
 module.exports = {
   blockSpamSender,
   manualBlockSender,
+  validateManualBlockScope,
   unblockSender,
   reconcileStaleAutoBlocks,
   isBlocked,

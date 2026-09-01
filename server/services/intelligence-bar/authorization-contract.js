@@ -639,9 +639,21 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
   if (notifiesCustomer) {
-    push('comms', CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
+    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
       ? 'Customer will be contacted'
-      : 'Customer may be contacted (conditional double-opt-in re-send only)');
+      : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    // Derived from the PINNED recipient set for batch moves (GH r21 P2):
+    // a stop pinned with no SMS recipient cannot be texted — the card
+    // must not claim an impossible send and then warn about it after.
+    if (toolName === 'move_stops_to_day' && Array.isArray(preview?.stops)) {
+      const missing = preview.stops.filter((st) => st && !st.notify_phone_last4).length;
+      if (missing && missing === preview.stops.length) {
+        contactLabel = 'No stop has an SMS recipient — NO customers will be texted by this move';
+      } else if (missing) {
+        contactLabel = `Customers with a pinned SMS recipient will be texted; ${missing} stop(s) have no SMS recipient and will NOT be texted`;
+      }
+    }
+    push('comms', contactLabel);
   }
 
   // Canonical order (kind, then label) so the contract — and therefore its

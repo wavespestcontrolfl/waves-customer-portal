@@ -483,7 +483,7 @@ async function optimizeTechRoute(input) {
 
 async function assignTechnician(input) {
   const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
-  const tech = await db('technicians').whereILike('name', `%${techName}%`).first();
+  let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
 
   const services = await db('scheduled_services')
@@ -523,10 +523,27 @@ async function assignTechnician(input) {
     return {
       proposal: true,
       would_assign_to: tech.name,
+      // The resolved ROW id binds the fingerprint (GH r21 P2): technician
+      // names are not unique, and the executor's own name resolution is an
+      // unordered first() — the card must pin WHICH technician row gets
+      // the stops, and the executor enforces that id.
+      would_assign_to_id: String(tech.id),
       stop_count: stops.length,
       stops,
       note: `Would reassign ${stops.length} stop(s) to ${tech.name}. Re-call with confirmed:true to apply.`,
     };
+  }
+
+  // Card-approved runs enforce the pinned technician IDENTITY (GH r21
+  // P2): the name re-resolution above is an unordered match, so the
+  // approved row id is authoritative — a different row (same display
+  // name, or a replacement) refuses instead of receiving every stop.
+  if (input._verified_tech_id && String(tech.id) !== String(input._verified_tech_id)) {
+    const pinned = await db('technicians').where('id', String(input._verified_tech_id)).first();
+    if (!pinned) {
+      return { error: 'The approved technician no longer exists — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
+    }
+    tech = pinned;
   }
 
   // The stop/current-tech set the operator approved (`_verified_stops`, the
