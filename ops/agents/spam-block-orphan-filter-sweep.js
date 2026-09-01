@@ -36,10 +36,13 @@ async function main() {
   }
   console.log(`${rows.length} orphaned filter(s) awaiting cleanup${EXECUTE ? '' : ' (DRY RUN — pass --execute to delete them)'}:`);
   for (const r of rows) {
-    // Scope only — never print full addresses beyond what the operator
-    // needs to recognize the entry (these are spam senders, not customers).
-    const scope = r.email_address ? `sender ${r.email_address}` : `domain @${r.domain}`;
-    console.log(`  filter ${r.gmail_filter_id} (${scope}, recorded ${r.recorded_at?.toISOString?.() || r.recorded_at})`);
+    // PII rule (AGENTS.md): redacted address — masked local part + domain —
+    // plus the ledger row id, never the full address.
+    const masked = r.email_address
+      ? `${String(r.email_address).slice(0, 1)}***@${String(r.email_address).split('@')[1] || 'unknown'}`
+      : null;
+    const scope = masked ? `sender ${masked}` : `domain @${r.domain}`;
+    console.log(`  ledger ${r.id} — filter ${r.gmail_filter_id} (${scope}, recorded ${r.recorded_at?.toISOString?.() || r.recorded_at})`);
     if (!EXECUTE) continue;
     try {
       const gmailClient = require('../../server/services/email/gmail-client');
