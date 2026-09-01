@@ -56,10 +56,19 @@ const ACTIVE_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
  *    recurring row is NEW and pays again.
  * Callbacks never count (free re-services are not a recurring program).
  */
-async function hasActiveRecurringService(db, customerId) {
+async function hasActiveRecurringService(db, customerId, { excludeRootId = null } = {}) {
   if (!customerId) return false;
-  const row = await db('scheduled_services')
-    .where({ customer_id: customerId })
+  const query = db('scheduled_services')
+    .where({ customer_id: customerId });
+  // Self-exclusion for callers deciding INSIDE the transaction that just
+  // seeded this customer's own series (the wizard self-booking stamp):
+  // the brand-new root and its children must not read as "existing".
+  if (excludeRootId) {
+    query
+      .whereNot('id', excludeRootId)
+      .whereRaw('(recurring_parent_id IS NULL OR recurring_parent_id != ?)', [excludeRootId]);
+  }
+  const row = await query
     .where(function recurringRow() {
       // recurring_pattern is recurring LINEAGE too (legacy rows can carry a
       // pattern without the flag — the repo's other classifiers honor it),

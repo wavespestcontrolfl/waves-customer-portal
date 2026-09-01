@@ -3066,6 +3066,24 @@ async function createSelfBooking(payload = {}) {
                     return;
                   }
                 }
+                // UNIFIED accept-time dedupe under this same lock (audit
+                // r21 P0 — mirrors acceptTimeUnifiedSetupFeeDecision): the
+                // frozen decision stands unless the account gained a live
+                // recurring service or an in-flight setup claim since the
+                // freeze (e.g. another signup accepted between /calculate
+                // and this booking). The series THIS booking just seeded is
+                // excluded — it must not read as "existing". Waive-only:
+                // this can never re-add a fee.
+                if (unifiedSetupQuote) {
+                  const { hasActiveRecurringService } = require('../services/unified-setup-fee');
+                  const { customerHasLiveSetupFeeClaim } = require('../services/secure-appointment-plans');
+                  const gainedService = await hasActiveRecurringService(sp, custId, { excludeRootId: stampServiceRow?.id || null });
+                  const inflightClaim = !gainedService && (await customerHasLiveSetupFeeClaim(sp, custId));
+                  if (gainedService || inflightClaim) {
+                    await retireOrWaiveDraft('fee_already_queued');
+                    return;
+                  }
+                }
                 // Stamp the obligation AND correlate it: source_estimate_id
                 // links the parent to the quote that disclosed the fee (the
                 // unminted-setup-fee obligation machinery keys off it), and

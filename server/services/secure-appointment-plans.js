@@ -420,10 +420,17 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
 // only evidence a concurrent/second accept can see.
 async function customerHasLiveSetupFeeClaim(database, customerId) {
   if (!customerId) return false;
+  // IN-FLIGHT only (audit r21 P0): a SETTLED claim must not waive forever
+  // — a lapsed customer whose old setup was paid years ago is NEW again
+  // and pays again (owner ruling). A paid claim on a STILL-ACTIVE series
+  // is already covered by the hasActiveRecurringService probe, so this
+  // probe needs only the pre-settlement window: draft/sent/processing
+  // invoices whose fee is minted but not yet money-final.
   const row = await database('setup_fee_claims as sfc')
     .join('invoices as i', 'i.id', 'sfc.invoice_id')
     .where('i.customer_id', customerId)
-    .whereNotIn('i.status', ['void', 'cancelled', 'canceled', 'refunded'])
+    .whereNotIn('i.status', ['void', 'cancelled', 'canceled', 'refunded', 'paid', 'prepaid'])
+    .whereNull('i.paid_at')
     .first('sfc.id');
   return !!row;
 }
