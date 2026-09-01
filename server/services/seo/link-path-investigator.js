@@ -717,7 +717,14 @@ async function investigatePaths(db, {
     for (const { domain, claimState } of targets) {
       try {
         const host = canonicalProspectDomain(domain.domain);
-        if (!host) { out.failed.push({ id: domain.id, domain: domain.domain, reason: 'invalid_host' }); continue; }
+        if (!host) {
+          // same backoff/parking as fetch and model failures — an invalid
+          // name must not re-select every hourly sweep forever (the failure
+          // ceiling eventually parks it watching)
+          out.failed.push({ id: domain.id, domain: domain.domain, reason: 'invalid_host' });
+          await deferFailedDomain(db, domain, now, { claim: claimState });
+          continue;
+        }
 
         // Claim: stamp `investigating` so the queue and UI show the domain in
         // flight (states 1–2 only; path refreshes never touch agent_state).
