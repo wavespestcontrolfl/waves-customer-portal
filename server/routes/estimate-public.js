@@ -10289,13 +10289,33 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         try {
           const EstimateConverter = require('../services/estimate-converter');
           const frozenRecurring = EstimateConverter.recurringServicesFromEstimateData(nextEstimateData);
+          // Unified live decision (GATE_UNIFIED_SETUP_FEE, owner ruling
+          // 2026-09-01) for quotes with no freeze; null = legacy predicate.
+          const freezeUnifiedDecision = await EstimateConverter.acceptTimeUnifiedSetupFeeDecision(trx, {
+            customerId: acceptResolvedCustomerId,
+            recurringServices: frozenRecurring,
+            estimateData: nextEstimateData,
+          });
           if (nextEstimateData.acceptedSetupFeeAmount == null
-            && EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
-              recurringServices: frozenRecurring, estimateData: nextEstimateData,
-            })) {
+            && (freezeUnifiedDecision
+              ?? EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+                recurringServices: frozenRecurring, estimateData: nextEstimateData,
+              }))) {
             // Frozen-disclosure resolver: the amount the quote showed, with
-            // the constant only as the pre-freeze legacy fallback.
-            nextEstimateData.acceptedSetupFeeAmount = EstimateConverter.frozenSetupFeeAmount(nextEstimateData);
+            // the constant only as the pre-freeze legacy fallback. A LIVE
+            // unified decision freezes the DB-configured unified amount —
+            // and the decision itself, so conversion and the detectors read
+            // the same decide-once verdict.
+            nextEstimateData.acceptedSetupFeeAmount = freezeUnifiedDecision === true
+              ? require('../services/unified-setup-fee').unifiedSetupFeeAmount()
+              : EstimateConverter.frozenSetupFeeAmount(nextEstimateData);
+            if (freezeUnifiedDecision === true && !nextEstimateData.setupFeeQuote) {
+              nextEstimateData.setupFeeQuote = {
+                kind: 'unified',
+                amount: nextEstimateData.acceptedSetupFeeAmount,
+                decided_at: new Date().toISOString(),
+              };
+            }
           }
         } catch (feeFreezeErr) {
           logger.warn(`[estimate-public] accept-time setup-fee freeze skipped: ${feeFreezeErr.message}`);
@@ -11448,10 +11468,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           && standardConversionResult?.recurringConversionSkipped !== true) {
           const conversionEstData = acceptedEstimateForScheduling.estimate_data || {};
           const conversionRecurringServices = EstimateConverter.recurringServicesFromEstimateData(conversionEstData);
-          const setupFeeApplies = EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+          // Estimates with NO frozen quote (staff/AI/call lanes never run
+          // /calculate's freeze) get their unified decision at this accept
+          // (GATE_UNIFIED_SETUP_FEE, owner ruling 2026-09-01); null =
+          // legacy predicate governs.
+          const acceptUnifiedDecision = await EstimateConverter.acceptTimeUnifiedSetupFeeDecision(trx, {
+            customerId,
             recurringServices: conversionRecurringServices,
             estimateData: conversionEstData,
           });
+          const setupFeeApplies = acceptUnifiedDecision
+            ?? EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+              recurringServices: conversionRecurringServices,
+              estimateData: conversionEstData,
+            });
           // allowFallback:false matches the allowFirstApplicationFallback the
           // old converter call passed — an explicit amount or nothing.
           const standardFirstApplicationAmount = EstimateConverter.resolveFirstApplicationAmount({
@@ -11478,7 +11508,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
             // the quote disclosed (constant = pre-freeze legacy fallback).
-            const acceptSetupFeeAmount = EstimateConverter.frozenSetupFeeAmount(conversionEstData);
+            // A LIVE unified decision has no freeze — it bills the
+            // DB-configured unified amount.
+            const acceptSetupFeeAmount = acceptUnifiedDecision === true
+              ? require('../services/unified-setup-fee').unifiedSetupFeeAmount()
+              : EstimateConverter.frozenSetupFeeAmount(conversionEstData);
             if (setupFeeApplies) {
               lineItems.push({
                 description: 'WaveGuard Membership — one-time setup fee',

@@ -2386,6 +2386,30 @@ function frozenRodentBaitSetupAmount(estimateData = {}) {
   return 0;
 }
 
+// Accept-time UNIFIED decision for estimates that carry NO frozen
+// setupFeeQuote (GATE_UNIFIED_SETUP_FEE, owner ruling 2026-09-01): staff,
+// AI, and call-created estimates never run /calculate's freeze, so their
+// acceptance is the first decision point — this is the one chokepoint every
+// estimate lane converts through. Returns:
+//   null  → no live decision applies; caller uses the legacy predicate
+//           (gate off, a frozen quote of any kind exists — the freeze
+//           governs — or the engine's rodent setup line already carries
+//           the fee: same dollars, never doubled)
+//   true  → the unified fee applies (bill unifiedSetupFeeAmount())
+//   false → decided and waived (existing customer / operator waiver /
+//           in-flight claim / no recurring service)
+async function acceptTimeUnifiedSetupFeeDecision(database, { customerId = null, recurringServices = [], estimateData = {} } = {}) {
+  const { unifiedSetupFeeEnabled, decideUnifiedSetupFee } = require('./unified-setup-fee');
+  if (!unifiedSetupFeeEnabled()) return null;
+  const data = normalizeEstimateData(estimateData);
+  if (data?.setupFeeQuote) return null;
+  if (!(Array.isArray(recurringServices) && recurringServices.length > 0)) return false;
+  if (estimateOperatorSetupFeeWaived(data)) return false;
+  if (frozenRodentBaitSetupAmount(data) > 0) return null;
+  const verdict = await decideUnifiedSetupFee(database, { customerId });
+  return Number(verdict.amount) > 0;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
@@ -5904,13 +5928,26 @@ const EstimateConverter = {
           allowFallback: opts.allowFirstApplicationFallback !== false,
         })
         : 0;
+      // Estimates with NO frozen quote (staff/AI/call lanes never run
+      // /calculate's freeze) get their unified decision HERE — the one
+      // chokepoint every estimate lane converts through (owner ruling
+      // 2026-09-01, GATE_UNIFIED_SETUP_FEE). null = live decision does not
+      // apply; legacy predicate governs.
+      const acceptUnifiedDecision = await acceptTimeUnifiedSetupFeeDecision(database, {
+        customerId,
+        recurringServices: recurringServicesForConversion,
+        estimateData,
+      });
       const setupFeeApplies = billingTerm === 'standard'
-        ? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
+        ? (acceptUnifiedDecision ?? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData }))
         : false;
       // Frozen wizard disclosure — single resolver shared with public
       // acceptance (frozenSetupFeeAmount below), so every charging path
-      // bills exactly what the quote disclosed.
-      const setupFeeAmount = frozenSetupFeeAmount(estimateData);
+      // bills exactly what the quote disclosed. A LIVE unified decision has
+      // no freeze to read — it bills the DB-configured unified amount.
+      const setupFeeAmount = acceptUnifiedDecision === true
+        ? require('./unified-setup-fee').unifiedSetupFeeAmount()
+        : frozenSetupFeeAmount(estimateData);
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
         : setupFeeApplies || standardFirstApplicationAmount > 0;
@@ -5945,7 +5982,11 @@ const EstimateConverter = {
             && Number(prepayUnifiedQuote.amount) > 0
             && !estimateOperatorSetupFeeWaived(estimateData)
             ? Math.round(Number(prepayUnifiedQuote.amount) * 100) / 100
-            : 0;
+            // No frozen quote (staff/AI/call lanes): the accept-time live
+            // decision above governs the prepay term too.
+            : (acceptUnifiedDecision === true
+              ? require('./unified-setup-fee').unifiedSetupFeeAmount()
+              : 0);
           const prepayLineDescription = commercialOnlyRecurring
             ? `${prepayPlanPrefix} — 12 months prepaid`
             : prepayDiscountApplied
@@ -6964,6 +7005,7 @@ module.exports.estimateHasCommercialOneTime = estimateHasCommercialOneTime;
 // invoices on standard accepts. Never hardcode 99 elsewhere.
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
+module.exports.acceptTimeUnifiedSetupFeeDecision = acceptTimeUnifiedSetupFeeDecision;
 module.exports.frozenRodentBaitSetupAmount = frozenRodentBaitSetupAmount;
 module.exports.estimateRodentBaitIsCommercial = estimateRodentBaitIsCommercial;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math

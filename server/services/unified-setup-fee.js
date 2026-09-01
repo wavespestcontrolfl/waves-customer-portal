@@ -67,15 +67,47 @@ async function hasActiveRecurringService(db, customerId) {
 }
 
 /**
+ * An in-flight old-world setup claim anywhere on the account (drain
+ * protection — one account setup at a time): ANY nonzero pending_setup_fee
+ * that can still be CONSUMED, the same liveness rules as the wizard's
+ * consumable-claim probe (public-quote decideSetupFeeQuote) — a negative
+ * stamp is completion's in-progress marker and always counts; a positive
+ * one counts while its row can still complete, a pending completion attempt
+ * can resume it, or a live child exists.
+ */
+async function hasConsumableSetupClaim(db, customerId) {
+  if (!customerId) return false;
+  const row = await db('scheduled_services as claim')
+    .where('claim.customer_id', customerId)
+    .whereNotNull('claim.pending_setup_fee')
+    .whereNot('claim.pending_setup_fee', 0)
+    .where(function consumable() {
+      this.where('claim.pending_setup_fee', '<', 0)
+        .orWhereIn('claim.status', LIVE_STATUSES)
+        .orWhereExists(function pendingCompletion() {
+          this.select(db.raw('1'))
+            .from('service_completion_attempts as sca')
+            .whereIn('sca.status', ['pending', 'side_effects_pending', 'side_effects_running'])
+            .whereRaw('(sca.service_id = claim.id OR sca.service_id IN (SELECT id FROM scheduled_services WHERE recurring_parent_id = claim.id))');
+        })
+        .orWhereExists(function liveChild() {
+          this.select(db.raw('1'))
+            .from('scheduled_services as child')
+            .whereRaw('child.recurring_parent_id = claim.id')
+            .whereIn('child.status', LIVE_STATUSES);
+        });
+    })
+    .first('claim.id');
+  return !!row;
+}
+
+/**
  * The decide-once verdict for a customer starting recurring service.
  * Returns `{ amount, kind: 'unified' }` (owed) or
  * `{ amount: 0, kind: 'unified', waived: <reason> }`.
  *
  * The caller persists this verdict (setupFeeQuote / pending_setup_fee) at
- * the accept/booking moment; it is never recomputed afterwards. In-flight
- * old-world claims are the CALLER's concern (the quote layer already runs
- * its consumable-claim probe before this decision) — this function decides
- * eligibility only.
+ * the accept/booking moment; it is never recomputed afterwards.
  *
  * Failure posture is the caller's lane convention: this function lets DB
  * errors propagate. The public wizard catches and keeps the fee disclosed
@@ -88,6 +120,9 @@ async function decideUnifiedSetupFee(db, { customerId } = {}) {
   if (customerId && (await hasActiveRecurringService(db, customerId))) {
     return { amount: 0, kind: 'unified', waived: 'existing_customer' };
   }
+  if (customerId && (await hasConsumableSetupClaim(db, customerId))) {
+    return { amount: 0, kind: 'unified', waived: 'fee_already_queued' };
+  }
   return { amount, kind: 'unified' };
 }
 
@@ -95,5 +130,6 @@ module.exports = {
   unifiedSetupFeeEnabled,
   unifiedSetupFeeAmount,
   hasActiveRecurringService,
+  hasConsumableSetupClaim,
   decideUnifiedSetupFee,
 };

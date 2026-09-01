@@ -25,19 +25,27 @@ const {
 } = require('../services/unified-setup-fee');
 const { WAVEGUARD } = require('../services/pricing-engine/constants');
 
-// Minimal knex-ish chain: .where/.orWhere* record nothing; .first resolves
-// the injected rows' first element.
+// Minimal knex-ish chain. fakeDb(rows) serves rows[0] to every probe;
+// fakeDbSeq(a, b, …) serves one result per chain created (probe order:
+// active-recurring first, consumable-claim second).
+function makeChain(result) {
+  const chain = {};
+  for (const m of ['where', 'whereNot', 'whereIn', 'orWhereIn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'orWhere', 'orWhereExists', 'whereRaw']) {
+    chain[m] = () => chain;
+  }
+  chain.first = async () => result || null;
+  return chain;
+}
 function fakeDb(rows) {
-  return () => {
-    const chain = {};
-    chain.where = () => chain;
-    chain.orWhereIn = () => chain;
-    chain.whereNull = () => chain;
-    chain.orWhereNotNull = () => chain;
-    chain.orWhere = () => chain;
-    chain.first = async () => rows[0] || null;
-    return chain;
-  };
+  const db = () => makeChain(rows[0]);
+  db.raw = () => '1';
+  return db;
+}
+function fakeDbSeq(...results) {
+  let i = 0;
+  const db = () => makeChain(results[i++]);
+  db.raw = () => '1';
+  return db;
 }
 
 beforeEach(() => { mockGateOn = false; });
@@ -75,6 +83,10 @@ describe('decideUnifiedSetupFee — decide once, frozen', () => {
     // new accounts are NEW per the ruling.
     expect(await decideUnifiedSetupFee(fakeDb([]), {}))
       .toEqual({ amount: unifiedSetupFeeAmount(), kind: 'unified' });
+    // An in-flight old-world claim (undrained stamp) waives — one account
+    // setup at a time, the drain protection.
+    expect(await decideUnifiedSetupFee(fakeDbSeq(null, { id: 'claim-1' }), { customerId: 'c1' }))
+      .toEqual({ amount: 0, kind: 'unified', waived: 'fee_already_queued' });
   });
 
   test('a zero/disabled configured fee waives everyone (rodent_setup_fee convention)', async () => {
