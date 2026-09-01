@@ -11,6 +11,8 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import EstimateViewPage from '../pages/EstimateViewPage';
 import WavesShell from '../components/brand/WavesShell';
 import { ESTIMATE_SCENARIOS } from './estimate-scenarios';
+import { documentRenderAffirmed, synthesizeDocumentProposal } from './estimate-document-proposal';
+import { addETDays, etDateString } from '../lib/timezone';
 import '../index.css';
 // Brand tokens (--surface/--border/...) normally ride in via main.jsx —
 // without them the WavesShell top bar computes a transparent background and
@@ -24,6 +26,17 @@ const scenario = (() => {
 })();
 
 // ── fixtures ────────────────────────────────────────────────────────────
+
+// Every date a freshness check inspects (estimate expiration, offered slots,
+// the linked appointment) is computed from the clock at load time — a date
+// literal goes stale the night the ET calendar passes it, and glassSlotIsStale
+// would then disable every offered slot, so the harness would stop
+// exercising the selectable-slot and post-selection states (AGENTS.md
+// "Hardcoded near-today calendar dates"). Issued/expired literals that no
+// validator inspects stay relative too so the hero block reads coherently.
+const NOW = new Date();
+const isoDaysOut = (days) => addETDays(NOW, days).toISOString();
+const etDaysOut = (days) => etDateString(addETDays(NOW, days));
 
 const CONTACT = {
   customerFirstName: 'William',
@@ -40,8 +53,8 @@ const BASE_ESTIMATE = {
   // every estimate — the harness carries real-shaped values so the block is
   // exercised in preview.
   slug: 'WPC-2026-0512',
-  createdAt: '2026-07-09T14:00:00.000Z',
-  expiresAt: '2026-07-16T14:00:00.000Z',
+  createdAt: isoDaysOut(0),
+  expiresAt: isoDaysOut(7),
   ...CONTACT,
   askToken: 'preview-ask-token',
   category: 'RESIDENTIAL',
@@ -268,7 +281,7 @@ function acceptedScenario() {
         reason: null,
         appointment: {
           id: 'appt-preview-1',
-          scheduledDate: '2026-07-09',
+          scheduledDate: etDaysOut(1),
           windowStart: '09:00',
           windowEnd: '10:00',
           windowDisplay: '9:00–10:00 AM',
@@ -897,7 +910,7 @@ function quoteRequiredScenario() {
 
 function expiredScenario() {
   const base = pestScenario();
-  return { ...base, estimate: { ...base.estimate, status: 'expired', expiresAt: '2026-07-01T14:00:00.000Z' }, cta: { ...base.cta, canAccept: false, terminalState: 'expired' } };
+  return { ...base, estimate: { ...base.estimate, status: 'expired', expiresAt: isoDaysOut(-8) }, cta: { ...base.cta, canAccept: false, terminalState: 'expired' } };
 }
 
 function missingContactScenario() {
@@ -953,16 +966,16 @@ const PAYLOADS = {
 const SLOTS = {
   nearby: true,
   primary: [
-    { slotId: 's1', date: '2026-07-04', windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
-    { slotId: 's2', date: '2026-07-05', windowStart: '11:00', windowEnd: '12:00' },
-    { slotId: 's3', date: '2026-07-07', windowStart: '09:00', windowEnd: '10:00' },
-    { slotId: 's4', date: '2026-07-08', windowStart: '13:00', windowEnd: '14:00' },
-    { slotId: 's5', date: '2026-07-09', windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
-    { slotId: 's6', date: '2026-07-10', windowStart: '15:00', windowEnd: '16:00' },
+    { slotId: 's1', date: etDaysOut(1), windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
+    { slotId: 's2', date: etDaysOut(2), windowStart: '11:00', windowEnd: '12:00' },
+    { slotId: 's3', date: etDaysOut(4), windowStart: '09:00', windowEnd: '10:00' },
+    { slotId: 's4', date: etDaysOut(5), windowStart: '13:00', windowEnd: '14:00' },
+    { slotId: 's5', date: etDaysOut(6), windowStart: '09:00', windowEnd: '10:00', routeOptimal: true, techFirstName: 'Adam' },
+    { slotId: 's6', date: etDaysOut(7), windowStart: '15:00', windowEnd: '16:00' },
   ],
   expander: [
-    { slotId: 's7', date: '2026-07-11', windowStart: '09:00', windowEnd: '10:00' },
-    { slotId: 's8', date: '2026-07-12', windowStart: '10:00', windowEnd: '11:00' },
+    { slotId: 's7', date: etDaysOut(8), windowStart: '09:00', windowEnd: '10:00' },
+    { slotId: 's8', date: etDaysOut(9), windowStart: '10:00', windowEnd: '11:00' },
   ],
 };
 
@@ -988,11 +1001,22 @@ window.fetch = async (input, init) => {
 
   if (url.includes('/api/estimates/') && url.includes('/data')) {
     // Prod sends glassDefault per eligible category with the gate unset =
-    // ALL categories, so the harness mirrors the live copy pack. The
-    // documentRender affirmation mirrors the server's gated pdf-pass payload
-    // so ?mode=pdf previews render the print document.
+    // ALL categories, so the harness mirrors the live copy pack. The pdf
+    // pass mirrors the server's gated /data payload: every estimate carries
+    // a proposal block for the print document (the authored one, or the
+    // synthesized single-building fallback that IS an ordinary estimate's
+    // pricing table), and documentRender is affirmed only when that block
+    // built with a priced line — otherwise ?mode=pdf falls through to the
+    // normal page exactly like production.
     const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
-    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...(pdfPass ? { documentRender: true } : {}) });
+    const payload = PAYLOADS[scenario]();
+    const proposal = payload.proposal || (pdfPass ? synthesizeDocumentProposal(payload) : null);
+    return respond({
+      ...payload,
+      ...(pdfPass && proposal ? { proposal } : {}),
+      glassDefault: true,
+      ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
+    });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

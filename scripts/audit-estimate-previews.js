@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+/* global window, document, getComputedStyle -- page.evaluate callbacks run inside the headless browser, not Node */
+
 // READ-ONLY against application state. Renders fictional dev-preview fixtures
 // and writes screenshots/PDFs only to the requested artifact directory.
 const fs = require('node:fs');
@@ -24,6 +26,18 @@ if (unknownScenarios.length) {
 const SCENARIOS = requestedScenarios.length ? ALL_SCENARIOS.filter((scenario) => requestedScenarios.includes(scenario)) : ALL_SCENARIOS;
 if (!SCENARIOS.length) throw new Error('No estimate preview scenarios selected');
 const VIEWPORTS = { desktop: { width: 1280, height: 900 }, mobile: { width: 390, height: 844 } };
+// Fixtures that offer the slot picker on load (canAccept + standard_slot_pick).
+// One of these rendering no BOOKABLE slot means the fixture clock drifted and
+// the audit silently stopped exercising the selectable-slot and
+// post-selection states — report it instead of shipping stale screenshots.
+const SLOT_PICKER_SCENARIOS = [
+  'pest', 'lawn', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent', 'wdo', 'termite_foam',
+  'trap_only', 'bundle', 'commercial', 'bundle_referral', 'lawn_member_upgrade', 'missing_contact', 'long_content', 'preslab',
+];
+// Fixtures with no priced line: the server withholds documentRender, so the
+// pdf pass must fall through to the normal page rather than print an
+// official-looking document with no pricing table.
+const PDF_FALLTHROUGH_SCENARIOS = ['quote_required'];
 const baseUrl = process.env.ESTIMATE_PREVIEW_BASE_URL || 'http://127.0.0.1:4178';
 const artifactDir = process.env.ESTIMATE_PREVIEW_ARTIFACT_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'waves-estimate-audit-'));
 fs.mkdirSync(artifactDir, { recursive: true });
@@ -131,6 +145,10 @@ async function launchBrowser() {
             clippedText,
             overflowElements,
             buttons: [...document.querySelectorAll('button,a')].map((el) => el.textContent.trim()).filter(Boolean),
+            slots: {
+              offered: document.querySelectorAll('[data-estimate-slot]').length,
+              stale: document.querySelectorAll('[data-estimate-slot].gc-slot-stale').length,
+            },
           };
         });
         if (!audit.h1) fail(scenario, viewportName, 'missing customer-facing H1');
@@ -142,7 +160,10 @@ async function launchBrowser() {
           fail(scenario, viewportName, `${scenario} incorrectly renders AI narrative or an ask bar`);
         }
 
-        observations.push({ scenario, viewport: viewportName, h1: audit.h1, actions: audit.buttons.slice(0, 8) });
+        if (audit.slots.stale > 0) fail(scenario, viewportName, `${audit.slots.stale} of ${audit.slots.offered} offered slots are stale (fixture clock drifted)`);
+        if (SLOT_PICKER_SCENARIOS.includes(scenario) && audit.slots.offered - audit.slots.stale === 0) fail(scenario, viewportName, 'no bookable slot offered');
+
+        observations.push({ scenario, viewport: viewportName, h1: audit.h1, actions: audit.buttons.slice(0, 8), slots: audit.slots });
         await page.screenshot({ path: path.join(artifactDir, `${scenario}-${viewportName}.png`), fullPage: true });
         await page.close();
       }
@@ -150,8 +171,31 @@ async function launchBrowser() {
       const printPage = await browser.newPage({ viewport: VIEWPORTS.desktop });
       const printUrl = `${baseUrl}/preview-estimate.html?scenario=${scenario}&chrome=0&mode=pdf`;
       await printPage.goto(printUrl, { waitUntil: 'domcontentloaded' });
-      await printPage.locator('body').waitFor({ state: 'visible', timeout: 15000 });
+      await printPage.locator('.estimate-document-v1, h1').first().waitFor({ state: 'visible', timeout: 15000 });
       await printPage.waitForTimeout(150);
+      // The print artifact is only evidence if it carries the pricing table
+      // the customer's emailed PDF prints (proposal buildings / programs /
+      // corrective work) — an official-looking document without one would
+      // let a PDF pricing regression pass as a SUCCESS.
+      const print = await printPage.evaluate(() => {
+        const doc = document.querySelector('.estimate-document-v1');
+        const text = doc ? doc.innerText : '';
+        return {
+          document: Boolean(doc),
+          pricingHeader: /Your services & pricing|Your proposal|Investment/i.test(text),
+          pricedLines: (text.match(/\$\d[\d,]*\.\d{2}/g) || []).length,
+          h1: document.querySelector('h1')?.textContent?.trim() || '',
+        };
+      });
+      if (PDF_FALLTHROUGH_SCENARIOS.includes(scenario)) {
+        if (print.document) fail(scenario, 'print', 'unpriced estimate rendered the print document instead of falling through');
+        else if (!print.h1) fail(scenario, 'print', 'pdf fall-through lost the customer-facing page');
+      } else if (!print.document) {
+        fail(scenario, 'print', 'pdf pass fell through to the normal page (documentRender withheld)');
+      } else if (!print.pricingHeader || print.pricedLines === 0) {
+        fail(scenario, 'print', 'print document rendered without a pricing table');
+      }
+      observations.push({ scenario, viewport: 'print', document: print.document, pricedLines: print.pricedLines });
       await printPage.emulateMedia({ media: 'print' });
       await printPage.pdf({ path: path.join(artifactDir, `${scenario}-print.pdf`), format: 'Letter', printBackground: true, margin: { top: '0.35in', right: '0.35in', bottom: '0.35in', left: '0.35in' } });
       await printPage.close();
@@ -161,7 +205,14 @@ async function launchBrowser() {
     previewServer?.kill('SIGTERM');
   }
 
-  const result = { artifactDir, scenarios: SCENARIOS.length, renderedPages: observations.length, failures, observations };
+  const result = {
+    artifactDir,
+    scenarios: SCENARIOS.length,
+    renderedPages: observations.filter((entry) => entry.viewport !== 'print').length,
+    printedDocuments: observations.filter((entry) => entry.viewport === 'print' && entry.document).length,
+    failures,
+    observations,
+  };
   fs.writeFileSync(path.join(artifactDir, 'audit.json'), `${JSON.stringify(result, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (failures.length) process.exitCode = 1;
