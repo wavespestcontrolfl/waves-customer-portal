@@ -559,23 +559,24 @@ describe('list — send-path recipient resolution + paging', () => {
     expect(body.nextCursor).toBeNull(); // page under 50 rows = exhausted
   });
 
-  test('GET / derives the office From for drafts with no sms_log anchor (campaign shape)', async () => {
+  test('GET / derives the office From lane-exactly for anchorless drafts', async () => {
     TWILIO_NUMBERS.getOutboundNumber.mockReturnValue('+19415552000');
-    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, nearest_location_id: 'venice', city: 'Venice' })] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } }); // recipient resolution
-    enqueue('message_drafts', { first: { count: '1' } }); // pendingCount
-
-    const body = await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/drafts?status=pending`);
-      expect(res.status).toBe(200);
-      return res.json();
-    });
-
-    // Mirrors the send path's TwilioService fallback (customerLocationId →
-    // city → Bradenton) so the composer deep link pins the customer's own
-    // office line instead of the composer's hardcoded default.
+    // Campaign lane: approve passes nearest_location_id → it wins.
+    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, campaign_type: 'upsell', nearest_location_id: 'venice', city: 'Sarasota' })] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    enqueue('message_drafts', { first: { count: '1' } });
+    const campaign = await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
     expect(TWILIO_NUMBERS.getOutboundNumber).toHaveBeenCalledWith('venice');
-    expect(body.drafts[0].resolvedFromNumber).toBe('+19415552000');
+    expect(campaign.drafts[0].resolvedFromNumber).toBe('+19415552000');
+
+    // Non-campaign lane: the send path passes only customerId, so Twilio
+    // derives from the customer's CITY — nearest_location_id must NOT win.
+    TWILIO_NUMBERS.getOutboundNumber.mockClear();
+    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, nearest_location_id: 'venice', city: 'Sarasota' })] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    enqueue('message_drafts', { first: { count: '1' } });
+    await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
+    expect(TWILIO_NUMBERS.getOutboundNumber).toHaveBeenCalledWith('sarasota');
   });
 
   test('GET / rejects an unknown before cursor (anchor row must exist)', async () => {

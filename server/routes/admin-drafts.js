@@ -97,19 +97,21 @@ async function resolveDraftRecipient(draft) {
 }
 
 // The From number the send path will END UP using for a draft with no
-// inbound sms_log anchor (campaign/click lanes): TwilioService derives the
-// customer's office line from customerLocationId, falling back to
-// resolveLocation(city) then Bradenton (services/twilio.js). The list
-// mirrors that derivation so the Communications deep link can pin the
-// SAME number — without it the composer submits its hardcoded default as
-// an explicit override and out-of-market customers get the wrong line
-// (Codex #3700 r2 P1). Display-only: the approve/revise send path is
-// untouched and still derives at send time.
-function derivedOfficeNumber(row) {
+// inbound sms_log anchor, mirrored LANE-EXACTLY (Codex #3700 r2+r3 P1):
+// only CAMPAIGN approvals pass customerLocationId (nearest_location_id)
+// to TwilioService; every other anchorless draft sends with customerId
+// alone, so Twilio derives the office from resolveLocation(customer.city)
+// — and with no resolved customer it falls to Bradenton. The list mirrors
+// exactly that per-lane chain so the Communications deep link pins the
+// SAME number the send path would pick — without it the composer submits
+// its hardcoded default as an explicit override and out-of-market
+// customers get the wrong line. Display-only: the approve/revise send
+// path is untouched and still derives at send time.
+function derivedOfficeNumber(row, recipientCustomerId) {
   try {
     const { resolveLocation } = require('../config/locations');
-    const locationId = row.nearest_location_id
-      || (row.city ? resolveLocation(row.city)?.id : null);
+    const cityLocation = recipientCustomerId && row.city ? resolveLocation(row.city)?.id : null;
+    const locationId = (row.campaign_type ? row.nearest_location_id : null) || cityLocation;
     return TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton') || null;
   } catch {
     return null;
@@ -672,7 +674,7 @@ router.get('/', async (req, res, next) => {
           customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
           customerPhone: d.phone || null,
           recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-          resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d),
+          resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d, r?.customerId),
           tier: d.waveguard_tier, stage: d.pipeline_stage,
           inboundMessage: d.inbound_message,
           draftResponse: d.draft_response,
@@ -1080,7 +1082,7 @@ router.get('/:id', async (req, res, next) => {
       customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
       customerPhone: d.phone || null,
       recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
-      resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d),
+      resolvedFromNumber: r?.fromNumber || derivedOfficeNumber(d, r?.customerId),
       tier: d.waveguard_tier,
       stage: d.pipeline_stage,
       inboundMessage: d.inbound_message,
