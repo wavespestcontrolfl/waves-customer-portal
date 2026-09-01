@@ -1089,105 +1089,118 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
   const { gates } = require('../config/feature-gates');
   if (!gates.visitGroups) return null;
   try {
-    const row = await database('scheduled_services as ss')
-      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-      .where('ss.id', rowId)
-      .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
-        'ss.source_action', 'ss.customer_confirmed',
-        'ss.window_start', 'ss.window_end', 'ss.technician_id',
-        'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
-    if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
-    // Property identity is REQUIRED for automatic grouping (codex #3590
-    // r14): a null-property row (legacy / multi-home parent carrying only
-    // a stamped service address) would match any other null-property row
-    // for the customer that day, folding two addresses into one stop.
-    // Such rows group once property linkage stamps them (the linkage
-    // regroup pass) or by explicit office action.
-    if (!row.property_id) return null;
-    // A placed window is REQUIRED for automatic grouping (codex #3590
-    // r15): windowless overlaps anything, and a windowless row is by
-    // policy an unplaced placeholder (booking-wizard demotion clears the
-    // window + tech for the office). Office placement/explicit grouping
-    // is the path for those rows — as subject AND as partner.
-    if (!row.window_start) return null;
-    if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
-    if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
-    // Autopay exclusion (spec rev-2 item: "autopay customers are not
-    // grouped until grouped autopay ships"; owner ruling 2026-08-31): the
-    // per-row autopay charger would charge each sibling separately under
-    // one visit. FAST PATH ONLY — the authoritative check runs inside
-    // createOrJoinVisit under the customer row lock (pre-push codex P0
-    // TOCTOU); this unlocked read just avoids partner queries for a
-    // customer that will be refused anyway. Unit moves of existing visits
-    // never pass through createOrJoinVisit, so later enrollment cannot
-    // break them.
-    if (await customerExcludedByAutopay(row.customer_id, database)) return null;
-    const partnersQ = database('scheduled_services as ss')
-      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-      .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
-      .where('ss.customer_id', row.customer_id)
-      .where('ss.scheduled_date', dateOnly(row.scheduled_date))
-      .whereNot('ss.id', row.id)
-      .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
-      .where('svc.groupable', true)
-      .where('svc.group_family', row.group_family)
-      .whereNotNull('ss.window_start')
-      .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
-      .select('ss.id', 'ss.visit_id');
-    if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
-    else partnersQ.whereNull('ss.property_id');
-    partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
-      'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
-      'ss.source_action', 'ss.customer_confirmed',
-      'svc.groupable', 'svc.group_family');
-    // Every same-stop candidate, deterministically ordered — a cap made
-    // grouping depend on heap order once a customer had more rows than
-    // the cap (codex #3590 r12 P2). The set is bounded by one customer's
-    // one-day, one-property, one-family rows.
-    const partners = await partnersQ.orderBy('ss.window_start', 'asc').orderBy('ss.id', 'asc');
-    if (!partners.length) return null;
-    // Mutually compatible subset (codex r1 P1): one incompatible same-day
-    // row must not poison the whole grouping. Treat the new row as a
-    // pseudo-visit and keep only partners that would join it, then keep at
-    // most ONE attached visit's members (createOrJoinVisit refuses rows
-    // spanning two visits).
-    const pseudoVisit = { ...row, status: 'open' };
-    const compatible = partners.filter((p) => canJoin(p, pseudoVisit).ok
-      && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
-    if (!compatible.length) return null;
-    const attachedVisit = compatible.find((p) => p.visit_id);
-    let subset = attachedVisit
-      ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
-      : compatible;
-    // Technician partition (codex r7 P2): when the new row is unassigned
-    // and partners span two technicians, keep ONE tech's partition
-    // (the attached visit's tech when present, else the first assigned
-    // partner's) plus unassigned partners — otherwise createOrJoinVisit
-    // rejects the whole mixed set and nothing groups.
-    if (!row.technician_id) {
-      const partTechs = [...new Set(subset.map((p) => p.technician_id).filter(Boolean).map(String))];
-      if (partTechs.length > 1) {
-        const keep = (attachedVisit && attachedVisit.technician_id && String(attachedVisit.technician_id))
-          || partTechs[0];
-        subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
-      }
-    }
-    const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
     if (database && database.isTransaction) {
-      // Inside a caller transaction (converter/seeder) the work must run
-      // on that trx (its uncommitted rows are invisible elsewhere), but a
-      // grouping failure must not abort the caller's transaction (25P02
-      // poisons every later statement) — so run inside a SAVEPOINT
-      // (knex nested transaction) and let the catch below swallow the
-      // rolled-back savepoint (codex #3590 r4).
-      return await database.transaction((sp) => createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: sp }));
+      // Inside a caller transaction (booking/converter/seeder) the work
+      // must run on that trx (its uncommitted rows are invisible
+      // elsewhere), but a grouping failure must not abort the caller's
+      // transaction (25P02 poisons every later statement) — so the WHOLE
+      // attempt, reads included, runs inside a SAVEPOINT (knex nested
+      // transaction) and the catch below swallows the rolled-back
+      // savepoint (codex #3590 r4; widened from createOrJoinVisit alone
+      // to the pre-reads + autopay check by the r5 pre-push audit: a
+      // failed SELECT there aborted the caller just the same).
+      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy));
     }
-    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
+    return await groupRowOn(database, rowId, createdBy);
   } catch (err) {
     const logger = require('./logger');
     logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
     return null;
   }
+}
+
+// maybeGroupRow's body on one connection: `database` is either the plain
+// pool (createOrJoinVisit opens its own transaction) or the caller's
+// savepoint (everything, createOrJoinVisit included, runs on it).
+async function groupRowOn(database, rowId, createdBy) {
+  const row = await database('scheduled_services as ss')
+    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+    .where('ss.id', rowId)
+    .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+      'ss.source_action', 'ss.customer_confirmed',
+      'ss.window_start', 'ss.window_end', 'ss.technician_id',
+      'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
+  if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
+  // Property identity is REQUIRED for automatic grouping (codex #3590
+  // r14): a null-property row (legacy / multi-home parent carrying only
+  // a stamped service address) would match any other null-property row
+  // for the customer that day, folding two addresses into one stop.
+  // Such rows group once property linkage stamps them (the linkage
+  // regroup pass) or by explicit office action.
+  if (!row.property_id) return null;
+  // A placed window is REQUIRED for automatic grouping (codex #3590
+  // r15): windowless overlaps anything, and a windowless row is by
+  // policy an unplaced placeholder (booking-wizard demotion clears the
+  // window + tech for the office). Office placement/explicit grouping
+  // is the path for those rows — as subject AND as partner.
+  if (!row.window_start) return null;
+  if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
+  if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
+  // Autopay exclusion (spec rev-2 item: "autopay customers are not
+  // grouped until grouped autopay ships"; owner ruling 2026-08-31): the
+  // per-row autopay charger would charge each sibling separately under
+  // one visit. FAST PATH ONLY — the authoritative check runs inside
+  // createOrJoinVisit under the customer row lock (pre-push codex P0
+  // TOCTOU); this unlocked read just avoids partner queries for a
+  // customer that will be refused anyway. Unit moves of existing visits
+  // never pass through createOrJoinVisit, so later enrollment cannot
+  // break them.
+  if (await customerExcludedByAutopay(row.customer_id, database)) return null;
+  const partnersQ = database('scheduled_services as ss')
+    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+    .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+    .where('ss.customer_id', row.customer_id)
+    .where('ss.scheduled_date', dateOnly(row.scheduled_date))
+    .whereNot('ss.id', row.id)
+    .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
+    .where('svc.groupable', true)
+    .where('svc.group_family', row.group_family)
+    .whereNotNull('ss.window_start')
+    .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
+    .select('ss.id', 'ss.visit_id');
+  if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
+  else partnersQ.whereNull('ss.property_id');
+  partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
+    'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
+    'ss.source_action', 'ss.customer_confirmed',
+    'svc.groupable', 'svc.group_family');
+  // Every same-stop candidate, deterministically ordered — a cap made
+  // grouping depend on heap order once a customer had more rows than
+  // the cap (codex #3590 r12 P2). The set is bounded by one customer's
+  // one-day, one-property, one-family rows.
+  const partners = await partnersQ.orderBy('ss.window_start', 'asc').orderBy('ss.id', 'asc');
+  if (!partners.length) return null;
+  // Mutually compatible subset (codex r1 P1): one incompatible same-day
+  // row must not poison the whole grouping. Treat the new row as a
+  // pseudo-visit and keep only partners that would join it, then keep at
+  // most ONE attached visit's members (createOrJoinVisit refuses rows
+  // spanning two visits).
+  const pseudoVisit = { ...row, status: 'open' };
+  const compatible = partners.filter((p) => canJoin(p, pseudoVisit).ok
+    && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
+  if (!compatible.length) return null;
+  const attachedVisit = compatible.find((p) => p.visit_id);
+  let subset = attachedVisit
+    ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
+    : compatible;
+  // Technician partition (codex r7 P2): when the new row is unassigned
+  // and partners span two technicians, keep ONE tech's partition
+  // (the attached visit's tech when present, else the first assigned
+  // partner's) plus unassigned partners — otherwise createOrJoinVisit
+  // rejects the whole mixed set and nothing groups.
+  if (!row.technician_id) {
+    const partTechs = [...new Set(subset.map((p) => p.technician_id).filter(Boolean).map(String))];
+    if (partTechs.length > 1) {
+      const keep = (attachedVisit && attachedVisit.technician_id && String(attachedVisit.technician_id))
+        || partTechs[0];
+      subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
+    }
+  }
+  const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
+  if (database && database.isTransaction) {
+    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database });
+  }
+  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
 }
 
 // ---- Live transitions: one tap moves the whole stop (doc §3) ---------------
