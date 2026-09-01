@@ -1550,7 +1550,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                   <Icon name={method.icon} size={17} strokeWidth={2} />
                 </span>
                 <span style={{ minWidth: 0, textAlign: 'center' }}>
-                  <span style={{ display: 'block', fontWeight: FW.heavy, fontSize: FS.body, marginBottom: SP.xxs }}>
+                  {/* FW.bold, not heavy — 800 is display/eyebrow-only per
+                      the type scale; 14px labels take 700. */}
+                  <span style={{ display: 'block', fontWeight: FW.bold, fontSize: FS.body, marginBottom: SP.xxs }}>
                     {method.title}
                   </span>
                   <span style={{ display: 'block', fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug }}>

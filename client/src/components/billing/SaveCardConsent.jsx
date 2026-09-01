@@ -36,6 +36,11 @@ export default function SaveCardConsent({
   collapsible = false,
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Informed-consent gate (Codex P1 on #3686): while the authorization is
+  // collapsed and never yet viewed, the first checkbox interaction reveals
+  // the terms instead of consenting — the box can only be checked once the
+  // text has been on screen.
+  const [viewedTerms, setViewedTerms] = useState(false);
   const isAch = methodType === 'us_bank_account' || methodType === 'ach';
   const resolvedHeadline = headline ?? (isAch
     ? 'Save this bank account on file with Waves Pest Control'
@@ -72,7 +77,15 @@ export default function SaveCardConsent({
         type="checkbox"
         checked={isChecked}
         disabled={locked}
-        onChange={(e) => !locked && onChange?.(e.target.checked)}
+        onChange={(e) => {
+          if (locked) return;
+          if (collapsible && !isChecked && !viewedTerms) {
+            setExpanded(true);
+            setViewedTerms(true);
+            return;
+          }
+          onChange?.(e.target.checked);
+        }}
         style={{
           width: 18, height: 18, accentColor: CONSENT_STYLE.text,
           marginTop: 2, flexShrink: 0,
@@ -80,7 +93,7 @@ export default function SaveCardConsent({
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 850, color: CONSENT_STYLE.text, lineHeight: 1.35 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: CONSENT_STYLE.text, lineHeight: 1.35 }}>
           {resolvedHeadline}
         </div>
         {showToggle && (
@@ -92,6 +105,7 @@ export default function SaveCardConsent({
               // also toggle the checkbox.
               e.preventDefault();
               setExpanded((v) => !v);
+              setViewedTerms(true);
             }}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
