@@ -773,6 +773,23 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     }
   };
   const openAcceptance = await findOpenAcceptance();
+  // Durable approved facts, inherited BEFORE prepay resolution: a
+  // fingerprint-exempt repair retry from dialog defaults must never flip a
+  // refunded end-now into end-at-term (or move the approved boundary) on
+  // facts nobody re-approved — the acceptance carries what the operator
+  // accepted, and the retry runs under exactly that.
+  if (openAcceptance) {
+    const acceptedMeta = requestCancelPlanMeta(openAcceptance);
+    if (acceptedMeta && acceptedMeta.effectiveDate && input.effectiveDate !== acceptedMeta.effectiveDate) {
+      logger.info(`[admin-cancellation] retry inherits effectiveDate=${acceptedMeta.effectiveDate} from request ${openAcceptance.id}`);
+      input.effectiveDate = acceptedMeta.effectiveDate;
+    }
+    if (acceptedMeta && 'prepayDisposition' in acceptedMeta
+      && (acceptedMeta.prepayDisposition || null) !== (input.prepayDisposition || null)) {
+      logger.info(`[admin-cancellation] retry inherits prepayDisposition=${acceptedMeta.prepayDisposition || 'none'} from request ${openAcceptance.id}`);
+      input.prepayDisposition = acceptedMeta.prepayDisposition || null;
+    }
+  }
   // Deposit-stage accounts belong to the dedicated signup-cancel flow; an
   // open acceptance means a generic cancel already partially ran — finish
   // its repairs instead of stranding them.
@@ -1123,6 +1140,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // commit different numbers. Checked before any write.
   let approvedPulled = null;
   let approvedPulledIds = null;
+  let approvedPulledKeysForMeta = null;
   // The approval boundary is MANDATORY for new destructive commits: both
   // first-party surfaces always carry the preview's fingerprint, so a
   // commit without one is a stale or hand-built call bypassing the facts
@@ -1142,6 +1160,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     if (liveImpact && Array.isArray(liveImpact.pulledVisitKeys)) {
       approvedPulled = liveImpact.pulledVisitKeys.length;
       approvedPulledIds = new Set(liveImpact.pulledVisitKeys.map((k) => String(k).split(':')[0]));
+      approvedPulledKeysForMeta = liveImpact.pulledVisitKeys.map(String);
     }
   }
 
@@ -1173,6 +1192,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // fallback — a run that lost BOTH a fee side effect and its case write
     // must still restore the waiver the operator accepted.
     const requestMeta = requestCancelPlanMeta(request);
+    // A fingerprint-exempt retry runs bounded by the FIRST approval's pull
+    // set: an appointment created after the operator approved is never
+    // swept silently — it flags visits_pulled_beyond_preview for office
+    // eyes (one-way: approved rows already pulled by run 1 are naturally
+    // absent from a repair run's cancels and are not drift).
+    if (!suppliedFingerprint && requestMeta && Array.isArray(requestMeta.approvedPulledKeys)) {
+      approvedPulled = requestMeta.approvedPulledKeys.length;
+      approvedPulledIds = new Set(requestMeta.approvedPulledKeys.map((k) => String(k).split(':')[0]));
+    }
     if (requestMeta && requestMeta.waiveLateFee === true && !input.waiveLateFee) {
       input.waiveLateFee = true;
       logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id}`);
@@ -1235,6 +1263,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             // text a customer the original operator explicitly chose not
             // to contact.
             sendConfirmation: input.sendConfirmation,
+            // The APPROVED facts a fingerprint-exempt retry runs under:
+            // boundary and disposition inherit (no silent end-now →
+            // end-at-term flip), the approved pull identities bound what a
+            // retry's sweep may cancel, and the accepted fingerprint is
+            // the audit link back to what the operator saw.
+            effectiveDate: input.effectiveDate,
+            prepayDisposition: input.prepayDisposition,
+            previewFingerprint: suppliedFingerprint,
+            ...(approvedPulledKeysForMeta ? { approvedPulledKeys: approvedPulledKeysForMeta } : {}),
           },
         }),
       })
@@ -1282,12 +1319,15 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // AND a missing approved pull (the visit completed mid-run and was
     // delivered — now payable, not cancelled as shown) are both changed
     // facts the operator never approved.
-    let beyond;
+    let beyond = false;
     if (approvedPulledIds && Array.isArray(result?.cancelledIds)) {
       const cancelledSet = new Set(result.cancelledIds.map(String));
       beyond = result.cancelledIds.some((id) => !approvedPulledIds.has(String(id)))
-        || [...approvedPulledIds].some((id) => !cancelledSet.has(id));
-    } else {
+        // Missing-approved-pull drift only under a CURRENT validated
+        // fingerprint: a repair retry's approved rows were pulled by run 1
+        // and are legitimately absent from this run's cancels.
+        || (!!suppliedFingerprint && [...approvedPulledIds].some((id) => !cancelledSet.has(id)));
+    } else if (suppliedFingerprint) {
       beyond = Number(result?.cancelledCount) > approvedPulled;
     }
     if (beyond) {

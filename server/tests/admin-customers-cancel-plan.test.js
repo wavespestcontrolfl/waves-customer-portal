@@ -949,6 +949,26 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockRaiseTermite).not.toHaveBeenCalled();
     }));
 
+    test('a repair retry inherits the ACCEPTED disposition and boundary — dialog defaults cannot flip the approved plan', () => withServer(async (baseUrl) => {
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: {
+          scope: [], waiveLateFee: false, sendConfirmation: true,
+          effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term',
+        } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+      // Bare retry from dialog DEFAULTS ('now', no disposition, no
+      // fingerprint — the repair exemption): the accepted facts govern.
+      const body = await (await post(baseUrl, '/cancel-plan', {})).json();
+      expect(body.requestId).toBe('req-9');
+      expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ keepThrough: '2027-02-28' }));
+      expect(body.prepayDisposition).toBe('end_at_term');
+      expect(body.prepayTermOutcome).toBe('ends_at_term');
+    }));
+
     test('now + refund: coverage cancelled, refund RECORDED on the case + office task — nothing refunded automatically', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
@@ -1355,6 +1375,29 @@ describe('POST /:id/cancel-plan', () => {
       // The acceptance stays 'new': the next retry re-lands, resends
       // dedupe, and the close is re-attempted.
       expect(mockState.service_requests[0].status).toBe('new');
+    }));
+
+    test('a fingerprint-exempt retry is bounded by the APPROVED pull set — an appointment created after approval flags, an already-pulled one does not', () => withServer(async (baseUrl) => {
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: {
+          scope: [], waiveLateFee: false, sendConfirmation: true,
+          effectiveDate: 'now', prepayDisposition: null,
+          approvedPulledKeys: ['s1:2099-01-15'],
+        } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      // Run 2 sweeps a visit the operator never saw → exception, not clean.
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledIds: ['s1', 's-new'], cancelledCount: 2 });
+      const flagged = await (await post(baseUrl, '/cancel-plan', {})).json();
+      expect(flagged.errors).toContain('visits_pulled_beyond_preview');
+      // One-way: an approved row already pulled by run 1 is absent from a
+      // repair run's cancels and is NOT drift.
+      mockState.service_requests[0].status = 'new';
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledIds: [], cancelledCount: 0 });
+      const clean = await (await post(baseUrl, '/cancel-plan', {})).json();
+      expect(clean.errors || []).not.toContain('visits_pulled_beyond_preview');
     }));
 
     test('a repair whose case stamp FAILS clears nothing and keeps the acceptance open — retryable, never stale-resolved', () => withServer(async (baseUrl) => {
