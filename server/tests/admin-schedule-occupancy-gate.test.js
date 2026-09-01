@@ -402,7 +402,12 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
   test('a recurrence-only save that spawns children locks the parent + every child date, sorted, before any insert', async () => {
     const inserts = [];
     trx.mockImplementation((table) => {
-      const c = chain(table === 'scheduled_services' ? { ...SVC, is_recurring: false } : (table === 'customers' ? { id: 'cust-1' } : undefined));
+      // A normal recurring customer: real tier + monthly rate, so dues cover
+      // the series. Without those, recurringWithoutBillableAmount refuses the
+      // spawn before any locking — these tests are about lock ordering.
+      const c = chain(table === 'scheduled_services'
+        ? { ...SVC, is_recurring: false }
+        : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33 } : undefined));
       if (table === 'scheduled_services') {
         c.insert = jest.fn((data) => {
           inserts.push(data);
