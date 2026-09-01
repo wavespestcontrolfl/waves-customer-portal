@@ -13,6 +13,7 @@ const {
   serviceIsPresentInInputs,
   recordServiceOptOutEvent,
   staffOfferedKeys,
+  latestOptOutEventIsStaff,
   currentlyOptedOutKeys,
 } = require('../services/estimate-service-opt-out');
 const { optOutImpact, recurringServiceKeysOf } = require('../routes/estimate-public');
@@ -118,8 +119,11 @@ describe('staffOfferedKeys', () => {
     recordServiceOptOutEvent(data, { serviceKey: 'lawn_care', included: false, actor: 'staff', at: 't1' }, {});
     recordServiceOptOutEvent(data, { serviceKey: 'mosquito', included: false, actor: 'customer', at: 't2' }, {});
     expect(staffOfferedKeys(data)).toEqual(['lawn_care']);
+    expect(latestOptOutEventIsStaff(data, 'lawn_care')).toBe(true);
+    expect(latestOptOutEventIsStaff(data, 'mosquito')).toBe(false);
     recordServiceOptOutEvent(data, { serviceKey: 'lawn_care', included: true, actor: 'customer', at: 't3' }, {});
     expect(staffOfferedKeys(data)).toEqual([]);
+    expect(latestOptOutEventIsStaff(data, 'lawn_care')).toBe(false);
     expect(staffOfferedKeys({})).toEqual([]);
   });
 });

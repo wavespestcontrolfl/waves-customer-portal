@@ -14722,6 +14722,11 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         return { status: 400, body: ({ error: 'service_not_addable' }) };
       }
       mode = 'add';
+    } else if (OptOut.latestOptOutEventIsStaff(parsedData, serviceKey) && !serviceAddGateOn()) {
+      // A staff-parked offer (lead-service send) re-enters the plan only
+      // under the add gate — the lane that created it. Gate off = the offer
+      // is withheld from /data and refused here (pre-push codex P0).
+      return { status: 400, body: ({ error: 'service_not_addable' }) };
     } else if (OptOut.serviceOptOutBlockedByProposal(parsedData)
       || OptOut.serviceOptOutTierSelectionActive(parsedData, estimate.waveguard_tier)) {
       // Same refusals as removals: a proposal added AFTER the removal is the
@@ -24847,7 +24852,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
-        const removedKeys = currentlyOptedOutKeys(projected);
+        // Staff-parked offers (lead-service send) belong to the add lane: with
+        // the add gate off they are withheld entirely — no control, and no
+        // "removed" wording for a line the customer never touched. The
+        // mirror office inquiry may then re-offer the line, which is the
+        // pre-feature behavior.
+        const staffParked = staffOfferedKeys(projected);
+        const removedKeys = currentlyOptedOutKeys(projected)
+          .filter((k) => serviceAddGateOn() || !staffParked.includes(k));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && isEstimateAcceptActive(estimate)
@@ -24857,7 +24869,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           : [];
         if (!removedKeys.length && !addableKeys.length) return {};
         // Lines staff parked at send time read as an offer, not a removal.
-        const staffOffered = staffOfferedKeys(projected).filter((k) => removedKeys.includes(k));
+        const staffOffered = staffParked.filter((k) => removedKeys.includes(k));
         // A proposal that gained itemization after a removal — or a standing
         // /select-tier choice — refuses restores (same guards as the PUT), so
         // the "Add it back" control must not render. But the removed keys

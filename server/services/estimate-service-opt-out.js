@@ -428,6 +428,14 @@ function buildServiceAddInputs(estData = {}, serviceKey) {
 // Keys whose CURRENT state is "removed by staff at send time" — the page words
 // these as an offer ("Also available"), not as something the customer took
 // off ("removed · Add it back").
+// Whether `serviceKey`'s CURRENT state is a staff-parked offer (its latest
+// event is an actor:'staff' removal). A staff offer only ever re-enters the
+// plan under the add gate — the lane that created it — so the rail and the
+// /data stamp both consult this with the gate.
+function latestOptOutEventIsStaff(parsedData = {}, serviceKey) {
+  return staffOfferedKeys(parsedData).includes(serviceKey);
+}
+
 function staffOfferedKeys(parsedData = {}) {
   const events = parsedData?.serviceOptOut?.events;
   if (!Array.isArray(events)) return [];
@@ -474,4 +482,5 @@ module.exports = {
   serviceOptOutAddableKeys,
   buildServiceAddInputs,
   staffOfferedKeys,
+  latestOptOutEventIsStaff,
 };
