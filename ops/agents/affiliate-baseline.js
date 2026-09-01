@@ -1,6 +1,14 @@
-// READ-ONLY: capture the pre-activation baseline the affiliate pilot requires
-// (docs/affiliate-links-pilot.md — "Baseline first: 90 days of GSC + GA4 per
-// candidate URL ... recorded before any link activates").
+// READ-ONLY: capture the SEARCH/TRAFFIC HALF of the pre-activation baseline the
+// affiliate pilot requires (docs/affiliate-links-pilot.md — "Baseline first: 90
+// days of GSC + GA4 per candidate URL ... recorded before any link activates").
+//
+// ⚠️ PARTIAL BASELINE — not sufficient to activate links on its own. The pilot
+// spec also names estimate starts, calls, CTA clicks and geography. Those are
+// portal-side conversion signals needing URL-to-conversion attribution, which
+// is NOT built here. The documented stop rule ("STOP a page if its local
+// service conversion drops >10% vs baseline") cannot be evaluated from this
+// output alone: it measures traffic, not leads. Capture the conversion half
+// separately before any link activates.
 //
 // Pulls per-URL Search Console performance and GA4 pageviews for a window,
 // keeps blog-lane URLs only, and flags the topic classes the pilot excludes.
@@ -88,16 +96,24 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   const siteUrl = process.env.GSC_SITE_URL || 'https://wavespestcontrol.com';
 
   // ── Search Console: per-page totals over the window (read-only query) ──
+  // Row limits are applied API-side, BEFORE the blog/--url filters below, so a
+  // candidate outside the global top set would silently vanish. Both limits are
+  // set well above the site's page count and truncation is reported loudly
+  // rather than left to be discovered as a missing row.
+  const GSC_ROW_LIMIT = 5000;
+  const GA4_ROW_LIMIT = 5000;
+
   const gscRes = await gsc.webmasters.searchanalytics.query({
     siteUrl,
     requestBody: {
       startDate,
       endDate,
       dimensions: ['page'],
-      rowLimit: 1000,
+      rowLimit: GSC_ROW_LIMIT,
       type: 'web',
     },
   });
+  const gscTruncated = (gscRes.data.rows || []).length >= GSC_ROW_LIMIT;
 
   const pages = (gscRes.data.rows || []).map((row) => {
     const pageUrl = row.keys[0];
@@ -118,11 +134,42 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   // ── GA4: pageviews per path over the same window ──
   // Not every GA4 property exposes per-page history; a miss degrades the row
   // to GSC-only rather than failing the run.
-  const ga4Res = await ga4.getTopPages(startDate, endDate, 500).catch((e) => ({
+  const ga4Res = await ga4.getTopPages(startDate, endDate, GA4_ROW_LIMIT).catch((e) => ({
     configured: false, data: [], error: e.message,
   }));
+  const ga4Rows = ga4Res.data || [];
+  const ga4Truncated = ga4Rows.length >= GA4_ROW_LIMIT;
+
+  // getTopPages groups by pagePath AND pageTitle, so one path yields several
+  // rows when its title changed inside the window. Summing is required —
+  // keying a Map by path alone would keep whichever row happened to come last
+  // and understate the baseline in an order-dependent way.
   const ga4ByPath = new Map();
-  for (const r of ga4Res.data || []) ga4ByPath.set(r.pagePath, r);
+  for (const r of ga4Rows) {
+    const prev = ga4ByPath.get(r.pagePath);
+    const views = r.pageviews || 0;
+    if (!prev) {
+      ga4ByPath.set(r.pagePath, {
+        pageviews: views,
+        bounceWeighted: (r.bounceRate || 0) * views,
+        durWeighted: (r.avgSessionDuration || 0) * views,
+        pageTitle: r.pageTitle,
+        titleVariants: 1,
+      });
+    } else {
+      prev.pageviews += views;
+      prev.bounceWeighted += (r.bounceRate || 0) * views;
+      prev.durWeighted += (r.avgSessionDuration || 0) * views;
+      prev.titleVariants += 1;
+    }
+  }
+  // Collapse the weighted sums into pageview-weighted averages.
+  for (const v of ga4ByPath.values()) {
+    v.bounceRate = v.pageviews ? +(v.bounceWeighted / v.pageviews).toFixed(4) : null;
+    v.avgSessionDuration = v.pageviews ? +(v.durWeighted / v.pageviews).toFixed(2) : null;
+    delete v.bounceWeighted;
+    delete v.durWeighted;
+  }
 
   // ── Merge, filter, rank ──
   let rows = pages.map((p) => {
@@ -137,22 +184,49 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   });
 
   if (!SHOW_ALL) rows = rows.filter((r) => r.pageType === 'blog');
+
+  // A --url the API never returned is a SILENT MISS, not an empty result: the
+  // page may exist but sit outside the window, the blog lane, or a truncated
+  // response. Name it rather than printing a short table.
+  const unmatchedFilters = URL_FILTERS.filter(
+    (f) => !rows.some((r) => r.url.toLowerCase().includes(f))
+  );
   if (URL_FILTERS.length) {
     rows = rows.filter((r) => URL_FILTERS.some((f) => r.url.toLowerCase().includes(f)));
   }
   rows.sort((a, b) => b.impressions - a.impressions);
 
+  // A path GSC returned but GA4 did not: the traffic half of that row is blank,
+  // so it is not a complete baseline for that URL.
+  const missingGa4 = rows.filter((r) => r.pageviews === null).map((r) => r.path);
+
   const eligible = rows.filter((r) => !r.excludedBecause);
   const excluded = rows.filter((r) => r.excludedBecause);
+
+  const warnings = [];
+  if (gscTruncated) warnings.push(`GSC hit the ${GSC_ROW_LIMIT}-row cap — some pages are missing from this baseline.`);
+  if (ga4Truncated) warnings.push(`GA4 hit the ${GA4_ROW_LIMIT}-row cap — some pageview figures are missing.`);
+  for (const f of unmatchedFilters) warnings.push(`--url=${f} matched no returned page — NOT captured.`);
+  if (missingGa4.length) warnings.push(`${missingGa4.length} page(s) have GSC data but no GA4 pageviews (GSC-only rows).`);
 
   const payload = {
     window: { startDate, endDate, days: DAYS },
     siteUrl,
     capturedAt: new Date().toISOString(),
+    partialBaseline: 'search/traffic only — estimate starts, calls, CTA clicks and geography are NOT captured here',
     sources: {
-      gsc: { rows: pages.length },
-      ga4: { configured: ga4Res.configured !== false, rows: (ga4Res.data || []).length, error: ga4Res.error || null },
+      gsc: { rows: pages.length, rowLimit: GSC_ROW_LIMIT, truncated: gscTruncated },
+      ga4: {
+        configured: ga4Res.configured !== false,
+        rows: ga4Rows.length,
+        rowLimit: GA4_ROW_LIMIT,
+        truncated: ga4Truncated,
+        pathsAfterTitleMerge: ga4ByPath.size,
+        error: ga4Res.error || null,
+      },
     },
+    warnings,
+    missingGa4,
     counts: { blogLane: rows.length, eligible: eligible.length, excluded: excluded.length },
     eligible: eligible.slice(0, LIMIT),
     excluded: excluded.slice(0, LIMIT),
@@ -172,6 +246,11 @@ const fmt = (d) => d.toISOString().slice(0, 10);
   if (payload.sources.ga4.error) console.log(`GA4 error: ${payload.sources.ga4.error}`);
   if (!SHOW_ALL) console.log(`Filter: blog lane only (service/city pages are structurally excluded from the pilot)`);
 
+  if (warnings.length) {
+    console.log(`\n⚠️  ${warnings.length} warning(s) — this snapshot is incomplete:`);
+    for (const w of warnings) console.log(`   • ${w}`);
+  }
+
   console.log(`\n── Eligible candidates (${eligible.length}) ──`);
   console.log(`${pad('PATH', 52)} ${num('CLICKS', 7)} ${num('IMPR', 8)} ${num('POS', 6)} ${num('VIEWS', 7)}`);
   for (const r of eligible.slice(0, LIMIT)) {
@@ -187,7 +266,9 @@ const fmt = (d) => d.toISOString().slice(0, 10);
 
   console.log(`\nPilot needs 6: 2 nonchemical prevention, 2 lawn/irrigation measurement, 2 field-tool/equipment.`);
   console.log(`Theme selection is a human call — this ranks by search demand, it does not read the articles.`);
-  console.log(`Re-run with --json to store the snapshot before any link activates.\n`);
+  console.log(`Re-run with --json to store the snapshot before any link activates.`);
+  console.log(`PARTIAL: estimate starts, calls, CTA clicks and geography are NOT captured here — the`);
+  console.log(`stop rule ("service conversion drops >10% vs baseline") needs that half captured separately.\n`);
 })().catch((e) => {
   console.error(`affiliate-baseline failed: ${e.message}`);
   process.exit(1);
