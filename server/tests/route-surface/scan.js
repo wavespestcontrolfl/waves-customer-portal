@@ -243,7 +243,8 @@ class ModuleAnalysis {
     const callArgArrays = []; // { arr, call } — exemption decided post-walk
     const memberAssignments = [];
     walk(this.ast.program, (node, ctx) => {
-      if (node.type === 'CallExpression' && node.arguments.some((a) => a && a.type === 'Identifier')) {
+      if ((node.type === 'CallExpression' || node.type === 'NewExpression')
+        && node.arguments.some((a) => a && (a.type === 'Identifier' || a.type === 'ArrayExpression'))) {
         callsWithIdentifierArgs.push(node);
       }
       if (node.type === 'OptionalCallExpression'
@@ -1309,7 +1310,12 @@ class Scanner {
     for (const rel of this.listServerFiles()) {
       if (this.modules.has(rel)) continue;
       let m;
-      try { m = new ModuleAnalysis(rel, this.read(rel), this); } catch { continue; }
+      try { m = new ModuleAnalysis(rel, this.read(rel), this); } catch (err) {
+        // The sweep exists to catch side-effect installers — a file it
+        // cannot analyze could hide one. Fail closed.
+        this.problems.push(`${rel}: side-effect sweep cannot analyze this file (${err.message}) — fix its shape or move it out of server/`);
+        continue;
+      }
       flag(m); // its OTHER problems are ignored — the file is not mounted surface
     }
   }
@@ -1552,6 +1558,16 @@ class Scanner {
     for (const r of this.routes) {
       if (!r.resolved && r.public) {
         problems.push(`${r.loc}: unguarded route with an unresolvable path (${r.method} ${r.path}) — the scanner cannot prove what it exposes`);
+      }
+    }
+    // A PUBLIC route registered inside a FUNCTION is deferred: whether and
+    // under what condition the function runs is invisible to the identity
+    // (`if (dev) install()` and bare `install()` key identically), so a
+    // conditionally-invoked debug route could lose its guard without
+    // re-review. Public surface must be registered at module level.
+    for (const r of this.routes) {
+      if (r.public && r.conditional && /(^|( && ))function( [A-Za-z0-9_$]+)?(( && )|$)/.test(r.cond || '')) {
+        problems.push(`${r.loc}: public route ${r.method} ${r.path} is registered inside a function — its invocation conditions are unknowable; register it at module top level (or guard it)`);
       }
     }
     // Two PUBLIC routes from different source locations must never share one

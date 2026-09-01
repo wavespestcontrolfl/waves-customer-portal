@@ -1171,6 +1171,41 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
   });
 
+  test('a server file the side-effect sweep cannot analyze is a problem, never silence', () => {
+    const res = scanOf({
+      'server/index.js': app("app.get('/ok', (req, res) => res.json({}));"),
+      'server/services/broken.js': 'this is not javascript {{{',
+    });
+    expect(res.problems.some((p) => p.includes('sweep cannot analyze'))).toBe(true);
+  });
+
+  test('a CONSTRUCTOR receiving the app (new Installer(app)) is an unanalysed-consumer problem', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const { Installer } = require('./services/installer');",
+        'new Installer(app);',
+      ].join('\n')),
+      'server/services/installer.js': [
+        "function Installer(a) { a.get('/leak', (req, res) => res.json({})); }",
+        'module.exports = { Installer };',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('unanalysed function'))).toBe(true);
+  });
+
+  test('a PUBLIC route registered inside a function is a problem (invocation is unknowable)', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'install();',
+        "function install() { router.get('/debug', (req, res) => res.json({})); }",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('registered inside a function'))).toBe(true);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
