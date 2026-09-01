@@ -80,39 +80,50 @@ async function maybeRaiseHotViewAlert({
       .filter((s) => s && s.startedAt && new Date(s.startedAt).getTime() >= windowStart).length;
     if (recent < minSessions) return { raised: false, reason: 'below_threshold' };
 
-    // Durable 24h dedupe on the notifications table — the same existence
-    // check the office-request notify core uses, so a redeploy or a second
-    // process never re-rings. The dedupeKey below closes the race between
-    // two concurrent opens (notifyAdmin's advisory-lock mechanism).
-    const existing = await dbh('notifications')
-      .where({ recipient_type: 'admin', category: HOT_VIEW_CATEGORY })
-      .whereRaw("metadata->>'estimateId' = ?", [String(estimate.id)])
-      .where('created_at', '>', dbh.raw(`NOW() - interval '${HOT_VIEW_DEDUPE_HOURS} hours'`))
-      .first();
-    if (existing) return { raised: false, reason: 'deduped' };
-
     const who = String(estimate.customer_name || '').trim() || 'A customer';
     const bodyParts = [`${ordinal(recent)} visit in ${windowHours}h`];
     const money = moneyPerMonth(estimate.monthly_total);
     const tail = [money, String(estimate.address || '').trim() || null].filter(Boolean).join(', ');
     if (tail) bodyParts.push(tail);
-    const dayBucket = Math.floor(now.getTime() / (HOT_VIEW_DEDUPE_HOURS * 3600000));
-    const result = await notify(
-      HOT_VIEW_CATEGORY,
-      `${who} is reading their estimate again`,
-      bodyParts.join(' — '),
-      {
-        // Same deep-link the estimate bells already use; EstimatesPageV2
-        // scrolls to ?estimateId=<id>.
-        link: `/admin/estimates?estimateId=${estimate.id}`,
-        metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, sessions: recent },
-        dedupeKey: `${HOT_VIEW_CATEGORY}:${estimate.id}:${dayBucket}`,
-      },
-    );
-    if (result && result.deduped) return { raised: false, reason: 'deduped' };
-    if (!result) return { raised: false, reason: 'notify_failed' };
-    logger.info(`[est-hot-view] raised for estimate ${estimate.id} (${recent} sessions / ${windowHours}h)`);
-    return { raised: true, reason: result.suppressed ? 'suppressed' : 'sent' };
+    const title = `${who} is reading their estimate again`;
+    const body = bodyParts.join(' — ');
+    const opts = {
+      // Same deep-link the estimate bells already use; EstimatesPageV2
+      // scrolls to ?estimateId=<id>.
+      link: `/admin/estimates?estimateId=${estimate.id}`,
+      metadata: { estimateId: estimate.id, customerId: estimate.customer_id || null, sessions: recent },
+    };
+
+    // Durable ROLLING 24h dedupe on the notifications table — the same
+    // existence check the office-request notify core uses, so a redeploy or
+    // a second process never re-rings. The check and the insert run under
+    // ONE stable per-estimate advisory xact lock (pre-push codex P1): a
+    // day-bucketed dedupeKey would hand two opens straddling the bucket
+    // boundary different locks, and both could pass the check before either
+    // inserted. The lock holder commits before releasing, so the next opener
+    // sees the row. Unit-test mocks without transaction support take the
+    // unserialized path.
+    const decideAndSend = async (trx) => {
+      const existing = await trx('notifications')
+        .where({ recipient_type: 'admin', category: HOT_VIEW_CATEGORY })
+        .whereRaw("metadata->>'estimateId' = ?", [String(estimate.id)])
+        .where('created_at', '>', trx.raw(`NOW() - interval '${HOT_VIEW_DEDUPE_HOURS} hours'`))
+        .first();
+      if (existing) return { raised: false, reason: 'deduped' };
+      const result = await notify(HOT_VIEW_CATEGORY, title, body, trx === dbh ? opts : { ...opts, connection: trx });
+      if (!result) return { raised: false, reason: 'notify_failed' };
+      return { raised: true, reason: result.suppressed ? 'suppressed' : 'sent' };
+    };
+    const outcome = typeof dbh.transaction === 'function'
+      ? await dbh.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${HOT_VIEW_CATEGORY}:${estimate.id}`]);
+        return decideAndSend(trx);
+      })
+      : await decideAndSend(dbh);
+    if (outcome.raised) {
+      logger.info(`[est-hot-view] raised for estimate ${estimate.id} (${recent} sessions / ${windowHours}h)`);
+    }
+    return outcome;
   } catch (err) {
     logger.warn(`[est-hot-view] alert failed for estimate ${estimate?.id}: ${err.message}`);
     return { raised: false, reason: 'error' };
