@@ -12178,7 +12178,7 @@ export function CompletionPanel({
             // season/weather/expectations prompt context.
             serviceId: service.id || null,
             serviceType: service.serviceType,
-            areasTreated: areasServiced,
+            areasTreated: completionAreasServiced,
             // Tech-chosen solutions feed the AI recap prompt on every line
             // (owner directive 2026-07-21) — context only, the prompt rules
             // keep product names out of the customer copy.
@@ -12232,7 +12232,7 @@ export function CompletionPanel({
     // debounce above absorbs per-keystroke churn.
     recapProductsKey,
     visitOutcome,
-    areasServiced,
+    completionAreasServiced,
     observationsText,
     recommendationsText,
     clientPestRating,
@@ -12269,7 +12269,7 @@ export function CompletionPanel({
           visitOutcome,
           serviceId: service.id || null,
           serviceType: service.serviceType,
-          areasTreated: areasServiced,
+          areasTreated: completionAreasServiced,
           products: selectedProducts.map((p) => ({
             productId: p.productId,
             name: p.displayName || p.name,
@@ -12640,7 +12640,7 @@ export function CompletionPanel({
           : notes,
       ),
       productsApplied,
-      areasServiced,
+      areasServiced: completionAreasServiced,
       actionsCompleted,
       observations,
       recommendations,
@@ -12659,7 +12659,7 @@ export function CompletionPanel({
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
       productsApplied.length > 0 ||
-      areasServiced.length > 0 ||
+      completionAreasServiced.length > 0 ||
       actionsCompleted.length > 0 ||
       observations.length > 0 ||
       recommendations.length > 0 ||
