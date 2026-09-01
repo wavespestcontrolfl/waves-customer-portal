@@ -1811,11 +1811,15 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
     ? Number(breakdown.total)
     : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
   const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
+  const hasTrapOnlyMonitoring = items.some((item) => String(item?.service || '').startsWith('trap_only_'));
+  const sectionTitle = hasTrapOnlyMonitoring
+    ? (items.every((item) => String(item?.service || '').startsWith('trap_only_')) ? 'Trap-only monitoring plan' : 'Plan services and one-time work')
+    : 'One-time services';
 
   return (
     <div style={estimateCard({ padding: 16 })}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
-        One-time services
+        {sectionTitle}
       </div>
       <div style={{ display: 'grid', gap: 12 }}>
         {items.map((item, i) => {
@@ -3650,6 +3654,8 @@ function customerOneTimeLabel(item = {}) {
   const isTermiteInstall = item.service === 'termite_bait_installation'
     || /\b(advance|trelona)\s+installation\b/i.test(label);
   if (isTermiteInstall) return 'Termite Bait Installation';
+  if (item.service === 'wdo_inspection' || item.service === 'wdo') return 'WDO Inspection';
+  if (item.service === 'termite_foam' || item.service === 'foam_drill') return 'Termite Foam Treatment';
   return label || 'One-time service';
 }
 
@@ -4314,6 +4320,18 @@ const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']
 // payment intents into B. It also neutralizes a slow /:token/data fetch: a
 // response for A that resolves after navigating to B lands on the unmounted
 // old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
+// The server's decision (estimate.regulatedCertificateSurface, computed from
+// the raw one-time rows before any breakdown alignment) wins outright; the
+// row-based derivation below is the fail-closed fallback for payloads that
+// predate the flag and for the dev-preview fixtures.
+export function estimateHasRegulatedCertificateSurface(serviceCategory, services = [], oneTimeItems = [], serverAffirmed = false) {
+  if (serverAffirmed === true) return true;
+  const regulatedCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
+  return regulatedCategories.has(serviceCategory)
+    || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
+    || oneTimeItems.some((item) => regulatedCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)));
+}
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   return <EstimateViewPageInner key={token || 'no-token'} />;
@@ -6006,6 +6024,12 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
+  const isRegulatedCertificateSurface = estimateHasRegulatedCertificateSurface(
+    serviceCategory,
+    services,
+    pricing?.oneTimeBreakdown?.items || [],
+    estimate?.regulatedCertificateSurface === true,
+  );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic
@@ -6017,8 +6041,12 @@ function EstimateViewPageInner() {
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
   // Review-gated quotes get the confirm-with-you variant instead of
   // "approve online and pick a day" (codex P2 r3).
+  const serviceSpecificOneTimeHero = new Set([
+    'termite_trenching', 'pre_slab_termiticide', 'bora_care',
+    'wdo_inspection', 'termite_foam', 'trap_only',
+  ]).has(serviceCategory);
   const glassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
     : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
@@ -6055,7 +6083,9 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  const intelligenceDisplay = glassPack && estimate.intelligence
+  const intelligenceDisplay = isRegulatedCertificateSurface
+    ? null
+    : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
   const askChips = glassPack?.askChips || pricing.askChips;
@@ -6654,7 +6684,7 @@ function EstimateViewPageInner() {
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-        {showAskBar ? (
+        {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
@@ -6713,14 +6743,18 @@ function EstimateViewPageInner() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
-      <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-      <EstimateAskBar
-        token={token}
-        askToken={estimate.askToken}
-        selectedFrequency={selectedFrequency}
-        serviceMode={serviceMode}
-        chips={askChips}
-      />
+      {!isRegulatedCertificateSurface ? (
+        <>
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <EstimateAskBar
+            token={token}
+            askToken={estimate.askToken}
+            selectedFrequency={selectedFrequency}
+            serviceMode={serviceMode}
+            chips={askChips}
+          />
+        </>
+      ) : null}
       <EstimateAddServiceRequestCard
         offer={addServiceOffer}
         requestState={addServiceRequestState}
@@ -7185,13 +7219,15 @@ function EstimateViewPageInner() {
                   — the standalone card read as a duplicate review section). */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <EstimateAskBar
-                token={token}
-                askToken={estimate.askToken}
-                selectedFrequency={selectedFrequency}
-                serviceMode={serviceMode}
-                chips={askChips}
-              />
+              {!isRegulatedCertificateSurface ? (
+                <EstimateAskBar
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedFrequency={selectedFrequency}
+                  serviceMode={serviceMode}
+                  chips={askChips}
+                />
+              ) : null}
               <EstimateAddServiceRequestCard
                 offer={addServiceOffer}
                 requestState={addServiceRequestState}
