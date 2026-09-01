@@ -337,7 +337,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
         channel: 'sms',
         purpose: 'appointment_reminder_24h',
         customer_id: 'c9',
-        metadata: { original_message_type: 'reminder_24h', scheduled_service_id: 'ss-owner' },
+        // rendered_slot_ms = the grouped 9:00 slot the text advertised (2026-06-22 ET).
+        metadata: { original_message_type: 'reminder_24h', scheduled_service_id: 'ss-owner', rendered_slot_ms: Date.parse('2026-06-22T13:00:00.000Z') },
       },
     });
     const custReadChain = chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } });
@@ -383,6 +384,31 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       idempotencyKey: 'appointment.reminder_24h:visit:visit-9:reminder_24h:2026-06-22',
     }));
     cardHoldReminderNote.mockImplementation(async () => '');
+  });
+
+  test('grouped 24h bounce AFTER the visit moved to another date: no recovery email — the new occurrence\'s key stays unconsumed (pre-push codex r8 P1)', async () => {
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_reminder_24h',
+        customer_id: 'c9',
+        metadata: { original_message_type: 'reminder_24h', scheduled_service_id: 'ss-owner', rendered_slot_ms: Date.parse('2026-06-22T13:00:00.000Z') },
+      },
+    });
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })],
+      appointment_reminders: [chain({ first: { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-25T14:00:00.000Z', service_type: 'Quarterly Pest Control' } })],
+      scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
+      service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-25' } })], // moved: 22nd → 25th
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_grouped_moved', status: 'undelivered', errorCode: '30003', to: '+19415551234',
+    });
+
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('non-appointment message is ignored (no landline change, no email)', async () => {

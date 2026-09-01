@@ -3527,16 +3527,38 @@ const AppointmentReminders = {
         if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
           try {
             const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
-            if (svc?.visit_id) {
-              const copy = await visitReminderCopyInputs(svc.visit_id, reminderRow);
-              apptTime = copy.apptTime;
-              cardHoldNote = copy.holdNote;
-              serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: svc.visit_id });
-              // Same visit-scoped key the direct email leg used, so a
-              // 'both'-channel bounce recovery dedupes against the email
-              // that already went out (GH codex r7 P1).
-              const visit = await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date');
-              if (visit) emailIdempotencyKey = visitReminderEmailKey(kind, require('./visit-groups').dedupeKeyFor(visit, `reminder_${kind}`));
+            const visit = svc?.visit_id
+              ? await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date')
+              : null;
+            if (visit) {
+              // The OCCURRENCE the bounced text represented is its own
+              // rendered slot (audit metadata), never the visit's current
+              // date (pre-push codex r8 P1): a late bounce after a unit
+              // move would otherwise email the NEW date's copy under the
+              // new date's key and dedupe away the correctly timed
+              // reminder for that occurrence. Moved since the text ⇒ the
+              // bounced notice is stale; the re-armed rows own the new
+              // date. Every grouped send stamps rendered_slot_ms, so a
+              // missing stamp means an ungrouped send — per-row copy.
+              const slotMs = Number(audit.metadata?.rendered_slot_ms);
+              const textedDate = Number.isFinite(slotMs) ? etDateString(new Date(slotMs)) : null;
+              const visitDate = visit.scheduled_date instanceof Date
+                ? visit.scheduled_date.toISOString().slice(0, 10)
+                : String(visit.scheduled_date || '').slice(0, 10);
+              if (textedDate && textedDate !== visitDate) {
+                logger.info(`[appt-remind] skipping ${kind} email fallback for ${scheduledServiceId} — grouped visit ${visit.id} moved from ${textedDate} to ${visitDate} since the text; the re-armed reminders own the new date`);
+                return;
+              }
+              if (textedDate) {
+                const copy = await visitReminderCopyInputs(visit.id, reminderRow);
+                apptTime = copy.apptTime;
+                cardHoldNote = copy.holdNote;
+                serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: visit.id });
+                // Same visit-scoped key the direct email leg used, so a
+                // 'both'-channel bounce recovery dedupes against the email
+                // that already went out (GH codex r7 P1).
+                emailIdempotencyKey = visitReminderEmailKey(kind, require('./visit-groups').dedupeKeyFor(visit, `reminder_${kind}`));
+              }
             }
           } catch (visitErr) {
             logger.warn(`[appt-remind] grouped copy rebuild failed for ${scheduledServiceId} — emailing the per-row copy: ${visitErr.message}`);
