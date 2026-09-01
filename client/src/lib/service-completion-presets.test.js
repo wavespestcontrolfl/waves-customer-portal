@@ -7,8 +7,20 @@ import {
   replaceFindingGroupSelection,
   specialtyCompletionFor,
 } from "./service-completion-presets";
+import observationAllowlist from "../../../shared/specialty-service-observations";
+
+const { SPECIALTY_SERVICE_OBSERVATION_SET } = observationAllowlist;
 
 describe("specialty pest completion configuration", () => {
+  test("every dropdown observation is server-approved for customer report egress", () => {
+    for (const preset of Object.values(SERVICE_COMPLETION_PRESETS)) {
+      for (const group of preset.findingGroups) {
+        for (const item of group.options) {
+          expect(SPECIALTY_SERVICE_OBSERVATION_SET.has(item.value)).toBe(true);
+        }
+      }
+    }
+  });
   test.each([
     ["fire_ant", "Fire Ant Treatment"],
     ["tick_control", "Tick Control Service"],

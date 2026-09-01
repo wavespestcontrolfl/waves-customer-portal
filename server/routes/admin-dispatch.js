@@ -4328,6 +4328,7 @@ const {
   splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
 } = require('../services/completion-invoice-candidate');
+const { SPECIALTY_SERVICE_OBSERVATION_SET } = require('../../shared/specialty-service-observations');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -5283,6 +5284,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formObservations = normalizeCompletionTextArray(
       Array.isArray(structuredObservations) ? structuredObservations : [],
     );
+    const invalidStructuredObservation = formObservations.find(
+      (value) => !SPECIALTY_SERVICE_OBSERVATION_SET.has(value),
+    );
+    if (invalidStructuredObservation) {
+      return res.status(422).json({
+        error: 'A structured observation is not valid for customer report publication.',
+        code: 'invalid_structured_observation',
+      });
+    }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
