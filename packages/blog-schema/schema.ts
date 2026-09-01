@@ -1178,6 +1178,35 @@ function tagsNamed(src: string, name: string): Array<{ start: number; attrs: str
   return found;
 }
 
+// The component renders its CHILDREN as the anchor text: a self-closing,
+// empty, comment-only, or unclosed <AffiliateLink> ships an empty,
+// unusable product link (Codex #3646 r35). The balanced close is walked
+// on the string-blanked view (a quoted '</AffiliateLink>' inside an
+// expression never closes it early); children are judged with comments
+// and empty-string expressions ({''}) removed.
+function affiliateLinkTextIsEmpty(src: string, strView: string, start: number, attrs: string): boolean {
+  if (attrs.trimEnd().endsWith('/')) return true;
+  const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
+  const tagRe = /<(\/?)AffiliateLink(?=[\s/>])/g;
+  tagRe.lastIndex = openEnd + 1;
+  let depth = 1; let t: RegExpExecArray | null;
+  while ((t = tagRe.exec(strView)) !== null) {
+    if (t[1] === '/') {
+      depth -= 1;
+      if (depth === 0) {
+        const children = src.slice(openEnd + 1, t.index)
+          .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, '')
+          .replace(/\{\s*(['"`])\1\s*\}/g, '');
+        return !children.trim();
+      }
+    } else {
+      const a = tagAttrsAt(src, t.index);
+      if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
+    }
+  }
+  return true; // unclosed — nothing renders
+}
+
 // A service-route path (exact route, optional ?query/#fragment).
 const SERVICE_ROUTE_PATH_RE =
   /^\/(?:book|contact|quote|pest-control-quote|pest-control-calculator|pest-control-services|waveguard-memberships|termite-inspection|termite-control|pest-inspection)\/(?:[?#].*)?$|^\/(?:commercial-pest-control|pest-control-services|pest-control-quote|tree-and-shrub-care|palm-tree-injections|termite-inspection|termite-control|mosquito-control|bed-bug-control|rodent-control|lawn-aeration|pest-control|lawn-care)-(?:bradenton|lakewood-ranch|sarasota|venice|north-port|palmetto|parrish|port-charlotte)-fl\/(?:[?#].*)?$/;
@@ -1647,6 +1676,9 @@ export function validateAffiliateUsage(
     if (attrs !== null && hasJsxSpread(attrs)) {
       blockers.push('<AffiliateLink> may not carry a JSX spread ({...}) — a spread can override product/placement at render time, so the invocation cannot be validated against the registry');
       continue;
+    }
+    if (attrs !== null && affiliateLinkTextIsEmpty(unmasked, exprStringView, start, attrs)) {
+      blockers.push('<AffiliateLink> must wrap visible link text — a self-closing, empty, comment-only, or unclosed invocation renders an empty, unusable product link (the component renders its children as the anchor text)');
     }
     const id = attrs === null ? null : literalAttr(attrs, 'product');
     const placement = attrs === null ? null : literalAttr(attrs, 'placement');

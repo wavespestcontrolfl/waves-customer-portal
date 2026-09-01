@@ -1891,6 +1891,30 @@ function isExactTagAt(text, start, name) {
   return after === undefined || /[\s/>]/.test(after);
 }
 
+// The component renders its CHILDREN as the anchor text, so a self-closing,
+// empty, comment-only, or unclosed <AffiliateLink> ships an empty, unusable
+// product link (Codex #3646 r35). The balanced close is walked on the
+// string-blanked view (a quoted '</AffiliateLink>' inside an expression
+// never closes it early); children are read from the comment-blanked view
+// with empty-string expressions ({''}) removed.
+function affiliateLinkTextIsEmpty(masked, strView, start, attrs) {
+  if (attrs.trimEnd().endsWith('/')) return true;
+  const openEnd = start + '<AffiliateLink'.length + attrs.length; // index of '>'
+  const tagRe = /<(\/?)AffiliateLink(?=[\s/>])/g;
+  tagRe.lastIndex = openEnd + 1;
+  let depth = 1; let t;
+  while ((t = tagRe.exec(strView)) !== null) {
+    if (t[1] === '/') {
+      depth -= 1;
+      if (depth === 0) return !masked.slice(openEnd + 1, t.index).replace(/\{\s*(['"`])\1\s*\}/g, '').trim();
+    } else {
+      const a = tagAttrsAt(masked, t.index);
+      if (a !== null && !a.trimEnd().endsWith('/')) depth += 1;
+    }
+  }
+  return true; // unclosed — nothing renders
+}
+
 function collectAffiliateLinkTags(text) {
   // Astro-parity COUNTING view: code and comments never render, so an
   // <AffiliateLink> inside a fenced example is not a component (it would
@@ -1918,10 +1942,10 @@ function collectAffiliateLinkTags(text) {
   while ((m = re.exec(masked)) !== null) {
     if (strView[m.index] === ' ') continue; // string/attr display text
     const attrs = tagAttrsAt(masked, m.index);
-    if (attrs === null) { tags.push({ start: m.index, attrs: '', productId: null, placement: null }); continue; }
+    if (attrs === null) { tags.push({ start: m.index, attrs: '', productId: null, placement: null, emptyText: true }); continue; }
     const productId = literalAttribute(attrs, 'product');
     const placement = literalAttribute(attrs, 'placement');
-    tags.push({ start: m.index, attrs, productId: productId || null, placement: placement || null });
+    tags.push({ start: m.index, attrs, productId: productId || null, placement: placement || null, emptyText: affiliateLinkTextIsEmpty(masked, strView, m.index, attrs) });
   }
   return tags;
 }
@@ -2501,6 +2525,9 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
     // astro contract rejects it outright (Codex #3646 r19).
     if (hasAttrSpreadAfter(tag.attrs)) {
       push('P0', 'INVALID_AFFILIATELINK_PROPS', '{...}', 'Draft contains an <AffiliateLink> carrying a JSX spread ({...}) — a spread can override product/placement at render time; the astro publish gate rejects it.');
+    }
+    if (tag.emptyText) {
+      push('P0', 'EMPTY_AFFILIATE_LINK_TEXT', tag.productId || '(no-product)', 'Draft contains an <AffiliateLink> with no visible link text (self-closing, empty, comment-only, or unclosed) — the component renders its children as the anchor text, so this ships an empty, unusable product link; the astro publish gate rejects it.');
     }
     for (const { name } of eachJsxAttr(tag.attrs)) {
       if (name !== 'product' && name !== 'placement') {

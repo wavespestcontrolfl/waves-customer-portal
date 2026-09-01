@@ -843,6 +843,24 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species={[{name: `x${y}`, risk: `invalid`, where: `x`, hunt: `x`, eggSac: `x`}]} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBe(0);
   });
 
+  test('an AffiliateLink must wrap visible link text (Codex #3646 r35)', () => {
+    withAffiliateEnv(() => {
+      const at = (tag) => `Intro.\n\n## Sec\n\n[quote](/quote/) ${tag}`;
+      const bad = [
+        '<AffiliateLink product="rain-gauge" placement="primary-rec" />',
+        '<AffiliateLink product="rain-gauge" placement="primary-rec"></AffiliateLink>',
+        '<AffiliateLink product="rain-gauge" placement="primary-rec">   </AffiliateLink>',
+        '<AffiliateLink product="rain-gauge" placement="primary-rec">{/* soon */}</AffiliateLink>',
+        "<AffiliateLink product=\"rain-gauge\" placement=\"primary-rec\">{''}</AffiliateLink>",
+        '<AffiliateLink product="rain-gauge" placement="primary-rec">unclosed',
+      ];
+      for (const b of bad) expect(affiliateCodes(guardrails.evaluate({ body: at(b), frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      expect(affiliateCodes(guardrails.evaluate({ body: at('<AffiliateLink product="rain-gauge" placement="primary-rec">a `rain` gauge</AffiliateLink>'), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+      // A quoted closer inside an expression is rendered TEXT — it neither closes the link early nor leaves it empty.
+      expect(affiliateCodes(guardrails.evaluate({ body: at("<AffiliateLink product=\"rain-gauge\" placement=\"primary-rec\">{'</AffiliateLink>'}</AffiliateLink>"), frontmatter: fm() }, { targetIsBlog: true }))).not.toContain('P0:EMPTY_AFFILIATE_LINK_TEXT');
+    });
+  });
+
   test('spread wrappers hide their CTA (astro parity, Codex #3646 r28)', () => {
     withAffiliateEnv(() => {
       const b = `Intro.\n\n## Sec\n\n<div {...props}>[Quote](/quote/)</div>\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
@@ -1090,6 +1108,7 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
       'INACTIVE_OR_EXPIRED_AFFILIATE_PRODUCT', 'PESTICIDE_LINK_WITHOUT_CURRENT_LABEL_REVIEW',
       'SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE', 'EXCESSIVE_AFFILIATE_LINK_DENSITY', 'AFFILIATE_PLACEMENT_NOT_ALLOWED',
       'AFFILIATE_DISCLOSURE_WITHOUT_LINKS', 'AFFILIATE_POST_NOT_HUB_ONLY', 'INVALID_INLINECTA_PROPS', 'INVALID_AFFILIATELINK_PROPS', 'INVALID_SPIDERIDBOARD_PROPS', 'AFFILIATE_LINK_REMOVED_ON_REFRESH',
+      'EMPTY_AFFILIATE_LINK_TEXT',
     ]) {
       expect(typeof GATE_RETRY_INSTRUCTIONS[code]).toBe('string');
     }
