@@ -239,6 +239,16 @@ const post = (baseUrl, path, body = {}) => fetch(`${baseUrl}/api/admin/customers
   body: JSON.stringify(body),
 });
 
+// Fresh commits carry the MANDATORY approval fingerprint: fetch it from a
+// preview of the same body first. Repair retries are exempt (open
+// acceptance) and pre-gate refusals never reach the requirement, so those
+// call sites may keep plain post.
+const postCancel = async (baseUrl, body = {}) => {
+  const p = await post(baseUrl, '/cancel-plan/preview', body);
+  const fp = p.status === 200 ? (await p.json()).previewFingerprint : null;
+  return post(baseUrl, '/cancel-plan', { ...body, ...(fp ? { previewFingerprint: fp } : {}) });
+};
+
 const PROCESSED = { ok: true, cancelledCount: 3, recurrenceStopped: 2, churned: true, errors: [], keptThrough: null, lateFeeWaived: false };
 
 beforeEach(() => {
@@ -277,7 +287,7 @@ describe('gate', () => {
     delete process.env.GATE_CANCEL_FLOW_V2;
     const preview = await post(baseUrl, '/cancel-plan/preview');
     expect(preview.status).toBe(404);
-    const commit = await post(baseUrl, '/cancel-plan');
+    const commit = await postCancel(baseUrl);
     expect(commit.status).toBe(404);
     expect((await commit.json()).code).toBe('cancel_flow_v2_off');
     expect(mockProcess).not.toHaveBeenCalled();
@@ -373,7 +383,7 @@ describe('POST /:id/cancel-plan', () => {
     mockOpenCase.mockImplementation(async (args) => { order.push('case'); return { id: 'case-1', ...args }; });
     sendCancellationConfirmations.mockImplementation(async () => { order.push('confirm'); return { smsSent: true, emailSent: true, channels: ['sms', 'email'] }; });
 
-    const res = await post(baseUrl, '/cancel-plan', { reasonCode: 'price', note: 'Too expensive', waiveLateFee: true });
+    const res = await postCancel(baseUrl, { reasonCode: 'price', note: 'Too expensive', waiveLateFee: true });
     expect(res.status).toBe(200);
     const body = await res.json();
 
@@ -414,7 +424,7 @@ describe('POST /:id/cancel-plan', () => {
   }));
 
   test('sendConfirmation false ⇒ no customer communication at all', () => withServer(async (baseUrl) => {
-    const body = await (await post(baseUrl, '/cancel-plan', { sendConfirmation: false })).json();
+    const body = await (await postCancel(baseUrl, { sendConfirmation: false })).json();
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     expect(body).toEqual(expect.objectContaining({ confirmation: null, confirmationChannels: [], confirmationRequested: false }));
     expect(mockOpenCase.mock.calls[0][0].snapshot.sendConfirmation).toBe(false);
@@ -455,9 +465,9 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a retry after a partial run reuses the SAME accepted request — the repair pass can find the first attempt\'s rows', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['visit_cancel_flip:s1'] });
-    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    const first = await (await postCancel(baseUrl)).json();
     expect(first.processed).toBe(false);
-    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    const second = await (await postCancel(baseUrl)).json();
     expect(second.requestId).toBe(first.requestId);
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
     // Both runs hand the processor the SAME request-id reason, so the
@@ -467,19 +477,19 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockState.service_requests.find((r) => r.id === second.requestId).status).toBe('resolved');
     // …so a LATER cancel (win-back cancelled again) opens a fresh request
     // with its own case/audit trail instead of reusing the finished one.
-    const third = await (await post(baseUrl, '/cancel-plan')).json();
+    const third = await (await postCancel(baseUrl)).json();
     expect(third.requestId).not.toBe(first.requestId);
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(2);
   }));
 
   test('a lost-response retry after a CLEAN run echoes the recorded outcome — never nothing_to_cancel', () => withServer(async (baseUrl) => {
-    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    const first = await (await postCancel(baseUrl)).json();
     expect(first.errors).toEqual([]);
     // The clean run resolved its acceptance and left nothing cancellable.
     hasCancellableWork.mockResolvedValue(false);
     mockProcess.mockClear();
     sendCancellationConfirmations.mockClear();
-    const retry = await (await post(baseUrl, '/cancel-plan')).json();
+    const retry = await (await postCancel(baseUrl)).json();
     expect(retry).toEqual(expect.objectContaining({
       duplicate: true, requestId: first.requestId, caseId: 'case-1', processed: true,
       visitsPulled: 3, confirmation: 'sms', confirmationChannels: ['sms', 'email'], errors: [],
@@ -488,7 +498,7 @@ describe('POST /:id/cancel-plan', () => {
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     // A genuinely empty account (no recorded case) still refuses.
     mockState.cancellation_cases = [];
-    const res = await post(baseUrl, '/cancel-plan');
+    const res = await postCancel(baseUrl);
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
@@ -503,7 +513,7 @@ describe('POST /:id/cancel-plan', () => {
       }
       return b;
     });
-    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    const body = await (await postCancel(baseUrl)).json();
     expect(body.processed).toBe(true);
     expect(body.errors).toEqual(['acceptance_close_failed']);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -513,13 +523,13 @@ describe('POST /:id/cancel-plan', () => {
   test('a scoped retry after its visits were pulled is not stranded by scope_not_owned — the acceptance carries it to the repair pass', () => withServer(async (baseUrl) => {
     // Run 1: feasible scoped cancel; a per-visit side effect failed.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'], errors: ['invoice_void:s1'] });
-    const first = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+    const first = await (await postCancel(baseUrl, { families: ['lawn_care'] })).json();
     expect(first.processed).toBe(false);
     // Retry: the family is gone from the live rows — ownership resolution
     // refuses, but the open acceptance proves this is a repair retry.
     mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: true, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: [], cancelledCount: 0 });
-    const second = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+    const second = await (await postCancel(baseUrl, { families: ['lawn_care'] })).json();
     expect(second.requestId).toBe(first.requestId);
     expect(second.processed).toBe(true);
     // The processor got the SAME request-scoped reason both times, so its
@@ -527,7 +537,7 @@ describe('POST /:id/cancel-plan', () => {
     expect(mockProcess.mock.calls[0][0].reason).toBe(mockProcess.mock.calls[1][0].reason);
     // A genuinely un-owned scope with NO acceptance still refuses 409.
     mockState.service_requests = [];
-    const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] });
+    const res = await postCancel(baseUrl, { families: ['lawn_care'] });
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('scope_not_owned');
   }));
@@ -545,14 +555,53 @@ describe('POST /:id/cancel-plan', () => {
     }];
     mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: true, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: [], cancelledCount: 0 });
-    const body = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+    const body = await (await postCancel(baseUrl, { families: ['lawn_care'] })).json();
     expect(body.requestId).toBe('req-ib');
     expect(mockState.inserted).toBeUndefined();
   }));
 
+  test('a fresh commit without the preview fingerprint is refused — the approval boundary is mandatory', () => withServer(async (baseUrl) => {
+    const res = await post(baseUrl, '/cancel-plan');
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('preview_fingerprint_required');
+    expect(mockState.inserted).toBeUndefined();
+    expect(mockProcess).not.toHaveBeenCalled();
+  }));
+
+  test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+      status: 'cancelled', renewal_decision: 'cancel',
+    }];
+    // The old cancellation's acceptance resolved DAYS ago; the customer was
+    // re-won back and now cancels again.
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+      created_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', service_request_id: 'req-old', status: 'committed',
+      created_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+      snapshot: JSON.stringify({
+        prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term',
+        outcome: { visitsPulled: 4, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+      }),
+    }];
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+    // NOT an echo: the processor runs and a fresh request/case is recorded.
+    expect(body.duplicate).toBeUndefined();
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(body.prepayTermOutcome).toBe('decision_already_recorded');
+    expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+  }));
+
   test('a deposit-stage account is refused — 409 use_cancel_signup routes to the dedicated offboarding flow', () => withServer(async (baseUrl) => {
     mockSignupPreview.mockResolvedValue({ eligible: true, blockers: [] });
-    const commit = await post(baseUrl, '/cancel-plan');
+    const commit = await postCancel(baseUrl);
     expect(commit.status).toBe(409);
     expect((await commit.json()).code).toBe('use_cancel_signup');
     expect(mockState.inserted).toBeUndefined();
@@ -567,7 +616,7 @@ describe('POST /:id/cancel-plan', () => {
       metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false } }),
       created_at: new Date(Date.now() - 60 * 60 * 1000),
     }];
-    const retry = await post(baseUrl, '/cancel-plan');
+    const retry = await postCancel(baseUrl);
     expect(retry.status).toBe(200);
   }));
 
@@ -575,31 +624,31 @@ describe('POST /:id/cancel-plan', () => {
     // Run 1: waived, a fee leg failed AND the case write failed.
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, lateFeeWaived: false, errors: ['card_hold:s1'] });
-    const first = await (await post(baseUrl, '/cancel-plan', { waiveLateFee: true })).json();
+    const first = await (await postCancel(baseUrl, { waiveLateFee: true })).json();
     expect(first.caseId).toBeNull();
     // Retry from the default unchecked state still carries the waiver.
-    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    const second = await (await postCancel(baseUrl)).json();
     expect(second.requestId).toBe(first.requestId);
     expect(mockProcess.mock.calls[1][0].waiveLateFee).toBe(true);
   }));
 
   test('a sticky waiver: a repair retry inherits the first attempt\'s accepted fee waiver', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, lateFeeWaived: false, errors: ['card_hold:s1'] });
-    const first = await (await post(baseUrl, '/cancel-plan', { waiveLateFee: true })).json();
+    const first = await (await postCancel(baseUrl, { waiveLateFee: true })).json();
     expect(first.processed).toBe(false);
     // Retry from the dialog's default UNCHECKED state.
-    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    const second = await (await postCancel(baseUrl)).json();
     expect(second.requestId).toBe(first.requestId);
     expect(mockProcess.mock.calls[1][0].waiveLateFee).toBe(true);
   }));
 
   test('a repair retry MERGES its outcome with the first attempt\'s — the case never regresses to "0 pulled"', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, cancelledCount: 3, errors: ['invoice_void:s1'] });
-    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    const first = await (await postCancel(baseUrl)).json();
     expect(first.visitsPulled).toBe(3);
     // Retry: nothing new flips (repairs don't count).
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0 });
-    await post(baseUrl, '/cancel-plan');
+    await postCancel(baseUrl);
     const latest = mockState.cancellation_cases[mockState.cancellation_cases.length - 1];
     const snap = JSON.parse(latest.snapshot);
     expect(snap.outcome.visitsPulled).toBe(3);
@@ -634,19 +683,19 @@ describe('POST /:id/cancel-plan', () => {
   test('a wound-down account with a lost follow-up step can still retry — the open acceptance beats nothing_to_cancel', () => withServer(async (baseUrl) => {
     // First run: the wind-down lands, the case write fails.
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
-    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    const first = await (await postCancel(baseUrl)).json();
     expect(first.errors).toEqual(['case_write']);
     expect(first.caseId).toBeNull();
     // The account is now churned — no cancellable work left — but the open
     // acceptance carries the retry through to the repair pass + case write.
     hasCancellableWork.mockResolvedValue(false);
-    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    const second = await (await postCancel(baseUrl)).json();
     expect(second.requestId).toBe(first.requestId);
     expect(second.caseId).toBe('case-1');
     expect(second.errors).toEqual([]);
     // A genuinely empty account (no acceptance) still refuses.
     mockState.service_requests = [];
-    const res = await post(baseUrl, '/cancel-plan');
+    const res = await postCancel(baseUrl);
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
@@ -688,24 +737,24 @@ describe('POST /:id/cancel-plan', () => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'] });
     // notifyAdmin's documented null-on-failure contract.
     NotificationService.notifyAdmin.mockResolvedValueOnce(null);
-    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    const body = await (await postCancel(baseUrl)).json();
     expect(body.errors).toEqual(expect.arrayContaining(['in_progress_visit:s9', 'review_alert_failed']));
   }));
 
   test('a repair retry inherits the accepted NO-communication choice — the silenced customer stays silent', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['invoice_void:s1'] });
-    const first = await (await post(baseUrl, '/cancel-plan', { sendConfirmation: false })).json();
+    const first = await (await postCancel(baseUrl, { sendConfirmation: false })).json();
     expect(first.processed).toBe(false);
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     // Retry from a fresh dialog (checkbox defaults back to true).
-    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    const second = await (await postCancel(baseUrl)).json();
     expect(second.requestId).toBe(first.requestId);
     expect(sendCancellationConfirmations).not.toHaveBeenCalled();
   }));
 
   test('a requested confirmation a reachable channel did not accept is a surfaced failure — review bell, never a clean "Done."', () => withServer(async (baseUrl) => {
     sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: false, channels: [] });
-    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    const body = await (await postCancel(baseUrl)).json();
     expect(body.processed).toBe(true);
     expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -718,7 +767,7 @@ describe('POST /:id/cancel-plan', () => {
     NotificationService.notifyAdmin.mockClear();
     mockState.customers[0].email = null;
     sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: true, emailSent: false, channels: ['sms'] });
-    const clean = await (await post(baseUrl, '/cancel-plan')).json();
+    const clean = await (await postCancel(baseUrl)).json();
     expect(clean.errors).toEqual([]);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   }));
@@ -737,7 +786,7 @@ describe('POST /:id/cancel-plan', () => {
     expect((await res.json()).code).toBe('scope_not_owned');
 
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze', cancelledCount: 1 });
-    res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] });
+    res = await postCancel(baseUrl, { families: ['lawn_care'] });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ families: ['lawn_care'] }));
@@ -747,6 +796,8 @@ describe('POST /:id/cancel-plan', () => {
 
   test('nothing to cancel → 400, no request row, processor never runs', () => withServer(async (baseUrl) => {
     hasCancellableWork.mockResolvedValueOnce(false);
+    // Plain post: the refusal is pre-gate, and the helper's preview would
+    // consume the armed Once.
     const res = await post(baseUrl, '/cancel-plan');
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('nothing_to_cancel');
@@ -756,9 +807,9 @@ describe('POST /:id/cancel-plan', () => {
 
   test('unknown customer → 404; bad reason code → 400', () => withServer(async (baseUrl) => {
     mockState.customers = [];
-    expect((await post(baseUrl, '/cancel-plan')).status).toBe(404);
+    expect((await postCancel(baseUrl)).status).toBe(404);
     mockState.customers = [{ id: 'cust-1', first_name: 'Pat', last_name: 'T', deleted_at: null }];
-    const res = await post(baseUrl, '/cancel-plan', { reasonCode: 'because' });
+    const res = await postCancel(baseUrl, { reasonCode: 'because' });
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('invalid_reason_code');
     expect(mockState.inserted).toBeUndefined();
@@ -774,7 +825,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('end_of_coverage: processor keeps visits through term_end, the term is decided cancel (no renewal), no refund, no office task', () => withServer(async (baseUrl) => {
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ keepThrough: '2027-02-28' }));
@@ -792,7 +843,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
       ];
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'now' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ keepThrough: null }));
@@ -815,7 +866,7 @@ describe('POST /:id/cancel-plan', () => {
     }));
 
     test('contradictory pair → 400 prepay_disposition_mismatch', () => withServer(async (baseUrl) => {
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', prepayDisposition: 'end_at_term' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'now', prepayDisposition: 'end_at_term' });
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe('prepay_disposition_mismatch');
       expect(mockState.inserted).toBeUndefined();
@@ -826,7 +877,7 @@ describe('POST /:id/cancel-plan', () => {
         id: 'term-2', customer_id: 'cust-1', term_start: '2026-06-01', term_end: '2027-05-31', plan_label: 'Annual Lawn',
         prepay_amount: '600.00', coverage_visit_count: 6, status: 'active', renewal_decision: null,
       });
-      const res = await post(baseUrl, '/cancel-plan');
+      const res = await postCancel(baseUrl);
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('multiple_prepay_terms');
       expect(mockState.inserted).toBeUndefined();
@@ -836,7 +887,7 @@ describe('POST /:id/cancel-plan', () => {
     test('a term already decided renew → 409 prepay_term_decided before any write', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'renew';
       mockState.annual_prepay_terms[0].status = 'renewed';
-      const res = await post(baseUrl, '/cancel-plan');
+      const res = await postCancel(baseUrl);
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('prepay_term_decided');
       expect(mockState.inserted).toBeUndefined();
@@ -845,7 +896,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a paid payment_pending term → 409 prepay_term_not_actionable (recordDecision would silently miss)', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].status = 'payment_pending';
-      const res = await post(baseUrl, '/cancel-plan');
+      const res = await postCancel(baseUrl);
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('prepay_term_not_actionable');
       expect(mockState.inserted).toBeUndefined();
@@ -855,6 +906,12 @@ describe('POST /:id/cancel-plan', () => {
     test('retry after a decided cancel reuses the recorded case — no second request, processor run, or customer text', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({
@@ -865,7 +922,7 @@ describe('POST /:id/cancel-plan', () => {
           },
         }),
       }];
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toEqual(expect.objectContaining({ duplicate: true, requestId: 'req-9', caseId: 'case-9', processed: true, prepayTermOutcome: 'decision_already_recorded' }));
@@ -918,7 +975,7 @@ describe('POST /:id/cancel-plan', () => {
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: { amount: 360 } }),
       }];
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('prepay_term_already_ended');
       expect(mockState.inserted).toBeUndefined();
@@ -933,7 +990,7 @@ describe('POST /:id/cancel-plan', () => {
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({ prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' }),
       }];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.duplicate).toBeUndefined();
       expect(body.processed).toBe(true);
       expect(body.prepayTermOutcome).toBe('decision_already_recorded');
@@ -955,7 +1012,7 @@ describe('POST /:id/cancel-plan', () => {
         }
         return builderFor(table);
       });
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.processed).toBe(true);
       expect(body.prepayTermOutcome).toBe('decision_conflict');
       expect(body.errors).toContain('prepay_term_decision_conflict');
@@ -977,7 +1034,7 @@ describe('POST /:id/cancel-plan', () => {
     test('a pre-existing decided-cancel term with NO recorded case still runs; the decision write is skipped', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.prepayTermOutcome).toBe('decision_already_recorded');
       expect(mockRecordDecision).not.toHaveBeenCalled();
       expect(mockProcess).toHaveBeenCalledTimes(1);
@@ -996,7 +1053,7 @@ describe('POST /:id/cancel-plan', () => {
         mockState.scheduled_services.find((r) => r.id === 's3').status = 'completed';
         return { ...PROCESSED };
       });
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       // Recorded money = the post-sweep truth (2 consumed, 2 remaining),
       // never the stale pre-commit snapshot's $360.
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240 }));
@@ -1032,7 +1089,7 @@ describe('POST /:id/cancel-plan', () => {
           outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: ['prepay_term_disposition'] },
         }),
       }];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-9', errors: [] }));
       expect(body.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false }));
       // The task is raised into the term dedupe (idempotent if it exists).
@@ -1060,6 +1117,12 @@ describe('POST /:id/cancel-plan', () => {
     test('a repair whose live refund no longer matches the recorded proposal is refused — a fresh approved preview unlocks it', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
       // A covered visit completed between the attempts: live refund is now
       // 2 remaining ($240), not the recorded 3 ($360).
       mockState.scheduled_services = [
@@ -1073,6 +1136,8 @@ describe('POST /:id/cancel-plan', () => {
           proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
         }),
       }];
+      // Plain post (exempt via the open acceptance): a fresh-preview
+      // fingerprint would legitimately APPROVE the changed numbers.
       let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
       expect(body.duplicate).toBe(true);
       expect(body.errors).toEqual(['refund_facts_changed']);
@@ -1094,6 +1159,12 @@ describe('POST /:id/cancel-plan', () => {
     test('a duplicate answers with the FIRST run\'s recorded errors — a belled run never re-reads as "Done"', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'resolved',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({
@@ -1104,7 +1175,7 @@ describe('POST /:id/cancel-plan', () => {
           },
         }),
       }];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       expect(body.duplicate).toBe(true);
       expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
     }));
@@ -1128,7 +1199,7 @@ describe('POST /:id/cancel-plan', () => {
           },
         }),
       }];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       expect(body.duplicate).toBe(true);
       // The send-once-guarded helper re-ran with the ORIGINAL verdict/copy.
       expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({
@@ -1166,7 +1237,7 @@ describe('POST /:id/cancel-plan', () => {
         if (table === 'cancellation_cases') { b.update = async () => { throw new Error('case table down'); }; }
         return b;
       });
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
       // Nothing cleared, nothing closed — the next retry repairs again
       // (the send-once probes make the resends idempotent).
       expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
@@ -1176,6 +1247,12 @@ describe('POST /:id/cancel-plan', () => {
     test('a failed repair reports the missing task instead of a clean duplicate; a recorded refund is never re-raised', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({
@@ -1184,7 +1261,7 @@ describe('POST /:id/cancel-plan', () => {
         }),
       }];
       NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
-      let body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      let body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.duplicate).toBe(true);
       expect(body.errors).toEqual(['prepay_refund_task_missing']);
       expect(body.refund).toBeUndefined();
@@ -1195,7 +1272,7 @@ describe('POST /:id/cancel-plan', () => {
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: { amount: 360, needsManualCalc: false } }),
       }];
-      body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body).toEqual(expect.objectContaining({ duplicate: true, errors: [] }));
       expect(body.refund).toEqual(expect.objectContaining({ amount: 360 }));
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -1209,13 +1286,13 @@ describe('POST /:id/cancel-plan', () => {
         // a coverage slice all the same.
         { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-03-05' },
       ];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
     }));
 
     test('a legacy term with no readable coverage identity refuses end_of_coverage (409) — an empty covered set is never trusted', () => withServer(async (baseUrl) => {
       delete mockState.annual_prepay_terms[0].coverage_service_type;
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage' });
+      const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage' });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('prepay_coverage_unresolvable');
       expect(mockState.inserted).toBeUndefined();
@@ -1231,7 +1308,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
       ];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ amount: null, needsManualCalc: true, reason: 'coverage_identity_missing' }));
       const billing = NotificationService.notifyAdmin.mock.calls.find((c) => c[0] === 'billing');
       expect(billing[2]).toContain('manual calculation');
@@ -1244,7 +1321,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
       ];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ amount: null, needsManualCalc: true, reason: 'prior_refund_activity' }));
 
       // No refund activity on the linked payment → the C-6 math stands.
@@ -1252,7 +1329,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.annual_prepay_terms[0].renewal_decision = null;
       mockState.cancellation_cases = [];
       mockRecordDecision.mockClear();
-      const clean = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const clean = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(clean.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false }));
     }));
 
@@ -1266,7 +1343,7 @@ describe('POST /:id/cancel-plan', () => {
       mockPlan.mockResolvedValue({ ok: true, inScope: ['pest_control'], remaining: ['lawn_care'], tierBefore: 'Silver', tierAfter: 'Bronze' });
       const preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['pest_control'] })).json();
       expect(preview).toEqual(expect.objectContaining({ scopedSupported: false, scopeError: 'scoped_covers_prepaid' }));
-      const res = await post(baseUrl, '/cancel-plan', { families: ['pest_control'] });
+      const res = await postCancel(baseUrl, { families: ['pest_control'] });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('scoped_covers_prepaid');
       expect(mockState.inserted).toBeUndefined();
@@ -1279,7 +1356,7 @@ describe('POST /:id/cancel-plan', () => {
         { id: 'sv1', customer_id: 'cust-1', family: 'pest_control', status: 'confirmed', scheduled_date: '2026-10-05', prepaid_method: 'annual_prepay_invoice' },
       ];
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'] });
-      const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] });
+      const res = await postCancel(baseUrl, { families: ['lawn_care'] });
       expect(res.status).toBe(200);
       expect(mockProcess).toHaveBeenCalledTimes(1);
       expect(mockRecordDecision).not.toHaveBeenCalled();
@@ -1291,13 +1368,13 @@ describe('POST /:id/cancel-plan', () => {
         { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01', annual_prepay_term_id: null },
         { id: 's3', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-01', annual_prepay_term_id: 'term-OTHER' },
       ];
-      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+      const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
     }));
 
     test('a scoped cancel leaves the term alone', () => withServer(async (baseUrl) => {
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: ['pest_control'] });
-      const body = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+      const body = await (await postCancel(baseUrl, { families: ['lawn_care'] })).json();
       expect(body.prepayDisposition).toBeNull();
       expect(mockRecordDecision).not.toHaveBeenCalled();
       expect((mockState.updates || []).filter((u) => u.table === 'annual_prepay_terms')).toEqual([]);
@@ -1306,7 +1383,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a green processor with a failed follow-up step (case write) still bells the office', () => withServer(async (baseUrl) => {
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
-    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    const body = await (await postCancel(baseUrl)).json();
     expect(body.processed).toBe(true);
     expect(body.errors).toEqual(['case_write']);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -1322,7 +1399,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a concurrent commit holding the customer lock → 409 cancel_in_progress, nothing written', () => withServer(async (baseUrl) => {
     db.client.locked = false;
-    const res = await post(baseUrl, '/cancel-plan');
+    const res = await postCancel(baseUrl);
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('cancel_in_progress');
     expect(mockState.inserted).toBeUndefined();
@@ -1333,7 +1410,7 @@ describe('POST /:id/cancel-plan', () => {
   test('the commit lock is released after a successful run (and the preview never takes it)', () => withServer(async (baseUrl) => {
     await post(baseUrl, '/cancel-plan/preview');
     expect(db.client.acquireConnection).not.toHaveBeenCalled();
-    const res = await post(baseUrl, '/cancel-plan');
+    const res = await postCancel(baseUrl);
     expect(res.status).toBe(200);
     const sqls = db.client.lockConn.query.mock.calls.map((c) => String(c[0]));
     expect(sqls.some((s) => s.includes('pg_try_advisory_lock'))).toBe(true);
@@ -1342,7 +1419,7 @@ describe('POST /:id/cancel-plan', () => {
   }));
 
   test('a body customerId cannot re-point the cancel: the path id is authoritative', () => withServer(async (baseUrl) => {
-    const res = await post(baseUrl, '/cancel-plan', { customerId: 'cust-EVIL' });
+    const res = await postCancel(baseUrl, { customerId: 'cust-EVIL' });
     expect(res.status).toBe(200);
     expect(mockState.inserted.find((i) => i.table === 'service_requests').row.customer_id).toBe('cust-1');
     expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
@@ -1354,7 +1431,7 @@ describe('POST /:id/cancel-plan', () => {
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
     }];
     mockProcess.mockRejectedValueOnce(new Error('sweep down'));
-    const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
+    const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
     expect(body.processed).toBe(false);
     expect(body.prepayTermOutcome).toBe('skipped_processor_failed');
     expect(body.errors).toEqual(expect.arrayContaining(['processor_threw', 'prepay_term_disposition_skipped']));
@@ -1368,7 +1445,7 @@ describe('POST /:id/cancel-plan', () => {
   test('a partial processor run reports processed:false, keeps the errors, and bells the office once', () => withServer(async (baseUrl) => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, errors: ['in_progress_visit:s9'] });
     sendCancellationConfirmations.mockResolvedValueOnce({ smsSent: false, emailSent: true, channels: ['email'] });
-    const body = await (await post(baseUrl, '/cancel-plan')).json();
+    const body = await (await postCancel(baseUrl)).json();
     // The blocked SMS on a reachable phone is itself a surfaced failure.
     expect(body).toEqual(expect.objectContaining({ processed: false, errors: ['in_progress_visit:s9', 'confirmation_sms_not_sent'], confirmation: 'email', confirmationChannels: ['email'] }));
     expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: false }));

@@ -722,10 +722,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       return null;
     }
   };
+  const openAcceptance = await findOpenAcceptance();
   // Deposit-stage accounts belong to the dedicated signup-cancel flow; an
   // open acceptance means a generic cancel already partially ran — finish
   // its repairs instead of stranding them.
-  if (!(await findOpenAcceptance())) await refuseDepositStageAccount(customerId);
+  if (!openAcceptance) await refuseDepositStageAccount(customerId);
   if (scopeError) {
     // A scoped retry whose first run already pulled every selected visit no
     // longer OWNS those families — refusing scope_not_owned here would
@@ -735,7 +736,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // rows (repair-only mode) and still refuses a genuinely un-owned scope.
     // Every OTHER scope refusal (covered prepaid visits, unattributable
     // ledger) stands regardless.
-    const retryAcceptance = scopeError === 'scope_not_owned' ? await findOpenAcceptance() : null;
+    const retryAcceptance = scopeError === 'scope_not_owned' ? openAcceptance : null;
     if (!retryAcceptance) throw scopeErrorToHttp(scopeError);
     logger.info(`[admin-cancellation] scoped repair retry for ${customerId} — open acceptance ${retryAcceptance.id} overrides scope_not_owned`);
   }
@@ -746,7 +747,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // idempotent processor repair pass and the durable records. A recent
     // open acceptance is that proof; without one this really is an account
     // with nothing to cancel.
-    if (!(await findOpenAcceptance())) {
+    if (!openAcceptance) {
       // A CLEAN run resolved its acceptance — a lost-response retry must
       // still answer with the recorded outcome, never nothing_to_cancel
       // (the operator cannot tell a completed cancel from an empty
@@ -845,6 +846,32 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         if (match) priorSnap = snap;
         return match;
       }) || null;
+      // The echo is only for RETRIES of that run — proven by its acceptance
+      // being still open, or resolved within the echo window (codex r16
+      // P0). A historical case whose acceptance closed long ago must not
+      // swallow a NEW cancellation: a re-won-back account with the same
+      // decided term still current would read "cancelled" while billing
+      // stays live. No provable tie → fall through and process fresh (the
+      // decided term reads 'decision_already_recorded'; the refund recounts
+      // from the live rows).
+      if (prior) {
+        let tied = false;
+        try {
+          const priorReq = prior.service_request_id
+            ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
+            : null;
+          tied = !!priorReq && (priorReq.status === 'new'
+            || (priorReq.status === 'resolved'
+              && new Date(priorReq.created_at).getTime() >= Date.now() - 24 * 60 * 60 * 1000));
+        } catch (tieErr) {
+          logger.warn(`[admin-cancellation] latch acceptance check failed for case ${prior.id}: ${tieErr.message}`);
+        }
+        if (!tied) {
+          logger.info(`[admin-cancellation] case ${prior.id} has no live acceptance — treating this as a NEW cancellation, not a retry`);
+          prior = null;
+          priorSnap = null;
+        }
+      }
     } catch (dupErr) {
       logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
     }
@@ -1035,6 +1062,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // commit different numbers. Checked before any write.
   let approvedPulled = null;
   let approvedPulledIds = null;
+  // The approval boundary is MANDATORY for new destructive commits: both
+  // first-party surfaces always carry the preview's fingerprint, so a
+  // commit without one is a stale or hand-built call bypassing the facts
+  // the operator approves. The one exception is a repair retry of an open
+  // acceptance — its original approved facts are durable on the request,
+  // and the run is idempotent repairs.
+  if (!suppliedFingerprint && !openAcceptance) {
+    throw new CancelPlanError(400, 'preview_fingerprint_required',
+      'This commit must carry the previewFingerprint from a current preview — re-open the preview and confirm from it.');
+  }
   if (suppliedFingerprint) {
     const { liveImpact, fingerprint } = await liveApprovedFacts();
     if (fingerprint !== suppliedFingerprint) {
@@ -1061,7 +1098,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // processor's repair pass finds the first attempt's cancelled rows by that
   // exact note — a fresh request would skip their failed side effects
   // forever (and per-request dedupe keys would double-bell).
-  let request = await findOpenAcceptance();
+  let request = openAcceptance;
   let priorOutcome = null;
   if (request) {
     logger.info(`[admin-cancellation] retry reuses accepted request ${request.id} for customer ${customerId} by ${actorLabel}`);
