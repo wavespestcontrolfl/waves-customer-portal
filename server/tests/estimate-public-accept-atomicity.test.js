@@ -1432,22 +1432,23 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(storedEstimate().status).toBe('accepted');
   });
 
-  test('a restart accept carrying option selections is refused — the stored offer is the only acceptable one (pre-push P0 after GH r21; r22 relaxation keeps the default cadence path open)', async () => {
-    for (const body of [
-      { serviceCadences: { pest_control: 'bimonthly' } },
-      { serviceMode: 'one_time' },
-    ]) {
-      resetStore(restartEstimate({ id: 'est-restart-frozen', token: 'tok-restart-f-x0123456789' }));
-      db.__state.tables.customers = [churnedCustomer()];
-      const res = await putAccept('tok-restart-f-x0123456789', body);
-      expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 409]);
-      expect(res.data.code).toBe('restart_quote_frozen');
-      expect(storedEstimate().status).toBe('sent');
-    }
+  test('a restart accept carrying option selections is refused — the stored offer is the only acceptable one (pre-push P0 after GH r21; r22 keeps the always-sent default payloads open)', async () => {
+    // One-time mode is a composition change the mint never offered.
+    resetStore(restartEstimate({ id: 'est-restart-frozen', token: 'tok-restart-f-x0123456789' }));
+    db.__state.tables.customers = [churnedCustomer()];
+    const oneTime = await putAccept('tok-restart-f-x0123456789', { serviceMode: 'one_time' });
+    expect(oneTime.status).toBe(409);
+    expect(oneTime.data.code).toBe('restart_quote_frozen');
+    expect(storedEstimate().status).toBe('sent');
+
     // selectedFrequency is compared against the offer's DEFAULT key (the
     // page always serializes it): a key that is not the stored default is
     // refused — 400 unknown-key here (this fixture carries no frequency
     // ladder), 409 frozen on a ladder-bearing offer — and never accepted.
+    // serviceCadences with no combos is INERT by the route's no-combos
+    // rule (books the stored default); with combos, the matched combo's
+    // totals must equal the minted row's stored totals — not
+    // representable in this ladderless fixture.
     resetStore(restartEstimate({ id: 'est-restart-frozen', token: 'tok-restart-f-x0123456789' }));
     db.__state.tables.customers = [churnedCustomer()];
     const res = await putAccept('tok-restart-f-x0123456789', { selectedFrequency: 'monthly' });

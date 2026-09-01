@@ -8927,16 +8927,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // r21): the mint prices deterministic defaults and the accept-time
     // revalidation compares attempt identity + families, not price mix —
     // honoring body option selections here would let a crafted PUT accept
-    // a one-time mode or per-service mix the mint never offered. Same 409
-    // code as the mutation-route guard so the portal messages it
-    // identically. selectedFrequency is validated further down against
-    // the offer's DEFAULT key instead (GH r22 P1): the estimate page
-    // always serializes it — falling back to the first offered frequency
-    // — so a bare nonempty check bricked every normal restart accept.
-    if (String(estimate.source || '') === 'plan_restart'
-        && (requestedOneTime
-          || (req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
-            && Object.keys(req.body.serviceCadences).length))) {
+    // a one-time mode the mint never offered. Same 409 code as the
+    // mutation-route guard so the portal messages it identically.
+    // selectedFrequency and serviceCadences are validated after bundle
+    // resolution instead (GH r22 P1 + its pre-push follow-on): the
+    // estimate page ALWAYS serializes both — defaults included — so bare
+    // nonempty checks bricked every normal restart accept.
+    if (String(estimate.source || '') === 'plan_restart' && requestedOneTime) {
       return res.status(409).json({
         error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
         code: 'restart_quote_frozen',
@@ -9492,6 +9489,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // selected one must not carry prepay past this point.
       if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
+      // Frozen-restart combo rule (pre-push P1 after GH r22): the page
+      // always sends the cadence map for bundled offers — defaults
+      // included — so the map itself can't be rejected. The matched combo
+      // must BE the deterministic default: every non-pest axis key must
+      // equal its section's own default (the same derivation the page's
+      // defaultSelectedForServices uses for the initial selection; the
+      // pest axis rides selectedFrequencyKey, bound to the primary
+      // default above), and — belt on top of identity — the combo's
+      // server-stamped totals must equal the minted row's stored totals.
+      // Totals alone were not enough: equal-priced combos can differ in
+      // composition, and conversion schedules the combo.
+      if (String(estimate.source || '') === 'plan_restart') {
+        const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+        const defaultKeyFor = (axis) => {
+          const section = sections.find((s) => s && s.key === axis);
+          const freqs = Array.isArray(section?.frequencies) ? section.frequencies : [];
+          return String(section?.defaultFrequencyKey || freqs[0]?.key || '');
+        };
+        const comboSelection = selectedCombo.selection || {};
+        const nonDefaultAxis = Object.entries(comboSelection)
+          .some(([axis, key]) => axis !== 'pest_control' && String(key) !== defaultKeyFor(axis));
+        const centsOf = (v) => Math.round(Number(v || 0) * 100);
+        if (nonDefaultAxis
+          || centsOf(selectedCombo.monthly) !== centsOf(estimate.monthly_total)
+          || centsOf(selectedCombo.annual) !== centsOf(estimate.annual_total)) {
+          return res.status(409).json({
+            error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+            code: 'restart_quote_frozen',
+          });
+        }
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the
