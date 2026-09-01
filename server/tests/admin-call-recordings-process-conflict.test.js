@@ -115,6 +115,17 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(alertCeilingMinutes() * 60000).toBeGreaterThan(providerBudgetMs());
   });
 
+  test('a NULL heartbeat keeps the conservative window — a rolling deploy is not a death', () => {
+    // An older pod holds a healthy claim while knowing nothing about the
+    // column; reading its silence as death let the new pod steal a live
+    // transcription after three minutes.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
+    expect(predicate).toContain('processing_heartbeat_at IS NOT NULL');
+    expect(predicate).toContain('processing_heartbeat_at IS NULL');
+    expect(predicate).toContain('LEGACY_CLAIM_QUIET_MINUTES');
+  });
+
   test('the ceiling never reaches the reclaim predicates — those are heartbeat-only', () => {
     // A ceiling that lets a peer take a still-beating claim has to sit above
     // the longest legitimate pass, and the pipeline has unbounded provider

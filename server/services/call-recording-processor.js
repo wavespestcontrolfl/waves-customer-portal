@@ -1972,8 +1972,19 @@ function summarizeBatch(results) {
 // properly needs ONE end-to-end deadline enforced inside the pass, so no leg
 // can outlive it and reclaim becomes safe by construction rather than by
 // margin — a larger change than this branch carries.
-const reclaimableClaim = (quietMinutes) =>
-  `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`;
+//
+// The short window applies ONLY to a claim that is actually beating. A claim
+// with a NULL heartbeat is not a dead one — during a rolling deploy an older
+// pod holds a perfectly healthy claim while knowing nothing about the column,
+// and reading its silence as death let the new pod steal a live transcription
+// after three minutes (pre-push audit P1). Those keep the conservative
+// ten-minute window they had before the heartbeat existed.
+const LEGACY_CLAIM_QUIET_MINUTES = 10;
+const reclaimableClaim = (quietMinutes) => "("
+  + `(processing_heartbeat_at IS NOT NULL AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
+  + ' OR (processing_heartbeat_at IS NULL AND'
+  + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
+  + ")";
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
