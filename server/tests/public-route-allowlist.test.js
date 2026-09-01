@@ -134,10 +134,13 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
         const assignOver = /Object\.assign\(\s*module\.exports/.test(src);
         // A COMPUTED export write (`module.exports['name'] = noop`) is the
         // same rewrite in a spelling the regexes above cannot see — a guard
-        // module may not contain one at all (fail closed).
+        // module may not contain one at all (fail closed). Ditto descriptor
+        // APIs (`Object.defineProperty(module.exports, ...)`) and
+        // Reflect.set, which rewrite exports without any `=` spelling.
         const computedExportWrites = (src.match(/module\.exports\s*\[/g) || []).length;
-        expect({ guard: g.name, module: g.module, memberRewrites, wholesale, assignOver, computedExportWrites })
-          .toEqual({ guard: g.name, module: g.module, memberRewrites: [], wholesale: 1, assignOver: false, computedExportWrites: 0 });
+        const descriptorWrites = /(Object\.define(Property|Properties)|Reflect\.(set|defineProperty))\s*\(\s*module\.exports/.test(src);
+        expect({ guard: g.name, module: g.module, memberRewrites, wholesale, assignOver, computedExportWrites, descriptorWrites })
+          .toEqual({ guard: g.name, module: g.module, memberRewrites: [], wholesale: 1, assignOver: false, computedExportWrites: 0, descriptorWrites: false });
         // ...and the BINDING itself must never be reassigned before export
         // (`adminAuthenticate = noop; module.exports = { adminAuthenticate }`
         // would pass every check above while exporting the no-op).
@@ -1606,6 +1609,59 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n')),
     });
     expect(res.problems.some((p) => p.includes('registered inside a function'))).toBe(true);
+  });
+
+  test("a COMPUTED holder access (holder['api'].get) resolves like the dot spelling", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const holder = { api: router };',
+        "holder['api'].get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a middleware array mutated via a BORROWED mutator (unshift.call) is tainted', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'const chain = [guardA];',
+        'Array.prototype.unshift.call(chain, (req, res) => res.json({ secret: 1 }));',
+        "router.get('/leak', chain, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('routes in TRY and CATCH carry the branch in their identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'try {',
+        "  app.get('/debug-try', (req, res) => res.json({}));",
+        '} catch (err) {',
+        "  app.get('/debug-catch', (req, res) => res.json({}));",
+        '}',
+      ].join('\n')),
+    });
+    const t = res.publicRoutes.find((r) => r.path === '/debug-try');
+    const c = res.publicRoutes.find((r) => r.path === '/debug-catch');
+    expect(t && t.cond).toBe('try');
+    expect(c && c.cond).toBe('catch');
+  });
+
+  test('express.static OPTIONS are part of the allowlist identity', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/files', express.static('public', { dotfiles: 'allow' }));"),
+    });
+    const st = res.publicRoutes.find((r) => r.path === '/files');
+    expect(st).toBeDefined();
+    expect(st.extra).toContain("dotfiles: 'allow'");
   });
 
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {

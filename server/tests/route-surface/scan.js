@@ -169,6 +169,19 @@ function walk(node, visit, ctx) {
     walk(node.right, visit, { ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
     return;
   }
+  if (node.type === 'TryStatement') {
+    // The try/catch/finally BRANCH is identity: moving an approved
+    // registration from the try body into its catch inverts when it is
+    // installed and must break the allowlist key.
+    const branch = (label) => ({ ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
+    walk(node.block, visit, branch('try'));
+    if (node.handler) {
+      if (node.handler.param) walk(node.handler.param, visit, ctx);
+      walk(node.handler.body, visit, branch('catch'));
+    }
+    if (node.finalizer) walk(node.finalizer, visit, branch('finally'));
+    return;
+  }
   if (node.type === 'SwitchStatement') {
     // The discriminant AND the matched case value are identity: changing
     // `case 'development'` to `case 'production'` must break the key.
@@ -345,6 +358,14 @@ class ModuleAnalysis {
         && node.left.object.type === 'Identifier') {
         mutatedNames.add(node.left.object.name); // chain[0] = x
       }
+      if (node.type === 'CallExpression'
+        && node.callee.type === 'MemberExpression'
+        && ['call', 'apply'].includes(memberPropName(node.callee))) {
+        // Borrowed mutation (`Array.prototype.unshift.call(chain, mw)`) —
+        // any identifier argument could be the receiver; taint them all
+        // (only array bindings consult mutatedNames).
+        for (const a of node.arguments) if (a && a.type === 'Identifier') mutatedNames.add(a.name);
+      }
       if (node.type === 'ArrayExpression') arrayLiterals.push(node);
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         for (const a of node.arguments) if (a && a.type === 'ArrayExpression') callArgArrays.push({ arr: a, call: node });
@@ -458,11 +479,12 @@ class ModuleAnalysis {
           // non-router object.
           if (method && (VERBS.has(method) || method === 'use' || method === 'route' || method === 'param')) {
             const inner = node.callee.object;
-            if (!inner.computed && inner.property.type === 'Identifier' && isRequireCall(inner.object)) {
+            if (memberPropName(inner) !== null && isRequireCall(inner.object)) {
               // require('./routers').api.get('/leak', h) — an inline named
-              // export mutation; recorded for the external-mutation sweep.
+              // export mutation (computed string-literal spelling included);
+              // recorded for the external-mutation sweep.
               const mod = this.resolveModule(inner.object.arguments[0].value);
-              if (mod) this.directExternalRegs.push({ module: mod, name: inner.property.name, method, loc: this.loc(node) });
+              if (mod) this.directExternalRegs.push({ module: mod, name: memberPropName(inner), method, loc: this.loc(node) });
             }
             this.registrations.push({ object: null, objectNode: node.callee.object, method, args: node.arguments, topLevel: ctx.topLevel, cond: ctx.conds.join(' && ') || null, node });
           }
@@ -861,20 +883,21 @@ class ModuleAnalysis {
     if (!node) return null;
     if (node.type === 'Identifier') return this.canonName(node.name);
     if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
-      && !node.computed && node.property.type === 'Identifier') {
+      && memberPropName(node) !== null) {
       // `module.exports` IS whatever was exported — registrations through it
       // (`module.exports.get('/leak', h)`) belong to the exported router.
+      const prop = memberPropName(node);
       if (node.object.type === 'Identifier' && node.object.name === 'module'
-        && node.property.name === 'exports') {
+        && prop === 'exports') {
         if (this.exportUnstable || !this.exportCandidate) return null;
         return this.canonName(this.exportCandidate);
       }
       const base = this.resolveMemberChain(node.object);
       if (!base) return null;
       const b = this.bindings.get(base);
-      if (this.reassignedProps && this.reassignedProps.has(`${base}.${node.property.name}`)) return null;
-      if (b && b.kind === 'object' && b.props.has(node.property.name)) {
-        return this.canonName(b.props.get(node.property.name));
+      if (this.reassignedProps && this.reassignedProps.has(`${base}.${prop}`)) return null;
+      if (b && b.kind === 'object' && b.props.has(prop)) {
+        return this.canonName(b.props.get(prop));
       }
     }
     return null;
@@ -1301,6 +1324,12 @@ class ModuleAnalysis {
               // anywhere in the expression forces allowlist re-review.
               desc = `${arg.name} = ${predicateLabel(this.src.slice(b.node.start, b.node.end))}`;
             } else desc = `${arg.name} = <unresolved>`;
+          }
+          // The OPTIONS are identity too: dotfiles/index/extensions widen
+          // what anonymous requests can retrieve, so changing them must
+          // force allowlist re-review like changing the root.
+          for (const opt of node.arguments.slice(1)) {
+            desc += `, ${predicateLabel(this.src.slice(opt.start, opt.end))}`;
           }
           return [{ type: 'static', desc }];
         }
