@@ -3276,27 +3276,32 @@ function recurringWithoutBillableAmount({
   // Free BY DESIGN — completion suppresses these before any amount matters.
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return null;
 
-  // Forced to an EXPLICIT non-membership lane, not to null. Nulling the mode
-  // lets resolveBillingLane INFER monthly_membership from a retained
-  // WaveGuard tier + positive monthly_rate — a supported production shape for
-  // an annual-prepay customer — while completion sees
-  // billing_mode='annual_prepay', ignores the monthly rate, and bills
-  // nothing. The annual lane is neutralized unconditionally: the prepay
-  // invoice + term are created post-commit inside a catch that leaves the
-  // booking standing, so neither a requested term nor an inherited lane is
-  // an amount.
-  const customerForLane = customer?.billing_mode === 'annual_prepay'
+  // The REAL lane flags — these are what completion will see, so they are
+  // what the mint question below must be asked with. Feeding it a rewritten
+  // lane made the gate believe an invoice would mint that completion then
+  // declines to cut (Codex P0, round 18).
+  const billingMode = customer?.billing_mode || null;
+  const explicitMembership = billingMode === 'monthly_membership';
+  const explicitPerVisitLane = ['per_visit', 'one_time'].includes(billingMode);
+  const perApplicationBilling = billingMode === 'per_application';
+  const annualPrepayBilling = billingMode === 'annual_prepay';
+  const monthlyRate = Number(customer?.monthly_rate) || 0;
+
+  // DUES COVERAGE is the one question the annual lane must not be allowed to
+  // answer. resolveBillingLane INFERS monthly_membership from a retained
+  // WaveGuard tier + positive monthly_rate — a supported shape for an
+  // annual-prepay customer — and would exempt the booking as dues-covered,
+  // while completion sees billing_mode='annual_prepay', ignores the monthly
+  // rate, and bills nothing. So the annual lane is neutralized for THIS
+  // check only, and nowhere else: the prepay invoice + term are created
+  // post-commit inside a catch that leaves the booking standing, so neither
+  // a requested term nor an inherited lane is an amount.
+  const customerForDues = annualPrepayBilling
     ? { ...customer, billing_mode: 'per_visit' }
     : customer;
-  const lane = resolveBillingLane(customerForLane);
-  const explicitMembership = customerForLane?.billing_mode === 'monthly_membership';
-  const explicitPerVisitLane = ['per_visit', 'one_time'].includes(customerForLane?.billing_mode);
-  const perApplicationBilling = customerForLane?.billing_mode === 'per_application';
-  const monthlyRate = Number(customerForLane?.monthly_rate) || 0;
-
-  // MEMBERSHIP DUES are real coverage: the 8AM cron collects them and the
-  // visit is free by design — but only when there is a rate to collect.
-  if (lane.mode === 'monthly_membership' && monthlyRate > 0) return null;
+  // Dues are real coverage — the 8AM cron collects them and the visit is free
+  // by design — but only when there is a rate to collect.
+  if (resolveBillingLane(customerForDues).mode === 'monthly_membership' && monthlyRate > 0) return null;
 
   // Otherwise the series must actually MINT. Asking the advisory prediction
   // was not enough (Codex P0): it answers "what would this bill", while
@@ -3312,9 +3317,9 @@ function recurringWithoutBillableAmount({
     estimatedPrice: Number(recurringFloorPrice) > 0 ? recurringFloorPrice : null,
     isCallback,
     perApplicationBilling,
-    perApplicationFee: customerForLane?.per_application_fee,
-    monthlyRate: customerForLane?.monthly_rate,
-    billingMode: customerForLane?.billing_mode || null,
+    perApplicationFee: customer?.per_application_fee,
+    monthlyRate: customer?.monthly_rate,
+    billingMode,
   });
   const willMint = shouldAutoInvoiceCompletion({
     // Completion-time suppressors cannot be known at booking and are all
@@ -3327,11 +3332,11 @@ function recurringWithoutBillableAmount({
     preMintedInvoice: false,
     existingCompletionInvoice: false,
     createInvoiceOnComplete,
-    waveguardTier: customerForLane?.waveguard_tier || null,
+    waveguardTier: customer?.waveguard_tier || null,
     explicitMembership,
     explicitPerVisitLane,
     perApplicationBilling,
-    annualPrepayBilling: false,
+    annualPrepayBilling,
     hasVisitPrice: Number(recurringFloorPrice) > 0,
     invoiceAmount,
     autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
@@ -3344,8 +3349,7 @@ function recurringWithoutBillableAmount({
   // Lane-specific guidance: recommending a monthly rate to a customer whose
   // lane deliberately IGNORES monthly rates leaves the operator stuck
   // following advice that cannot clear the gate (Codex P1).
-  const acceptsMonthlyRate = !explicitPerVisitLane && !perApplicationBilling
-    && customer?.billing_mode !== 'annual_prepay';
+  const acceptsMonthlyRate = !explicitPerVisitLane && !perApplicationBilling && !annualPrepayBilling;
   const needsPerApplicationFee = perApplicationBilling;
   const remedy = needsPerApplicationFee
     ? 'set a per-application fee on the customer profile, or price the visit'

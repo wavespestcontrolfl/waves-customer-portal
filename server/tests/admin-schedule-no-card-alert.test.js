@@ -120,6 +120,22 @@ describe('recurringWithoutBillableAmount (booking gate)', () => {
     expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'monthly_membership' }) })).toBeTruthy();
   });
 
+  test('the mint question is asked with the REAL lane, not a rewritten one (Codex P0)', () => {
+    // The annual lane is neutralized ONLY for the dues-coverage check. Passing
+    // a rewritten lane into shouldAutoInvoiceCompletion made the gate believe
+    // an invoice would mint (explicitPerVisitLane true, annualPrepayBilling
+    // false) that completion then declines to cut with the priced-visits gate
+    // off — every visit uninvoiced.
+    const annual = C({ billing_mode: 'annual_prepay' });
+    expect(recurringWithoutBillableAmount({
+      ...base, customer: annual, recurringFloorPrice: 89, createInvoiceOnComplete: false,
+    })).toBeTruthy();
+    // With the scheduler stamp set it really does mint, so it clears.
+    expect(recurringWithoutBillableAmount({
+      ...base, customer: annual, recurringFloorPrice: 89,
+    })).toBeNull();
+  });
+
   test('an annual-prepay lane or a stale rate on an explicit lane is no amount (Codex P0)', () => {
     // Neither an inherited prepay lane (its term invoice is created
     // post-commit and may never exist) nor a monthly rate an explicit
