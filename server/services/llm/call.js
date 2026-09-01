@@ -424,6 +424,10 @@ async function anthropicCreateWithSamplingRetry(client, request) {
 }
 
 module.exports = {
+  // Exported so a caller reasoning about how long one pass can run reads the
+  // dispatcher's REAL budget instead of mirroring the number (see
+  // utils/claim-ceiling.js).
+  DEFAULT_FALLBACK_BUDGET_MS,
   anthropicCreateWithSamplingRetry,
   callOpenAI,
   callGemini,

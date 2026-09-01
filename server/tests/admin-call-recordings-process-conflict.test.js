@@ -96,7 +96,9 @@ describe('processAllPending counters', () => {
 // derivation mirrors the processor's own timeout map — pinned here so the two
 // cannot drift apart silently.
 describe('claim ceiling is derived from the provider budgets', () => {
-  const { alertCeilingMinutes, reclaimCeilingMinutes, providerBudgetMs } = require('../utils/claim-ceiling');
+  const {
+    alertCeilingMinutes, humanReclaimCeilingMinutes, reclaimCeilingMinutes, providerBudgetMs,
+  } = require('../utils/claim-ceiling');
   const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
 
   test('the mirrored budget counts every sequential leg at the processor timeouts', () => {
@@ -107,14 +109,21 @@ describe('claim ceiling is derived from the provider budgets', () => {
       + (3 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
       + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcript_label)
       + (2 * PROVIDER_FETCH_TIMEOUTS_MS.extraction)
-      + 240000;
+      + require('../services/llm/call').DEFAULT_FALLBACK_BUDGET_MS;
     expect(providerBudgetMs()).toBe(expected);
   });
 
-  test('no legitimate provider path can reach either ceiling', () => {
+  test('no legitimate provider path reaches any ceiling', () => {
     const worstCaseMs = providerBudgetMs();
-    expect(alertCeilingMinutes() * 60000).toBeGreaterThan(worstCaseMs);
-    expect(reclaimCeilingMinutes() * 60000).toBeGreaterThan(worstCaseMs);
+    for (const minutes of [alertCeilingMinutes(), humanReclaimCeilingMinutes(), reclaimCeilingMinutes()]) {
+      expect(minutes * 60000).toBeGreaterThan(worstCaseMs);
+    }
+  });
+
+  test('a human may reclaim a hung claim long before an automatic sweep', () => {
+    // The wedge this branch exists to shorten: an operator looking at the row
+    // must not wait hours behind a pass that is beating but going nowhere.
+    expect(humanReclaimCeilingMinutes()).toBeLessThan(reclaimCeilingMinutes());
   });
 
   test('the bell rings before a peer may steal a still-beating claim', () => {

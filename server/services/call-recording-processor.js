@@ -1951,11 +1951,19 @@ function summarizeBatch(results) {
 // + extraction (primary and fallback) back to back, which at the shipped
 // defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
 // slow-but-working pass out from under itself (pre-push audit P1).
-const { reclaimCeilingMinutes } = require('../utils/claim-ceiling');
-const reclaimableClaim = (quietMinutes) => "("
-  + `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`
-  + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${reclaimCeilingMinutes()} minutes'`
-  + ")";
+const { humanReclaimCeilingMinutes, reclaimCeilingMinutes } = require('../utils/claim-ceiling');
+// `human` picks the ceiling for the FORCE path: an operator looking at the
+// row and asking on purpose may take a claim that has outlived every
+// legitimate provider path, while an automatic sweep waits far longer —
+// nobody is watching a robot steal, and a wrong steal duplicates side
+// effects.
+const reclaimableClaim = (quietMinutes, { human = false } = {}) => {
+  const ceiling = human ? humanReclaimCeilingMinutes() : reclaimCeilingMinutes();
+  return "("
+    + `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`
+    + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${ceiling} minutes'`
+    + ")";
+};
 
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
@@ -6223,7 +6231,7 @@ const CallRecordingProcessor = {
             // after looking at the row; the automatic paths keep the
             // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw(reclaimableClaim(3));
+              .orWhereRaw(reclaimableClaim(3, { human: true }));
           })
           .update({
             processing_status: 'processing',

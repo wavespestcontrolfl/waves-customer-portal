@@ -37,8 +37,10 @@ function providerBudgetMs() {
   // fallback, contact dictation), two labeling attempts, two V1 extraction
   // attempts, and the V2 fallback chain. This is the worst case a HEALTHY
   // pass can legitimately reach — both ceilings sit above it.
-  const v2FallbackChain = envMs('CALL_PROC_V2_FALLBACK_TIMEOUT_MS', 240000);
-  return download + (3 * transcription) + (2 * label) + (2 * extraction) + v2FallbackChain;
+  // The dispatcher's OWN budget, not a mirror of it: a change there must move
+  // this ceiling with it (existing-mechanism rule).
+  const { DEFAULT_FALLBACK_BUDGET_MS } = require('../services/llm/call');
+  return download + (3 * transcription) + (2 * label) + (2 * extraction) + DEFAULT_FALLBACK_BUDGET_MS;
 }
 
 // TWO ceilings, because alerting and stealing carry opposite risks.
@@ -46,9 +48,14 @@ function providerBudgetMs() {
 // Ringing a bell early on a pass that turns out to be healthy costs one
 // notification. RECLAIMING a live claim costs duplicate side effects on a
 // customer's record, so it must never happen to a pass that is merely slow.
-// Both sit ABOVE the worst case a healthy pass can reach — the bell at 2x
-// that budget, the reclaim at 4x — so neither fires on a slow-but-working
-// pass, and the bell always comes first.
+// THREE thresholds, because the actor differs.
+//
+// A pass past every legitimate provider path is not healthy, so that is where
+// the bell rings AND where a human forcing a reprocess is allowed to win —
+// the operator is looking at the row and asking on purpose, and making them
+// wait longer is the wedge this branch exists to shorten. Automatic reclaim
+// stays far more conservative: robot-vs-robot stealing is what produces
+// duplicate side effects with nobody watching.
 //
 // Neither number is an attempt to enumerate the call graph. The processor can
 // run more legs than the four timeouts describe — a second labeling attempt,
@@ -63,7 +70,8 @@ function providerBudgetMs() {
 // no leg can outlive it and the ceiling becomes true by construction rather
 // than by margin. That needs cancellation threaded through every provider
 // await and is deliberately not attempted here.
-const ALERT_HEADROOM = 2;
+const ALERT_HEADROOM = 1.2;
+const HUMAN_RECLAIM_HEADROOM = 1.2;
 const RECLAIM_HEADROOM = 4;
 
 // When the stall watchdog should ring about a claim that is still beating.
@@ -71,13 +79,21 @@ function alertCeilingMinutes() {
   return Math.ceil((providerBudgetMs() * ALERT_HEADROOM) / 60000);
 }
 
-// When a peer may take a still-beating claim away. Always later than the bell.
+// When an OPERATOR forcing a reprocess may take a still-beating claim. Past
+// every legitimate provider path, a human asking wins.
+function humanReclaimCeilingMinutes() {
+  return Math.ceil((providerBudgetMs() * HUMAN_RECLAIM_HEADROOM) / 60000);
+}
+
+// When an automatic sweep may take a still-beating claim. Deliberately far
+// out: nobody is watching, and a wrong steal duplicates side effects.
 function reclaimCeilingMinutes() {
   return Math.ceil((providerBudgetMs() * RECLAIM_HEADROOM) / 60000);
 }
 
 module.exports = {
   alertCeilingMinutes,
+  humanReclaimCeilingMinutes,
   reclaimCeilingMinutes,
   providerBudgetMs,
   ALERT_HEADROOM,
