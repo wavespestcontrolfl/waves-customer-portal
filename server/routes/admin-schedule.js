@@ -9526,6 +9526,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }, Infinity);
             const spawnProfile = await resolveCompletionProfileForScheduledService(parent, trx)
               .catch(() => null);
+            // The PARENT's own label — this asks whether the series' service is
+            // always-free, it is not a child row's identity (children resolve
+            // the live catalog identity at insert). Named so the child-insert
+            // golden master stays strict rather than allow-listing a line.
+            const spawnSeriesServiceType = parent.service_type;
             const unbillableSpawn = gateCustomer && recurringWithoutBillableAmount({
               isRecurring: true,
               recurringFloorPrice: Number.isFinite(spawnFloor) ? spawnFloor : 0,
@@ -9534,7 +9539,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               typedOneTimeBilling: String(spawnProfile?.billingType || '').toLowerCase() === 'one_time'
                 && parent.followup_included !== true,
               isCallback: !!parent.is_callback,
-              serviceType: parent.service_type,
+              serviceType: spawnSeriesServiceType,
             });
             if (unbillableSpawn) {
               throw Object.assign(httpError(409, unbillableSpawn.error), { code: unbillableSpawn.code });
