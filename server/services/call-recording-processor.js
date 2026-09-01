@@ -6423,11 +6423,17 @@ const CallRecordingProcessor = {
     // pass leaves before it acts, which is what makes the operator takeover
     // safe rather than merely bounded.
     const stillOwnsClaim = async () => {
+      // NO catch: a transient query failure is not evidence that ownership
+      // was lost. Swallowing it made the pass abandon a claim it still held
+      // and stop its heartbeat without releasing the token, leaving the call
+      // wedged in 'processing' until the stale reclaim — manufacturing the
+      // exact failure this branch exists to remove (codex P1). Let it reach
+      // the outer catch, which releases the lock to a recoverable terminal
+      // state. Only a real zero-row result means the claim is gone.
       const row = await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
-        .first('id')
-        .catch(() => null);
+        .first('id');
       return !!row;
     };
     const abandonToPeer = (boundary) => {
