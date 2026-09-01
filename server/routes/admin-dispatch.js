@@ -5263,8 +5263,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         };
       })
       .filter(Boolean);
+    const submittedObservations = normalizeCompletionTextArray(
+      Array.isArray(observations) ? observations : [],
+    );
     const reportObservations = normalizeCompletionTextArray([
-      ...(Array.isArray(observations) ? observations : []),
+      ...submittedObservations,
       ...taggedCompletionNoteLines(technicianNotes, ['found']),
     ]);
     const reportRecommendations = normalizeCompletionTextArray([
@@ -7502,8 +7505,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // Pressure recurring-issue component matches completed records'
         // service_findings by service_line) and surface on customer-facing
         // findings reads — neither is wanted for an advisory walkthrough.
-        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length && !isInternalOnlyCompletion) {
-          const findingRows = reportObservations.map((title) => ({
+        if (useServiceReportV1 && serviceFindingsAvailable && submittedObservations.length && !isInternalOnlyCompletion) {
+          const findingRows = submittedObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
             severity: completionFindingSeverity(title),
