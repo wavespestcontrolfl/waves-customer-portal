@@ -48,6 +48,11 @@ function normalizeAppointmentPin(row) {
     // group during the pending window is drift, never an undisclosed
     // detach/dissolve.
     visit_id: row.visit_id ? String(row.visit_id) : null,
+    // Recurrence state (GH r19 P2): with the collective-move gate on, a
+    // recurring row's DATE move is deterministically refused by the
+    // executor — the proposal refuses first, and a row that becomes
+    // recurring during the pending window is drift.
+    is_recurring: row.is_recurring === true,
     // Tracker-lifecycle evidence, DERIVED (GH r8 on #3648): a date move of a
     // row with live status/track_state or leftover lifecycle stamps rewinds
     // the tracker (rebooker needsLifecycleRewind) — an effect the card must
@@ -64,6 +69,7 @@ function appointmentPinFingerprint(pin) {
     pin.customer_id || null,
     pin.track_rewind === true,
     pin.visit_id || null,
+    pin.is_recurring === true,
   ]);
 }
 

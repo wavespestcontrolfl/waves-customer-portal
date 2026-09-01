@@ -1110,7 +1110,11 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // the provider handoff if the visit moved again or went terminal, and closes/
 // re-arms the covered reminder windows guarded on the pre-send snapshot.
 // Returns { sent, error }.
-async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = null } = {}) {
+// expectedPhone semantics (GH r18/r19 P1): undefined = unpinned caller
+// (no enforcement); a string = the card-approved number; null = the card
+// showed NO SMS recipient — a phone that appears afterwards must refuse,
+// never receive a text the operator did not approve.
+async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = undefined } = {}) {
   // Shared belt for every notice path (update-details, bulk reschedule, IB
   // schedule tools): a LEGACY outbound-review row (pending before the
   // 2026-08-11 review-hold removal) must be activated — reminders armed,
@@ -1144,8 +1148,8 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
     if (!customer) {
       error = 'Customer not found';
-    } else if (expectedPhone
-      && String(require('../services/customer-contact').getServiceContactSmsRecipient(customer).phone || '') !== String(expectedPhone)) {
+    } else if (expectedPhone !== undefined
+      && String(require('../services/customer-contact').getServiceContactSmsRecipient(customer).phone || '') !== String(expectedPhone || '')) {
       // W0B pinned recipient at the sender's own customer read (GH r18
       // P1): a card-confirmed batch move approved a specific number — a
       // phone changed after the card must refuse here, never text an

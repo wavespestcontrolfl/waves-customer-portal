@@ -395,6 +395,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       const who = groupedStops.map((st) => String(st.customer || st.id)).join(', ');
       push('operational', `${groupedStops.length} moved stop(s) are the sole open member of a grouped visit — ${who}: the date move also detaches them from that visit and dissolves the now-empty group (a failed repair surfaces as a warning)`);
     }
+    // Every moved stop also gets a reschedule_log audit append (GH r19
+    // P2) — same disclosure the single-visit reschedule carries; a failed
+    // append surfaces in the combined warning.
+    push('operational', 'A reschedule audit entry is appended for each moved stop (a failed append surfaces as a warning)');
     // Pinned text recipients (GH r18 P1): with notify_customers the card
     // names each number (last4) the reschedule text goes to — the full
     // number binds the fingerprint and is enforced at the sender's final
@@ -418,15 +422,30 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       const who = grouped.map((st) => String(st.customer || st.id)).join(', ');
       push('operational', `${grouped.length} stop(s) belong to grouped visits — ${who}: the reassignment also updates grouped-visit membership (the visit adopts the new technician, or the stop detaches from its visit, per the group's rules; a failed repair surfaces as a warning)`);
     }
+    // Route-order reset (GH r19 P2): a stop whose technician actually
+    // changes loses its sequence number (NULL appends after the
+    // destination day's ordered run until an optimizer places it) —
+    // a scheduling mutation the operator is approving.
+    const changing = preview.stops.filter((st) => st
+      && String(st.current_tech || 'Unassigned') !== String(preview.would_assign_to || ''));
+    if (changing.length && preview.would_assign_to) {
+      push('operational', `${changing.length} stop(s) actually change technician — their route order is cleared (they append after the destination day's ordered run until the next optimization)`);
+    }
   }
   // Same seam disclosure for whole-day swaps (GH r16 P1): the swap preview's
   // stops are an object keyed by technician name; grouped members carry
   // grouped_visit_id, which also binds the fingerprint and the executor's
   // under-lock membership compare.
   if (toolName === 'swap_tech_assignments' && preview?.stops && typeof preview.stops === 'object' && !Array.isArray(preview.stops)) {
-    const grouped = Object.values(preview.stops).flat().filter((st) => st && st.grouped_visit_id);
+    const allSwap = Object.values(preview.stops).flat().filter(Boolean);
+    const grouped = allSwap.filter((st) => st.grouped_visit_id);
     if (grouped.length) {
       push('operational', `${grouped.length} swapped stop(s) belong to grouped visits: the swap also updates grouped-visit membership (each visit adopts the new technician, or the divergent stop detaches, per the group's rules; a failed repair surfaces as a warning)`);
+    }
+    // Both sides' route orders are cleared on reassignment (GH r19 P2) —
+    // same scheduling mutation as assign_technician, disclosed.
+    if (allSwap.length) {
+      push('operational', "Every swapped stop's route order is cleared on both sides — stops append after each day's ordered run until the next optimization");
     }
   }
   // Receiving a restock also re-runs the WaveGuard lawn-readiness recheck,

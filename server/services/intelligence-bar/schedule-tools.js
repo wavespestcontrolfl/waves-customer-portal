@@ -895,6 +895,8 @@ async function moveStopsToDay(input) {
   // post-commit (GH r9 P1) — the card disclosed that release, so a failure
   // surfaces as a warning, never a bare Done.
   const lifecycleCleanupFailures = [];
+  // Moved rows whose reschedule_log audit append failed (GH r19 P2).
+  const auditFailures = [];
   let textedCount = 0;
   for (const s of movable) {
     const oldDate = s.scheduled_date;
@@ -1091,6 +1093,9 @@ async function moveStopsToDay(input) {
       });
     } catch (err) {
       logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
+      // The card discloses the audit append (GH r19 P2) — a failed insert
+      // surfaces in the combined warning, never a bare Done.
+      auditFailures.push(s.id);
     }
 
   }
@@ -1167,8 +1172,12 @@ async function moveStopsToDay(input) {
               // final recipient read (GH r18 P1) — a number changed after
               // the card refuses there instead of texting an unapproved
               // phone.
+              // The pinned value is passed even when it is null (GH r19
+              // P1): a card that showed "no SMS recipient" pins ABSENCE —
+              // a phone added after the confirm re-preview must refuse at
+              // the sender, never text a number the operator did not see.
               const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start, {
-                expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) || null,
+                expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) ?? null,
               });
               if (notice.sent) textedCount++;
               else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
@@ -1237,7 +1246,10 @@ async function moveStopsToDay(input) {
   const lifecycleNote = lifecycleCleanupFailures.length
     ? `${lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
     : null;
-  const combinedWarning = [overlapNote, notifyNote, conflictNote, lifecycleNote, moveGroupWarning].filter(Boolean).join(' ');
+  const auditNote = auditFailures.length
+    ? `${auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
+    : null;
+  const combinedWarning = [overlapNote, notifyNote, conflictNote, lifecycleNote, moveGroupWarning, auditNote].filter(Boolean).join(' ');
 
   return {
     success: true,

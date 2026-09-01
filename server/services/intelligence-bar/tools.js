@@ -871,7 +871,11 @@ async function findDuplicates(input) {
 const UPDATABLE_FIELDS = {
   first_name: 'first_name', last_name: 'last_name', email: 'email',
   phone: 'phone', city: 'city', state: 'state', zip: 'zip',
-  address_line1: 'address_line1', waveguard_tier: 'waveguard_tier',
+  // address_line2 accepted (GH r19 P2): the fan-out and its disclosure
+  // already treat a unit-only edit as an address change — omitting it here
+  // made a unit-only card fail as no-valid-fields and silently dropped the
+  // unit from combined updates.
+  address_line1: 'address_line1', address_line2: 'address_line2', waveguard_tier: 'waveguard_tier',
   pipeline_stage: 'pipeline_stage', lead_source: 'lead_source',
   monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
 };
@@ -1932,8 +1936,14 @@ async function createAppointment(input) {
       // (and the mismatch aborts the booking) or waits until this booking
       // has committed with its event (and is redeemed by the next booking,
       // exactly as the card said). No READ COMMITTED blind spot remains.
+      // COMPLETE offer set, gate-paused offers included (pre-push P0 + GH
+      // r19 P1 reconciliation): the proposal refuses whenever ANY offer
+      // exists, so this locked re-check must see the same full set — a
+      // paused offer appearing since the card aborts rather than being
+      // stamped over (which would orphan it) or minted later (which the
+      // card never approved).
       await require('../inspection-credit').lockInspectionCreditCustomer(trx, customer_id);
-      const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customer_id, { dbh: trx });
+      const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customer_id, { dbh: trx, includePaused: true });
       const live = Number(projected?.amount ?? projected) || 0;
       if (live !== Number(input._inspection_credit_amount)) {
         const err = new Error('booking_credit_changed');
@@ -1958,6 +1968,9 @@ async function createAppointment(input) {
       // sweep would mint against a booking whose card said no credit; the
       // late offer now redeems on the NEXT booking instead, the ratified
       // r6b contract).
+      // Safe unconditionally: the locked full-set check above guarantees
+      // ZERO open offers (paused included) existed when a card-approved
+      // booking reaches this stamp — no promise can be orphaned by it.
       source: input._inspection_credit_amount !== undefined
         ? require('../inspection-credit').CREDIT_FREE_CARD_EVENT_SOURCE
         : 'intelligence_bar',

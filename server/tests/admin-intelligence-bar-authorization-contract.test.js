@@ -453,7 +453,7 @@ describe('W0B booking is card-confirmable only when credit-free', () => {
       expect(body.pendingActions).toEqual([]);
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
-      expect(toolResult.error).toMatch(/\$49\.00 of inspection credit/);
+      expect(toolResult.error).toMatch(/\$49\.00 of open inspection-credit offer/);
       expect(toolResult.error).toMatch(/Schedule screen/);
     });
   });

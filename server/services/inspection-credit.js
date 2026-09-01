@@ -2018,7 +2018,7 @@ async function lockInspectionCreditCustomer(trx, customerId) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inspection_credit:${customerId}`]);
 }
 
-async function projectRedeemableOfferAmount(customerId, { now = new Date(), dbh = db } = {}) {
+async function projectRedeemableOfferAmount(customerId, { now = new Date(), dbh = db, includePaused = false } = {}) {
   if (!customerId) return 0;
   // THROWS on a query failure (Codex #3492 r10 P0) — a swallowed error
   // returning 0 is indistinguishable from "no offer", and the prepay quote
@@ -2032,7 +2032,11 @@ async function projectRedeemableOfferAmount(customerId, { now = new Date(), dbh 
     .where('created_at', '<=', now)
     .where('expires_at', '>=', now);
   // Dark = STANDING-PROMISE offers only, matching redemption (r34 P0).
-  if (!gateOn()) q.where({ source_service_key: 'rodent_inspection' });
+  // includePaused (GH r19 P1): the IB booking's credit-free STAMP decision
+  // must see the COMPLETE offer set — a gate-paused ordinary offer is
+  // invisible to redemption but must not be orphaned by a permanent
+  // credit-free exclusion stamped while it was paused.
+  if (!gateOn() && !includePaused) q.where({ source_service_key: 'rodent_inspection' });
   const open = await q.select('amount');
   return round2(open.reduce((sum, offer) => sum + (Number(offer.amount) || 0), 0));
 }

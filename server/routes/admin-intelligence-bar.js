@@ -207,6 +207,9 @@ const PII_TOOL_NAMES = new Set([
   // redacted like the comms tools (codex P1 on the pinning round).
   'update_lead_status',
   'bulk_update_leads',
+  // block_sender inputs/results carry the full sender address (pre-push
+  // P1) — redact its telemetry like the comms tools.
+  'block_sender',
   'draft_sms_reply',
   'draft_sms',
   'lookup_property',
@@ -541,7 +544,7 @@ async function loadAppointmentPin(appointmentId) {
   const a = await db('scheduled_services as ss')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.id', appointmentId)
-    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id', 'ss.visit_id',
+    .first('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.time_window', 'ss.window_start', 'ss.window_end', 'ss.estimated_duration_minutes', 'ss.technician_id', 'ss.service_type', 'ss.customer_id', 'ss.visit_id', 'ss.is_recurring',
       // Tracker-lifecycle evidence for the derived track_rewind pin field
       // (see normalizeAppointmentPin) — the executor asserts the same
       // fingerprint on its own full-row read.
@@ -825,13 +828,18 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // card must show and the contract must pin. Read-only projection of
       // what the redemption would apply; fail closed if it can't be read.
       try {
-        const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id));
+        // The COMPLETE offer set, gate-paused offers included (pre-push P0
+        // + GH r19 P1 reconciliation): a paused offer becomes redeemable
+        // when the gate flips back on, so a card stamped credit-free over
+        // it would either orphan the promise or mint unapproved money —
+        // refuse the card whenever ANY offer exists.
+        const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(params.customer_id), { includePaused: true });
         const amount = Number(projected?.amount ?? projected) || 0;
         if (amount > 0) {
           // The redemption is claimed post-commit by the executor (and the
           // hourly sweep) — not pinnable to this card. Credit-bearing
           // bookings are made where that money flow is visible.
-          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of inspection credit that this booking would redeem, which the confirmation card cannot pin exactly. Book it from the Schedule screen. Nothing was changed.` } };
+          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) (redemption may be gate-paused) that the confirmation card cannot pin exactly. Book it from the Schedule screen. Nothing was changed.` } };
         }
         params._inspection_credit_amount = 0;
         preview = { ...preview, inspection_credit: { amount: 0 } };
@@ -885,6 +893,15 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // visit_id is in the fingerprint, so a row that joins a group during
       // the pending window drifts to preview_changed instead of executing
       // an undisclosed group change.
+      // Collective-move gate at proposal (GH r19 P2): the executor refuses
+      // a DATE move of a recurring row outright when the gate is on — a
+      // card promising that move would be consumed just to report the
+      // refusal. Same message, surfaced before the card exists.
+      if (pin.is_recurring
+        && params.new_date && String(params.new_date) !== String(pin.scheduled_date)
+        && require('../services/rebooker').collectiveMoveGateOn()) {
+        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was proposed.', code: 'COLLECTIVE_MOVE_REQUIRED' } };
+      }
       if (pin.visit_id) {
         const VisitGroups = require('../services/visit-groups');
         const members = await VisitGroups.openMembers(db, pin.visit_id);
@@ -994,7 +1011,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           // that also stored its domain must not read as a domain block.
           : await db('blocked_email_senders').where('domain', blockDomain).whereNull('email_address').first('id', 'gmail_filter_id');
         if (existing && existing.gmail_filter_id) {
-          return { failed: true, modelResult: { error: `${blockEmail || `@${blockDomain}`} is already blocked (blocklist row + Gmail filter in place) — nothing was proposed.`, already_blocked: true } };
+          // Redacted (GH r19 P1): this error is persisted verbatim into
+          // tool_health_events telemetry — never a full address.
+          const label = blockEmail
+            ? `${blockEmail.slice(0, 1)}***@${blockEmail.split('@')[1] || 'unknown'}`
+            : `@${blockDomain}`;
+          return { failed: true, modelResult: { error: `${label} is already blocked (blocklist row + Gmail filter in place) — nothing was proposed.`, already_blocked: true } };
         }
         if (existing) params._existing_block_repair = true;
       }
@@ -2600,7 +2622,7 @@ router.post('/confirm-action', async (req, res, next) => {
       if (!drifted && pinnedCredit !== undefined && execParams.customer_id) {
         // The booking's redemption amount the card disclosed must still hold.
         try {
-          const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(execParams.customer_id));
+          const projected = await require('../services/inspection-credit').projectRedeemableOfferAmount(String(execParams.customer_id), { includePaused: true });
           drifted = (Number(projected?.amount ?? projected) || 0) !== Number(pinnedCredit);
         } catch { drifted = true; }
       }
