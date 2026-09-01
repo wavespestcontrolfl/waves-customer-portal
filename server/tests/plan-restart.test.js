@@ -401,6 +401,22 @@ describe('mintRestartEstimate', () => {
     expect([...found.families].sort()).toEqual(['lawn_care', 'mosquito', 'pest_control']);
   });
 
+  test('a case with a request linkage keys recovery to EXACTLY that request\'s rows — a prior cancellation inside the slack hour stays out', async () => {
+    // Reactivate-then-recancel: both requests' rows sit inside the one-hour
+    // window, but the case's service_request_id names the second — only its
+    // rows are this attempt's evidence (codex GH r7 P1).
+    tables.cancellation_cases = [{
+      id: 'case-2', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:30:00Z', service_request_id: 'req-9',
+    }];
+    tables.scheduled_services = [
+      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-9', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-23T12:25:00Z' },
+      { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-8', service_type: 'Lawn Care Program', cancelled_at: '2026-08-23T12:00:00Z' },
+      { id: 's3', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Customer cancellation request', service_type: 'Monthly Mosquito Program', cancelled_at: '2026-08-23T12:05:00Z' },
+    ];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-2', source: 'cancelled_rows' });
+  });
+
   test('rows cancelled with the request-scoped portal reason are this plan\'s evidence too', async () => {
     // Every requests.js path passes "Portal cancellation request <id>" as
     // the reason, and it lands verbatim on the rows — matching only the

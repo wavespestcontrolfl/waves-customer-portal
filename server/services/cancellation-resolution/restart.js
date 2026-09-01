@@ -70,7 +70,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   const latest = await dbh('cancellation_cases')
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
-    .first('id', 'scope', 'status', 'created_at');
+    .first('id', 'scope', 'status', 'created_at', 'service_request_id');
   const scope = latest && latest.status === 'committed' ? parseJson(latest.scope, []) : [];
   const scoped = (Array.isArray(scope) ? scope : []).filter((f) => RESTARTABLE_FAMILIES.includes(f));
   if (scoped.length) return { families: scoped, caseId: latest.id, source: 'case_scope' };
@@ -92,17 +92,31 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     .where('s.status', 'cancelled')
     .where('s.is_recurring', true)
     .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
+    .orderBy('s.cancelled_at', 'desc')
+    // No LIMIT: this is family EVIDENCE run through the JS classifier — a
+    // big attempt's newest rows could all belong to one family and starve
+    // the rest out of the quote (codex GH r7 P2). Narrowed by status +
+    // recurring + reason + one customer_id.
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
+  if (latest && latest.service_request_id) {
+    // Exact correlation: the processor stamps every row THIS request pulls
+    // with "Portal cancellation request <id>" verbatim, and the case row
+    // records that id — so when the linkage exists, only those rows are
+    // this attempt's evidence. A prefix/time-window match would also accept
+    // a prior cancellation inside the slack hour after a reactivation
+    // (codex GH r7 P1). The window fallback below stays for legacy cases
+    // without the linkage.
+    rowsQuery = rowsQuery.where('s.cancellation_reason', `${PORTAL_CANCEL_REASON_PREFIX} ${latest.service_request_id}`);
+  } else {
     // A customer-driven cancellation's reason is either the bare default or
     // the request-scoped "Portal cancellation request <id>" every
     // requests.js path passes (codex GH r5 P1: matching only the default
     // made every ordinary whole-account restart find zero rows).
-    .where(function customerCancelReason() {
+    rowsQuery = rowsQuery.where(function customerCancelReason() {
       this.where('s.cancellation_reason', CHURN_REASON)
         .orWhere('s.cancellation_reason', 'like', `${PORTAL_CANCEL_REASON_PREFIX}%`);
-    })
-    .orderBy('s.cancelled_at', 'desc')
-    .limit(50)
-    .select('s.*', 'sv.service_key', 'sv.name as service_name');
+    });
+  }
   if (latest && latest.created_at) {
     // Slack window: the H0 request path runs the processor BEFORE it writes
     // the case row, so this attempt's rows carry cancelled_at slightly
