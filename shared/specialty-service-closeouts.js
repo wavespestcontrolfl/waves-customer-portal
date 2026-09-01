@@ -105,10 +105,21 @@ function exclusiveSpecialtyActionConflict(spec, actionLabels, productCount) {
   return null;
 }
 
+// Specialty lanes complete with their preset actions only. A stale tab or
+// direct API client can still submit an obsolete dynamic-protocol label; it
+// must be refused rather than silently persisted into the immutable report
+// inputs (codex P2 r10 #3701).
+function offPresetSpecialtyAction(spec, actionLabels) {
+  const known = new Set((spec.protocols || []).map((action) => action.label));
+  const unknown = (Array.isArray(actionLabels) ? actionLabels : []).find((label) => !known.has(label));
+  return unknown ? `“${unknown}” is not a protocol action for this service.` : null;
+}
+
 function validateSpecialtyClosureCombination(serviceKey, { observations, actions, productCount = 0 } = {}) {
   const spec = SPECIALTY_SERVICE_CLOSEOUTS[specialtyServiceKey({ serviceKey })];
   if (!spec) return null;
   return validateSpecialtyObservationCombination(serviceKey, observations)
+    || offPresetSpecialtyAction(spec, actions)
     || exclusiveSpecialtyActionConflict(spec, actions, productCount)
     || specialtyFindingActionConflict(spec, observations, actions);
 }

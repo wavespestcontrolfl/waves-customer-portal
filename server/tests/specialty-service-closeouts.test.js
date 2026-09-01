@@ -99,7 +99,7 @@ describe('specialty service closeout vocabulary', () => {
       observations: [], actions: ['No treatment recommended'], productCount: 1,
     })).toBe('Remove applied products or clear “No treatment recommended” before completing this visit.');
     expect(validateSpecialtyClosureCombination('bed_bug', {
-      observations: [], actions: ['Inspection only', '[Protocol] free-text line'], productCount: 0,
+      observations: [], actions: ['Inspection only'], productCount: 0,
     })).toBeNull();
     expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
       observations: [], actions: ['Exposed nest treated', 'Nest physically removed'], productCount: 2,
@@ -128,9 +128,36 @@ describe('specialty service closeout vocabulary', () => {
     expect(specialtyServiceKey({ serviceType: 'General Pest Control' })).toBeNull();
   });
 
-  test('accepts consistent work state, tagged free-text actions and lanes without work-state rules', () => {
+  test('rejects protocol actions the specialty preset does not offer', () => {
     expect(validateSpecialtyClosureCombination('dethatching', {
       observations: ['Inspection only'], actions: ['Inspection only', 'Checked irrigation heads'],
+    })).toBe('“Checked irrigation heads” is not a protocol action for this service.');
+    expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
+      observations: [], actions: ['Cobweb sweep'],
+    })).toBe('“Cobweb sweep” is not a protocol action for this service.');
+  });
+
+  test('rejects nest counts and identified species beside no-evidence findings', () => {
+    expect(validateSpecialtyObservationCombination('mud_dauber_removal', [
+      'No current evidence observed', '1–3 nests',
+    ])).toBe('“No current evidence observed” cannot be paired with “1–3 nests”.');
+    expect(validateSpecialtyObservationCombination('mud_dauber_removal', [
+      'Mud dauber activity without completed nests', 'Exact count not practical',
+    ])).toBe('“Mud dauber activity without completed nests” cannot be paired with “Exact count not practical”.');
+    expect(validateSpecialtyObservationCombination('tick_control', [
+      'No tick activity observed', 'Brown dog tick',
+    ])).toBe('“No tick activity observed” cannot be paired with “Brown dog tick”.');
+    expect(validateSpecialtyObservationCombination('tick_control', [
+      'No tick activity observed', 'Species not confirmed',
+    ])).toBeNull();
+    expect(validateSpecialtyObservationCombination('mud_dauber_removal', [
+      'Inactive or abandoned nests', '4–10 nests',
+    ])).toBeNull();
+  });
+
+  test('accepts consistent work state and lanes without work-state rules', () => {
+    expect(validateSpecialtyClosureCombination('dethatching', {
+      observations: ['Inspection only'], actions: ['Inspection only'],
     })).toBeNull();
     expect(validateSpecialtyClosureCombination('plugging', {
       observations: ['9-inch spacing', 'Full quoted area completed'],

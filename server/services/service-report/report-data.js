@@ -487,13 +487,16 @@ function structuredActionScope(service = {}) {
   let hasInterior = false;
   let hasExterior = false;
   let hasTreatment = false;
+  let hasActions = false;
   for (const entry of entries) {
-    if (!entry || typeof entry !== 'object' || entry.treatmentApplied !== true) continue;
+    if (!entry || typeof entry !== 'object') continue;
+    hasActions = true;
+    if (entry.treatmentApplied !== true) continue;
     const scope = String(entry.scope || '').toLowerCase();
     if (scope === 'interior') { hasInterior = true; hasTreatment = true; }
     else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
   }
-  return { hasInterior, hasExterior, hasTreatment };
+  return { hasInterior, hasExterior, hasTreatment, hasActions };
 }
 
 // Controlled treatment-area labels carry an explicit scope
@@ -555,7 +558,11 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   };
 }
 
-function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
+// `treatmentEvidence` is the caller's read-time application verdict (the
+// same boolean the payload publishes as applicationMade): false = products
+// loaded and nothing spray-class or treatment-tagged was recorded; undefined
+// = unknown (product load failed), which never zeroes anything.
+function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false, treatmentEvidence } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
   // Admin re-entry correction (PATCH /admin/dispatch/:serviceId/reentry):
   // a typed window is authoritative FOR ITS SIDE ONLY. The marker is
@@ -568,6 +575,20 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   const sideAdjusted = (side) => adjustedMarker === true
     || (!!adjustedMarker && typeof adjustedMarker === 'object' && adjustedMarker[side] === true);
   const scope = treatmentScope({ service, applications, zones });
+
+  // A closeout that DECLARED its protocol actions and marked none of them as
+  // treatment (inspection-only, deferred, no treatment recommended) applied
+  // nothing — the inspected areas are location, not treatment scope. With
+  // no application evidence either, both re-entry targets must be zero so
+  // the report never shows a "ready in" countdown beside "No treatment was
+  // applied" (codex P1 r10 #3701). Only the read-time caller knows the
+  // product-load verdict, so the rule is gated on an explicit `false`.
+  const declared = structuredActionScope(service);
+  if (treatmentEvidence === false && declared.hasActions && !declared.hasTreatment) {
+    if (!sideAdjusted('interior') && normalized.interior_reentry_min != null) normalized.interior_reentry_min = 0;
+    if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null) normalized.exterior_reentry_min = 0;
+    return normalized;
+  }
 
   if (!sideAdjusted('interior') && normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
@@ -4003,6 +4024,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     service,
     applications,
     zones: payloadTracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    treatmentEvidence: productsLoadFailed ? undefined : readTimeSprayEvidence,
   });
   const metrics = buildMetrics(config, {
     onSiteMin,

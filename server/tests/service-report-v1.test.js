@@ -499,6 +499,33 @@ describe('service report v1', () => {
       expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     });
 
+    test('a declared no-treatment closeout zeros both re-entry targets when nothing was applied', () => {
+      const inspectionOnly = {
+        areas_serviced: JSON.stringify(['Eaves / soffit', 'Attic']),
+        structured_notes: {
+          protocolActionScopesCompleted: [
+            { label: 'Inspection and identification only', scope: 'exterior', treatmentApplied: false },
+          ],
+        },
+      };
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly, treatmentEvidence: false }))
+        .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+      // Unknown evidence (product load failed) never zeroes; recorded evidence keeps the scope rules.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly }))
+        .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+      expect(normalizeAdvisoryForTreatmentScope(advisory, { service: inspectionOnly, treatmentEvidence: true }))
+        .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+      // A person's per-side correction survives.
+      expect(normalizeAdvisoryForTreatmentScope(
+        { ...advisory, reentry_adjusted: { exterior: true, interior: false } },
+        { service: inspectionOnly, treatmentEvidence: false },
+      )).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+      // No declared actions at all: legacy records keep today's behavior.
+      expect(normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify(['Eaves / soffit']) }, treatmentEvidence: false,
+      })).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+    });
+
     test('pet-resting area chips retain interior scope beside lawn treatment', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: { areas_serviced: JSON.stringify(['Pet resting areas', 'Front lawn']) },

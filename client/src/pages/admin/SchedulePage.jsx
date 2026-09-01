@@ -18207,12 +18207,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
-                  {areasServiced.length > 0 && (() => {
+                  {completionAreasServiced.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(
                       sp.applicationArea,
                     );
                     const areaChoices = productAreaChoices(
-                      areasServiced,
+                      completionAreasServiced,
                       sp.applicationArea,
                     );
                     return (
