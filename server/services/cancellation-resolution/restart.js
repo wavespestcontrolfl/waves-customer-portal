@@ -113,13 +113,27 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   const anchorTs = current ? current.created_at : (latestRequest ? latestRequest.created_at : null);
   if (anchorTs) {
     try {
-      const { etCalendarDayOf } = require('../../utils/datetime-et');
-      const row = await dbh('customers').where({ id: customerId }).first('churned_at');
-      const churnDay = row && row.churned_at ? etCalendarDayOf(row.churned_at) : null;
-      if (churnDay) {
-        const staleBefore = new Date(Date.parse(`${churnDay}T00:00:00Z`) - 24 * 3600 * 1000).toISOString().slice(0, 10);
-        if (etCalendarDayOf(anchorTs) < staleBefore) {
-          return { families: [], caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'none' };
+      const row = await dbh('customers').where({ id: customerId }).first('churned_at', 'pipeline_stage_changed_at');
+      const staleAttempt = () => ({ families: [], caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'none' });
+      const transitionMs = row && row.pipeline_stage_changed_at ? new Date(row.pipeline_stage_changed_at).getTime() : NaN;
+      if (!Number.isNaN(transitionMs)) {
+        // PRECISE binding (codex GH r23 P1 — the DATE-day tolerance still
+        // admitted a same-day admin re-churn): every churn writer stamps
+        // pipeline_stage_changed_at with the transition instant (the
+        // processor at churn commit; stageLifecycleStamps on the admin
+        // stage paths), and it re-stamps only on stage CHANGES, so on a
+        // churned row it IS the current transition. The attempt must land
+        // within the processor's stamping slack of that instant, or later.
+        if (new Date(anchorTs).getTime() < transitionMs - ATTEMPT_SLACK_MS) return staleAttempt();
+      } else {
+        // Legacy rows without the stamp: churned_at (a pg DATE) allows
+        // only day-level proximity — one-day tolerance for a request
+        // filed just before a midnight churn stamp.
+        const { etCalendarDayOf } = require('../../utils/datetime-et');
+        const churnDay = row && row.churned_at ? etCalendarDayOf(row.churned_at) : null;
+        if (churnDay) {
+          const staleBefore = new Date(Date.parse(`${churnDay}T00:00:00Z`) - 24 * 3600 * 1000).toISOString().slice(0, 10);
+          if (etCalendarDayOf(anchorTs) < staleBefore) return staleAttempt();
         }
       }
     } catch { /* unreadable — keep the legacy correlation */ }
@@ -559,7 +573,18 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     } catch (err) {
       logger.warn(`[plan-restart] estimate property seed skipped for ${fresh.id}: ${err.message}`);
     }
-    const turfProfile = await pricingAi.loadTurfProfile(trx, fresh.id);
+    // Savepoint-isolated like the seed and prepay lookups (codex GH r23
+    // P2): loadTurfProfile's own safeSelect catch returns null on a pg
+    // statement error, but the OUTER trx would already be aborted — the
+    // mint could not continue on the property/cache/seed fallbacks it
+    // documents and would 500 on the next transactional query. A null
+    // profile from a rolled-back savepoint degrades exactly as intended.
+    let turfProfile = null;
+    try {
+      turfProfile = await trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id));
+    } catch (err) {
+      logger.warn(`[plan-restart] turf profile skipped for ${fresh.id}: ${err.message}`);
+    }
     // Verified-correction probe discipline (codex GH r4 P1), mirrored from
     // BOTH offer paths (cross-sell report + portal offer): only a USABLE
     // lookup result carries staff's verified overrides folded in, so record

@@ -574,6 +574,32 @@ describe('mintRestartEstimate', () => {
     expect(live.families).toEqual(['pest_control']);
   });
 
+  test('a SAME-DAY admin re-churn refuses the morning portal attempt — pipeline_stage_changed_at binds precisely (codex GH r23 P1)', async () => {
+    // Portal cancellation at noon, staff reactivate, admin re-churn that
+    // evening: the DATE stamp matches but the transition instant does not.
+    tables.customers[0].churned_at = '2026-08-23';
+    tables.customers[0].pipeline_stage_changed_at = '2026-08-23T20:00:00Z';
+    tables.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-23T12:00:00Z',
+    }];
+    const stale = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(stale).toEqual({ families: [], caseId: 'case-old', requestId: null, source: 'none' });
+
+    // The portal attempt's own transition (stamped within the processor's
+    // slack of the request) stays live.
+    tables.customers[0].pipeline_stage_changed_at = '2026-08-23T12:30:00Z';
+    const live = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(live.families).toEqual(['pest_control']);
+  });
+
+  test('a failing turf-profile read degrades to a null profile — the savepoint keeps the mint alive (codex GH r23 P2)', async () => {
+    const d = deps();
+    d.pricingAi.loadTurfProfile = async () => { throw new Error('schema skew boom'); };
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(result.reused).toBe(false);
+    expect(tables.estimates).toHaveLength(1);
+  });
+
   test('a failing prepay evidence read only NARROWS — the savepoint keeps the outer transaction usable (codex GH r18 P2)', async () => {
     // The prepay lookup is best-effort, but without a savepoint a pg
     // statement error aborts the OUTER mint transaction — the catch would
