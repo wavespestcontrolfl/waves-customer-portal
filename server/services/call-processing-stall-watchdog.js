@@ -83,10 +83,11 @@ const GRACE_MINUTES = 20;
 const CLAIM_STALE_MINUTES = 8;
 // The heartbeat is a TIMER, so it keeps beating while a pass is alive even
 // when the work is hung on a provider socket. The processor bounds that with
-// an absolute ceiling on how long any claim may be held; the watchdog reads
-// the same ceiling, so a hung-but-beating pass is still a stall here rather
-// than a call that silently never rings.
-const CLAIM_ABSOLUTE_CEILING_MINUTES = 20;
+// an absolute ceiling on how long any claim may be held, DERIVED from the
+// provider timeout budgets; the watchdog reads the same derivation, so a
+// hung-but-beating pass is a stall here rather than a call that silently
+// never rings — and so tuning a provider timeout moves both together.
+const { claimAbsoluteCeilingMinutes } = require('../utils/claim-ceiling');
 // One bell per call per DAY, not one per call forever. Permanence was what
 // made an aggressive staleness threshold dangerous: a single false positive
 // on a slow-but-healthy pass would have settled that SID for good and
@@ -129,7 +130,7 @@ function maskPhone(value) {
 function computeStalledCalls(rows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const claimCutoff = new Date(now.getTime() - CLAIM_STALE_MINUTES * 60 * 1000);
-  const ceilingCutoff = new Date(now.getTime() - CLAIM_ABSOLUTE_CEILING_MINUTES * 60 * 1000);
+  const ceilingCutoff = new Date(now.getTime() - claimAbsoluteCeilingMinutes() * 60 * 1000);
   const stalled = [];
   for (const r of rows) {
     const readyAt = recordingReadyAt(r);
@@ -350,7 +351,6 @@ module.exports = {
   MIN_DURATION_SECONDS,
   GRACE_MINUTES,
   CLAIM_STALE_MINUTES,
-  CLAIM_ABSOLUTE_CEILING_MINUTES,
   PAGE_SIZE,
   MAX_PAGES,
   COLLECT_CAP,

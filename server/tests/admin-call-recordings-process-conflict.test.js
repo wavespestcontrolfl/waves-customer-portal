@@ -90,3 +90,25 @@ describe('processAllPending counters', () => {
     expect(summarizeBatch([])).toEqual({ processed: 0, skipped: 0, failed: 0, attempted: 0 });
   });
 });
+
+// The claim ceiling must stay ABOVE what a healthy pass can legitimately
+// spend, or it reclaims a slow-but-working run out from under itself. The
+// derivation mirrors the processor's own timeout map — pinned here so the two
+// cannot drift apart silently.
+describe('claim ceiling is derived from the provider budgets', () => {
+  const { claimAbsoluteCeilingMinutes, providerBudgetMs, HEADROOM } = require('../utils/claim-ceiling');
+  const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
+
+  test('the mirrored budget matches the processor timeout map', () => {
+    const expected = PROVIDER_FETCH_TIMEOUTS_MS.recording_download
+      + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
+      + PROVIDER_FETCH_TIMEOUTS_MS.transcript_label
+      + (2 * PROVIDER_FETCH_TIMEOUTS_MS.extraction);
+    expect(providerBudgetMs()).toBe(expected);
+  });
+
+  test('the ceiling exceeds the worst-case healthy pass', () => {
+    expect(claimAbsoluteCeilingMinutes() * 60000).toBeGreaterThan(providerBudgetMs());
+    expect(HEADROOM).toBeGreaterThan(1);
+  });
+});

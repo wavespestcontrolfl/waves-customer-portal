@@ -1946,10 +1946,15 @@ function summarizeBatch(results) {
 // rather than crashed. The absolute ceiling is the backstop: generous enough
 // that a long transcription is never stolen mid-flight, finite so a hang is
 // always recoverable (pre-push audit P1).
-const CLAIM_ABSOLUTE_CEILING_MINUTES = 20;
+// DERIVED from the provider budgets, never a flat guess: a healthy pass can
+// legitimately run download + transcription (primary and fallback) + labeling
+// + extraction (primary and fallback) back to back, which at the shipped
+// defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
+// slow-but-working pass out from under itself (pre-push audit P1).
+const { claimAbsoluteCeilingMinutes } = require('../utils/claim-ceiling');
 const reclaimableClaim = (quietMinutes) => "("
   + `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`
-  + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${CLAIM_ABSOLUTE_CEILING_MINUTES} minutes'`
+  + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${claimAbsoluteCeilingMinutes()} minutes'`
   + ")";
 
 // A voicemail landing on the TERMINAL skip path despite concrete service
@@ -6262,6 +6267,16 @@ const CallRecordingProcessor = {
         .where({ id: call.id })
         .where('processing_token', procToken)
         .update({ processing_heartbeat_at: new Date() })
+        .then((rows) => {
+          // A beat that matches 0 rows means a peer reclaimed this call —
+          // the ceiling fired, or the pass went quiet long enough to look
+          // dead. Say so loudly: every terminal write from here is
+          // token-fenced and will no-op, so the pass finishes into nothing,
+          // and this line is the only trace of why.
+          if (rows === 0) {
+            logger.warn(`[call-proc] ownership LOST mid-pass for ${maskSid(callSid)} — a peer reclaimed the claim; this pass's terminal writes will no-op`);
+          }
+        })
         .catch((e) => logger.warn(`[call-proc] heartbeat skipped for ${maskSid(callSid)}: ${e.message}`));
     }, 60 * 1000);
     if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
