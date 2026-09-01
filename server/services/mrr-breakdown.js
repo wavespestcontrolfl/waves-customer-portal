@@ -116,16 +116,23 @@ function mrrPopulationQuery(conn, includeIds = []) {
  *
  * @param {import('knex')} [dbConn]  Knex instance (defaults to the app db; lazy-loaded).
  * @param {string} asOf              ET calendar date (YYYY-MM-DD). Defaults to today ET.
- * @param {string[]} [pendingIds]    Pre-fetched payment-pending prepay ids. Pass
- *                                   when the caller shares ONE set across several
- *                                   population reads (the snapshot writer, the BI
- *                                   revenue snapshot) so a transient lookup
- *                                   failure between reads can't produce
- *                                   internally inconsistent figures (Codex #3669
- *                                   r4). Omitted = fetched here.
+ * @param {string[]|null} [pendingIds] Pre-fetched payment-pending prepay ids.
+ *                                   Pass when the caller shares ONE set across
+ *                                   several population reads (the snapshot
+ *                                   writer, the dashboard, the BI snapshot) so
+ *                                   a transient lookup failure between reads
+ *                                   can't produce internally inconsistent
+ *                                   figures (Codex #3669 r4). Three states:
+ *                                   omitted/undefined = fetched here (fail-soft
+ *                                   empty); an array = used as-is; explicit
+ *                                   NULL = the caller's shared lookup FAILED —
+ *                                   degrade to no union WITHOUT refetching, so
+ *                                   sibling reads in the same response degrade
+ *                                   identically instead of independently
+ *                                   retrying to different outcomes (Codex r15).
  * @returns {Promise<{total:number, committed:number, atRisk:number, totalCount:number, atRiskCount:number}>}
  */
-async function computeMrrBreakdown(dbConn, asOf = etDateString(), pendingIds = null) {
+async function computeMrrBreakdown(dbConn, asOf = etDateString(), pendingIds = undefined) {
   // Lazy-require so the helper (and its tests) can load without pulling in
   // knex when a connection is injected.
   const conn = dbConn || require('../models/db');
@@ -137,8 +144,8 @@ async function computeMrrBreakdown(dbConn, asOf = etDateString(), pendingIds = n
   // prepay-table hiccup never blanks the dashboard MRR tile. Fetched FIRST:
   // these customers sit on 'per_application' until the prepay is paid, so the
   // population query needs their ids to union them past the lane predicate.
-  const pendingSet = pendingIds != null
-    ? new Set(pendingIds.map(String))
+  const pendingSet = pendingIds !== undefined
+    ? new Set((pendingIds || []).map(String))
     : await Promise.resolve()
       .then(() => getPaymentPendingCustomerIds(asOf, conn))
       .catch(() => new Set());

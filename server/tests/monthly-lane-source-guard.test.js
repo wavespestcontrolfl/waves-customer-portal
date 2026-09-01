@@ -260,13 +260,44 @@ function findOffenders() {
     const stripped = stripComments(src);
     const lines = stripped.split('\n');
     const seen = new Set();
-    lines.forEach((line, idx) => {
+    const anyPredicate = (text) => {
       KNEX_PREDICATE.lastIndex = 0;
       RAW_PREDICATE.lastIndex = 0;
       COALESCE_PREDICATE.lastIndex = 0;
       PARAM_PREDICATE.lastIndex = 0;
+      return KNEX_PREDICATE.test(text) || RAW_PREDICATE.test(text) || COALESCE_PREDICATE.test(text) || PARAM_PREDICATE.test(text);
+    };
+    // Window bounds for a given anchor line (mirrors statementWindow).
+    const windowBounds = (idx) => {
+      const ends = (l) => /[;{}]\s*$/.test(l.trim());
+      let start = idx;
+      while (start > 0 && start > idx - 4 && !ends(lines[start - 1] || '')) start -= 1;
+      let end = idx;
+      while (end < lines.length - 1 && end < idx + 4 && !ends(lines[end])) end += 1;
+      return [start, end];
+    };
+    lines.forEach((line, idx) => {
+      // Anchor on the line naming the column; a predicate SPLIT across
+      // argument/continuation lines (`.where(\n 'monthly_rate', '>', 0\n)`
+      // or raw SQL wrapping before the operator) is caught by re-testing
+      // the whitespace-normalized statement window (Codex #3669 r15). A
+      // window-level match only counts when NO line in the window matches
+      // on its own (i.e. the predicate is genuinely split) and only from
+      // the window's FIRST monthly_rate line — one offender per predicate,
+      // so allowlist count keying holds and a `.whereNotNull` neighbor of a
+      // legal chain never rides along.
+      if (!line.includes('monthly_rate')) return;
       const jsClassifier = isJsLaneClassifier(lines, idx);
-      if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line) && !COALESCE_PREDICATE.test(line) && !PARAM_PREDICATE.test(line)) return;
+      let hit = jsClassifier || anyPredicate(line);
+      if (!hit) {
+        const [start, end] = windowBounds(idx);
+        const windowLines = lines.slice(start, end + 1);
+        const splitOnly = !windowLines.some((l) => anyPredicate(l))
+          && anyPredicate(windowLines.join('\n').replace(/\s+/g, ' '));
+        const firstAnchor = start + windowLines.findIndex((l) => l.includes('monthly_rate'));
+        hit = splitOnly && firstAnchor === idx;
+      }
+      if (!hit) return;
       if (seen.has(idx)) return;
       seen.add(idx);
       // A JS classifier's "chain" is its statement window, so an ALLOWLIST
@@ -349,6 +380,10 @@ describe('monthly-lane source guard (#3140)', () => {
       "ELSE coalesce(cu.monthly_rate, 0) > '0'",
       "whereRaw('monthly_rate > ?', [0])",
       "whereRaw('c.monthly_rate >= ?', [0])",
+      // split-argument form, tested via the normalized statement window
+      // exactly as findOffenders normalizes it (r15)
+      ".where(\n  'monthly_rate', '>', 0\n)".replace(/\s+/g, ' '),
+      'AND monthly_rate\n  > 0'.replace(/\s+/g, ' '),
     ];
     for (const s of shapes) {
       KNEX_PREDICATE.lastIndex = 0; RAW_PREDICATE.lastIndex = 0; COALESCE_PREDICATE.lastIndex = 0; PARAM_PREDICATE.lastIndex = 0;

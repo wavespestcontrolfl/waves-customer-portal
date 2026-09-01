@@ -17,8 +17,11 @@ const logger = require('./logger');
 // null (recordMrrSnapshot skips the write and the previous row stands).
 async function pendingPrepayIds(conn) {
   const { getPaymentPendingCustomerIds } = require('./annual-prepay-renewals');
+  // throwOnError: the inner table probe must REJECT on a failed schema
+  // probe instead of caching "no table" and resolving empty (Codex r15) —
+  // otherwise this wrapper's null failure signal could never fire.
   const set = await Promise.resolve()
-    .then(() => getPaymentPendingCustomerIds(etDateString(), conn))
+    .then(() => getPaymentPendingCustomerIds(etDateString(), conn, { throwOnError: true }))
     .catch(() => null);
   return set == null ? null : [...set];
 }
@@ -32,13 +35,15 @@ async function pendingPrepayIds(conn) {
 // `pendingIds`: pre-fetched pending-prepay ids — recordMrrSnapshot fetches
 // ONE set and passes it to both this and computeMrrBreakdown, so a transient
 // lookup failure between the two reads can't persist a snapshot whose
-// by_tier disagrees with its own total_mrr (Codex #3669 r4). Omitted =
-// fetched here (standalone callers).
-async function tierBreakdown(conn, pendingIds = null) {
+// by_tier disagrees with its own total_mrr (Codex #3669 r4). Three states,
+// same contract as computeMrrBreakdown (Codex r15): omitted/undefined =
+// fetched here (fail-soft); an array = used as-is; explicit NULL = the
+// caller's shared lookup failed — degrade to no union WITHOUT refetching,
+// so sibling reads in one response degrade identically. The snapshot
+// WRITER never reaches here with null (it aborts first).
+async function tierBreakdown(conn, pendingIds = undefined) {
   conn = conn || require('../models/db');
-  // Standalone/read callers degrade a failed lookup (null) to no union —
-  // the snapshot WRITER never reaches here with a failed set (it aborts).
-  const rows = await mrrPopulationQuery(conn, pendingIds != null ? pendingIds : ((await pendingPrepayIds(conn)) || []))
+  const rows = await mrrPopulationQuery(conn, pendingIds !== undefined ? (pendingIds || []) : ((await pendingPrepayIds(conn)) || []))
     .select('c.waveguard_tier as waveguard_tier', conn.raw('SUM(c.monthly_rate) as mrr'), conn.raw('COUNT(*) as count'))
     .groupBy('c.waveguard_tier');
   return rows.map((r) => ({
