@@ -126,6 +126,15 @@ function aliasInsertPatterns(src, token) {
   while ((fac = factoryRe.exec(src))) {
     patterns.push(new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g'));
   }
+  // Named FUNCTION factory — `function baseQuery() { return db('leads'); }`.
+  const fnFactoryRe = new RegExp(
+    String.raw`\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{\s*return\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    'g'
+  );
+  let fn;
+  while ((fn = fnFactoryRe.exec(src))) {
+    patterns.push(new RegExp(String.raw`\b${escapeRe(fn[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g'));
+  }
   return patterns;
 }
 
@@ -206,9 +215,12 @@ function lexBlank(code, { keepStrings = false } = {}) {
       const content = buf.slice(1, buf[buf.length - 1] === c ? -1 : undefined);
       // Keep a string UNLESS it embeds quote characters — that's what makes
       // a doc string code-shaped ("await db('leads').insert(row)"): its
-      // inner quotes would otherwise read as live table literals. Table
-      // names and raw SQL fragments carry no nested quotes and stay.
-      const plausible = !/['"`]/.test(content);
+      // inner quotes would otherwise read as live table literals. Two
+      // exceptions stay scannable: quote-free content (table names, plain
+      // SQL fragments) and content that STARTS as a SQL statement —
+      // `"INSERT INTO leads (status) VALUES ('new')"` is a real writer
+      // even with quoted values inside.
+      const plausible = !/['"`]/.test(content) || /^\s*(?:insert|update|delete|select|with|merge)\b/i.test(content);
       for (const ch of buf) {
         if (keepStrings && plausible) out += ch;
         else out += ch === '\n' ? '\n' : ' ';
@@ -341,6 +353,18 @@ function scanSourceForDynamicTableInserts(src) {
     const useRe = new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, fac[2]);
+  }
+  // Named FUNCTION factory over a dynamic table.
+  const dynFnFactoryRe = new RegExp(
+    String.raw`\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{\s*return\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    'g'
+  );
+  let fnFac;
+  while ((fnFac = dynFnFactoryRe.exec(code))) {
+    if (!fnFac[2].trim() || isResolved(fnFac[2])) continue;
+    const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(fnFac[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
+    let use;
+    while ((use = useRe.exec(code))) record(use.index, use[0].length, fnFac[2]);
   }
   // Raw SQL with a DYNAMIC target — `INSERT INTO ${table}` or
   // `'INSERT INTO ' + table` — scanned on the ORIGINAL source (the SQL text
@@ -484,6 +508,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['table selected after insert', "await db.insert(row).table('leads');"],
     ['bracket-notation insert', "await db('leads')['insert'](row);"],
     ['raw SQL split at a token boundary', "await db.raw('INSERT ' + 'INTO leads (name) VALUES (?)', [name]);"],
+    ['raw SQL with quoted values inside', 'await db.raw("INSERT INTO leads (status) VALUES (\'new\')");'],
+    ['named function factory', "function baseQuery() { return db('leads'); }\nawait baseQuery().insert(row);"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -741,16 +767,27 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         const mutation = bare.match(mutationReFor(cc.object));
         expect({ file: w.file, mutation: mutation && mutation[0].trim() })
           .toEqual({ file: w.file, mutation: null });
-        // Mutations THROUGH an alias too: every identifier initialized from
-        // the config object (const config = TYPES[type]) is itself checked
-        // for property writes / Object.assign. One aliasing level — the
-        // repo's actual access pattern; a deeper chain would need an AST.
-        const aliasRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*${escapeRe(cc.object)}\b`, 'g');
-        let al;
-        while ((al = aliasRe.exec(bare))) {
-          const aliasMutation = bare.match(mutationReFor(al[1]));
-          expect({ file: w.file, alias: al[1], mutation: aliasMutation && aliasMutation[0].trim() })
-            .toEqual({ file: w.file, alias: al[1], mutation: null });
+        // Mutations THROUGH aliases too — followed TRANSITIVELY to a
+        // fixpoint: `const cfg = TYPES.lawn; const alias = cfg;
+        // alias.table = x` is caught because `alias` inherits governed
+        // status from `cfg`, which inherits it from the object.
+        const governed = new Set([cc.object]);
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const name of [...governed]) {
+            const aliasRe = new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*${escapeRe(name)}\b`, 'g');
+            let al;
+            while ((al = aliasRe.exec(bare))) {
+              if (!governed.has(al[1])) { governed.add(al[1]); grew = true; }
+            }
+          }
+        }
+        for (const name of governed) {
+          if (name === cc.object) continue; // checked above
+          const aliasMutation = bare.match(mutationReFor(name));
+          expect({ file: w.file, alias: name, mutation: aliasMutation && aliasMutation[0].trim() })
+            .toEqual({ file: w.file, alias: name, mutation: null });
         }
         expect({ file: w.file, spreads: (objBare.match(/\.\.\./g) || []).length })
           .toEqual({ file: w.file, spreads: 0 });
@@ -834,6 +871,10 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         // reference in live code is rejected. Module-internal, so there is
         // no require/exports exception.
         const bareFile = blankCommentsAndStrings(files.find((f) => f.rel === w.file).src);
+        // Literal bracket access hides the helper name in a string.
+        const bracketRef = blankComments(fileSrc).match(new RegExp(String.raw`\[\s*['"\x60]${escapeRe(cc.helper)}['"\x60]\s*\]`));
+        expect({ file: w.file, bracketAccess: bracketRef && bracketRef[0] })
+          .toEqual({ file: w.file, bracketAccess: null });
         const refRe2 = new RegExp(String.raw`\b${escapeRe(cc.helper)}\b(?!\s*\()`, 'g');
         let r2;
         while ((r2 = refRe2.exec(bareFile))) {
@@ -926,6 +967,15 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           }
         }
         expect(callers).toBeGreaterThanOrEqual(cc.minCallers);
+        // LITERAL BRACKET ACCESS to the governed export —
+        // require('…')['storeFunnelPhotos'](…) — hides the name inside a
+        // string, invisible to the call scan; rejected wherever it appears
+        // (scanned on the string-preserving view).
+        for (const { rel, src } of files) {
+          const bracket = blankComments(src).match(new RegExp(String.raw`\[\s*['"\x60]${escapeRe(cc.helper)}['"\x60]\s*\]`));
+          expect({ file: rel, bracketAccess: bracket && bracket[0] })
+            .toEqual({ file: rel, bracketAccess: null });
+        }
         // Aliasing the helper (const savePhotos = storeFunnelPhotos) would
         // route calls around this name-based scan — every bare (non-call)
         // reference in live code is rejected, except require /
@@ -1012,10 +1062,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
   const FUNCTION_HEADER_RE = /(?:\bfunction\b|=>|^\s*(?:async\s+)?(?!if\b|for\b|while\b|switch\b|catch\b|return\b)[\w$]+\s*\([^()]*\)\s*{\s*$|^\s*[\w$]+\s*:\s*(?:async\b|function\b|\())/;
   const indentOf = (l) => l.match(/^\s*/)[0].length;
   function enclosingFunctionSpan(lines, idx) {
-    // The anchor line ITSELF being a function header (a same-line arrow
-    // body — `const mint = () => db('leads').insert(row)`) means the
-    // function IS that line: the span must not expand to siblings.
+    // The anchor line ITSELF being a function header with a SAME-LINE body
+    // — an arrow one-liner (`const mint = () => db('leads').insert(row)`)
+    // or a one-line method (`mint() { return db('leads').insert(row); }`) —
+    // means the function IS that line: the span must not expand to siblings.
     if (FUNCTION_HEADER_RE.test(lines[idx]) && !/\{\s*$/.test(lines[idx])) {
+      return lines[idx];
+    }
+    if (/^\s*(?:async\s+)?(?!if\b|for\b|while\b|switch\b|catch\b|return\b)[\w$]+\s*\([^()]*\)\s*\{.*\}\s*[,;]?\s*$/.test(lines[idx])) {
       return lines[idx];
     }
     let threshold = indentOf(lines[idx]);
