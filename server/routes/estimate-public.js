@@ -15340,6 +15340,16 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
       return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
     };
     const kind = String(req.body?.kind || 'change');
+    // Unknown kinds are a validation error, never a silent change request
+    // (pre-push codex P1) — but only once the token has cleared the public
+    // eligibility gates, so a probe cannot tell gate state from a 400.
+    if (!['change', 'still_deciding'].includes(kind)) {
+      const { isSoftExitEligible } = require('../services/estimate-change-request');
+      if (estimateRow && isEstimateCustomerViewable(estimateRow) && isSoftExitEligible(estimateRow)) {
+        return res.status(400).json({ error: 'kind must be change or still_deciding' });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const result = kind === 'still_deciding'
       ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
       : await createEstimateChangeRequest({
