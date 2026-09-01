@@ -437,6 +437,16 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('unanalysed function'))).toBe(true);
   });
 
+  test('registrations through an APP alias (const api = app) are not lost', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const api = app;',
+        "api.get('/new-public-route', (req, res) => res.json({}));",
+      ].join('\n')),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /new-public-route']);
+  });
+
   test('registrations through a router ALIAS are not lost', () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
