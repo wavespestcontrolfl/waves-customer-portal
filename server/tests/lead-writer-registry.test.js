@@ -110,8 +110,11 @@ function simpleAssignPairs(src) {
 // constant never handed to raw is ignored.
 function inRawContext(code, idx) {
   if (/\braw\s*\(/.test(code.slice(Math.max(0, idx - 300), idx))) return true;
-  const lineStart = code.lastIndexOf('\n', idx) + 1;
-  const decl = code.slice(lineStart, idx).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/);
+  // The declaration may sit on an earlier line (`const SQL =\n  'INSERT…'`):
+  // look back a short window and require only whitespace/quotes/glue between
+  // the `=` and the match.
+  const back = code.slice(Math.max(0, idx - 200), idx);
+  const decl = back.match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[\s'"\x60+]*$/);
   if (decl) return new RegExp(String.raw`\braw\s*\(\s*${escapeRe(decl[1])}\b`).test(code);
   return false;
 }
@@ -122,10 +125,10 @@ function inRawContext(code, idx) {
 // matching bodyRe (whose first capture is returned for the caller).
 function balancedBodyFactories(src, bodyRe) {
   const out = [];
-  const headRe = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{|\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g;
+  const headRe = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{|\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{|(?<![.\w$])(?:async\s+)?(?!if\b|for\b|while\b|switch\b|catch\b|function\b|return\b)([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{/g;
   let h;
   while ((h = headRe.exec(src))) {
-    const name = h[1] || h[2];
+    const name = h[1] || h[2] || h[3];
     if (!name) continue;
     let depth = 1;
     let j = headRe.lastIndex;
@@ -172,7 +175,7 @@ function aliasInsertPatterns(src, token) {
   // : db('audit');` — anything holding a leads builder anywhere in its
   // (non-awaited) initializer is a stored builder.
   const condDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;\n]*\bawait\b)[^;\n]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;]{0,200}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
     'g'
   );
   let cnd;
@@ -297,8 +300,11 @@ function lexBlank(code, { keepStrings = false } = {}) {
       // even with quoted values inside.
       const sqlBody = content.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*\n?)*/, '');
       const plausible = !/['"`]/.test(content) || /^(?:insert|update|delete|select|with|merge)\b/i.test(sqlBody);
+      // Method-name strings survive even FULL blanking, so bracket
+      // selectors (db['table'](x)) stay visible to the dynamic scan.
+      const methodName = /^(?:insert|table|from)$/.test(content);
       for (const ch of buf) {
-        if (keepStrings && plausible) out += ch;
+        if ((keepStrings && plausible) || methodName) out += ch;
         else out += ch === '\n' ? '\n' : ' ';
       }
       lastSig = c; // after a string, `/` is division
@@ -418,7 +424,7 @@ function scanSourceForDynamicTableInserts(src) {
   }
   // Conditional initializers holding a dynamic builder anywhere.
   const dynCondDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;\n]*\bawait\b)[^;\n?]{0,80}\?[^;\n]{0,120}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![^;]{0,200}\bawait\b)[^;?]{0,120}\?[^;]{0,160}?[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   let cnd;
@@ -621,6 +627,9 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['factory with deep nesting before return', "function baseQuery() { try { if (a) { audit(); } } finally { cleanup(); } return db('leads'); }\nawait baseQuery().insert(row);"],
     ['conditional builder initializer', "const target = useLeads ? db('leads') : db('audit');\nawait target.insert(row);"],
     ['SQL constant passed to raw', "const SQL = 'INSERT INTO leads (a) VALUES (?)';\nawait db.raw(SQL, [a]);"],
+    ['multiline SQL constant passed to raw', "const SQL =\n  'INSERT INTO leads (a) VALUES (?)';\nawait db.raw(SQL, [a]);"],
+    ['multiline conditional builder', "const target = useLeads\n  ? db('leads')\n  : db('audit');\nawait target.insert(row);"],
+    ['class-method factory', "class Queries {\n  base() { return db('leads'); }\n}\nawait queries.base().insert(row);"],
     ['SQL line comment between keywords', 'await db.raw(`INSERT -- audit\nINTO leads (a) VALUES (?)`, [a]);'],
     ['block-bodied arrow factory', "const baseQuery = () => { audit(); return db('leads'); };\nawait baseQuery().insert(row);"],
     ['transitive stored-builder alias', "const base = db('leads');\nconst target = base;\nawait target.insert(row);"],
@@ -781,6 +790,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       'const q = (t) => db(t);\nawait q(x).insert(row);'
     );
     expect(dynArrowFactory).toHaveLength(1);
+    const bracketDynSelector = scanSourceForDynamicTableInserts("await db['table'](table).insert(row);");
+    expect(bracketDynSelector).toHaveLength(1);
     const condDynBuilder = scanSourceForDynamicTableInserts('const target = c ? db(a) : db(b);\nawait target.insert(row);');
     expect(condDynBuilder.length).toBeGreaterThanOrEqual(1);
     const insertThenTable = scanSourceForDynamicTableInserts('await db.insert(row).table(target);');
