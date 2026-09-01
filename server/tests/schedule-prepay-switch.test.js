@@ -147,6 +147,7 @@ function stubTables({
   childRows = [],
 } = {}) {
   stubTables.casCalls = [];
+  stubTables.inserts = [];
   stubTables.updates = [];
   stubTables.whereIns = [];
   db.transaction = jest.fn(async (cb) => cb(db));
@@ -210,7 +211,14 @@ function stubTables({
       }
       return 1;
     });
-    q.insert = jest.fn(async () => [{}]);
+    // knex insert is a thenable builder: the claims-ledger write chains
+    // .onConflict('invoice_id').ignore() before awaiting.
+    q.insert = jest.fn((row) => {
+      stubTables.inserts.push({ table, row });
+      const p = Promise.resolve([{}]);
+      p.onConflict = jest.fn(() => ({ ignore: jest.fn(async () => 1) }));
+      return p;
+    });
     q.count = jest.fn(() => { isCount = true; return q; });
     q.select = jest.fn(async () => {
       if (table === 'scheduled_services') return childRows;
@@ -662,6 +670,91 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
   });
   afterEach(() => termSpy.mockRestore());
 
+  test('direct rodent series: the recomputed setupFeeAmount bills as its OWN invoice line; the term keeps coverage money only (codex #3591 r33 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    // Direct series: no accept-minted draft to supersede.
+    stubTables({ visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations', source_estimate_id: null }, invoices: [] });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    const retireSpy = jest.spyOn(plans, 'retireDirectSetupClaimForPrepay');
+    // Residential, untaxed: the minted total is the sum of BOTH lines.
+    mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+    try {
+      const { status, body } = await post('/svc-1/prepay-switch', {});
+      expect([status, body.error]).toEqual([201, undefined]);
+      expect(body.invoice).toMatchObject({ id: 'inv-prepay' });
+      const { lineItems } = mockCreateInvoice.mock.calls[0][0];
+      expect(lineItems).toHaveLength(2);
+      const coverage = lineItems[0].unit_price;
+      expect(coverage).toBeGreaterThan(0);
+      expect(lineItems[0]).toMatchObject({ category: 'Annual prepay' });
+      expect(lineItems[1]).toMatchObject({ unit_price: 99, description: 'Bait Station Setup — one-time setup fee', category: 'Setup fee' });
+      // Term = coverage money only; the setup line never enters the basis.
+      expect(termSpy.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage, monthlyRate: Math.round((coverage / 12) * 100) / 100 });
+      // The per-application claim on the series parent is retired under the
+      // mint (codex #3591 r34 P1): the service-side helper runs with the
+      // ANCHOR, the minted prepay, and the exact billed setup.
+      expect(retireSpy).toHaveBeenCalledTimes(1);
+      expect(retireSpy.mock.calls[0][1]).toEqual({ anchorId: 'svc-1', invoiceId: 'inv-prepay', amount: 99 });
+      expect(retireSpy.mock.calls[0][0]).toBe(db);
+    } finally {
+      spy.mockRestore();
+      retireSpy.mockRestore();
+    }
+  });
+
+  test('direct rodent series: a claim mid-mint (negative stamp) refuses the switch before the term exists (codex #3591 r34 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    stubTables({ visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations', source_estimate_id: null, pending_setup_fee: -99 }, invoices: [] });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+    try {
+      const { status, body } = await post('/svc-1/prepay-switch', {});
+      expect(status).toBe(409);
+      expect(body.error).toMatch(/completion in progress/);
+      expect(termSpy).not.toHaveBeenCalled();
+      expect(stubTables.inserts.filter((i) => i.table === 'setup_fee_claims')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an ESTIMATE-anchored switch never touches the per-application claim (its setup rode the accept invoice, not a stamp)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const retireSpy = jest.spyOn(plans, 'retireDirectSetupClaimForPrepay');
+    try {
+      const { status } = await post('/svc-1/prepay-switch', {});
+      expect(status).toBe(201);
+      expect(retireSpy).not.toHaveBeenCalled();
+    } finally {
+      retireSpy.mockRestore();
+    }
+  });
+
+  test('direct rodent series: a minted total that omits the setup line aborts the switch', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    // Direct series: no accept-minted draft to supersede.
+    stubTables({ visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations', source_estimate_id: null }, invoices: [] });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    // A total that came back WITHOUT the setup line (coverage only).
+    mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: lineItems[0].unit_price,
+    }));
+    try {
+      const { status, body } = await post('/svc-1/prepay-switch', {});
+      expect(status).toBe(409);
+      expect(body.error).toMatch(/did not match the quoted total/);
+      expect(termSpy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('voids the draft and mints invoice + term in one transaction, all server-derived', async () => {
     const { status, body } = await post('/svc-1/prepay-switch', { amount: 1, chargeInPerson: false /* both ignored — collect-only, server-priced */ });
     expect(status).toBe(201);
@@ -1003,5 +1096,86 @@ describe('on-site prepay switch — activation status (paid ≠ activated)', () 
     // …and with the term still pending (stub static), never claims success.
     expect(body.activated).toBe(false);
     expect(body.termStatus).toBe('payment_pending');
+  });
+});
+
+describe('on-site prepay switch — estimate-origin rodent setup is carried, never waived (codex #3591 r38 P1)', () => {
+  // The non-member rodent accept: bait-station setup + first application
+  // (estimate-public.js). Nothing here is the WaveGuard membership fee.
+  const RODENT_ACCEPT_INVOICE = {
+    ...ACCEPT_INVOICE,
+    total: '227.00',
+    notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — $99.00 setup fee plus first application.',
+    line_items: [
+      { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+      { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+    ],
+  };
+  let termSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
+    termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations' },
+      invoices: [RODENT_ACCEPT_INVOICE],
+    });
+    mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+  });
+  afterEach(() => termSpy.mockRestore());
+
+  test('preview: the accept invoice is a recognized supersede; its bait-station setup rides the prepay as its own line and is NOT offered as a waiver', async () => {
+    const { status, body } = await preview();
+    expect(status).toBe(200);
+    expect(body.eligible).toBe(true);
+    expect(body.supersedes).toHaveLength(1);
+    // Coverage 4 × $128 = $512 less the rodent plan's 5% prepay discount
+    // = $486.40, plus the carried $99 setup (never discounted, never waived).
+    expect(body.prepayTotal).toBe(585.4);
+    expect(body.discountAmount).toBe(25.6);
+    expect(body.setupFee).toBeNull();
+    expect(body.rodentSetupFee).toEqual({ amount: 99, waivedWithPrepay: false });
+    expect(body.mintPayload).toMatchObject({ amount: 486.4, setupFeeAmount: 99, scheduledServiceId: 'svc-1' });
+  });
+
+  test('preview: a membership setup fee on the same invoice is still the waivable one — only the rodent line is carried', async () => {
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations' },
+      invoices: [{
+        ...RODENT_ACCEPT_INVOICE,
+        total: '326.00',
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          ...RODENT_ACCEPT_INVOICE.line_items,
+        ],
+      }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(true);
+    expect(body.setupFee).toEqual({ amount: 99, waivedWithPrepay: true });
+    expect(body.rodentSetupFee).toEqual({ amount: 99, waivedWithPrepay: false });
+    expect(body.prepayTotal).toBe(585.4);
+  });
+
+  test('switch: the carried setup bills as its OWN line, the term keeps coverage money only, and no separate claim is ledgered (the marker re-mint restores the line)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const retireSpy = jest.spyOn(plans, 'retireDirectSetupClaimForPrepay');
+    try {
+      const { status, body } = await post('/svc-1/prepay-switch', {});
+      expect([status, body.error]).toEqual([201, undefined]);
+      const { lineItems } = mockCreateInvoice.mock.calls[0][0];
+      expect(lineItems).toHaveLength(2);
+      expect(lineItems[0]).toMatchObject({ unit_price: 486.4, category: 'Annual prepay' });
+      expect(lineItems[1]).toMatchObject({ unit_price: 99, description: 'Bait Station Setup — one-time setup fee', category: 'Setup fee' });
+      expect(termSpy.mock.calls[0][0]).toMatchObject({ prepayAmount: 486.4, sourceEstimateId: 'est-1' });
+      expect(retireSpy).not.toHaveBeenCalled();
+      expect(stubTables.inserts.filter((i) => i.table === 'setup_fee_claims')).toHaveLength(0);
+    } finally {
+      retireSpy.mockRestore();
+    }
   });
 });

@@ -191,20 +191,34 @@ describe('pricing engine one-time treatment rules', () => {
     expect(mosquito.discount.appliedDiscounts).not.toContainEqual(expect.objectContaining({ type: 'waveguard' }));
   });
 
-  test('palm injection and rodent bait do not trigger the one-time recurring-customer perk', () => {
-    const estimate = generateEstimate(estimateInput({
+  test('palm injection alone does not trigger the one-time recurring-customer perk; rodent bait DOES (WaveGuard member since 2026-08-29)', () => {
+    const palmOnly = generateEstimate(estimateInput({
+      services: {
+        palm: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
+        oneTimeMosquito: { stationCount: 0, dunkCount: 0 },
+      },
+    }));
+    const palmMosquito = palmOnly.lineItems.find(i => i.service === 'one_time_mosquito');
+    expect(palmOnly.waveGuard.qualifyingCount).toBe(0);
+    expect(palmOnly.waveGuard.activeServices).toEqual([]);
+    expect(palmMosquito.recurringCustomerDiscountRate).toBe(0);
+    expect(palmMosquito.price).toBe(palmMosquito.subtotalBeforeRecurringCustomerDiscount);
+
+    // Rodent bait is a full recurring program now, so it makes the customer
+    // a recurring customer for the one-time perk like any other qualifier.
+    const withRodent = generateEstimate(estimateInput({
       services: {
         palm: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
         rodentBait: {},
         oneTimeMosquito: { stationCount: 0, dunkCount: 0 },
       },
     }));
-
-    const mosquito = estimate.lineItems.find(i => i.service === 'one_time_mosquito');
-    expect(estimate.waveGuard.qualifyingCount).toBe(0);
-    expect(estimate.waveGuard.activeServices).toEqual([]);
-    expect(mosquito.recurringCustomerDiscountRate).toBe(0);
-    expect(mosquito.price).toBe(mosquito.subtotalBeforeRecurringCustomerDiscount);
+    const mosquito = withRodent.lineItems.find(i => i.service === 'one_time_mosquito');
+    expect(withRodent.waveGuard.qualifyingCount).toBe(1);
+    expect(withRodent.waveGuard.activeServices).toEqual(['rodent_bait']);
+    expect(mosquito.discount.appliedDiscounts).toEqual([
+      expect.objectContaining({ type: 'recurring_customer_one_time_perk', amount: 0.15 }),
+    ]);
   });
 
   test('seasonal9 and monthly12 recurring mosquito programs qualify for WaveGuard', () => {

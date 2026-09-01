@@ -22,7 +22,20 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
-const WAVEGUARD_SERVICE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
+// rodent_bait joined the qualifying families 2026-08-29 (owner directive) —
+// but its membership follows the LIVE pricing_config.rodent_waveguard flag
+// (db-bridge syncs WAVEGUARD.qualifyingServices from it), so every reader
+// goes through liveWaveGuardServiceFamilies() rather than this literal
+// (codex #3591 r13 P1): an operator flipping tier_qualifier off must stop
+// booking-time and nightly alignment from enrolling/upgrading on rodent.
+const WAVEGUARD_SERVICE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait'];
+function liveWaveGuardServiceFamilies() {
+  let rodentQualifies = true;
+  try {
+    rodentQualifies = require('./pricing-engine/discount-engine').serviceCountsTowardWaveGuardTier('rodent_bait');
+  } catch { rodentQualifies = true; }
+  return WAVEGUARD_SERVICE_FAMILIES.filter((family) => family !== 'rodent_bait' || rodentQualifies);
+}
 // admin-manual-booking-resend: the admin "resend booking link" for a ONE-TIME
 // accepted estimate (admin-estimates.js — it sends the estimate_accepted_onetime
 // SMS template). It must carry one-time semantics like estimate-accept, or a
@@ -262,6 +275,21 @@ const SELF_BOOKING_RECURRING_PLANS = {
   termite_bait_monitoring: TERMITE_BAIT_RECURRING_PLANS.monitoring,
   termite_bait_active_annual: TERMITE_BAIT_RECURRING_PLANS.active_annual,
   termite_bait_active_quarterly: TERMITE_BAIT_RECURRING_PLANS.active_quarterly,
+  // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive):
+  // tier-counted like the other families. monthlyRate stays 0 ON PURPOSE —
+  // the program bills PER APPLICATION (footprint brackets), so the
+  // rate-backfill lane must never invent a monthly charge for it.
+  rodent_bait: {
+    planKey: 'rodent_bait',
+    serviceKey: 'rodent_bait_quarterly',
+    serviceType: 'Quarterly Rodent Bait Station Service',
+    label: 'Rodent Bait Stations',
+    tier: 'Bronze',
+    monthlyRate: 0,
+    recurringPattern: 'quarterly',
+    visitsPerYear: 4,
+    targetAppointmentCount: 4,
+  },
 };
 
 function normalizeDateString(value) {
@@ -442,6 +470,19 @@ function resolveTermiteBaitRecurringPlan(serviceType) {
   return TERMITE_BAIT_RECURRING_PLANS.quarterly;
 }
 
+// Rodent BAIT STATION rows are the qualifying rodent program (2026-08-29);
+// trapping/exclusion/sanitation and one-time rodent work never resolve.
+function resolveRodentBaitRecurringPlan(serviceType) {
+  const raw = String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
+  if (!/\b(rodent|rats?|mouse|mice)\b/.test(raw)) return null;
+  // Pest-primary combined names ("Pest & Rodent ...") stay pest coverage.
+  if (/\bpest\b.*\brodent\b/.test(raw)) return null;
+  if (!/\b(bait|station|stations|monitor|monitoring)\b/.test(raw)) return null;
+  if (/\b(trap|trapping|exclusion|sanitation|one time|onetime|inspection)\b/.test(raw)) return null;
+  if (isNonPlanRecurringServiceText(serviceType)) return null;
+  return SELF_BOOKING_RECURRING_PLANS.rodent_bait;
+}
+
 function resolveSelfBookedRecurringPlan(serviceType) {
   const raw = String(serviceType || '').toLowerCase();
   const text = normalizeServiceText(serviceType);
@@ -555,6 +596,8 @@ function detectWaveGuardPlanKeys(row = {}) {
 
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
+  const rodentPlan = resolvePlan(resolveRodentBaitRecurringPlan);
+  if (rodentPlan) add(rodentPlan.planKey || 'rodent_bait');
   const mosquitoPlan = resolvePlan(resolveMosquitoRecurringPlan);
   if (mosquitoPlan) add(mosquitoPlan.planKey || 'mosquito');
   const treeShrubPlan = resolvePlan(resolveTreeShrubRecurringPlan);
@@ -573,6 +616,7 @@ function detectWaveGuardPlanKeys(row = {}) {
   if (catalogText) {
     const catalogFamilies = uniqueServiceFamilies([
       resolveTermiteBaitRecurringPlan,
+      resolveRodentBaitRecurringPlan,
       resolveMosquitoRecurringPlan,
       resolveTreeShrubRecurringPlan,
       resolveLawnCareRecurringPlan,
@@ -588,9 +632,13 @@ function detectWaveGuardPlanKeys(row = {}) {
 
 function serviceFamilyKey(planKey) {
   const key = String(planKey || '');
-  for (const family of WAVEGUARD_SERVICE_FAMILIES) {
+  for (const family of liveWaveGuardServiceFamilies()) {
     if (key === family || key.startsWith(`${family}_`)) return family;
   }
+  // A rodent plan key while the live flag is OFF is not a tier family at
+  // all — dropping it here keeps uniqueServiceFamilies/representativePlanKeys
+  // (and every tier count built on them) in step with the pricing engine.
+  if (key === 'rodent_bait' || key.startsWith('rodent_bait_')) return null;
   return key || null;
 }
 
@@ -835,6 +883,7 @@ async function scheduledServiceRowsForCustomer(database, customerId) {
         's.*',
         'svc.service_key',
         'svc.name as service_name',
+        'svc.billing_type as catalog_billing_type',
       ));
   } catch (err) {
     logger.warn(`[self-booking-plan-sync] joined service row lookup failed for ${customerId}: ${err.message}`);
@@ -918,7 +967,7 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     const rowDate = normalizeDateString(row.scheduled_date);
     if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
     if (upcomingOnly && (!rowDate || rowDate < today)) continue;
-    if (upcomingOnly && (isCommercialServiceRow(row) || isRodentLedServiceRow(row))) continue;
+    if (upcomingOnly && (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row))) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
       if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
     }
@@ -1003,6 +1052,10 @@ function textIsRodentLed(value) {
 }
 
 function isRodentLedServiceRow(row = {}) {
+  return rodentRowTextFields(row).some(textIsRodentLed);
+}
+
+function rodentRowTextFields(row = {}) {
   return [
     row.service_type,
     row.serviceType,
@@ -1013,7 +1066,79 @@ function isRodentLedServiceRow(row = {}) {
     row.serviceName,
     row.name,
     row.label,
-  ].some(textIsRodentLed);
+  ];
+}
+
+// Tier-evidence exclusion since 2026-08-29 (owner directive): BAIT STATION
+// rows are qualifying WaveGuard coverage, so only NON-bait rodent-led rows
+// (trapping, exclusion, sanitation, one-time) stay excluded from the
+// reconciliation evidence.
+const RODENT_BAIT_TOKEN_RE = /\b(bait|station|stations|monitor|monitoring)\b/;
+function textHasRodentBaitToken(value) {
+  return RODENT_BAIT_TOKEN_RE.test(String(value || '').toLowerCase().replace(/[_-]+/g, ' '));
+}
+
+function isNonBaitRodentServiceRow(row = {}) {
+  // Authoritative one-time catalog metadata excludes the row outright, and
+  // it decides BEFORE the rodent-led gate (codex #3591 r63 P1 · r79 P1):
+  // services.billing_type is the truth because catalog names do not
+  // reliably carry a one-time token — lawn_fungicide reads as recurring
+  // lawn and termite_cartridge_replacement as termite-bait coverage by
+  // text. A recurring-flagged row repointed to ANY one-time catalog
+  // service (rodent-led or not) must never feed tier/setup-waiver evidence
+  // or the portal plan payload; every caller uses this as an exclusion
+  // predicate, so returning true here excludes exactly that row.
+  if (catalogTextForServiceRow(row) && catalogBillingTypeIsOneTime(row)) return true;
+  if (!isRodentLedServiceRow(row)) return false;
+  // A rodent-led CATALOG identity decides bait vs non-bait on its own
+  // (codex #3591 r30 P1): a recurring row repointed to rodent_trapping that
+  // still carries a stale "Rodent Bait Station Service" service_type is a
+  // trapping row — the stale label must not keep it in the tier evidence
+  // (detectWaveGuardPlanKeys would then fall through to the full text and
+  // enroll the trapping plan as rodent_bait). Rows with no catalog identity,
+  // or a non-rodent one (the catalog-family prune handles those), still
+  // classify from every text field as before.
+  const catalogText = catalogTextForServiceRow(row);
+  if (catalogText && textIsRodentLed(catalogText)) return !textHasRodentBaitToken(catalogText);
+  // A NON-rodent catalog identity wins over a stale rodent label (codex
+  // #3591 r61 P1): a row repointed to an authoritative pest/lawn/etc.
+  // catalog service while service_type still says "Rodent Trapping" is that
+  // catalog family's coverage — letting the label-scan exclude it here
+  // would drop real qualifying coverage from tier and setup-waiver
+  // evidence, nightly alignment, and the portal plan payload before
+  // detectWaveGuardPlanKeys/qualifyingKeysForRow ever see the row.
+  if (catalogText && catalogResolvesNonRodentQualifyingFamily(catalogText)) return false;
+  return !rodentRowTextFields(row).some(textHasRodentBaitToken);
+}
+
+// services.billing_type on the joined row; the one-time text regex below
+// stays only as the fallback for rows the plain-select degrade left unjoined.
+function catalogBillingTypeIsOneTime(row = {}) {
+  const value = row.catalog_billing_type ?? row.catalogBillingType ?? row.billing_type ?? row.billingType;
+  return String(value || '').trim().toLowerCase() === 'one_time';
+}
+
+// One-time / non-plan catalog identities must never anchor the override
+// (codex #3591 r62 P1): the family resolvers are lenient about cadence —
+// resolveLawnCareRecurringPlan happily maps `lawn_care_one_time` to a
+// recurring lawn plan — so a recurring-flagged row repointed to a one-time
+// catalog entry (stale rodent label or not) would otherwise count as
+// qualifying coverage, promote the tier, and waive a later rodent setup off
+// one-time work. The pest resolver inlines this rejection; mirror it here
+// for every family before any resolver runs.
+const ONE_TIME_CATALOG_IDENTITY_RE = /\b(one[-\s]?time|onetime|clean[-\s]?out|initial[-\s]?only|inspection)\b/;
+
+function catalogResolvesNonRodentQualifyingFamily(catalogText) {
+  const text = normalizeServiceText(catalogText);
+  if (ONE_TIME_CATALOG_IDENTITY_RE.test(text)) return false;
+  if (isNonPlanRecurringServiceText(catalogText)) return false;
+  return [
+    resolveTermiteBaitRecurringPlan,
+    resolveMosquitoRecurringPlan,
+    resolveTreeShrubRecurringPlan,
+    resolveLawnCareRecurringPlan,
+    resolvePestControlRecurringPlan,
+  ].some((resolver) => resolver(catalogText));
 }
 
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
@@ -1024,7 +1149,7 @@ async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
   const detectedPlanKeys = [];
   for (const row of rows) {
     if (!serviceRowCountsTowardWaveGuard(row)) continue;
-    if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+    if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) continue;
     const rowDate = normalizeDateString(row.scheduled_date);
     if (!rowDate || rowDate < today) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
@@ -1036,6 +1161,15 @@ async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
 
 async function enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today }) {
   if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') {
+    return { synced: false, reason: 'commercial_customer' };
+  }
+  // The customer's property CHANNEL refuses enrollment too (codex #3591
+  // r84 P1): a commercial/business customer with no 'commercial' tier
+  // sentinel yet — e.g. a direct booking persisting the generic shared-
+  // catalog bait label — must not be stamped a residential Bronze member.
+  // Same 'commercial'+'business' set the /secure, taxation, and bait
+  // channel classifiers use; commercial is never a WaveGuard membership.
+  if (['commercial', 'business'].includes(String(customer?.property_type || '').toLowerCase())) {
     return { synced: false, reason: 'commercial_customer' };
   }
 
@@ -1461,6 +1595,8 @@ module.exports = {
   isCommercialServiceRow,
   isOneTimeBookingSource,
   isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
+  resolveRodentBaitRecurringPlan,
   normalizeTierName,
   reconcileRecurringTiers,
   representativePlanKeys,
@@ -1471,6 +1607,7 @@ module.exports = {
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
   serviceFamilyKey,
+  liveWaveGuardServiceFamilies,
   serviceRowCountsTowardWaveGuard,
   tierLabelStatus,
   syncCustomerWaveGuardPlanFromScheduledServices,

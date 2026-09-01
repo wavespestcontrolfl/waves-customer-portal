@@ -7,6 +7,8 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/invoice', () => ({
   settleInvoiceAsAnnualPrepayCovered: jest.fn(),
   reopenAnnualPrepayCoveredInvoicesForTerm: jest.fn(),
+  retireRodentSetupObligationForRevivedPrepay: jest.fn(async () => null),
+  _retireSwitchRestoredInvoicesForRevivedPrepay: jest.fn(async () => 0),
 }));
 jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn().mockResolvedValue(undefined),

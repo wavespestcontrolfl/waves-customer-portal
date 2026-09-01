@@ -24,7 +24,14 @@ jest.mock('../models/db', () => {
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
     chain.update = (patch) => { chain.calls.push(['update', patch]); return Promise.resolve(handlers.update ? handlers.update(chain, patch) : 1); };
-    chain.insert = (row) => { chain.calls.push(['insert', row]); return Promise.resolve(handlers.insert ? handlers.insert(chain, row) : [{ id: 'row' }]); };
+    chain.insert = (row) => {
+      chain.calls.push(['insert', row]);
+      const p = Promise.resolve(handlers.insert ? handlers.insert(chain, row) : [{ id: 'row' }]);
+      // knex thenable builder: the claims-ledger write chains
+      // .onConflict('invoice_id').ignore() before awaiting.
+      p.onConflict = () => ({ ignore: () => p });
+      return p;
+    };
     return chain;
   };
   const fn = jest.fn((table) => {
@@ -47,8 +54,13 @@ jest.mock('../services/estimate-converter', () => ({
     const raw = String(svc.name || '').toLowerCase();
     if (raw.includes('pest')) return 'pest_control';
     if (raw.includes('lawn')) return 'lawn_care';
+    if (raw.includes('rodent')) return 'rodent_bait';
     return raw.replace(/[^a-z0-9]+/g, '_');
   },
+}));
+let mockQualifyingKeys = async () => [];
+jest.mock('../services/waveguard-existing-services', () => ({
+  loadExistingQualifyingServiceKeys: (...args) => mockQualifyingKeys(...args),
 }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
 jest.mock('../services/call-booking-catalog', () => ({
@@ -88,6 +100,7 @@ const pestVisit = {
   recurring_parent_id: null,
   pending_setup_fee: null,
   source_estimate_id: null,
+  created_at: '2026-09-01T12:00:00.000Z',
 };
 const customer = { id: 'c1', billing_mode: null, waveguard_tier: null, monthly_rate: null, property_type: 'single_family' };
 const pendingRequest = { id: 'r1', scheduled_service_id: 'v1', customer_id: 'c1', status: 'pending', token: 'tok', selected_plan: null, prepay_invoice_id: null };
@@ -103,8 +116,15 @@ function setTables(overrides = {}) {
     annual_prepay_terms: { first: () => null },
     invoices: { first: () => null },
     activity_log: {},
+    knex_migrations: { first: () => ({ migration_time: '2026-08-29T18:30:00.000Z' }) },
     ...overrides,
   };
+}
+
+function insertsFor(table) {
+  return mockDbCalls
+    .filter((c) => c.table === table)
+    .flatMap((c) => c.calls.filter(([op]) => op === 'insert').map(([, row]) => row));
 }
 
 function updatesFor(table) {
@@ -115,6 +135,7 @@ function updatesFor(table) {
 
 beforeEach(() => {
   mockGateOn = true;
+  mockQualifyingKeys = async () => [];
   mockDbCalls = [];
   mockResolveForInvoice.mockReset().mockResolvedValue(null);
   mockOverlapLock.mockReset().mockResolvedValue(undefined);
@@ -127,6 +148,163 @@ beforeEach(() => {
     total: lineItems[0].unit_price, // residential, untaxed — total === line
   }));
   setTables();
+});
+
+describe('selectSecurePlan — direct rodent bait series (non-member setup, codex #3591 r9 P1)', () => {
+  const { RODENT, ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
+  const rodentVisit = { ...pestVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' };
+  const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+  const setup = Number(RODENT.baitSetupFee);
+  beforeEach(() => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    setTables({
+      // The render already DISCLOSED and froze the setup (accepted_setup_fee,
+      // migration 20260829000041): only a stamped figure authorizes the fee at
+      // selection (pre-push codex P0 on #3591 r30).
+      appointment_card_requests: { first: () => ({ ...pendingRequest, accepted_setup_fee: String(setup.toFixed(2)) }) },
+      scheduled_services: {
+        first: () => ({ ...rodentVisit }),
+        select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
+      },
+    });
+    // Residential, untaxed — total is the sum of the lines.
+    mockInvoiceCreate.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-1', token: 'invtok', invoice_number: 'INV-100',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+  });
+
+  test('per_application stamps the bait-station setup on the series parent (the first completion mint bills it)', async () => {
+    expect(setup).toBeGreaterThan(0);
+    const result = await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(result).toEqual({ ok: true, plan: 'per_application' });
+    expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: setup });
+  });
+
+  test('a request whose render never stamped accepted_setup_fee (pre-column page, or no plan displayed) bills NO setup on either plan — never disclosed, never charged', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...pendingRequest, accepted_setup_fee: null }) };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+    mockDbCalls = [];
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+  });
+
+  test('a disclosure lowered by a concurrent render between the snapshot and the transaction is consumed under the request-row LOCK on both plans (codex #3591 r31 P1)', async () => {
+    // First read (unlocked snapshot) sees $99; the FOR UPDATE re-read inside
+    // the transaction sees the other tab's lowered $79.
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...pendingRequest, accepted_setup_fee: reads++ === 0 ? '99.00' : '79.00' }),
+    };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    const lockRead = mockDbCalls.find((c) => c.table === 'appointment_card_requests' && c.calls.some(([op]) => op === 'forUpdate'));
+    expect(lockRead).toBeTruthy();
+    expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: 79 });
+
+    reads = 0;
+    mockDbCalls = [];
+    mockInvoiceCreate.mockClear();
+    mockCreateTerm.mockClear();
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    const createArgs = mockInvoiceCreate.mock.calls[0][0];
+    expect(createArgs.lineItems[1]).toEqual(expect.objectContaining({ unit_price: 79 }));
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+  });
+
+  test('a disclosure cleared to NULL under the lock bills no setup', async () => {
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...pendingRequest, accepted_setup_fee: reads++ === 0 ? '99.00' : null }),
+    };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+  });
+
+  test('a lowered stamp is consumed at the stamped figure, never the live constant', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...pendingRequest, accepted_setup_fee: '79.00' }) };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: 79 });
+  });
+
+  test('prepay_annual mints the setup as its OWN line (never waived by prepay); the term is sliced from coverage money only', async () => {
+    const result = await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(result).toEqual({ ok: true, plan: 'prepay_annual', payUrl: 'https://portal.test/pay/invtok' });
+    const createArgs = mockInvoiceCreate.mock.calls[0][0];
+    expect(createArgs.lineItems).toEqual([
+      expect.objectContaining({ unit_price: coverage, quantity: 1, category: 'Annual prepay' }),
+      expect.objectContaining({ unit_price: setup, quantity: 1, description: 'Bait Station Setup — one-time setup fee' }),
+    ]);
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({
+      coverageServiceType: 'Quarterly Rodent Bait Station Service',
+      coverageVisitCount: 4,
+      prepayAmount: coverage,
+      monthlyRate: Math.round(coverage / 12 * 100) / 100,
+    });
+    // The unwaived setup that rode the prepay is ledgered against it
+    // (codex #3591 r34 P1) so a later void/refund can re-stamp the claim the
+    // mint cleared from the series parent.
+    expect(insertsFor('setup_fee_claims')).toEqual([
+      { invoice_id: 'inv-1', scheduled_service_id: rodentVisit.id, amount: setup },
+    ]);
+  });
+
+  test('prepay_annual refuses (selection_conflict) while a completion holds the parent claim (negative stamp) and CAS-clears only a positive one (codex #3591 r40 P1)', async () => {
+    setTables({
+      appointment_card_requests: { first: () => ({ ...pendingRequest, accepted_setup_fee: String(setup.toFixed(2)) }) },
+      scheduled_services: {
+        first: () => ({ ...rodentVisit, pending_setup_fee: '-99.00' }),
+        select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
+      },
+    });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'prepay_annual' })).rejects.toMatchObject({ code: 'selection_conflict' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+    expect(insertsFor('setup_fee_claims')).toEqual([]);
+    mockDbCalls = [];
+    setTables({
+      appointment_card_requests: { first: () => ({ ...pendingRequest, accepted_setup_fee: String(setup.toFixed(2)) }) },
+      scheduled_services: {
+        first: () => ({ ...rodentVisit, pending_setup_fee: String(setup.toFixed(2)) }),
+        select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
+      },
+    });
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    const clears = mockDbCalls.filter((c) => c.table === 'scheduled_services'
+      && c.calls.some(([op, patch]) => op === 'update' && patch?.pending_setup_fee === null));
+    expect(clears).toHaveLength(1);
+    // Exact-value CAS on the stamp, never a blanket whereNotNull clear.
+    expect(clears[0].calls.some(([op, w]) => op === 'where' && w?.pending_setup_fee === String(setup.toFixed(2)))).toBe(true);
+    expect(clears[0].calls.some(([op]) => op === 'whereNotNull')).toBe(false);
+  });
+
+  test('a qualifying family gained BETWEEN render and selection waives the fee under the transaction — no stamp, no setup line (codex #3591 r51 local P0)', async () => {
+    // First resolver run (context derivation) sees no families; the in-trx
+    // re-derivation sees the freshly added pest plan.
+    let calls = 0;
+    mockQualifyingKeys = async () => (++calls <= 1 ? [] : ['pest_control']);
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    const stamps = updatesFor('scheduled_services').filter((p) => p && 'pending_setup_fee' in p && p.pending_setup_fee !== null);
+    expect(stamps).toEqual([]);
+    mockDbCalls = [];
+    calls = 0;
+    mockQualifyingKeys = async () => (++calls <= 1 ? [] : ['pest_control']);
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
+    expect(insertsFor('setup_fee_claims')).toEqual([]);
+  });
+
+  test('member (another qualifying service on the account) → no stamp, no setup line', async () => {
+    mockQualifyingKeys = async () => ['pest_control'];
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+    mockDbCalls = [];
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+    // No fee billed ⇒ nothing to ledger (and nothing to restore later).
+    expect(insertsFor('setup_fee_claims')).toEqual([]);
+  });
 });
 
 describe('selectSecurePlan — per_application', () => {

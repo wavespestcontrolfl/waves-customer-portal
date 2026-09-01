@@ -44,17 +44,6 @@ function foundationAdj(foundation) {
   }
 }
 
-// ── Roof type → rodent bait station count ────────────────────
-// Tile roofs provide nesting harborage for roof rats.
-function rodentRoofAdj(roofType) {
-  switch ((roofType || '').toUpperCase()) {
-    case 'TILE': return 50;
-    case 'METAL': return 20;
-    case 'SHINGLE':
-    default: return 0;
-  }
-}
-
 // ── Water proximity → mosquito pressure multiplier ───────────
 // Replaces v1's binary nearWater. 6-level graduated scale.
 // levels: ADJACENT | CLOSE | NEAR | MODERATE | DISTANT | NONE
@@ -88,7 +77,6 @@ function deriveModifiers(profile = {}) {
     wdoConstructionMult: constructionMult(profile.constructionMaterial),
     wdoFoundationAdj: foundationAdj(profile.foundationType),
     wdoTimeMult: wdoTimeMult(profile.yearBuilt),
-    rodentRoofAdj: rodentRoofAdj(profile.roofType),
     mosquitoWaterMult: mosquitoWaterMult(profile.nearWater),
   };
 }
@@ -127,7 +115,6 @@ module.exports = {
   pestAgeAdj,
   constructionMult,
   foundationAdj,
-  rodentRoofAdj,
   mosquitoWaterMult,
   wdoTimeMult,
   deriveModifiers,

@@ -108,7 +108,14 @@ function PlanOption({ selected, disabled, onClick, title, price, priceSuffix, st
 export default function SecurePlanChoice({ planContext, selected, onSelect, disabled = false }) {
   if (!planContext || planContext.mode !== 'recurring') return null;
   const { perVisit, visitsPerYear, annualBase, prepay, setupFee, planClass } = planContext;
-  const discounted = planClass === 'discount' && prepay.discount > 0;
+  // prepay null = the server found the year already covered (membership
+  // dues / an existing term) — only the per-application option (and its
+  // setup disclosure) is offered.
+  const discounted = planClass === 'discount' && Number(prepay?.discount) > 0;
+  // A fee-waiver plan's setup is waived by prepay; a non-member rodent bait
+  // plan's bait-station setup is NOT (owner 2026-08-29) — it rides the
+  // prepay invoice as its own line and prepay.total already includes it.
+  const setupWaivedByPrepay = !!setupFee && setupFee.waivedWithPrepay !== false;
 
   return (
     <div style={{ marginTop: 18 }}>
@@ -125,6 +132,7 @@ export default function SecurePlanChoice({ planContext, selected, onSelect, disa
             : 'Nothing is charged today — your card is charged automatically after each completed service.'}
           badge={setupFee ? <Badge tone="amber">{fmtMoney(setupFee.amount)} setup fee applies</Badge> : null}
         />
+        {prepay && (
         <PlanOption
           selected={selected === 'prepay_annual'}
           disabled={disabled}
@@ -132,14 +140,19 @@ export default function SecurePlanChoice({ planContext, selected, onSelect, disa
           title={discounted ? `Prepay the year — save ${prepay.ratePctLabel}` : 'Prepay the year'}
           price={fmtMoney(prepay.total)}
           priceSuffix={`/ year · ${visitsPerYear} application${visitsPerYear === 1 ? '' : 's'}`}
-          strike={discounted ? fmtMoney(annualBase) : null}
+          strike={discounted
+            ? fmtMoney(setupFee && !setupWaivedByPrepay ? annualBase + Number(setupFee.amount) : annualBase)
+            : null}
           sub={setupFee
-            ? `Pay once today and the ${fmtMoney(setupFee.amount)} setup fee is waived. No charges after your visits.`
+            ? (setupWaivedByPrepay
+              ? `Pay once today and the ${fmtMoney(setupFee.amount)} setup fee is waived. No charges after your visits.`
+              : `Includes the one-time ${fmtMoney(setupFee.amount)} setup fee. Pay once today. No charges after your visits.`)
             : 'Pay once today. No charges after your visits.'}
-          badge={setupFee
+          badge={setupWaivedByPrepay
             ? <Badge tone="green">{fmtMoney(setupFee.amount)} setup fee waived</Badge>
             : (discounted ? <Badge tone="green">You save {fmtMoney(prepay.discount)}</Badge> : null)}
         />
+        )}
       </div>
       <p style={{ fontSize: 12, color: W.textCaption, lineHeight: 1.5, marginTop: 11, marginBottom: 0 }}>
         {CARD_SURCHARGE_DISCLOSURE}

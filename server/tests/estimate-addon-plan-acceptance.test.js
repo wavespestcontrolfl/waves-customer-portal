@@ -66,11 +66,11 @@ describe('combined membership tier on add-on accepts', () => {
     ).tier).toBe('Gold');
   });
 
-  test('palm injection and rodent bait stations never contribute a qualifying key', () => {
+  test('palm injection never contributes a qualifying key; rodent bait does (2026-08-29 owner directive)', () => {
     expect(tierQualifyingRecurringServiceKeys([
       { name: 'Palm Tree Injections', service: 'palm_injection', selected: true },
       { name: 'Rodent Bait Stations', service: 'rodent_bait', selected: true },
-    ])).toEqual([]);
+    ])).toEqual(['rodent_bait']);
   });
 });
 
@@ -93,10 +93,10 @@ describe('frozen-snapshot prior keys (codex r6)', () => {
     expect(priorQualifyingKeysFromSnapshot({ membershipSnapshot: {} })).toBe(null);
   });
 
-  test('non-qualifying keys in a snapshot never raise the tier', () => {
+  test('non-qualifying keys in a snapshot never raise the tier (rodent_bait qualifies since 2026-08-29)', () => {
     expect(priorQualifyingKeysFromSnapshot({
       membershipSnapshot: { existingServiceKeys: ['pest_control', 'palm_injection', 'rodent_bait'] },
-    })).toEqual(['pest_control']);
+    })).toEqual(['pest_control', 'rodent_bait']);
   });
 });
 

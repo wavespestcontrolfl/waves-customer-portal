@@ -9940,6 +9940,15 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
   }, [loadPlan]);
 
   const serviceMatches = (svcId, service = {}) => {
+    // Server-resolved family wins when present (codex #3591 r58 P1):
+    // catalog-over-label, so a bait row wearing a stale 'Rodent Trapping'
+    // label lands on the bait plan card instead of being dropped or
+    // reclassified from text.
+    const fam = String(service.serviceFamily || '').toLowerCase();
+    if (fam) {
+      if (svcId === 'termite') return fam === 'termite_bait' || fam === 'termite';
+      return fam === svcId;
+    }
     const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
     return (
       (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
@@ -9997,7 +10006,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     const id = detectCatalogServiceId(service);
     if (!id) return;
     if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
-    const realName = service.serviceType || service.service_type || service.type;
+    // serviceDisplayName is the server's resolved CATALOG name, set only
+    // when catalog identity overrode a stale label's family (codex #3591
+    // r79 P2) — prefer it so the card title matches the card's program
+    // (a repointed "Rodent Trapping" label never titles the bait card).
+    const realName = service.serviceDisplayName || service.serviceType || service.service_type || service.type;
     if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
   };
   // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
@@ -10008,15 +10021,25 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
   // non-qualifying families — palm injection, rodent, and one-time work — to match the
   // server classifier (toQualifyingKey), so e.g. a recurring palm row never shows as
   // Tree & Shrub coverage. When nothing qualifies we fall back to the tier defaults.
-  const PLAN_NON_QUALIFIER_RE = /palm|rodent|one[\s_-]?time|onetime/;
+  const PLAN_NON_QUALIFIER_RE = /palm|one[\s_-]?time|onetime/;
   const PLAN_TERMINAL_STATUSES = new Set(['rescheduled', 'cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
   const isPlanCoverageRow = (s) => {
     if (!s || s.isRecurring !== true || s.isCallback === true) return false;
     // A rescheduled/terminal recurring row is a phantom for coverage — it must not be
     // detected and, under the tier-limit slice, displace the customer's real plan.
     if (PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase())) return false;
+    // Server-derived qualification wins when present (schedule route,
+    // codex #3591 r19 P1): it follows the live rodent_waveguard flag through
+    // the same classifier alignment uses, so a rodent-only account whose
+    // tier was cleared server-side never lists bait stations as coverage.
+    if (typeof s.waveguardQualifying === 'boolean') return s.waveguardQualifying;
     const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
-    return !PLAN_NON_QUALIFIER_RE.test(text);
+    if (PLAN_NON_QUALIFIER_RE.test(text)) return false;
+    // Legacy payloads (no server flag): rodent BAIT stations are WaveGuard
+    // plan coverage since 2026-08-29 — mirrors the server classifier;
+    // non-bait rodent work (trapping, exclusion, one-time) never qualifies.
+    if (/rodent|rat\b|mice|mouse/.test(text) && !/bait|station|monitor/.test(text)) return false;
+    return true;
   };
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
 
@@ -10041,23 +10064,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     .filter(Boolean);
   const numServices = includedServices.length;
 
-  // Rodent bait is billed separately from WaveGuard and deliberately excluded
-  // from plan-coverage detection, so it never counts toward the tier, its
-  // padding, numServices, or the savings copy. A live recurring rodent row on
-  // the visible schedule still earns a service row — appended after the tier
-  // services so rodent customers can see cadence, progress, and coverage.
-  const rodentBaitRow = [nextService, ...upcomingServices].find(s =>
-    s && s.isRecurring === true && s.isCallback !== true &&
-    !PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase()) &&
-    serviceMatches('rodent_bait', s));
-  const hasRodentBait = !!rodentBaitRow;
-  if (rodentBaitRow) {
-    const realName = rodentBaitRow.serviceType || rodentBaitRow.service_type || rodentBaitRow.type;
-    if (realName) detectedServiceNames.rodent_bait = realName;
-  }
-  const displayedServices = hasRodentBait
-    ? [...includedServices, SERVICE_CATALOG.find(svc => svc.id === 'rodent_bait')].filter(Boolean)
-    : includedServices;
+  // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive) —
+  // bait rows flow through the normal plan-coverage detection above like
+  // any other qualifying service, so no separate append is needed.
+  const displayedServices = includedServices;
 
   const monthlyRate = customer.monthlyRate || 0;
   const annualPrepay = customer.annualPrepay || null;
@@ -10345,7 +10355,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             // 0% is not a perk — hide the discount tile entirely at zero
             // (eyeball 07-12 finding 6).
-            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: hasRodentBait ? 'off every plan service' : 'off every service' },
+            // Not "every plan service": a pre-realignment rodent bait plan
+            // keeps its snapshotted rate and never received the tier %
+            // (codex #3591 r10 P2) — the tile speaks to plan pricing; the
+            // rows below carry the label only where the % applies.
+            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'on WaveGuard plan pricing' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
           ].filter(Boolean).map((item, idx, arr) => (
             <div key={item.label} style={{
@@ -10454,8 +10468,14 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
                           {/* Percentage framing only — the old $/yr figures were
                               static catalog basePrice math, not real billing
                               (owner 2026-07-11: no per-year totals). Rodent bait
-                              is billed separately from the plan, so the member
-                              rate must not be claimed on its row. */}
+                              joined WaveGuard 2026-08-29, but only plans priced
+                              on/after that date receive the tier % — a
+                              grandfathered bait plan keeps its snapshotted rate.
+                              The portal payload carries no pricing provenance
+                              (service type + price only), so the rodent row
+                              makes NO discount claim rather than promising a
+                              percentage it may never have received (codex
+                              #3591 r10 P2). */}
                           {discount > 0 && svc.id !== 'rodent_bait' ? (
                             <div style={{ marginTop: 4, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
                               WaveGuard {tierName}

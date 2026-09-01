@@ -460,11 +460,11 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 0,
-      "annualAfterDiscount": 0,
-      "monthlyTotal": 0,
+      "annualBeforeDiscount": 436,
+      "annualAfterDiscount": 436,
+      "monthlyTotal": 36.33,
       "savings": 0,
-      "serviceCount": 0
+      "serviceCount": 1
     },
     "results": {
       "lawn": [],
@@ -472,17 +472,22 @@
       "ts": [],
       "mq": [],
       "tmBait": null,
-      "rodBaitMo": 69
+      "rodBaitMo": 36.33
     },
     "oneTime": {
-      "total": 0,
+      "total": 99,
       "tmInstall": 0,
       "items": [],
-      "specItems": []
+      "specItems": [
+        {
+          "name": "rodent_bait_setup",
+          "price": 99
+        }
+      ]
     },
     "totals": {
-      "year1": 828,
-      "year2": 828
+      "year1": 535,
+      "year2": 436
     }
   },
   "v1adapter_zone_c_bimonthly_pest_lawn_treeshrub": {

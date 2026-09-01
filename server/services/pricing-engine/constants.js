@@ -1071,28 +1071,39 @@ const TERMITE = {
 //   5. Bundle discount (7% / 5% / 10% with floors)
 //   6. Optional annual guarantee (gated; 3 tiers by complexity)
 //
-// Bait stations (recurring monthly) stay at the values from the prior
-// realignment: quarterly visits, $49/$59/$69, post-exclusion modifier, etc.
+// Bait stations (owner directive 2026-08-29): footprint-bracket QUARTERLY
+// pricing billed per application (4 visits/yr), station allowance per
+// bracket, NO setup fee, and full WaveGuard membership (counts toward the
+// tier AND receives the tier %). The score-based $49/$59/$69 monthly model,
+// the $199 setup fee, and the post-exclusion modifier are all retired —
+// guarantee/post-exclusion customers pay the same bracket price.
 // ============================================================
 const RODENT = {
-  // ── Bait stations (unchanged from prior realignment) ──────
-  baitScoreFactors: {
-    footprint_2500plus: 2, footprint_1800plus: 1,
-    lot_20000plus: 2, lot_12000plus: 1,
-    nearWater: 1, trees_heavy: 1,
-  },
-  baitMonthly: {
-    small:  { maxScore: 1, monthly: r(49), label: 'Small' },
-    medium: { maxScore: 2, monthly: r(59), label: 'Medium' },
-    large:  { maxScore: Infinity, monthly: r(69), label: 'Large' },
+  // ── Bait stations (footprint brackets, per quarterly visit) ──
+  // maxSqFt is inclusive; above the last bracket the ladder EXTENDS
+  // (owner ruling 2026-08-29): +1 station and +$10 per additional
+  // 1,000 sq ft, indefinitely — never a manual quote on size alone.
+  baitBrackets: [
+    { maxSqFt: 1750, stations: 4, perVisit: r(79) },
+    { maxSqFt: 2750, stations: 5, perVisit: r(89) },
+    { maxSqFt: 3750, stations: 6, perVisit: r(99) },
+    { maxSqFt: 4750, stations: 7, perVisit: r(109) },
+    { maxSqFt: 5750, stations: 8, perVisit: r(119) },
+    { maxSqFt: 6750, stations: 9, perVisit: r(129) },
+  ],
+  baitBracketExtension: {
+    perSqFt: 1000,
+    stationsPerStep: 1,
+    perVisitPerStep: r(10),
   },
   baitVisitsPerYear: 4,
-  baitSetupFee: r(199),
-  baitPostExclusion: {
-    multiplier: 0.72,
-    floorMonthly: r(39),
-  },
-  baitPerStationOverage: r(8),
+  // One-time setup fee for NON-WaveGuard members only (owner directive
+  // 2026-08-29): waived whenever the customer has any OTHER qualifying
+  // recurring service (on this estimate or already active). Standalone
+  // rodent-bait-only customers pay it once.
+  baitSetupFee: r(99),
+  // (baitPerStationOverage retired 2026-08-29 with the bracket ladder — the
+  // per-bracket station allowance replaces per-station overage billing.)
 
   // ── Inspection / diagnosis ────────────────────────────────
   // $75 (owner directive 2026-08-26, down from $125) — fully creditable
@@ -1304,9 +1315,11 @@ const RODENT = {
     ],
   },
 
-  // WaveGuard rules: NOT a tier qualifier, excluded from all WaveGuard benefits
-  tierQualifier: false,
-  excludeFromPctDiscount: true,
+  // WaveGuard rules (owner directive 2026-08-29): bait stations are a FULL
+  // WaveGuard member — they count toward the tier and receive the tier %.
+  // (rodent_guarantee stays excluded via WAVEGUARD.excludedFromPercentDiscount.)
+  tierQualifier: true,
+  excludeFromPctDiscount: false,
   setupCredit: 0,
 };
 
@@ -2129,12 +2142,13 @@ const WAVEGUARD = {
   },
   qualifyingServices: [
     'lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait',
-    // palm_injection and rodent_bait are NOT qualifiers
+    // rodent_bait joined WaveGuard 2026-08-29 (owner directive): counts
+    // toward the tier and receives the tier %. palm_injection stays out.
+    'rodent_bait',
   ],
   // Services excluded from percentage discounts (flat credits only where explicitly allowed)
   excludedFromPercentDiscount: {
-    rodent_bait: true,          // Fully excluded: no tier count, %, setup credit, coupon, or benefit
-    rodent_guarantee: true,     // Gated annual re-entry warranty ($199/$249/$299 by tier): fixed per-tier price, excluded from the recurring-customer one-time perk (enforces RODENT.excludeFromPctDiscount)
+    rodent_guarantee: true,     // Gated annual re-entry warranty ($199/$249/$299 by tier): fixed per-tier price, excluded from the recurring-customer one-time perk
     palm_injection: true,       // $10/palm/yr Gold+ flat credit
     bed_bug: true,              // Bed bug services are not eligible for recurring-customer discounts
     bed_bug_chemical: true,     // Legacy key; excluded with no flat credit
@@ -2153,6 +2167,11 @@ const WAVEGUARD = {
     // it here stops the orchestrator discount loop from applying the 15% rc
     // perk a second time on the already-discounted $85.
     german_roach_initial: true,
+    // $99 one-time bait-station setup (2026-08-29): flat cost-recovery for
+    // non-WaveGuard members — never cut by the recurring-customer one-time
+    // perk or any % discount (codex #3591 r2 P1: the generic one-time loop
+    // was applying the 15% perk and charging $84.15).
+    rodent_bait_setup: true,
     // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
     // not a recurring-service benefit or one-time perk candidate.
     german_roach: true,

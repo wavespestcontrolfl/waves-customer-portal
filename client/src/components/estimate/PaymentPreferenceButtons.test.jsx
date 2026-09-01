@@ -117,6 +117,28 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText('$224.00')).toBeInTheDocument();
   });
 
+  it('previews up-front extra rows (rodent bait-station setup) inside the first invoice (codex #3591 r33 P1)', () => {
+    const onSelect = vi.fn();
+    render(
+      <PaymentPreferenceButtons
+        onSelect={onSelect}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        extraInvoiceRows={[{ label: 'Bait Station Setup', amount: 99 }]}
+        selectedFrequency={{ key: 'quarterly', monthly: 29.6667 }}
+      />,
+    );
+    expect(screen.getByText('Bait Station Setup')).toBeInTheDocument();
+    expect(screen.getByText('Per application')).toBeInTheDocument();
+    expect(screen.getByText('Invoice total')).toBeInTheDocument();
+    expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
+    expect(screen.getByText('$89.00')).toBeInTheDocument();
+    expect(screen.getByText('$188.00')).toBeInTheDocument();
+    expect(screen.getByText(/setup \+ first application invoice/i)).toBeInTheDocument();
+    expect(screen.queryByText('WaveGuard Membership Setup')).not.toBeInTheDocument();
+  });
+
   it('prefers discounted treatment rows for the per-application amount', () => {
     render(
       <PaymentPreferenceButtons
