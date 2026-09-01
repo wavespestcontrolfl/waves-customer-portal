@@ -176,14 +176,29 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(beat).toContain('processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)');
   });
 
+  test('only the OPERATOR path gets the takeover ceiling', () => {
+    // A hung pass keeps beating, so no heartbeat rule frees it. A human
+    // pressing the button after the watchdog has been ringing may take it;
+    // the automatic sweeps never may, because nobody is watching them.
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(source).toContain('operatorTakeover');
+    expect(source).toMatch(/reclaimableClaim\(FORCE_CLAIM_QUIET_MINUTES, \{ operatorTakeover: true \}\)/);
+    // The automatic call sites pass no takeover.
+    const autoCalls = source.match(/reclaimableClaim\(\d+\)/g) || [];
+    expect(autoCalls.length).toBeGreaterThan(0);
+  });
+
   test('the ceiling never reaches the reclaim predicates — those are heartbeat-only', () => {
     // A ceiling that lets a peer take a still-beating claim has to sit above
     // the longest legitimate pass, and the pipeline has unbounded provider
     // calls; set too low it steals live work and duplicates side effects.
     const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const predicate = source.match(/const reclaimableClaim = [^;]+;/s)[0];
+    const predicate = source.match(/const reclaimableClaim = [\s\S]*?\n\};/)[0];
     expect(predicate).toContain('processing_heartbeat_at');
-    expect(predicate).not.toMatch(/Ceiling|ceiling/);
+    // The ceiling appears ONLY inside the operator-takeover branch.
+    const ceilingUses = predicate.match(/alertCeilingMinutes\(\)/g) || [];
+    expect(ceilingUses).toHaveLength(1);
+    expect(predicate).toContain('if (operatorTakeover)');
   });
 
 

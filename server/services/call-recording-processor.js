@@ -1951,7 +1951,10 @@ function summarizeBatch(results) {
 // + extraction (primary and fallback) back to back, which at the shipped
 // defaults is exactly 20 minutes — so a flat 20 would have reclaimed a
 // slow-but-working pass out from under itself (pre-push audit P1).
-// A claim is reclaimable when it STOPPED BEATING. Nothing else.
+const { alertCeilingMinutes } = require('../utils/claim-ceiling');
+
+// A claim is reclaimable when it STOPPED BEATING — plus, for a HUMAN pressing
+// the button, one bounded takeover for the hang case (see below).
 //
 // Earlier revisions added an absolute ceiling so a pass that hangs while its
 // timer keeps beating could still be recovered. Every attempt to size that
@@ -1992,11 +1995,31 @@ const FORCE_CLAIM_QUIET_MINUTES = 3;
 // branch — permanently unreclaimable, the worst possible bug in a lock.
 const CURRENT_BEAT = 'processing_heartbeat_at IS NOT NULL'
   + ' AND processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)';
-const reclaimableClaim = (quietMinutes) => "("
-  + `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`
-  + ` OR (NOT (${CURRENT_BEAT}) AND`
-  + ` COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`
-  + ")";
+const reclaimableClaim = (quietMinutes, { operatorTakeover = false } = {}) => {
+  const clauses = [
+    `(${CURRENT_BEAT} AND processing_heartbeat_at < NOW() - INTERVAL '${quietMinutes} minutes')`,
+    `(NOT (${CURRENT_BEAT}) AND COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${LEGACY_CLAIM_QUIET_MINUTES} minutes')`,
+  ];
+  if (operatorTakeover) {
+    // THE OPERATOR TAKEOVER, and only ever for a human pressing the button.
+    //
+    // A pass hung on an unbounded provider call keeps beating, so no
+    // heartbeat rule can free it — that was the one real hole left, and the
+    // reason five review rounds went into an absolute ceiling. What makes a
+    // ceiling safe HERE and not on the automatic path:
+    //   * a human has looked at the row, after the watchdog has been ringing
+    //     about it since this same threshold;
+    //   * the claim has outlived every budgeted provider path, so a healthy
+    //     pass is not a candidate;
+    //   * a hung pass is by definition not writing, and when it finally
+    //     unsticks it hits the transcript or terminal fence and abandons
+    //     itself at the next checkpoint rather than racing the new owner.
+    // The automatic sweeps keep no ceiling at all: nobody is watching them,
+    // and a wrong steal there duplicates side effects silently.
+    clauses.push(`COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${alertCeilingMinutes()} minutes'`);
+  }
+  return `(${clauses.join(' OR ')})`;
+};
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -6263,7 +6286,7 @@ const CallRecordingProcessor = {
             // after looking at the row; the automatic paths keep the
             // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES));
+              .orWhereRaw(reclaimableClaim(FORCE_CLAIM_QUIET_MINUTES, { operatorTakeover: true }));
           })
           .update({
             processing_status: 'processing',
@@ -6310,9 +6333,15 @@ const CallRecordingProcessor = {
         success: false,
         skipped: true,
         reason: 'already_processing',
-        retryAfterMinutes: beating
-          ? (opts.force ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
-          : LEGACY_CLAIM_QUIET_MINUTES,
+        // A forced caller also has the operator takeover available once the
+        // claim outlives every budgeted path, so never quote them longer
+        // than that even when the beat rule would.
+        retryAfterMinutes: (() => {
+          const beatWindow = beating
+            ? (opts.force ? FORCE_CLAIM_QUIET_MINUTES : LEGACY_CLAIM_QUIET_MINUTES)
+            : LEGACY_CLAIM_QUIET_MINUTES;
+          return opts.force ? Math.min(beatWindow, alertCeilingMinutes()) : beatWindow;
+        })(),
       };
     }
 
