@@ -779,7 +779,11 @@ async function investigatePaths(db, {
         let effectiveVerdict = verdict.verdict;
         await db.transaction(async (trx) => {
           const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate().first('agent_state');
-          if (!fresh || (claimState && fresh.agent_state !== 'investigating')) { staleClaim = true; return; }
+          // Claims must still hold `investigating`; a REFRESH must still see
+          // the lane state it selected — either way, a state that moved
+          // during the un-locked network window owns the row now.
+          const expected = claimState ? 'investigating' : domain.agent_state;
+          if (!fresh || fresh.agent_state !== expected) { staleClaim = true; return; }
           const writtenIds = [];
           for (const p of writable) {
             // The model's price claims count only when the exact quote/marker

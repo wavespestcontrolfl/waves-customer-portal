@@ -935,6 +935,26 @@ describe('full run', () => {
     expect(again).toHaveLength(0);
   });
 
+  test('a refresh whose domain changed state mid-flight aborts all writes too (Codex r14 P1)', async () => {
+    const d = domainRow({ agent_state: 'acquired' });
+    const baseline = {
+      id: uid(), domain_id: d.id, acquisition_type: 'unknown', submission_url: null, baseline: true,
+      path_key: 'unknown:-', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [baseline] });
+    const llm = jest.fn(async () => {
+      db._tables.seo_link_domains[0].agent_state = 'rejected'; // admin acts mid-flight
+      return { ok: true, json: verdictOf([modelPath()]) };
+    });
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    expect(r.staleClaims).toBe(1);
+    expect(r.pathsWritten).toBe(0);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(1); // nothing written
+    expect(db._tables.seo_link_acquisition_paths[0].last_investigated_at).toBeNull(); // nothing stamped
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected');
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {
