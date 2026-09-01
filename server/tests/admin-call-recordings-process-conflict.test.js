@@ -205,18 +205,24 @@ describe('claim ceiling is derived from the provider budgets', () => {
     expect(beat).toContain('processing_heartbeat_at >= COALESCE(processing_started_at, processing_heartbeat_at)');
   });
 
-  test('every provider call the pass makes is bounded', () => {
-    // An unbounded call is what let a pass hang while its timer kept
-    // beating, which is what made a wedged claim unreclaimable and drove
-    // several attempts at a ceiling that could steal live work.
-    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    const marker = 'client.messages.create(';
+  // An unbounded call is what let a pass hang while its timer kept beating,
+  // which made a wedged claim unreclaimable and drove a dozen rounds of
+  // trying to size a ceiling that could steal live work. This scans the
+  // processor AND the modules it awaits while holding the claim — an earlier
+  // version looked only at the processor and missed the CSR coach.
+  test.each([
+    ['../services/call-recording-processor', /timeout: PROVIDER_FETCH_TIMEOUTS_MS/],
+    ['../services/csr/csr-coach', /timeout: CSR_SCORE_TIMEOUT_MS/],
+  ])('%s bounds every direct Anthropic call', (modulePath, expectedTimeout) => {
+    const source = require('fs').readFileSync(require.resolve(modulePath), 'utf8');
     const starts = [];
-    for (let i = source.indexOf(marker); i !== -1; i = source.indexOf(marker, i + 1)) starts.push(i);
+    for (let i = source.indexOf('messages.create('); i !== -1; i = source.indexOf('messages.create(', i + 1)) {
+      starts.push(i);
+    }
     expect(starts.length).toBeGreaterThan(0);
     starts.forEach((start, idx) => {
       const end = idx + 1 < starts.length ? starts[idx + 1] : source.length;
-      expect(source.slice(start, end)).toContain('timeout: PROVIDER_FETCH_TIMEOUTS_MS');
+      expect(source.slice(start, end)).toMatch(expectedTimeout);
     });
   });
 

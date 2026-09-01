@@ -7,6 +7,12 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 let TwilioService;
+
+// Matches the call pipeline's extraction budget: this runs INSIDE a
+// processing claim, so an unbounded hang here wedges the whole call.
+const CSR_SCORE_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
+  ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
+  : 180000;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
 class CSRCoach {
@@ -112,7 +118,13 @@ ${transcript || 'No transcript available — score based on available metadata o
 
 Score the call, grade the lead, and generate a follow-up task if applicable.`
       }]
-    });
+    // BOUNDED. The call-recording pass AWAITS this while holding its
+    // processing claim, and its heartbeat runs on a timer — so on the SDK's
+    // defaults a hang here kept the claim alive and unreclaimable by both the
+    // 3-minute human path and the 10-minute automatic one (codex #3677 P1).
+    // Scoring is best-effort: failing after four minutes is strictly better
+    // than pinning a call in 'processing'.
+    }, { timeout: CSR_SCORE_TIMEOUT_MS });
 
     let score;
     try {
