@@ -5327,10 +5327,27 @@ function priceSanitation(options = {}) {
 // every percentage discount.
 function priceBaitSetup(options = {}) {
   const { waived = true } = options;
+  // GATE_UNIFIED_SETUP_FEE (owner ruling 2026-09-01): with the gate on,
+  // there is ONE setup-fee amount — a rodent line emitted by a lane that
+  // doesn't suppress it (staff/AI/call estimate producers) must price at
+  // the unified DB knob, never a drifted rodent-specific value, so every
+  // lane discloses and bills the same dollars (audit r13 P0). Gate off:
+  // byte-identical legacy amount. Amount only — the line's own waiver
+  // semantics are the frozen disclosure and stand unchanged; saved
+  // estimates bill their FROZEN stored amounts, so this has the same
+  // runtime-mutability semantics as an admin fee edit.
+  let feeAmount = RODENT.baitSetupFee;
+  try {
+    if (require('../../config/feature-gates').isEnabled('unifiedSetupFee')) {
+      const { WAVEGUARD } = require('./constants');
+      const unified = Number(WAVEGUARD.unifiedSetupFee);
+      if (Number.isFinite(unified) && unified >= 0) feeAmount = Math.round(unified * 100) / 100;
+    }
+  } catch { /* gates unavailable (isolated harness) — legacy amount stands */ }
   return {
     service: 'rodent_bait_setup',
     name: 'Bait Station Setup',
-    price: waived ? 0 : RODENT.baitSetupFee,
+    price: waived ? 0 : feeAmount,
     waived,
     discountable: false,
     discountEligible: false,
@@ -5341,7 +5358,7 @@ function priceBaitSetup(options = {}) {
     // waives it.
     detail: waived
       ? 'Waived — another WaveGuard recurring service is on the plan'
-      : `One-time $${RODENT.baitSetupFee} setup — waived with any other WaveGuard recurring service`,
+      : `One-time $${feeAmount} setup — waived with any other WaveGuard recurring service`,
   };
 }
 
