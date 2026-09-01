@@ -418,7 +418,12 @@ async function computePrepayRefund(term) {
   }
   const completedVisits = completedRows.length;
   const remainingVisits = Math.max(0, base.includedVisits - completedVisits);
-  const amount = Math.round((base.prepaidAmount / base.includedVisits) * remainingVisits * 100) / 100;
+  // Integer-cents math (money): dividing the float dollar value can drift a
+  // cent under the rounding boundary ($10.01 × 5 ÷ 10 lands just below
+  // 500.5¢ and would record $5.00, not $5.01) — and this amount becomes an
+  // actionable refund task and case record.
+  const prepaidCents = Math.round(base.prepaidAmount * 100);
+  const amount = Math.round((prepaidCents * remainingVisits) / base.includedVisits) / 100;
   return { ...base, completedVisits, remainingVisits, amount, needsManualCalc: false };
 }
 

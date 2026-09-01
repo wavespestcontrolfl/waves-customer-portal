@@ -1579,7 +1579,20 @@ describe('POST /:id/cancel-plan', () => {
       expect(arg.approvedScopedPricing).toMatch(/^tier=.*\|monthly=.*\|rates=.*\|perapp=/);
     }));
 
-    test('an OLD end_at_term case never echoes past a recorded end-now — the inverse refusal outranks the duplicate latch', () => withServer(async (baseUrl) => {
+  test('the prepaid refund computes in integer cents — float drift never shaves a cent off an actionable task', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [{
+        id: 'term-c', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        prepay_amount: '10.01', coverage_visit_count: 10, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
+      }];
+      mockState.scheduled_services = Array.from({ length: 5 }, (_, n) => ({
+        id: `done-${n}`, customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: `2026-0${4 + n}-01`,
+      }));
+      const body = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
+      // 1001¢ × 5 ÷ 10 = 500.5¢ → $5.01 (float dollars round to $5.00).
+      expect(body.prepay.refund).toEqual(expect.objectContaining({ completedVisits: 5, remainingVisits: 5, amount: 5.01 }));
+    }));
+
+      test('an OLD end_at_term case never echoes past a recorded end-now — the inverse refusal outranks the duplicate latch', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       // The transition run reused and RESOLVED the acceptance (clean run);
       // both cases remain on the term.
