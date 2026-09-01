@@ -76,7 +76,7 @@ describe('German Roach Cleanout customer-facing estimate copy', () => {
     expect(prompts).toEqual([
       'How do you get rid of German roaches?',
       'How long until the roaches are gone?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
       'When am I charged?',
     ]);
     // German-roach prompts replace the generic ant chip.

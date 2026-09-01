@@ -355,7 +355,7 @@ export default function EstimateProposalDocument({ data, token }) {
                 {program.note ? (
                   <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>{program.note}</div>
                 ) : null}
-                <div style={{
+                <div data-estimate-document-line="" style={{
                   display: 'flex', justifyContent: 'space-between', gap: 14,
                   padding: '4px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5,
                 }}>
@@ -406,7 +406,7 @@ export default function EstimateProposalDocument({ data, token }) {
                   <div style={{ fontSize: 11, color: MUTED, padding: '0 0 2px', lineHeight: 1.5 }}>{building.note}</div>
                 ) : null}
                 {(building.lineItems || []).map((item, iIdx) => (
-                  <div key={`${item.description || 'line'}-${iIdx}`} style={{
+                  <div key={`${item.description || 'line'}-${iIdx}`} data-estimate-document-line="" style={{
                     display: 'flex', justifyContent: 'space-between', gap: 14,
                     padding: '5px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5, lineHeight: 1.5,
                   }}>
@@ -429,7 +429,7 @@ export default function EstimateProposalDocument({ data, token }) {
               <div>
                 <div style={{ fontSize: 12, fontWeight: 800, color: NAVY, padding: '6px 0 2px' }}>Corrective work (one-time)</div>
                 {correctiveWork.map((work, idx) => (
-                  <div key={`${work.label}-${idx}`} style={{
+                  <div key={`${work.label}-${idx}`} data-estimate-document-line="" style={{
                     display: 'flex', justifyContent: 'space-between', gap: 14,
                     padding: '5px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5, lineHeight: 1.5,
                   }}>

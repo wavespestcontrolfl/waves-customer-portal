@@ -8,6 +8,7 @@ import {
   glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
+  glassOneTimeHeroOverlay,
   glassPestInclusions,
   glassRewriteSlotSummary,
   glassRowInclusions,
@@ -52,6 +53,12 @@ describe('glassCopyActive', () => {
 });
 
 describe('glassEstimateCopyFor', () => {
+  it('keeps regulated certificate copy free of AI quick questions', () => {
+    setGlassDefault(true);
+    expect(glassEstimateCopyFor('wdo_inspection').askChips).toEqual([]);
+    expect(glassEstimateCopyFor('pre_slab_termiticide').askChips).toEqual([]);
+  });
+
   it('returns a pack for every service category under glass, none when glass is off', () => {
     setGlassDefault(true);
     expect(glassEstimateCopyFor('pest_control').heroH1).toMatch(/pest-free \{city\} plan/);
@@ -84,8 +91,29 @@ describe('glassEstimateCopyFor', () => {
       expect(pack.eyebrow, category).toBeTruthy();
       expect(pack.aiTitle, category).toBeTruthy();
       expect(pack.aiBody, category).toBeTruthy();
-      expect(pack.askChips, category).toHaveLength(4);
+      expect(pack.askChips, category).toHaveLength(category === 'pre_slab_termiticide' ? 0 : 4);
     }
+  });
+});
+
+describe('glassServiceSlug regulated certificate routing', () => {
+  it.each([
+    'pre_slab_termiticide',
+    'Pre-Slab Termiticide Treatment',
+    'Pre slab treatment',
+  ])('keeps mixed-estimate pre-slab row %s out of the termite-bait fallback', (value) => {
+    expect(glassServiceSlug(value)).toBe('pre_slab_termiticide');
+  });
+
+  it('keeps the standalone termite_inspection off the regulated WDO slug and recognizes the slab pre-treat catalog key', () => {
+    // FS 482.226 standalone inspection — not a real-estate WDO report.
+    expect(glassServiceSlug('termite_inspection')).not.toBe('wdo_inspection');
+    expect(glassServiceSlug('termite_slab_pretreat')).toBe('pre_slab_termiticide');
+    expect(glassServiceSlug('Slab Pre-Treat Termite Service')).toBe('pre_slab_termiticide');
+  });
+
+  it('does not classify ordinary termiticide treatment as pre-slab certificate work', () => {
+    expect(glassServiceSlug('Liquid termiticide treatment')).not.toBe('pre_slab_termiticide');
   });
 });
 
@@ -109,6 +137,15 @@ describe('glassCtaMicroFor', () => {
     // Row-slug spelling of rodent resolves to the rodent pack's line.
     expect(glassCtaMicroFor('rodent_bait')).toBe(glassCtaMicroFor('rodent'));
     expect(glassCtaMicroFor('rodent')).not.toMatch(/callbacks/);
+  });
+});
+
+describe('glassOneTimeHeroOverlay', () => {
+  it('preserves explicit specialty-service headers while generic one-time work stays terms-neutral', () => {
+    setGlassDefault(true);
+    const wdo = glassEstimateCopyFor('wdo_inspection');
+    expect(glassOneTimeHeroOverlay(wdo, { preserveServiceHero: true }).heroH1).toMatch(/WDO inspection/i);
+    expect(glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control')).heroH1).toMatch(/service quote/i);
   });
 });
 
