@@ -32,9 +32,10 @@ describe('ReturnVisitStrip', () => {
     expect(screen.getByText('Your expiration date was extended.')).toBeInTheDocument();
   });
 
-  it('says so plainly when nothing changed', () => {
+  it('never claims "nothing changed" when the server named no change (only two stamps are recognized)', () => {
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
-    expect(screen.getByText(/Nothing has changed since you last looked on August 30 — same price, same plan\./)).toBeInTheDocument();
+    expect(screen.getByText(/Back for another look since August 30 — the estimate below is current as of today\./)).toBeInTheDocument();
+    expect(screen.queryByText(/same price|nothing has changed/i)).not.toBeInTheDocument();
   });
 
   it('shares through the customer’s own sms: draft when navigator.share is absent', () => {

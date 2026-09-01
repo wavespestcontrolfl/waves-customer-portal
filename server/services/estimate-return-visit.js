@@ -6,7 +6,9 @@
 // visit. Every entry in `changes` is named from a DURABLE stamp the customer
 // can see the effect of; nothing is inferred from updated_at, because a
 // "something changed" we cannot name is exactly the surprise the strip
-// exists to prevent.
+// exists to prevent. The converse holds too: an EMPTY list only means no
+// recognized stamp fired, never that the price or plan are unchanged — the
+// page's empty-state copy must not claim equality (pre-push codex P1).
 
 function toDate(value) {
   if (!value) return null;

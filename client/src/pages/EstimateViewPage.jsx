@@ -1113,7 +1113,9 @@ const ESTIMATE_ASK_PROMPTS = [
 // Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Renders only when the
 // payload carries `returnVisit` (second or later VISIT, sessionized server-
 // side). Every change line is server-named from a durable stamp; the strip
-// never says "something changed" on its own. "Text this to someone" is the
+// never says "something changed" on its own — and never claims "nothing
+// changed" either (pre-push codex P1: only two stamps are recognized, so an
+// empty list proves nothing). The empty state just says the page is current. "Text this to someone" is the
 // CUSTOMER'S share sheet (navigator.share, else an sms: draft on their phone)
 // — never a Waves-sent message.
 export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection }) {
@@ -1149,7 +1151,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection }) {
         </>
       ) : (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-          Nothing has changed since you last looked{lastDisplay ? ` on ${lastDisplay}` : ''} &mdash; same price, same plan.
+          Back for another look{lastDisplay ? ` since ${lastDisplay}` : ''} &mdash; the estimate below is current as of today.
         </div>
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
