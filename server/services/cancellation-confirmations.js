@@ -156,8 +156,11 @@ async function sendCancellationConfirmations({
       } : {}),
     });
     emailSent = !!(emailResult && emailResult.ok);
+    // Skips are DEFINITIVE recipient states, not transient failures:
+    // prefs off, no/malformed stored address, or no customer row — none
+    // repair by retrying the send. Only provider-side misses stay failed.
     if (!emailSent && emailResult
-      && (emailResult.blocked === true || (emailResult.skipped === true && emailResult.reason === 'email_disabled'))) {
+      && (emailResult.blocked === true || emailResult.skipped === true)) {
       emailBlocked = true;
     }
   } catch (emailErr) {
