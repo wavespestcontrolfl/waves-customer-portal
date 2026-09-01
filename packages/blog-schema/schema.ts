@@ -678,7 +678,7 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       // extra ">" is text), never the close (CommonMark).
       if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; prevBlank = true; /* a closed fence ends the block — the next line can start any list */ }
     } else {
-      let marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+      let marker = strippedLine.match(/^ *(?:[-*+]|\d{1,9}[.)])\s+/);
       // CommonMark: an ordered marker interrupts a paragraph only when it
       // starts at 1 — "Paragraph\n2. ~~~" is paragraph TEXT, and treating
       // it as an item would open a fence that swallows rendered components.
@@ -728,8 +728,20 @@ function blankNonRenderedCode(src: string): string {
   }
   let out = chars.join('');
   // Inline code spans: opener and closer are EQUAL-length backtick runs
-  // (CommonMark) — a 4-run never closes against part of a 5-run.
-  out = out.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (m) => m.replace(/[^\n]/g, ' '));
+  // (CommonMark) — a 4-run never closes against part of a 5-run. Scanned
+  // on the ATTR-MASKED view: a backtick inside a quoted JSX attribute is
+  // an inert character, never a span delimiter that could pair across a
+  // real component (Codex #504 r25).
+  {
+    const spanView = maskJsxAttrQuotes(out);
+    const spanChars = out.split('');
+    const spanRe = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
+    let sm2: RegExpExecArray | null;
+    while ((sm2 = spanRe.exec(spanView)) !== null) {
+      for (let k = sm2.index; k < sm2.index + sm2[0].length; k += 1) if (spanChars[k] !== '\n') spanChars[k] = ' ';
+    }
+    out = spanChars.join('');
+  }
   // An indented code line follows a blank line (or another code line) —
   // measured RELATIVE to the ambient list content column (CommonMark
   // strips the marker indent first): "- Product" then a blank then a
@@ -742,8 +754,9 @@ function blankNonRenderedCode(src: string): string {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const blank = line.trim() === '';
-    const eIndent = ((line.match(/^[ \t]*/) || [''])[0]).replace(/\t/g, '    ').length;
-    const marker = line.match(/^( *)(?:[-*+]|\d+[.)])\s+/);
+    let eIndent = 0;
+    for (const ch of (line.match(/^[ \t]*/) || [''])[0]) eIndent += ch === '\t' ? 4 - (eIndent % 4) : 1; // tab = next 4-column stop (CommonMark), not a fixed width
+    const marker = line.match(/^( *)(?:[-*+]|\d{1,9}[.)])\s+/);
     if (marker && marker[1].length <= col() + 3 && eIndent < col() + 4) {
       while (listCols.length && listCols[listCols.length - 1] > marker[1].length) listCols.pop();
       listCols.push(marker[0].length);
@@ -1761,6 +1774,10 @@ function parseJsxProps(attrs: string): {
     const propName = m[1];
     if (propName in simple) continue;
     const body = extractBalancedExpression(attrs, expr.lastIndex - 1);
+    // A STATIC quoted string expression (tel={'not-a-phone'}, title={''})
+    // has a real value the schema must see (Codex #3646 r23 P1).
+    const sm = body === null ? null : /^\s*'((?:[^'\\]|\\.)*)'\s*$|^\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(body);
+    if (sm) { simple[propName] = (sm[1] ?? sm[2] ?? '').replace(/\\(.)/g, '$1'); continue; }
     const parsed = body === null ? undefined : tryParseStaticJson(body);
     if (parsed !== undefined) {
       simple[propName] = parsed.value;
@@ -1773,9 +1790,24 @@ function parseJsxProps(attrs: string): {
   // the string/array schemas must see and reject; scan a value-blanked
   // view so a bare-looking word inside a quoted value never matches
   // (Codex #3646 r22 P1).
-  const bareView = attrs
-    .replace(/(["'])(?:(?!\1)[\s\S])*\1/g, (q) => q[0] + ' '.repeat(q.length - 2) + q[q.length - 1])
-    .replace(/\{[\s\S]*?\}/g, (b) => ' '.repeat(b.length));
+  const quotedMasked = attrs
+    .replace(/(["'])(?:(?!\1)[\s\S])*\1/g, (q) => q[0] + ' '.repeat(q.length - 2) + q[q.length - 1]);
+  // Brace expressions blank BALANCED (a non-greedy regex stops at a nested
+  // object's first } and leaves trailing identifiers to false-flag as
+  // bare props — Codex #504 r25).
+  const bvChars = quotedMasked.split('');
+  for (let bi = 0; bi < quotedMasked.length; bi += 1) {
+    if (quotedMasked[bi] !== '{') continue;
+    let d = 0; let be = -1;
+    for (let bj = bi; bj < quotedMasked.length; bj += 1) {
+      if (quotedMasked[bj] === '{') d += 1;
+      else if (quotedMasked[bj] === '}') { d -= 1; if (d === 0) { be = bj; break; } }
+    }
+    const stop = be === -1 ? quotedMasked.length - 1 : be;
+    for (let bk = bi; bk <= stop; bk += 1) bvChars[bk] = ' ';
+    bi = stop;
+  }
+  const bareView = bvChars.join('');
   const bare = /(?:^|\s)([a-zA-Z_$][\w$]*)(?=\s|\/|$)(?!\s*=)/g;
   while ((m = bare.exec(bareView)) !== null) {
     const propName = m[1];
@@ -2518,7 +2550,7 @@ const PRE_DISCLAIMER_GLUE_RE =
 
 // A markdown list item ("- Naples", "2) Venice") — used to re-attach a
 // colon-terminated claim intro ("We serve these cities:") to each item.
-const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d{1,9}[.)])\s+/;
 
 // A "Yes" answer that attributes the service to a county/municipal/public
 // provider (or a third-party company) — the same provider set the
@@ -2978,7 +3010,7 @@ function cityAliasSource(city: string): string {
 // must scan as one sentence. Consecutive PROSE lines likewise re-join with
 // a space (a soft-wrapped paragraph is one rendered sentence).
 const MARKDOWN_SELF_CLOSING_LINE_RE = /^\s*(?:#{1,6}\s|<\/?[A-Za-z])/;
-const MARKDOWN_CONTINUABLE_MARKER_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>\s?|\|)/;
+const MARKDOWN_CONTINUABLE_MARKER_RE = /^\s*(?:[-*+]\s|\d{1,9}[.)]\s|>\s?|\|)/;
 
 function markdownSegments(body: string): string[] {
   const segments: string[] = [];

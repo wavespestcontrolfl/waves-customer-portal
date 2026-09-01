@@ -805,6 +805,15 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('static string expressions carry real values the schemas reject (Codex #3646 r23)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'not-a-phone'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard title={""} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<SpiderIdBoard species={'wolf'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'tel:+19415993489'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBe(0);
+  });
+
   test('nested components in prop expressions validate; expression-string routes; invalid titles (Codex #3646 r22)', () => {
     const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
     const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;

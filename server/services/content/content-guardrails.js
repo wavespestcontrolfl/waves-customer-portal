@@ -2025,6 +2025,15 @@ const INLINE_CTA_ROOT_RELATIVE_RE = /^\/(?!\/)[A-Za-z0-9._~\-/]*(?:[?#][A-Za-z0-
 // here first (Codex #3646 r16 P1).
 const INLINE_CTA_PROP_NAMES = Object.freeze(new Set(['headline', 'description', 'ctaLabel', 'ctaHref', 'phone', 'tel', 'eyebrow']));
 const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?[\d\-().\s]{7,20}$/;
+// The real string value of a STATIC quoted string expression
+// ({'x'} / {"x"}) — null for anything else. tel={'not-a-phone'} carries a
+// value the schemas must see (astro parseJsxProps parity, Codex #3646 r23).
+function staticStringOfExpr(expr) {
+  const m = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$/.exec(String(expr || ''));
+  if (!m) return null;
+  return (m[1] !== undefined ? m[1] : m[2]).replace(/\\(.)/g, '$1');
+}
+
 // Every attribute name with its quoted-literal value (null when
 // expression-valued/unquoted) and its RAW expression text — a balanced
 // walk via the shared lexer, so nested-brace expressions
@@ -2114,8 +2123,10 @@ function inlineCtaContractFinding(body) {
       if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
         return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA ${name}=${expr}> — a boolean/number/null/container expression never satisfies the component's string prop schema; use a quoted literal.`);
       }
-      if (name === 'tel' && literal !== null && !INLINE_CTA_TEL_RE.test(literal)) {
-        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA tel="${literal}"> that is not a phone number (optionally tel:-prefixed) — the astro publish gate rejects it.`);
+      // A STATIC string expression carries a real value the schema sees.
+      const staticVal = literal !== null ? literal : staticStringOfExpr(expr);
+      if (name === 'tel' && staticVal !== null && !INLINE_CTA_TEL_RE.test(staticVal)) {
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA tel="${staticVal}"> that is not a phone number (optionally tel:-prefixed) — the astro publish gate rejects it.`);
       }
     }
     if (!/\bctaHref\s*=/.test(maskAttrRegions(tag.attrs))) continue; // no ctaHref: the component defaults to the quote page
@@ -2182,8 +2193,8 @@ function spiderIdBoardContractFinding(body) {
           // never the required array shape (Codex #3646 r21 P1).
           return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a bare <SpiderIdBoard species> shorthand — JSX passes {true}, which never satisfies the species array schema.');
         }
-        if (literal !== null) {
-          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species="…"> string — species must be a JSON array expression of shaped records (name, risk, where, hunt, eggSac; optional sciName, glyph, source{label, https url}).');
+        if (literal !== null || staticStringOfExpr(expr) !== null) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species> string — species must be a JSON array expression of shaped records (name, risk, where, hunt, eggSac; optional sciName, glyph, source{label, https url}).');
         }
         if (expr) {
           let parsed; let jsonish = false;
@@ -2193,7 +2204,8 @@ function spiderIdBoardContractFinding(body) {
           }
         }
       } else {
-        if (literal !== null && (name === 'title' || name === 'eyebrow') && !literal) {
+        const staticVal = literal !== null ? literal : staticStringOfExpr(expr);
+        if (staticVal !== null && (name === 'title' || name === 'eyebrow') && !staticVal) {
           return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=""> — the schema requires a non-empty string.`);
         }
         if (literal === null && expr === null) {
