@@ -128,6 +128,19 @@ const ALLOWLIST = [
     reason: 'OR-widened candidate prefilter; per-row fail-close via isMembershipCustomerRow',
   },
   {
+    file: 'services/intelligence-bar/authorization-contract.js',
+    match: 'Number(params?.updates?.monthly_rate) > 0',
+    context: 'if (isCustomerUpdate',
+    count: 1,
+    // Confirm-card disclosure trigger over the UPDATE PAYLOAD (does this
+    // IB write touch waveguard_tier or set a positive monthly_rate?) — it
+    // classifies the EDIT to decide what the card must disclose, never a
+    // row's billing lane; the executor it discloses for resolves the lane
+    // canonically when stamping billing_mode. (#3648 and #3669 merged
+    // past each other, so this site postdates the guard's review.)
+    reason: 'disclosure trigger over update params on the IB confirm card; not a row lane classification',
+  },
+  {
     file: 'scripts/align-waveguard-portal-records.js',
     match: ".orWhere('c.monthly_rate', '>', 0)",
     context: "waveguard_tier_source",
