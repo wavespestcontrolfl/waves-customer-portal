@@ -1532,14 +1532,23 @@ describe('account-level disclosure + registers', () => {
 // prb-r18 pins.
 describe('prb-r18', () => {
   test('a PAN read across turns is caught, and the prior fragments are sanitized out of the model history', async () => {
-    const { convo, spoken } = makeConvo();
-    mockScriptedMessages.push(endTurn('Go on.'));
-    await turn(convo, 'the card is 4242 4242'); // 8 digits — no single-turn hit
-    mockScriptedMessages.length = 0;
-    await turn(convo, '4242 4242');
-    expect(spoken).toContain(script.SECURITY_INTERRUPT);
-    const everything = JSON.stringify(convo.messages) + JSON.stringify(convo._turns);
-    expect(everything).not.toContain('4242');
+    // Pinned clock: the turns' `at:` epoch-millis serialize into the string
+    // this test scans, and a REAL wall clock whose millis happen to contain
+    // "4242" (…4484242 at 01:01:24.242Z) fails the scan with no PAN leak
+    // (CI flake caught on #3671). A fixed time keeps the digits inert.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    try {
+      const { convo, spoken } = makeConvo();
+      mockScriptedMessages.push(endTurn('Go on.'));
+      await turn(convo, 'the card is 4242 4242'); // 8 digits — no single-turn hit
+      mockScriptedMessages.length = 0;
+      await turn(convo, '4242 4242');
+      expect(spoken).toContain(script.SECURITY_INTERRUPT);
+      const everything = JSON.stringify(convo.messages) + JSON.stringify(convo._turns);
+      expect(everything).not.toContain('4242');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('the pre-send pay-link ledger row carries the consent verbatim', async () => {
