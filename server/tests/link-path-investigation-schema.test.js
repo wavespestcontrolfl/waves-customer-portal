@@ -121,6 +121,10 @@ describe('investigator output schema', () => {
     expect(validateInvestigation(good({ paths: [deadlock] })).valid).toBe(false);
     const sendFirst = goodPath({ terms_accepted_by_send: true, execution_after_send: true, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
     expect(validateInvestigation(good({ paths: [sendFirst] })).valid).toBe(true);
+    // …and a send that legally accepts terms REQUIRES the attestation — an
+    // internally inconsistent response cannot bypass the hash gate (Codex PR r15 P1)
+    const noAttestation = goodPath({ terms_accepted_by_send: true, execution_after_send: true, legal_attestation: false });
+    expect(validateInvestigation(good({ paths: [noAttestation] })).valid).toBe(false);
   });
 
   test('a not_reproducible verdict may carry evidence entries but never a positive-confidence executable path (Codex PR r1 P1)', () => {

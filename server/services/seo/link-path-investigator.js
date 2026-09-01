@@ -88,6 +88,11 @@ const PROBE_PATHS = Object.freeze([
   '/sponsors', '/advertise', '/directory', '/resources', '/contact', '/signup', '/register',
 ]);
 const FULL_PROBE_MASK = (1 << PROBE_PATHS.length) - 1; // one coverage bit per probe
+
+// Attempt outcomes that mean the executed flow DIVERGED from what the
+// investigation described — the path re-investigates promptly (plan: a
+// failed attempt triggers re-investigation, not a 90-day wait).
+const FAILED_ATTEMPT_OUTCOMES = Object.freeze(['failed', 'blocked', 'captcha', 'price_changed', 'terms_changed', 'send_error']);
 const PROBE_SLOT_RESERVE = 2; // fetch slots per pass that hints can never take from uncovered probes
 
 // Domain states the investigator may claim and finish (stamp a verdict on).
@@ -393,6 +398,7 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     return seed(a) - seed(b) || (new Date(a.created_at) - new Date(b.created_at));
   });
   const notSeen = (q) => ([...seen].length ? q.whereNotIn('d.id', [...seen]) : q);
+  const notSeen2 = (q) => ([...seen].length ? q.whereNotIn('id', [...seen]) : q); // un-aliased variant
   // Refresh buckets (path-based, §5): never-investigated active paths, then
   // 90-day-stale ones — always state-less, always deferrable, and bound by
   // owner actions (rejected never re-fetches; watching waits for its recheck).
@@ -411,6 +417,38 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     else q = q.orderByRaw('MIN(p.last_investigated_at) asc');
     return q.limit(limit);
   };
+  // The plan requires re-investigation after a FAILED acquisition attempt:
+  // an attempt in a failure-shaped outcome NEWER than the path's last
+  // investigation makes the path due now, not at the 90-day expiry.
+  // Re-investigating stamps the path, so the same historical failure never
+  // triggers twice; failures older than the stale horizon are covered by
+  // the ordinary stale bucket, which bounds the attempts scan.
+  const failedAttemptRows = async () => {
+    const attempts = await db('seo_link_attempts')
+      .whereIn('outcome', FAILED_ATTEMPT_OUTCOMES)
+      .where('created_at', '>', new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000))
+      .select('path_id', 'created_at');
+    const latestByPath = new Map();
+    for (const a of attempts) {
+      if (!a.path_id) continue;
+      const prev = latestByPath.get(a.path_id);
+      if (!prev || new Date(a.created_at) > new Date(prev)) latestByPath.set(a.path_id, a.created_at);
+    }
+    if (!latestByPath.size) return [];
+    const pathRows = await db('seo_link_acquisition_paths')
+      .whereIn('id', [...latestByPath.keys()]).whereNull('superseded_by')
+      .select('id', 'domain_id', 'last_investigated_at');
+    const dueDomainIds = [...new Set(pathRows
+      .filter((pr) => !pr.last_investigated_at || new Date(latestByPath.get(pr.id)) > new Date(pr.last_investigated_at))
+      .map((pr) => pr.domain_id))];
+    if (!dueDomainIds.length) return [];
+    return notSeen2(db('seo_link_domains')
+      .whereIn('id', dueDomainIds)
+      .where(backoffDue())
+      .whereNotIn('agent_state', ['rejected'])
+      .where((b) => b.whereNot('agent_state', 'watching').orWhere('watch_recheck_at', '<=', now))
+      .select('*').limit(limit));
+  };
   // Owner seeds jump the WHOLE queue (§5), refresh work included: seed
   // claims, then seed refreshes, then everything else — a seed with a due
   // path can never be starved behind a full page of ordinary new rows.
@@ -419,6 +457,7 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
   if (out.length < limit) take(await refreshRows('stale', { seedOnly: true }), false);
   take(claimPool, true); // seeds already taken; dedupe skips them
   if (out.length < limit) take(await refreshRows('never'), false);
+  if (out.length < limit) take(await failedAttemptRows(), false);
   if (out.length < limit) take(await refreshRows('stale'), false);
   return out;
 }
@@ -670,6 +709,29 @@ function verifyPriceEvidence(pages, p) {
     }
     if (evidence) verification.currency_evidence = 'verified';
   }
+  // The model NEVER sees script bodies (canonicalize strips them), so a page
+  // whose only currency declaration lives in JSON-LD cannot yield a model
+  // evidence claim at all. Derive it DETERMINISTICALLY instead: when no
+  // model evidence verified, and a cited page's structured offers declare
+  // exactly one currency whose price matches a verified quote's amount,
+  // that declaration is the evidence — page truth, not model attestation.
+  if (!evidence) {
+    const derived = new Map(); // currency → page_url
+    for (const [ok, text, pageUrl] of [[priceOk, p.price_text, p.price_page_url], [renewalOk, p.renewal_price_text, p.renewal_price_page_url]]) {
+      if (!ok) continue;
+      const cents = parsePriceTextCents(text);
+      const page = findPage(pages, pageUrl);
+      if (cents == null || !page) continue;
+      for (const o of jsonLdOffers(page.html)) {
+        if (o.priceCurrency && o.priceCents === cents) derived.set(o.priceCurrency, pageUrl);
+      }
+    }
+    if (derived.size === 1) {
+      const [[marker, pageUrl]] = [...derived.entries()];
+      evidence = { marker, kind: 'jsonld_price_currency', page_url: pageUrl, derived: true };
+      verification.currency_evidence = 'derived_from_structured_offer';
+    }
+  }
   return {
     price_text: priceOk ? p.price_text : null,
     renewal_price_text: renewalOk ? p.renewal_price_text : null,
@@ -809,8 +871,14 @@ async function investigatePaths(db, {
         });
         const priorProbeMask = Number(domain.probe_coverage_mask) || 0;
         const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths, probeOffset: Math.floor(now.getTime() / (60 * 60 * 1000)), probeMask: priorProbeMask });
-        const probeIndexByKey = new Map(PROBE_PATHS.map((p, i) => [registry.normalizeSubmissionUrl(`https://${host}${p}`), i]));
-        let passProbeMask = 0; // probes OFFERED a fetch attempt this pass (success or failure both count; aliased hints count via the normalized key)
+        // probe classification is by PATHNAME, so origin variants
+        // (www/http fallbacks) and aliased hints all count toward the same
+        // coverage bit (host-boundness is enforced separately)
+        const probePathIndex = new Map(PROBE_PATHS.map((pp, i) => [pp, i]));
+        const probeIdxFor = (u) => {
+          try { const path = new URL(u).pathname.replace(/\/$/, '') || '/'; return probePathIndex.get(path); } catch { return undefined; }
+        };
+        let passProbeMask = 0; // probes whose fetch reached a DEFINITIVE outcome this pass
         const pages = [];
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
@@ -819,7 +887,7 @@ async function investigatePaths(db, {
         for (let qi = 0; qi < urlQueue.length; qi++) {
           const url = urlQueue[qi];
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
-          const probeIdx = probeIndexByKey.get(registry.normalizeSubmissionUrl(url));
+          const probeIdx = probeIdxFor(url);
           out.fetches += 1;
           const page = await fetcher(url);
           const finalUrl = (page && page.finalUrl) || url;
@@ -842,6 +910,17 @@ async function investigatePaths(db, {
             // URL must not stay "never covered" and re-select forever
             pages.push({ url: finalUrl, requestedUrl: url, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
             probeDefinitive = true; // the route was actually inspected
+            // A WORKING fallback origin carries the probes too: the apex is
+            // dead, so re-base every still-queued apex probe onto the origin
+            // that answers — otherwise no route could ever be discovered
+            // before the no-progress valve closes the domain.
+            if (url === `https://www.${host}` || url === `http://${host}`) {
+              for (let j = qi + 1; j < urlQueue.length; j++) {
+                if (urlQueue[j].startsWith(`https://${host}/`) && probeIdxFor(urlQueue[j]) !== undefined) {
+                  urlQueue[j] = url + new URL(urlQueue[j]).pathname;
+                }
+              }
+            }
           } else if (page && page.html && !page.blocked && !page.error) {
             // the request was host-bound but a redirect left the domain —
             // an off-site page must never become model input or evidence
@@ -1155,7 +1234,19 @@ async function investigatePaths(db, {
             const contentCovered = !p.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(p.submission_url));
             if (!contentCovered) {
               const echoKey = registry.pathKey(p.acquisition_type, p.submission_url);
-              if (!replaces && existingPaths.some((e) => e.path_key === echoKey)) { uncoveredEcho = true; continue; }
+              const echoedExisting = !replaces && existingPaths.find((e) => e.path_key === echoKey);
+              if (echoedExisting) {
+                uncoveredEcho = true;
+                // mark the row DUE (evidence untouched): a recent stamp would
+                // otherwise keep it out of every refresh bucket for 90 days
+                // while its page went unread this pass. Gone URLs skip this —
+                // the goneKeys disproof below retires them stamped.
+                const exKey = echoedExisting.submission_url ? registry.normalizeSubmissionUrl(echoedExisting.submission_url) : null;
+                if (!exKey || !goneKeys.has(exKey)) {
+                  await trx('seo_link_acquisition_paths').where({ id: echoedExisting.id }).update({ last_investigated_at: null, updated_at: now });
+                }
+                continue;
+              }
               row.last_investigated_at = null;
               p.unstamped = true;
             }

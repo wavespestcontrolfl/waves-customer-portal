@@ -22,7 +22,7 @@ const uid = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`
 function makeDb(seed = {}) {
   const tables = {
     seo_link_domains: [], seo_link_acquisition_paths: [], seo_link_domain_sources: [],
-    seo_competitor_backlinks: [], seo_link_prospects: [],
+    seo_competitor_backlinks: [], seo_link_prospects: [], seo_link_attempts: [],
     ...seed,
   };
   const stripAlias = (expr) => {
@@ -89,7 +89,7 @@ function makeDb(seed = {}) {
           return q;
         }
         if (typeof a === 'object') state.preds.push((row, get) => Object.entries(a).every(([k, v]) => get(row, k) === v));
-        else if (c !== undefined) state.preds.push((row, get) => (b === '<=' ? get(row, a) <= c : b === '<' ? get(row, a) < c : get(row, a) === c));
+        else if (c !== undefined) state.preds.push((row, get) => (b === '<=' ? get(row, a) <= c : b === '<' ? get(row, a) < c : b === '>' ? get(row, a) > c : b === '>=' ? get(row, a) >= c : get(row, a) === c));
         else state.preds.push((row, get) => get(row, a) === b);
         return q;
       },
@@ -1334,7 +1334,7 @@ describe('full run', () => {
     const kept = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
     expect(Number(kept.confidence)).toBe(0.9); // no observation, no replacement
     expect(Number(kept.estimated_cost_cents)).toBe(12000);
-    expect(kept.last_investigated_at).toEqual(new Date('2026-08-15')); // stays due for rotation
+    expect(kept.last_investigated_at).toBeNull(); // marked DUE (Codex PR r15 P1) — a recent stamp must not hide the unread page for 90 days
   });
 
   test('an abbreviated numeric continuation never verifies the truncated quote (Codex PR r7 P1)', () => {
@@ -1774,6 +1774,51 @@ describe('full run', () => {
     await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
     const kept = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
     expect(kept.legal_terms_hash).toBeNull(); // the old agreement's hash cannot vouch for a different one
+  });
+
+  test('JSON-LD currency derives deterministically when the model cannot see the script (Codex PR r15 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const text = `Directory listing page with membership details. Join for $95 / year. ${'Copy. '.repeat(10)}`;
+    const html = `<html><script type="application/ld+json">{"@type":"Offer","price":"95","priceCurrency":"USD"}</script><body>${text}</body></html>`;
+    const page = { url: 'https://example.com/join', excerpt: text, text, html };
+    // the model reports NO currency evidence — it never saw the JSON-LD
+    const v = verifyPriceEvidence([page], modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null }));
+    expect(v.currency_evidence).toEqual({ marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join', derived: true });
+    expect(v.verification.currency_evidence).toBe('derived_from_structured_offer');
+    // …but an offer with a DIFFERENT amount derives nothing
+    const html2 = html.replace('"price":"95"', '"price":"500"');
+    const v2 = verifyPriceEvidence([{ ...page, html: html2 }], modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null }));
+    expect(v2.currency_evidence).toBeNull();
+  });
+
+  test('a failed acquisition attempt makes its path due before the 90-day expiry (Codex PR r15 P2)', async () => {
+    const d = domainRow({ agent_state: 'qualified' });
+    const path = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-08-20'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const attempt = { id: uid(), path_id: path.id, prospect_id: null, provider: 'deterministic_runner', action: 'submit', outcome: 'failed', created_at: new Date('2026-08-30') };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [path], seo_link_attempts: [attempt] });
+    const r = await investigatePaths(db, runOpts(db));
+    expect(r.selected).toBe(1); // the failure re-selects the domain now, not in 90 days
+    // re-investigation stamped the path — the same failure never triggers twice
+    const again = await investigatePaths(db, runOpts(db));
+    expect(again.selected).toBe(0);
+  });
+
+  test('a working fallback origin carries the probes too (Codex PR r15 P2)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url.startsWith('https://www.example.com')) return okFetch(url);
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' }; // apex dead
+    };
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
+    expect(fetched.some((u) => u.startsWith('https://www.example.com/'))).toBe(true); // probes re-based onto the live origin
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {

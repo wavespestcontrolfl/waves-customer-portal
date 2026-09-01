@@ -138,6 +138,13 @@ const PATH_SCHEMA = {
       if: { properties: { terms_accepted_by_send: { const: true } } },
       then: { properties: { execution_after_send: { const: true } } },
     },
+    // A send that legally ACCEPTS terms needs an attestation bound to the
+    // agreement hash (§3.2): terms_accepted_by_send without
+    // legal_attestation would bypass the terms-fetch/hash gate entirely.
+    {
+      if: { properties: { terms_accepted_by_send: { const: true } } },
+      then: { properties: { legal_attestation: { const: true } } },
+    },
     // §3.2 type consistency (the §6.3 validity step re-asserts this in step 4).
     {
       if: { properties: { acquisition_type: { enum: ['paid_listing', 'membership', 'association', 'sponsorship'] } } },
