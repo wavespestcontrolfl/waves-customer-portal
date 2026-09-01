@@ -45,6 +45,16 @@ async function main() {
     console.log(`  ledger ${r.id} — filter ${r.gmail_filter_id} (${scope}, recorded ${r.recorded_at?.toISOString?.() || r.recorded_at})`);
     if (!EXECUTE) continue;
     try {
+      // Never delete a filter a LIVE blocklist row still references
+      // (pre-push follow-up): a shared filter id ledgered by mistake — or
+      // re-recorded by a later repair — is in active use; stamp it as
+      // nothing-to-clean instead.
+      const stillUsed = await db('blocked_email_senders').where('gmail_filter_id', r.gmail_filter_id).first('id');
+      if (stillUsed) {
+        console.log('    still referenced by a live blocklist row — nothing to clean; stamping');
+        await db('blocked_email_senders_dedupe_orphans').where({ id: r.id }).update({ cleaned_at: new Date() });
+        continue;
+      }
       const gmailClient = require('../../server/services/email/gmail-client');
       const auth = await gmailClient.getAuthClient();
       if (!auth) {

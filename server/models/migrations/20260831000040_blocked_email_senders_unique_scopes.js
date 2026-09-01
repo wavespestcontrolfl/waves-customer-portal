@@ -19,12 +19,20 @@
  * deletes those filters via the Gmail API and stamps cleaned_at.
  */
 
+// keeper_filter_id: the retained row's filter id per partition — a losing
+// row that SHARES the keeper's filter id must never be ledgered (pre-push
+// r19 P1 follow-up): the sweep would otherwise delete the winner's live
+// filter and leave its blocklist row pointing at nothing.
 const RANKED = (scopeWhere) => `
-  SELECT id, email_address, domain, gmail_filter_id FROM (
+  SELECT id, email_address, domain, gmail_filter_id, keeper_filter_id FROM (
     SELECT id, email_address, domain, gmail_filter_id, ROW_NUMBER() OVER (
       PARTITION BY ${scopeWhere.partition}
       ORDER BY (gmail_filter_id IS NOT NULL) DESC, created_at ASC, id ASC
-    ) AS rn
+    ) AS rn,
+    FIRST_VALUE(gmail_filter_id) OVER (
+      PARTITION BY ${scopeWhere.partition}
+      ORDER BY (gmail_filter_id IS NOT NULL) DESC, created_at ASC, id ASC
+    ) AS keeper_filter_id
     FROM blocked_email_senders
     WHERE ${scopeWhere.where}
   ) ranked WHERE ranked.rn > 1
@@ -64,7 +72,8 @@ exports.up = async function up(knex) {
       WITH losers AS (${RANKED(scope)}),
       preserved AS (
         INSERT INTO blocked_email_senders_dedupe_orphans (email_address, domain, gmail_filter_id, source_row_id)
-        SELECT email_address, domain, gmail_filter_id, id::text FROM losers WHERE gmail_filter_id IS NOT NULL
+        SELECT email_address, domain, gmail_filter_id, id::text FROM losers
+        WHERE gmail_filter_id IS NOT NULL AND gmail_filter_id IS DISTINCT FROM keeper_filter_id
       )
       DELETE FROM blocked_email_senders WHERE id IN (SELECT id FROM losers)
     `);
