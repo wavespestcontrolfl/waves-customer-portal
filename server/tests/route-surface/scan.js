@@ -62,8 +62,10 @@ const APP_FILE = 'server/index.js';
 const GUARD_REGISTRY_FILE = 'server/config/route-auth-guards.json';
 // Every HTTP method Express exposes as a router method (router.checkout,
 // router.m-search, ... included) — a route registered under ANY of them is
-// surface. `all` is Express's own addition.
-const VERBS = new Set([...require('http').METHODS.map((m) => m.toLowerCase()), 'all']);
+// surface.
+// `all` is Express's own addition; `del` is Express 4's deprecated (but
+// still live) alias of `delete`.
+const VERBS = new Set([...require('http').METHODS.map((m) => m.toLowerCase()), 'all', 'del']);
 const APP_IDENTIFIERS = new Set(['app']);
 
 // ---------------------------------------------------------------------------
@@ -126,6 +128,17 @@ function resolveModulePath(fromFile, spec) {
 function walk(node, visit, ctx) {
   if (!node || typeof node.type !== 'string') return;
   visit(node, ctx);
+  if (node.type === 'IfStatement' || node.type === 'ConditionalExpression') {
+    // Branch POLARITY is part of a conditional route's identity: the
+    // alternate branch is labelled with the negated test, so moving a route
+    // from `if (dev)` into its else changes the allowlist key.
+    const t = (ctx.src ? ctx.src.slice(node.test.start, node.test.end) : '?').replace(/\s+/g, ' ').slice(0, 80);
+    const branch = (label) => ({ ...ctx, topLevel: false, conds: [...(ctx.conds || []), label] });
+    walk(node.test, visit, ctx); // the test itself evaluates unconditionally
+    walk(node.consequent, visit, branch(t));
+    if (node.alternate) walk(node.alternate, visit, branch(`!(${t})`));
+    return;
+  }
   const nextCtx = node.type === 'Program' ? ctx : nestedCtx(node, ctx);
   for (const key of Object.keys(node)) {
     if (key === 'loc' || key === 'start' || key === 'end' || key === 'extra' || key === 'comments'
@@ -152,9 +165,8 @@ const TOP_LEVEL_TRANSPARENT = new Set([
  * allowlist IDENTITY, so flipping a predicate (!== to ===) changes the key.
  */
 function condLabel(node, src) {
-  if (node.type === 'IfStatement' || node.type === 'ConditionalExpression') {
-    return src.slice(node.test.start, node.test.end).replace(/\s+/g, ' ').slice(0, 80);
-  }
+  // If/ternary branches are labelled directly in walk() (polarity-aware);
+  // this covers the remaining constructs.
   if (node.type === 'ForOfStatement' || node.type === 'ForInStatement'
     || node.type === 'ForStatement' || node.type === 'WhileStatement' || node.type === 'DoWhileStatement') {
     return 'loop';
@@ -191,7 +203,9 @@ class ModuleAnalysis {
   }
 
   loc(node) {
-    return `${this.file}:${node.loc ? node.loc.start.line : '?'}`;
+    // Line AND column: two anonymous responders on one line must never
+    // collapse to a single location (the duplicate-identity check keys on it).
+    return `${this.file}:${node.loc ? `${node.loc.start.line}:${node.loc.start.column}` : '?'}`;
   }
 
   collect() {
@@ -254,8 +268,12 @@ class ModuleAnalysis {
         && node.left.type === 'MemberExpression' && !node.left.computed
         && node.left.object.type === 'Identifier' && node.left.object.name === 'module'
         && node.left.property.name === 'exports') {
-        if (node.right.type === 'Identifier') this.exportCandidate = node.right.name;
-        else if (node.right.type === 'ObjectExpression') this.exportObjectNode = node.right;
+        // The LAST top-level assignment wins (execution order); a later
+        // rewrite to inline middleware clears the stale router candidate. A
+        // conditional export can never be trusted at all.
+        if (!ctx.topLevel) this.exportUnstable = true;
+        this.exportCandidate = node.right.type === 'Identifier' ? node.right.name : null;
+        this.exportObjectNode = node.right.type === 'ObjectExpression' ? node.right : null;
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
         && node.left.type === 'MemberExpression' && !node.left.computed
         && node.left.property.type === 'Identifier') {
@@ -332,12 +350,29 @@ class ModuleAnalysis {
       if (b.kind === 'alias' && this.routers.has(this.canonName(name))) this.routers.add(name);
     }
     // `holder.api = router` — extend the modeled object's props; a router
-    // assigned into a shape the scanner cannot model is rejected.
+    // assigned into a shape the scanner cannot model is rejected. A property
+    // written MORE THAN ONCE is ambiguous (which value a later reference
+    // sees depends on execution order): it resolves to nothing, and if a
+    // router was ever involved that is a problem, not silence.
+    this.reassignedProps = new Set();
+    const propWrites = new Map(); // `${base}.${prop}` -> count
+    const bumpProp = (key) => {
+      const w = (propWrites.get(key) || 0) + 1;
+      propWrites.set(key, w);
+      if (w > 1) this.reassignedProps.add(key);
+    };
+    for (const [bn, b] of this.bindings) {
+      if (b.kind === 'object') for (const k of b.props.keys()) bumpProp(`${bn}.${k}`);
+    }
     for (const a of memberAssignments) {
       const base = this.resolveMemberChain(a.objectNode);
       const b = base ? this.bindings.get(base) : null;
       if (b && b.kind === 'object' && a.right.type === 'Identifier') {
-        b.props.set(a.prop, a.right.name);
+        bumpProp(`${base}.${a.prop}`);
+        if (!this.reassignedProps.has(`${base}.${a.prop}`)) b.props.set(a.prop, a.right.name);
+        else if (this.routers.has(this.canonName(b.props.get(a.prop) || '')) || this.routers.has(this.canonName(a.right.name))) {
+          this.problems.push(`${this.loc(a.node)}: property ${base}.${a.prop} holding a router is reassigned — which router a later reference sees depends on execution order; use distinct names`);
+        }
         continue;
       }
       if (a.right.type === 'Identifier' && this.routers.has(this.canonName(a.right.name))) {
@@ -371,6 +406,12 @@ class ModuleAnalysis {
         this.problems.push(`${this.loc(v)}: router ${v.name} stored in an object shape the scanner cannot model — register routes via the router identifier, or a one-level object literal bound to a const`);
       }
     }
+    if (this.exportUnstable) {
+      // module.exports assigned inside a block/function — what the module
+      // exports depends on execution the scanner cannot see. Fail closed.
+      this.exportCandidate = null;
+      this.exportObjectNode = null;
+    }
     if (this.exportCandidate) {
       const canon = this.canonName(this.exportCandidate);
       if (this.routers.has(canon)) this.exportedRouter = canon;
@@ -379,11 +420,12 @@ class ModuleAnalysis {
     this.registrations = this.registrations.filter((r) => this.routers.has(r.object) || APP_IDENTIFIERS.has(r.object));
     // A router (or the app) passed as an ARGUMENT to a function the scanner
     // does not analyse could have routes registered on it inside that helper
-    // (`installRoutes(app)`), invisibly to the walk. Reject it (fail closed).
+    // (`installRoutes(app)`) — package code included: node_modules can call
+    // app.get() just as well as in-repo code. Reject it (fail closed).
     // Exempt: methods ON a known router/app (that IS the supported
     // registration path — app.use('/x', router), app.listen, ...) and
-    // node_modules callees (http.createServer(app), Sentry error handler —
-    // only in-repo code can register in-repo route surface).
+    // callees with a reviewed `routerConsumers` registry entry
+    // (http.createServer, the Sentry error handler).
     for (const call of callsWithIdentifierArgs) {
       const passed = call.arguments
         .filter((a) => a && a.type === 'Identifier')
@@ -391,13 +433,20 @@ class ModuleAnalysis {
         .filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
       if (!passed.length) continue;
       const c = call.callee;
-      if (c.type === 'MemberExpression' && c.object.type === 'Identifier') {
+      if (c.type === 'MemberExpression' && !c.computed && c.object.type === 'Identifier'
+        && c.property.type === 'Identifier') {
         const objCanon = this.canonName(c.object.name);
         if (this.routers.has(objCanon) || APP_IDENTIFIERS.has(objCanon)) continue;
-        if (this.isNodeModulesRef(c.object)) continue;
+        const ob = this.bindings.get(c.object.name);
+        if (ob && ob.kind === 'require'
+          && this.scanner.registry.lookupRouterConsumer(ob.module === null ? ob.spec : ob.module, c.property.name)) continue;
       }
-      if (c.type === 'Identifier' && this.isNodeModulesRef(c)) continue;
-      this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level`);
+      if (c.type === 'Identifier') {
+        const b = this.bindings.get(c.name);
+        if (b && b.kind === 'requireMember'
+          && this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name)) continue;
+      }
+      this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`);
     }
     // EXECUTION order, not AST pre-order: in a fluent chain the outer call's
     // node encloses the inner one (`router.get('/x', h).use(guard)` runs the
@@ -461,6 +510,7 @@ class ModuleAnalysis {
       const base = this.resolveMemberChain(node.object);
       if (!base) return null;
       const b = this.bindings.get(base);
+      if (this.reassignedProps && this.reassignedProps.has(`${base}.${node.property.name}`)) return null;
       if (b && b.kind === 'object' && b.props.has(node.property.name)) {
         return this.canonName(b.props.get(node.property.name));
       }
@@ -557,6 +607,12 @@ class ModuleAnalysis {
       case 'ArrayExpression': {
         const out = [];
         for (const el of node.elements) {
+          if (el && el.type === 'SpreadElement') {
+            const spread = this.resolveStrings(el.argument);
+            if (!spread) return null;
+            out.push(...spread);
+            continue;
+          }
           const sub = this.resolvePaths(el);
           if (!sub) return null;
           out.push(...sub);
@@ -624,8 +680,12 @@ class ModuleAnalysis {
     if (!node) return false;
     if (['StringLiteral', 'RegExpLiteral', 'TemplateLiteral', 'ArrayExpression'].includes(node.type)) {
       if (node.type === 'ArrayExpression') {
-        // An array of handlers vs an array of paths: paths are strings/regexes.
-        return node.elements.every((el) => el && ['StringLiteral', 'RegExpLiteral', 'TemplateLiteral'].includes(el.type));
+        // An array of handlers vs an array of paths: paths are strings /
+        // regexes / spreads of them ([...PATHS] resolves via resolveStrings,
+        // or fails to an UNRESOLVED path — never a handler at the mount root).
+        return node.elements.every((el) => el
+          && (['StringLiteral', 'RegExpLiteral', 'TemplateLiteral'].includes(el.type)
+            || (el.type === 'SpreadElement' && el.argument.type === 'Identifier')));
       }
       return true;
     }
@@ -781,6 +841,11 @@ class ModuleAnalysis {
           return [{ type: 'opaque', desc: `${this.src.slice(c.start, c.end)}(...) — unreviewed package factory` }];
         }
         if (c.type === 'Identifier') {
+          if (this.shadowedNames.has(c.name) || this.reassignedNames.has(c.name)) {
+            // The callee itself may be a block-local no-op shadowing a real
+            // registered factory — never credit it.
+            return [{ type: 'opaque', desc: `${c.name}(...) (shadowed or reassigned callee)` }];
+          }
           const b = this.bindings.get(c.name);
           if (b && b.kind === 'requireMember') {
             const g = registry.lookup(b.module, b.name);
@@ -869,10 +934,20 @@ class GuardRegistry {
       if (!p.name || !p.module) throw new Error(`passthrough entry missing name/module: ${JSON.stringify(p)}`);
       return { name: p.name, module: p.module, local: Boolean(p.local), package: Boolean(p.package) };
     });
+    // Functions reviewed as safe to RECEIVE the app/a router without
+    // registering routes on it (http.createServer, Sentry's error handler).
+    this.routerConsumers = (Array.isArray(json.routerConsumers) ? json.routerConsumers : []).map((r) => {
+      if (!r.name || !r.module) throw new Error(`routerConsumers entry missing name/module: ${JSON.stringify(r)}`);
+      return { name: r.name, module: r.module };
+    });
   }
 
   lookup(module, name, { local = false } = {}) {
     return this.entries.find((g) => g.module === module && g.name === name && g.local === local) || null;
+  }
+
+  lookupRouterConsumer(moduleOrSpec, name) {
+    return this.routerConsumers.find((r) => r.module === moduleOrSpec && r.name === name) || null;
   }
 
   lookupPassthrough(module, name, { local = false } = {}) {
@@ -1138,7 +1213,7 @@ class Scanner {
       // A verb registration = one route per expanded path. A registration
       // inside a function/block may execute at any time relative to the
       // module's top-level use() guards, so it gets no source-order credit.
-      const method = reg.method.toUpperCase();
+      const method = (reg.method === 'del' ? 'delete' : reg.method).toUpperCase();
       for (const p of paths) {
         const fullPath = joinPaths(ctx.prefix, p);
         this.routes.push(this.makeRoute({
@@ -1228,7 +1303,9 @@ function isExempt(guard, method, fullPath) {
   else return false;
   return guard.exempts.some((e) => {
     const [m, p] = e.split(/\s+/);
-    return (m === '*' || m === method) && p === rel;
+    // ALL covers every concrete method, so ANY method-specific exemption on
+    // the path applies (fail closed: exempting widens the PUBLIC surface).
+    return (m === '*' || m === method || method === 'ALL') && p === rel;
   });
 }
 

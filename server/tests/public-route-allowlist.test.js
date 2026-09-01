@@ -115,6 +115,16 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
         `(function\\s+${g.name}\\b|(const|let|var)\\s+${g.name}\\b|(async\\s+)?function\\s+${g.name}\\b)`
       ).test(src);
       expect({ guard: g.name, module: g.module, defined }).toEqual({ guard: g.name, module: g.module, defined: true });
+      // The export must be the SAME-NAMED value — `module.exports = {
+      // adminAuthenticate: noop }` would keep the definition check green
+      // while runtime Express receives the no-op. Local entries are consumed
+      // in-file and are not exported.
+      if (!g.local) {
+        const honestExport = new RegExp(
+          `module\\.exports\\s*=\\s*\\{[^}]*\\b${g.name}\\b\\s*(?::\\s*${g.name}\\b)?\\s*[,}]`, 's'
+        ).test(src) || new RegExp(`module\\.exports\\.${g.name}\\s*=\\s*${g.name}\\b`).test(src);
+        expect({ guard: g.name, module: g.module, honestExport }).toEqual({ guard: g.name, module: g.module, honestExport: true });
+      }
     }
   });
 
@@ -768,6 +778,140 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       'server/index.js': app("app?.get('/leak', (req, res) => res.json({}));"),
     });
     expect(res.problems.some((p) => p.includes('optional-call registration'))).toBe(true);
+  });
+
+  test('a PACKAGE helper receiving the app is a problem unless routerConsumers-reviewed', () => {
+    const files = {
+      'server/index.js': app([
+        "const pkg = require('some-installer');",
+        'pkg.install(app);',
+      ].join('\n')),
+    };
+    const unreviewed = scanOf(files);
+    expect(unreviewed.problems.some((p) => p.includes('unanalysed function'))).toBe(true);
+    const reviewed = new Scanner({
+      files, appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'install', module: 'some-installer' }] },
+    }).scan();
+    expect(reviewed.problems).toEqual([]);
+  });
+
+  test('the ALTERNATE branch of an if carries negated-polarity identity', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "if (process.env.NODE_ENV !== 'production') {",
+        "  app.get('/debug', (req, res) => res.json({}));",
+        '} else {',
+        "  app.get('/prod-leak', (req, res) => res.json({}));",
+        '}',
+      ].join('\n')),
+    });
+    expect(res.publicRoutes.map(routeKey).sort()).toEqual([
+      "server/index.js @ / :: GET /debug [conditional: process.env.NODE_ENV !== 'production']",
+      "server/index.js @ / :: GET /prod-leak [conditional: !(process.env.NODE_ENV !== 'production')]",
+    ]);
+  });
+
+  test('REASSIGNING an object property that held a router is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const fallback = (req, res, next) => next();',
+        'const holder = {};',
+        'holder.api = router;',
+        "holder.api.get('/leak', (req, res) => res.json({}));",
+        'holder.api = fallback;',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('holding a router is reassigned'))).toBe(true);
+  });
+
+  test('a SHADOWED factory callee is never credited as a guard factory', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { makeGuard } = require('../middleware/f');",
+        'function setup() { const makeGuard = () => (req, res, next) => next(); return makeGuard; }',
+        "router.get('/leak', makeGuard('scope'), (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('router.all() honors method-specific guard exemptions (ALL covers GET)', () => {
+    const registry = {
+      guards: [{ name: 'except', module: 'server/middleware/e.js', exempts: ['GET /open'] }],
+    };
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry,
+      files: {
+        'server/index.js': app([
+          "const { except } = require('./middleware/e');",
+          "app.use('/api', except, require('./routes/x'));",
+        ].join('\n')),
+        'server/routes/x.js': [
+          "const router = require('express').Router();",
+          "router.all('/open', (req, res) => res.json({}));",
+          'module.exports = router;',
+        ].join('\n'),
+      },
+    }).scan();
+    // The runtime guard lets GET /open through, so the ALL registration is
+    // public surface and must be allowlisted.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['ALL /api/open']);
+  });
+
+  test('a SPREAD path array ([...PATHS]) expands to its paths, never a mount-root handler', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const PATHS = ['/a', '/leak'];",
+        'router.get([...PATHS], (req, res) => res.json({}));',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`).sort())
+      .toEqual(['GET /api/x/a', 'GET /api/x/leak']);
+  });
+
+  test('two anonymous responders on ONE source line are still distinct locations', () => {
+    const res = scanOf({
+      'server/index.js': app('app.use((req, res) => res.json({ a: 1 })); app.use((req, res) => res.json({ b: 2 }));'),
+    });
+    expect(res.problems.some((p) => p.includes('share the allowlist identity'))).toBe(true);
+  });
+
+  test("Express's deprecated del() alias registers as DELETE", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.del('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['DELETE /api/x/leak']);
+  });
+
+  test('a module.exports REWRITE clears the stale router export (fail closed)', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/old', (req, res) => res.json({}));",
+        'module.exports = router;',
+        'module.exports = (req, res) => res.json({ secret: 1 });',
+      ].join('\n'),
+    });
+    // The final export is inline middleware, not a provable router — the
+    // mount is rejected instead of scanning the stale router.
+    expect(res.problems.some((p) => p.includes('no exported Router'))).toBe(true);
   });
 
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {

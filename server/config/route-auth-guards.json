@@ -89,5 +89,17 @@
       "what": "body parser — 4xx on a malformed/oversized body, next() otherwise" },
     { "name": "raw", "module": "express", "package": true,
       "what": "body parser — 4xx on an oversized body, next() otherwise" }
+  ],
+  "_routerConsumers_comment": [
+    "Functions reviewed as safe to RECEIVE the app or a router as an argument",
+    "WITHOUT registering routes on it. Any other call that passes the app/a",
+    "router to an unanalysed function is a scanner problem — package code can",
+    "call app.get() just as well as in-repo code."
+  ],
+  "routerConsumers": [
+    { "name": "createServer", "module": "http",
+      "what": "wraps the app as a request listener; registers no routes" },
+    { "name": "setupExpressErrorHandler", "module": "@sentry/node",
+      "what": "appends Sentry's error-capture middleware; registers no routes" }
   ]
 }
