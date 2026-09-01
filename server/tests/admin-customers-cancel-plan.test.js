@@ -266,6 +266,22 @@ const postCancel = async (baseUrl, body = {}) => {
 
 const PROCESSED = { ok: true, cancelledCount: 3, recurrenceStopped: 2, churned: true, errors: [], keptThrough: null, lateFeeWaived: false };
 
+// Frozen calendar (codex r22 P1): the annual-prepay fixtures carry literal
+// term windows (term_start 2026-03-01 → term_end 2027-02-28) that
+// resolveLiveTerm filters by term_end >= today — after Feb 2027 the terms
+// would silently vanish and the suite would rot without any code change.
+// Only Date is faked; timers stay real (withServer's sockets need them).
+beforeAll(() => {
+  jest.useFakeTimers({
+    now: new Date('2026-08-31T12:00:00-04:00'),
+    doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask',
+      'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback',
+      'cancelIdleCallback', 'setImmediate', 'clearImmediate',
+      'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'],
+  });
+});
+afterAll(() => { jest.useRealTimers(); });
+
 beforeEach(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   mockState = {
@@ -981,7 +997,18 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockRaiseTermite).not.toHaveBeenCalled();
     }));
 
-    test('a repair retry inherits the ACCEPTED disposition and boundary — dialog defaults cannot flip the approved plan', () => withServer(async (baseUrl) => {
+    test('a definitively BLOCKED channel is unavailable, not failed — the run closes clean instead of retrying an opt-out forever', () => withServer(async (baseUrl) => {
+    sendCancellationConfirmations.mockResolvedValueOnce({
+      smsSent: false, smsBlocked: true, emailSent: true, emailBlocked: false,
+      channels: ['email'], smsTemplateKey: 'service_cancellation_confirmation',
+    });
+    const body = await (await postCancel(baseUrl)).json();
+    expect(body.processed).toBe(true);
+    expect(body.errors).toEqual([]);
+    expect(body.confirmation).toBe('email');
+  }));
+
+  test('a repair retry inherits the ACCEPTED disposition and boundary — dialog defaults cannot flip the approved plan', () => withServer(async (baseUrl) => {
       mockState.service_requests = [{
         id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
         subject: 'Cancel plan (Admin (user admin-1))', description: '',

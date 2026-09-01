@@ -295,6 +295,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     if (req.customerInactive) {
       const priorCancellation = await db('service_requests')
         .where({ customer_id: req.customer.id, category: 'cancellation' })
+        // PORTAL-originated only: after an admin end_of_coverage cancel the
+        // account is inactive while its prepaid visits deliberately stay
+        // scheduled — re-running the ADMIN request's whole-account scope
+        // from here (without its keepThrough/keepVisitIds boundary) would
+        // pull every retained paid visit. Admin repairs run through the
+        // admin commit path, which restores the durable boundary.
+        .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })
         .orderBy('created_at', 'desc')
         .first();
       if (!priorCancellation) {
@@ -1107,6 +1114,11 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const requests = await db('service_requests')
       .where({ customer_id: req.customer.id })
+      // Admin-originated rows (the C3 cancel acceptance) are internal ops
+      // records: their subject embeds the staff actor and their description
+      // is the operator's free-text note — neither is customer-facing.
+      // NULL-safe: portal rows carry no source.
+      .where((qb) => { qb.whereNull('service_requests.source').orWhereNot('service_requests.source', 'admin'); })
       .leftJoin('technicians', 'service_requests.assigned_technician_id', 'technicians.id')
       .select(
         'service_requests.id',

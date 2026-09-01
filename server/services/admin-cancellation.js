@@ -1187,8 +1187,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
                 identityTrustLevel: 'admin_operator',
               });
               const stillFailed = [];
-              if (customer.phone && !resend.smsSent) stillFailed.push('confirmation_sms_not_sent');
-              if (customer.email && !resend.emailSent) stillFailed.push('confirmation_email_not_sent');
+              // A definitively BLOCKED channel (opt-out, landline,
+              // suppression) is unavailable, not failed — parking the run
+              // would retry it forever while the other channel delivered.
+              if (customer.phone && !resend.smsSent && !resend.smsBlocked) stillFailed.push('confirmation_sms_not_sent');
+              if (customer.email && !resend.emailSent && !resend.emailBlocked) stillFailed.push('confirmation_email_not_sent');
               channels = [...new Set([...channels, ...resend.channels])];
               errorsNext = [...promotedErrors.filter((e) => !isConfirmErr(e)), ...stillFailed];
             }
@@ -1655,8 +1658,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // from the recorded outcome. The channel errors ride the review-bell
     // rail below (the confirmation verdict itself was already decided —
     // the copy that DID go out stays truthful).
-    if (customer.phone && !confirmations.smsSent) errors.push('confirmation_sms_not_sent');
-    if (customer.email && !confirmations.emailSent) errors.push('confirmation_email_not_sent');
+    // Blocked = unavailable (policy refusal — opt-out, landline, hard
+    // bounce), never a repairable failure: only transient misses park.
+    if (customer.phone && !confirmations.smsSent && !confirmations.smsBlocked) errors.push('confirmation_sms_not_sent');
+    if (customer.email && !confirmations.emailSent && !confirmations.emailBlocked) errors.push('confirmation_email_not_sent');
   }
 
   // Record the run's outcome on the case (best-effort): a later duplicate

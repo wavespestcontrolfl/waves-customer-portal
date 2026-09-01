@@ -70,6 +70,12 @@ async function sendCancellationConfirmations({
     : 'service_cancellation_received';
   let smsSent = false;
   let emailSent = false;
+  // Definitive POLICY refusals (opt-out, landline, suppression, hard
+  // bounce, contract violation) — the channel is UNAVAILABLE, not failed:
+  // callers must not park the run and retry a permanently blocked channel
+  // forever. Transient provider failures stay non-blocked (retryable).
+  let smsBlocked = false;
+  let emailBlocked = false;
 
   // Send-once per request + template (mirrors the email leg's class-keyed
   // idempotency): a retry that reuses the acceptance because the OTHER
@@ -123,6 +129,7 @@ async function sendCancellationConfirmations({
       },
     });
     smsSent = !!smsResult.sent;
+    if (!smsResult.sent && smsResult.blocked === true) smsBlocked = true;
     if (!smsResult.sent) {
       logger.warn(`Cancellation confirmation SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
     }
@@ -149,6 +156,10 @@ async function sendCancellationConfirmations({
       } : {}),
     });
     emailSent = !!(emailResult && emailResult.ok);
+    if (!emailSent && emailResult
+      && (emailResult.blocked === true || (emailResult.skipped === true && emailResult.reason === 'email_disabled'))) {
+      emailBlocked = true;
+    }
   } catch (emailErr) {
     logger.warn(`Failed to send cancellation confirmation email for request ${request.id}: ${emailErr.message}`);
   }
@@ -156,6 +167,8 @@ async function sendCancellationConfirmations({
   return {
     smsSent,
     emailSent,
+    smsBlocked,
+    emailBlocked,
     smsTemplateKey,
     channels: [smsSent ? 'sms' : null, emailSent ? 'email' : null].filter(Boolean),
   };

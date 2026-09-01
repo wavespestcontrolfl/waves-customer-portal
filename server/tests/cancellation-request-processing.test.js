@@ -791,6 +791,23 @@ describe('processCancellationRequest', () => {
     expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
   });
 
+  test('a waiver never papers over an already-charged fee — terminal charged holds park for office review', async () => {
+    db.__tables.scheduled_services = [
+      { id: 'w1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: null, cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    // Run 1 already charged the late-cancel fee: the hold is terminal and
+    // invisible to heldCardForScheduledService (the rail reports no_hold).
+    db.__tables.estimate_card_holds = [{ id: 'h9', scheduled_service_id: 'w1', status: 'charged_no_show' }];
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'reqW', waiveLateFee: true });
+    expect(result.errors).toContain('card_hold_already_charged:w1');
+    // The record must NOT claim a waiver for money the customer already paid.
+    expect(result.lateFeeWaived).toBe(false);
+  });
+
   test('feeEvaluationAt freezes the fee rails\' clock — the sweep judges cancel windows at the approved instant, not mid-run', async () => {
     db.__tables.scheduled_services = [
       { id: 'f1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: null, cancelled_at: null, recurring_ongoing: false },
