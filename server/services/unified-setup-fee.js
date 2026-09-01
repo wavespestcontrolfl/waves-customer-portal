@@ -54,7 +54,12 @@ async function hasActiveRecurringService(db, customerId) {
   const row = await db('scheduled_services')
     .where({ customer_id: customerId })
     .where(function recurringRow() {
-      this.where('is_recurring', true).orWhereNotNull('recurring_parent_id');
+      // recurring_pattern is recurring LINEAGE too (legacy rows can carry a
+      // pattern without the flag — the repo's other classifiers honor it),
+      // so a live pattern-only series still marks the customer existing.
+      this.where('is_recurring', true)
+        .orWhereNotNull('recurring_parent_id')
+        .orWhereNotNull('recurring_pattern');
     })
     .where(function liveRow() {
       this.whereNull('status').orWhereIn('status', LIVE_STATUSES);

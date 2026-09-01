@@ -63,7 +63,7 @@ describe('hasActiveRecurringService — the "existing customer" predicate', () =
       .split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '$1')).join('\n'); // code only — comments may NAME the excluded helpers
     // Recurring evidence: anchor flag OR child linkage — no family filter,
     // no tier read, no service_type mention.
-    expect(src).toMatch(/is_recurring', true\)\.orWhereNotNull\('recurring_parent_id'\)/);
+    expect(src).toMatch(/is_recurring', true\)[\s\S]{0,80}orWhereNotNull\('recurring_parent_id'\)[\s\S]{0,80}orWhereNotNull\('recurring_pattern'\)/);
     expect(src).not.toMatch(/waveguard_tier|service_type|loadExistingQualifyingServiceKeys/);
     // Status-based liveness incl. NULL-open legacy rows; date never enters.
     expect(src).toMatch(/whereNull\('status'\)\.orWhereIn\('status', LIVE_STATUSES\)/);

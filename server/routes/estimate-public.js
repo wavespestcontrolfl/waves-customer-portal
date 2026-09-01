@@ -10309,11 +10309,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const frozenRecurring = EstimateConverter.recurringServicesFromEstimateData(nextEstimateData);
           // Unified live decision (GATE_UNIFIED_SETUP_FEE, owner ruling
           // 2026-09-01) for quotes with no freeze; null = legacy predicate.
-          const freezeUnifiedDecision = await EstimateConverter.acceptTimeUnifiedSetupFeeDecision(trx, {
-            customerId: acceptResolvedCustomerId,
-            recurringServices: frozenRecurring,
-            estimateData: nextEstimateData,
-          });
+          // ONLY when the customer is already resolved here — a standard
+          // accept can resolve/create the customer later in this
+          // transaction, and freezing "new customer" against a null id
+          // would charge an existing account (audit r9 P0). With no id the
+          // freeze abstains and the converter's own locked pre-seeding
+          // decision (which always has the real customer) governs.
+          const freezeUnifiedDecision = acceptResolvedCustomerId
+            ? await EstimateConverter.acceptTimeUnifiedSetupFeeDecision(trx, {
+              customerId: acceptResolvedCustomerId,
+              recurringServices: frozenRecurring,
+              estimateData: nextEstimateData,
+            })
+            : null;
           if (nextEstimateData.acceptedSetupFeeAmount == null
             && (freezeUnifiedDecision
               ?? EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
