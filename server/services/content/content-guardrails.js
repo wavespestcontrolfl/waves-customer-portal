@@ -1695,6 +1695,7 @@ function blankExpressionStringLiterals(text) {
   // prop quote and blanks a counted component's opener — astro parity,
   // Codex #504 r19); in prose only braces matter.
   let inTag = false; let attrQ = null; let word = ''; let wordDot = false;
+  const parenCtl = [];
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
@@ -1715,6 +1716,8 @@ function blankExpressionStringLiterals(text) {
     }
     if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; prevSig = '}'; word = ''; continue; }
+    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
@@ -1760,11 +1763,15 @@ function blankExpressionStringLiterals(text) {
 // Keywords after which a `/` starts a REGEX, not division (return /x/) —
 // shared by both lexers (astro parity).
 const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new']);
+// A `)` closing one of these keywords' condition returns to STATEMENT
+// position — `if (ok) /x/.test(y)` opens a regex (astro parity).
+const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
 
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced) — string/regex/comment-aware (astro closeOfExpressionAt).
 function closeOfExpressionAt(s, i) {
   let depth = 0; let q = null; let prevSig = ''; let word = ''; let wordDot = false;
+  const parenCtl = [];
   for (let j = i; j < s.length; j += 1) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
@@ -1784,6 +1791,8 @@ function closeOfExpressionAt(s, i) {
     }
     if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
+    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c;
   }
@@ -1978,6 +1987,9 @@ function hasServiceCtaLink(body) {
   for (const span of eachMarkdownLink(attrMasked)) {
     if (span.kind !== 'inline' || span.isImage) continue;
     if (backslashRunBefore(attrMasked, span.labelStart) % 2 === 1) continue;
+    // [](/quote/) renders an EMPTY anchor — no visible funnel, no CTA
+    // (astro parity, Codex #3646 r21 P1).
+    if (!attrMasked.slice(span.labelStart + 1, span.labelEnd).trim()) continue;
     const inner = attrMasked.slice(span.destStart, span.destEnd + 1).trim();
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
     // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
@@ -2085,6 +2097,10 @@ function inlineCtaContractFinding(body) {
       // parsed by the astro prop validator and rejected against it
       // (Codex #3646 r17 P1); opaque expressions ({someVar}) stay
       // unvalidated there, so they pass here too.
+      if (literal === null && expr === null) {
+        // JSX shorthand (<InlineCTA tel />) passes {true} — never a string.
+        return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains a bare <InlineCTA ${name}> shorthand — JSX passes {true}, which never satisfies the component's string prop schema; use a quoted literal.`);
+      }
       if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
         return finding('P0', 'INVALID_INLINECTA_PROPS', `Draft contains an <InlineCTA ${name}=${expr}> — a boolean/number/null/container expression never satisfies the component's string prop schema; use a quoted literal.`);
       }
@@ -2147,6 +2163,11 @@ function spiderIdBoardContractFinding(body) {
         return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard> with unknown prop "${name}" — the component accepts only ${[...SPIDER_ID_BOARD_PROP_NAMES].join(', ')}; the astro publish gate rejects unknown props.`);
       }
       if (name === 'species') {
+        if (literal === null && expr === null) {
+          // JSX shorthand (<SpiderIdBoard species />) passes {true} —
+          // never the required array shape (Codex #3646 r21 P1).
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a bare <SpiderIdBoard species> shorthand — JSX passes {true}, which never satisfies the species array schema.');
+        }
         if (literal !== null) {
           return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard species="…"> string — species must be a JSON array expression of shaped records (name, risk, where, hunt, eggSac; optional sciName, glyph, source{label, https url}).');
         }
@@ -2160,6 +2181,9 @@ function spiderIdBoardContractFinding(body) {
       } else {
         if (literal !== null && (name === 'title' || name === 'eyebrow') && !literal) {
           return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=""> — the schema requires a non-empty string.`);
+        }
+        if (literal === null && expr === null) {
+          return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a bare <SpiderIdBoard ${name}> shorthand — JSX passes {true}, which never satisfies the string prop schema.`);
         }
         if (literal === null && expr && /^\{\s*(?:true|false|null|undefined|-?\d|\[|\{)/.test(expr)) {
           return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', `Draft contains a <SpiderIdBoard ${name}=${expr}> — a non-string literal expression never satisfies the string prop schema.`);

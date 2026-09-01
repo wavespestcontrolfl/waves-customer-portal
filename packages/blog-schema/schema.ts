@@ -728,25 +728,57 @@ function blankNonRenderedCode(src: string): string {
   // Inline code spans: opener and closer are EQUAL-length backtick runs
   // (CommonMark) — a 4-run never closes against part of a 5-run.
   out = out.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (m) => m.replace(/[^\n]/g, ' '));
-  // An indented code line follows a blank line (or another code line).
+  // An indented code line follows a blank line (or another code line) —
+  // measured RELATIVE to the ambient list content column (CommonMark
+  // strips the marker indent first): "- Product" then a blank then a
+  // 4-space "<AffiliateLink …>" is LIST CONTENT the renderer emits, code
+  // only from the item's column + 4 (Codex #3646 r21 P1).
   const lines = out.split('\n');
   let prevBlankOrCode = true;
+  const listCols: number[] = [];
+  const col = () => (listCols.length ? listCols[listCols.length - 1] : 0);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-    if (/^(?: {4}|\t)/.test(line) && prevBlankOrCode) {
+    const blank = line.trim() === '';
+    const eIndent = ((line.match(/^[ \t]*/) || [''])[0]).replace(/\t/g, '    ').length;
+    const marker = line.match(/^( *)(?:[-*+]|\d+[.)])\s+/);
+    if (marker && marker[1].length <= col() + 3 && eIndent < col() + 4) {
+      while (listCols.length && listCols[listCols.length - 1] > marker[1].length) listCols.pop();
+      listCols.push(marker[0].length);
+    } else if (!blank && eIndent < col() && prevBlankOrCode) {
+      while (listCols.length && listCols[listCols.length - 1] > eIndent) listCols.pop();
+    }
+    if (!blank && prevBlankOrCode && eIndent >= col() + 4) {
       lines[i] = ' '.repeat(line.length);
       prevBlankOrCode = true;
     } else {
-      prevBlankOrCode = line.trim() === '' || /^(?: {4}|\t)/.test(line) === false && line.trim() === '';
-      prevBlankOrCode = line.trim() === '';
+      prevBlankOrCode = blank;
     }
   }
   return lines.join('\n');
 }
 
+// HTML/MDX comment blanking that ignores comment DELIMITERS inside quoted
+// attribute values: <div title="<!--"> is inert text and must not pair
+// with a later --> and swallow real components (Codex #504 r23). The scan
+// runs on the attr-masked view; blanking applies to the source.
+function blankNonRenderedComments(src: string): string {
+  const view = maskJsxAttrQuotes(src);
+  const out = src.split('');
+  const re = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(view)) !== null) {
+    for (let k = m.index; k < m.index + m[0].length; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  }
+  return out.join('');
+}
+
 // Keywords after which a `/` starts a REGEX, not division (return /x/,
 // case /x/: …) — the last-identifier check both lexers share.
 const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new']);
+// A `)` closing one of these keywords' condition puts the lexer back at
+// STATEMENT position — `if (ok) /x/.test(y)` starts a regex, not division.
+const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
 
 // Index of the `}` closing the expression whose `{` is at `i` (-1 if
 // unbalanced). Honors JS literals so their content can't end it early:
@@ -755,6 +787,7 @@ const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'v
 // aware), and // and /* */ comments.
 function closeOfExpressionAt(src: string, i: number): number {
   let depth = 0; let q: string | null = null; let prevSig = ''; let word = ''; let wordDot = false;
+  const parenCtl: boolean[] = [];
   for (let j = i; j < src.length; j += 1) {
     const c = src[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
@@ -774,6 +807,8 @@ function closeOfExpressionAt(src: string, i: number): number {
     }
     if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
+    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY, not the keyword — a / after it is division
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
   }
@@ -863,6 +898,7 @@ function blankExpressionStrings(src: string): string {
   // a later real prop quote and blanked a counted component's opener:
   // fail open); in prose only braces matter.
   let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false;
+  const parenCtl: boolean[] = [];
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
@@ -883,6 +919,8 @@ function blankExpressionStrings(src: string): string {
     }
     if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; prevSig = '}'; word = ''; continue; }
+    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
+    if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
@@ -1082,7 +1120,7 @@ function maskMarkdownImages(src: string): string {
 // maskMarkdownImages), and an optional quoted link TITLE after the
 // destination ([q](/quote/ "Request service")) is split off. Images must
 // be masked before this runs.
-function* markdownLinkDests(src: string): Generator<string> {
+function* markdownLinkDests(src: string): Generator<{ dest: string; label: string }> {
   let i = 0;
   while (i < src.length) {
     if (src[i] === '\\') { i += 2; continue; }
@@ -1114,14 +1152,16 @@ function* markdownLinkDests(src: string): Generator<string> {
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
     // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
     // </quote/ > renders /quote/%20, never the service route) — only the
-    // syntax whitespace outside <…> is trimmed.
-    if (dm) yield dm[1] ?? dm[2] ?? '';
+    // syntax whitespace outside <…> is trimmed. The LABEL rides along so
+    // the CTA rule can require visible content ([](/quote/) renders an
+    // empty anchor — no funnel).
+    if (dm) yield { dest: dm[1] ?? dm[2] ?? '', label: src.slice(i + 1, j - 1) };
     i = k;
   }
 }
 
 function hasCompletedMarkdownLink(s: string): boolean {
-  for (const dest of markdownLinkDests(s)) { void dest; return true; }
+  for (const span of markdownLinkDests(s)) { void span; return true; }
   return false;
 }
 
@@ -1143,7 +1183,7 @@ function hasServiceCtaBefore(prefix: string): boolean {
   // ONE classifier for every real link destination, relative or absolute
   // (isServiceCtaHref) — a walker over real links, never a `](`-anchored
   // regex that escaped or residual bracket text can satisfy.
-  for (const dest of markdownLinkDests(p3)) if (isServiceCtaHref(dest)) return true;
+  for (const { dest, label } of markdownLinkDests(p3)) if (label.trim() && isServiceCtaHref(dest)) return true;
   // p3 doubles as the POSITION view for the component scan: a tag spelled
   // inside an attribute value (<div title="<InlineCTA />">) is blanked
   // there and never counts; attrs still read from p2.
@@ -1309,8 +1349,7 @@ export function validateAffiliateUsage(
 ): AffiliateUsageResult {
   const blockers: string[] = [];
   const warnings: string[] = [];
-  let cleaned = blankNonRenderedCode(body_mdx);
-  cleaned = cleaned.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  let cleaned = blankNonRenderedComments(blankNonRenderedCode(body_mdx));
   // MDX expressions ({''}, {'[quote](/quote/)'}, {`## fake`}) render as
   // ordinary text, never as markup — blank every balanced brace expression
   // OUTSIDE quoted JSX attribute values (length-preserving) so structural
@@ -1329,7 +1368,7 @@ export function validateAffiliateUsage(
   // blanked, expressions intact): style={{display:'none'}} and
   // open={false} live inside expressions the structural view has already
   // erased — evaluating them on `structural` would see neither.
-  const unmasked = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  const unmasked = blankNonRenderedComments(blankNonRenderedCode(body_mdx));
   // Definitely-hidden markup never satisfies a reader-facing rule: elements
   // carrying `hidden` (unless hidden={false}), an inline display:none
   // (literal or expression-valued), or a closed <details> body — including
@@ -1358,7 +1397,9 @@ export function validateAffiliateUsage(
     if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
     // Responsively-visible wrappers (class="hidden md:block") stay: mask
     // only elements hidden at EVERY breakpoint.
-    return !/\b[a-z-]+:(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
+    // Only VIEWPORT breakpoints prove responsive visibility — print:/
+    // hover:/focus: variants leave the element hidden in ordinary viewing.
+    return !/\b(?:sm|md|lg|xl|2xl):(?:block|flex|grid|inline|inline-block|inline-flex|table|contents|list-item)\b/.test(cls);
   }, unmasked);
   structural = blankBalancedElements(structural, (attrs, name) => name === 'details'
     && !detailsRendersOpen(attrs), unmasked);
@@ -1461,7 +1502,7 @@ export function validateAffiliateUsage(
 function extractMdxComponentNames(mdx: string): Set<string> {
   // A component name spelled inside an expression string is text (same
   // rule as extractComponentInvocations) — scan the string-blanked view.
-  const cleaned = maskJsxAttrQuotes(blankExpressionStrings(blankNonRenderedCode(mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length))));
+  const cleaned = maskJsxAttrQuotes(blankExpressionStrings(blankNonRenderedComments(blankNonRenderedCode(mdx))));
 
   const names = new Set<string>();
   const pattern = /<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g;
@@ -1513,7 +1554,7 @@ export function validateMarkdownComponentProps(
   // needs valid props.
   // Comments never render — an example in <!-- --> or {/* */} needs no
   // valid props (same masking as validateAffiliateUsage).
-  const cleaned = blankNonRenderedCode(body_mdx).replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  const cleaned = blankNonRenderedComments(blankNonRenderedCode(body_mdx));
   const invocations = extractComponentInvocations(cleaned);
 
   const issues: ComponentPropIssue[] = [];

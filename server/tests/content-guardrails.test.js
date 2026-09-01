@@ -805,6 +805,21 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('bare shorthand props fail closed; CTA links need visible labels (Codex #3646 r21)', () => {
+    withAffiliateEnv(() => {
+      const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+      const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+      // JSX shorthand passes {true} — never a string/array.
+      expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard species />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+      expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA tel />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+      // An empty-label link renders an invisible anchor — not the CTA.
+      for (const cta of ['[](/quote/)', '[  ](/quote/)']) {
+        const b = `Intro.\n\n## Sec\n\nGet a ${cta}.\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+        expect(affiliateCodes(guardrails.evaluate({ body: b, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+      }
+    });
+  });
+
   test('AffiliateLink nested in a prop expression is COUNTED; keyword properties are division (Codex #3646 r20)', () => {
     withAffiliateEnv(() => {
       // A component passed as a prop renders — it counts and parks.
