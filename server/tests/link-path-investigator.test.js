@@ -442,6 +442,13 @@ describe('full run', () => {
     // a subdomain of the investigated host IS bound
     expect(_internals.hostBound('example.com', 'https://members.example.com/join')).toBe(true);
     expect(_internals.hostBound('example.com', 'https://notexample.com/join')).toBe(false);
+    // userinfo can NOT spoof the host past the guard (Codex r6 P1) — real URL
+    // parsing; credentials, foreign schemes and malformed URLs are rejected
+    expect(_internals.hostBound('example.com', 'https://example.com:secret@evil.test/join')).toBe(false);
+    expect(_internals.hostBound('example.com', 'https://user@example.com/join')).toBe(false);
+    expect(_internals.hostBound('example.com', 'ftp://example.com/join')).toBe(false);
+    expect(_internals.hostBound('example.com', 'not a url')).toBe(false);
+    expect(_internals.hostBound('example.com', 'https://example.com:8443/join')).toBe(true); // an explicit port is fine
   });
 
   test('a negative re-investigation invalidates the stale executable path and clears best_path_id (Codex r1 P1)', async () => {

@@ -116,7 +116,14 @@ const looksLikeUrl = (s) => /^https?:\/\//i.test(String(s || '').trim());
  * injection register an unrelated site as this row's executable path.
  */
 function hostBound(host, url) {
-  const h = canonicalProspectDomain(url);
+  // Real URL parsing, never the textual canonicalizer: that one truncates at
+  // the first colon, so `https://example.com:pw@evil.test/` would read as
+  // example.com. Credentials and non-http(s) schemes are rejected outright.
+  let u;
+  try { u = new URL(String(url || '').trim()); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  if (u.username || u.password) return false;
+  const h = canonicalProspectDomain(u.hostname);
   return !!h && (h === host || h.endsWith(`.${host}`));
 }
 
