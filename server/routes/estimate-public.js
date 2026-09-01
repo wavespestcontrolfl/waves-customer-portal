@@ -14064,18 +14064,38 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   // change" on the very tier collapse being confirmed.
   const svcRows = (result) => (Array.isArray(result?.recurring?.services) ? result.recurring.services : [])
     .filter((r) => r && typeof r === 'object');
-  const effectivePerApplication = (row) => {
+  // Stored /preferences discounts (declined interior spray / exterior sweep)
+  // reduce the PEST line's per-application price, and the route persists the
+  // pref-adjusted totals — the disclosed pest dollars must match, or the
+  // customer confirms amounts higher than they will pay (codex #3684 r3 P1).
+  // Same derivation as the /preferences write, per side, converted back to
+  // per-application (monthlyOff × 12 ÷ visits).
+  const pestPrefPerAppOff = (result, data) => {
+    try {
+      const pest = detectPestRecurring(recurringServicesWithSupplements(result || {}));
+      const visits = Number(pest?.visitsPerYear || 0);
+      if (!pest || !(visits > 0)) return 0;
+      const { monthlyOff } = computePrefDiscount(data?.preferences, pest, false, 0);
+      return Math.round(((monthlyOff * 12) / visits) * 100) / 100;
+    } catch (_) { return 0; }
+  };
+  const beforePestOff = pestPrefPerAppOff(beforeResult, beforeData);
+  const afterPestOff = pestPrefPerAppOff(afterResult, afterData);
+  const effectivePerApplication = (row, prefOff = 0) => {
     const annual = Number(row.annualAfterDiscount ?? 0) || 0;
     const visits = Number(row.visitsPerYear ?? 0) || 0;
-    if (annual > 0 && visits > 0) return Math.round((annual / visits) * 100) / 100;
-    return Number(row.perTreatment ?? 0) || 0;
+    const gross = annual > 0 && visits > 0
+      ? Math.round((annual / visits) * 100) / 100
+      : Number(row.perTreatment ?? 0) || 0;
+    const off = String(row.service || '') === 'pest_control' ? prefOff : 0;
+    return Math.max(0, Math.round((gross - off) * 100) / 100);
   };
   const afterSvcByKey = new Map(svcRows(afterResult).map((r) => [String(r.service || r.name || ''), r]));
   for (const row of svcRows(beforeResult)) {
     const after = afterSvcByKey.get(String(row.service || row.name || ''));
     if (!after) continue;
-    const beforePA = effectivePerApplication(row);
-    const afterPA = effectivePerApplication(after);
+    const beforePA = effectivePerApplication(row, beforePestOff);
+    const afterPA = effectivePerApplication(after, afterPestOff);
     if (!beforePA || !afterPA || beforePA === afterPA) continue;
     disclosures.push({
       code: 'recurring_per_application',
@@ -14092,7 +14112,7 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
     const beforeKeys = new Set(svcRows(beforeResult).map((r) => String(r.service || r.name || '')));
     for (const after of svcRows(afterResult)) {
       if (beforeKeys.has(String(after.service || after.name || ''))) continue;
-      const pa = effectivePerApplication(after);
+      const pa = effectivePerApplication(after, afterPestOff);
       if (!pa) continue;
       disclosures.push({
         code: 'restored_per_application',
@@ -14233,7 +14253,9 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
       ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
       : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
     const restoreInputs = included === true
-      ? ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.removedInputs || null)
+      ? OptOut.readRemovedInputs(
+        (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),
+      )
       : null;
 
     const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {

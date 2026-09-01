@@ -184,19 +184,60 @@ describe('applyServiceOptOutToEstimateData — the restore', () => {
 describe('the audit record', () => {
   const event = (serviceKey, included) => ({ serviceKey, included, at: '2026-08-31T12:00:00.000Z' });
 
-  it('captures the baseline ONCE, with serviceOptOut stripped', () => {
+  it('captures the baseline ONCE, serialized and with serviceOptOut stripped', () => {
     const data = pestAndLawn();
     const baselineSource = JSON.parse(JSON.stringify(data));
     recordServiceOptOutEvent(data, event('lawn_care', false), baselineSource);
     const firstBaseline = data.serviceOptOut.baseline;
-    expect(firstBaseline.serviceOptOut).toBeUndefined();
+    // A STRING, not an object: the baseline carries the complete pre-removal
+    // rows/inputs, and recursive detectors that walk every object in
+    // estimate_data (collectTermiteFacts) would read the removed service back
+    // out of a traversable one (codex #3684 r3 P1).
+    expect(typeof firstBaseline).toBe('string');
+    expect(JSON.parse(firstBaseline).serviceOptOut).toBeUndefined();
 
     // A second change must not nest a blob inside a blob, or re-baseline onto
     // the already-reduced estimate.
     recordServiceOptOutEvent(data, event('mosquito', false), JSON.parse(JSON.stringify(data)));
-    expect(data.serviceOptOut.baseline).toEqual(firstBaseline);
-    expect(data.serviceOptOut.baseline.serviceOptOut).toBeUndefined();
+    expect(data.serviceOptOut.baseline).toBe(firstBaseline);
     expect(data.serviceOptOut.events).toHaveLength(2);
+  });
+
+  it('serializes the event removedInputs, and readRemovedInputs round-trips them', () => {
+    const { readRemovedInputs } = require('../services/estimate-service-opt-out');
+    const data = pestAndLawn();
+    const applied = applyServiceOptOutToEstimateData(data, { serviceKey: 'lawn_care', included: false });
+    recordServiceOptOutEvent(data, { ...event('lawn_care', false), removedInputs: applied.removedInputs }, { ...data });
+    const stored = data.serviceOptOut.events[0];
+    // Opaque to recursive detectors, exactly like the baseline.
+    expect(typeof stored.removedInputs).toBe('string');
+    const roundTripped = readRemovedInputs(stored);
+    expect(roundTripped.engineInputs.lawn).toEqual({ track: 'st_augustine', tier: 'enhanced' });
+    // And a restore from the round-tripped shape is exact.
+    const restored = applyServiceOptOutToEstimateData(data, {
+      serviceKey: 'lawn_care', included: true, removedInputs: roundTripped,
+    });
+    expect(restored.ok).toBe(true);
+    expect(data.engineInputs.services.lawn).toEqual({ track: 'st_augustine', tier: 'enhanced' });
+  });
+
+  it('readRemovedInputs tolerates legacy object-shaped events and garbage', () => {
+    const { readRemovedInputs } = require('../services/estimate-service-opt-out');
+    expect(readRemovedInputs({ removedInputs: { engineInputs: { lawn: {} } } }))
+      .toEqual({ engineInputs: { lawn: {} } });
+    expect(readRemovedInputs({ removedInputs: 'not json{' })).toBeNull();
+    expect(readRemovedInputs(undefined)).toBeNull();
+  });
+
+  it('recognizes the snake_case termite_bait input carrier (codex r3 P1)', () => {
+    // estimate-add-service-request writes inputs.services.termite_bait and the
+    // engine consumes that alias — presence detection and the prune must too.
+    const data = { inputs: { services: { termite_bait: { stations: 12 } } } };
+    expect(serviceIsPresentInInputs(data, 'termite_bait')).toBe(true);
+    const applied = applyServiceOptOutToEstimateData(data, { serviceKey: 'termite_bait', included: false });
+    expect(applied.ok).toBe(true);
+    expect(data.inputs.services.termite_bait).toBeUndefined();
+    expect(applied.removedInputs.inputs.termite_bait).toEqual({ stations: 12 });
   });
 
   it('currentlyOptedOutKeys reflects the LATEST state per service', () => {

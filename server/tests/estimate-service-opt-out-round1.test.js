@@ -109,6 +109,34 @@ describe('optOutImpact per-application disclosures (owner price-copy rule — no
     expect(tier.message).toMatch(/^Adding Lawn Care back moves your WaveGuard tier from Silver to Gold/);
   });
 
+  it('pest per-application disclosures honor stored preference discounts (r3 P1)', () => {
+    // Declined interior spray = $10/visit off pest. The persisted totals carry
+    // that discount, so the disclosed pest dollars must too — quarterly pest
+    // at $114 gross discloses at $104 on both sides, and here only the
+    // tier-driven move remains visible net of the same pref discount.
+    const side = (annualAfterDiscount) => ({
+      recurring: {
+        services: [{
+          service: 'pest_control', name: 'Pest Control',
+          perTreatment: 120, visitsPerYear: 4, annualAfterDiscount,
+          mo: 60, pricingVersion: 'v1',
+        }],
+      },
+    });
+    const prefs = { interior_spray: false };
+    const impact = optOutImpact({
+      beforeResult: side(412), afterResult: side(456),
+      beforeData: { preferences: prefs }, afterData: { preferences: prefs },
+      label: 'Lawn Care',
+    });
+    const pa = impact.disclosures.find((d) => d.code === 'recurring_per_application');
+    expect(pa.message).toMatch(/changes from \$9[0-9.]+ to \$10[0-9.]+ per application\./);
+    // Net of the SAME pref discount on both sides: the spread stays $11.
+    const [, from, to] = pa.message.match(/\$([0-9.]+) to \$([0-9.]+)/);
+    expect(Number(to) - Number(from)).toBeCloseTo(11, 2);
+    expect(Number(from)).toBeLessThan(103);
+  });
+
   it('restore mode prices the restored line itself — the after-only row (r2 P1)', () => {
     const impact = optOutImpact({
       beforeResult: {

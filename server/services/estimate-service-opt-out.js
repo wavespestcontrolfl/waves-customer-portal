@@ -25,7 +25,11 @@ const SERVICE_OPT_OUT_KEYS = {
   pest_control: { engine: ['pest'], selected: ['PEST'], label: 'Pest Control' },
   lawn_care: { engine: ['lawn'], selected: ['LAWN'], label: 'Lawn Care' },
   mosquito: { engine: ['mosquito'], selected: ['MOSQUITO'], label: 'Mosquito' },
-  termite_bait: { engine: ['termite', 'termiteBait'], selected: ['TERMITE_BAIT'], label: 'Termite Bait Stations' },
+  // termite_bait: estimate-add-service-request writes the snake_case alias
+  // into inputs.services and the engine consumes it (estimate-engine.js
+  // `services.termite || services.termiteBait || services.termite_bait`) —
+  // omitting it left those revised estimates un-removable (codex #3684 r3 P1).
+  termite_bait: { engine: ['termite', 'termiteBait', 'termite_bait'], selected: ['TERMITE_BAIT'], label: 'Termite Bait Stations' },
   rodent_bait: { engine: ['rodentBait'], selected: ['RODENT_BAIT'], label: 'Rodent Bait Stations' },
   palm_injection: { engine: ['palmInjection', 'palm'], selected: ['PALM_INJECTION'], label: 'Palm Injection' },
 };
@@ -287,19 +291,43 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
 // Runtime-added blob key, same class as preferences / customerSelection /
 // membershipSnapshot / operatorPriceAdjustment. baseline is captured ONCE, on
 // the first scope change, with serviceOptOut stripped so a second removal can
-// never nest a blob inside a blob.
+// never nest a blob inside a blob. The baseline is stored as a JSON STRING,
+// not an object: it carries the complete pre-removal rows and inputs, and
+// recursive detectors that walk every object in estimate_data (fresh
+// evidence: collectTermiteFacts in termite-program-agreement.js) would read
+// the removed service back out of it — accepting a reduced estimate would
+// still look like a termite-program acceptance (codex #3684 r3 P1). A string
+// is opaque to every walker; it is audit-only and never replayed.
 function recordServiceOptOutEvent(parsedData, event, baselineSource) {
   if (!isPlainObject(parsedData.serviceOptOut)) {
     const baseline = { ...baselineSource };
     delete baseline.serviceOptOut;
     parsedData.serviceOptOut = {
-      baseline,
+      baseline: JSON.stringify(baseline),
       baselineCapturedAt: event.at,
       events: [],
     };
   }
+  // Same opacity rule for the event's removedInputs — it is the complete
+  // deleted input subtree (a termite removal carries the full bait-program
+  // config), and a recursive detector would read the removed service back out
+  // of it exactly like the baseline. Stored as a string; the route parses it
+  // back for a restore (readRemovedInputs below).
+  if (event && isPlainObject(event.removedInputs)) {
+    event.removedInputs = JSON.stringify(event.removedInputs);
+  }
   parsedData.serviceOptOut.events.push(event);
   return parsedData.serviceOptOut;
+}
+
+// The restore-side reader for an event's removedInputs — tolerant of both the
+// serialized shape written by recordServiceOptOutEvent and a plain object.
+function readRemovedInputs(event) {
+  const raw = event?.removedInputs ?? null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch (_) { return null; }
+  }
+  return isPlainObject(raw) ? raw : null;
 }
 
 // Section keys currently opted out, for the /data payload and the add-offer
@@ -329,6 +357,7 @@ module.exports = {
   captureServiceOptOutProvenance,
   applyServiceOptOutToEstimateData,
   recordServiceOptOutEvent,
+  readRemovedInputs,
   currentlyOptedOutKeys,
   serviceOptOutLabel,
 };
