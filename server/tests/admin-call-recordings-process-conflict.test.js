@@ -70,22 +70,23 @@ describe('POST /process/:callSid skip semantics', () => {
 
 // A settled skip COMPLETED work — the bulk counters must not report it as
 // nothing done, which would prompt a needless reprocess of a call that was
-// correctly classified.
-describe('processAllPending counts settled skips as processed', () => {
-  const CallRecordingProcessorReal = jest.requireActual('../services/call-recording-processor');
+// correctly classified. An ownership loss is the opposite: it finished
+// NOTHING and must never land in `processed`.
+describe('processAllPending counters', () => {
+  const { summarizeBatch } = jest.requireActual('../services/call-recording-processor')._test;
 
-  test('success discriminates a settled skip from a blocked one', () => {
-    const results = [
-      { success: true },                                   // a real run
-      { success: true, skipped: true, reason: 'voicemail' }, // classified — work done
-      { success: false, skipped: true, reason: 'already_processing' }, // nothing ran
-      { success: false, error: 'provider timeout' },        // failed
-    ];
-    const blocked = results.filter((r) => r.skipped && r.success === false).length;
-    const failed = results.filter((r) => r.success === false && !r.skipped).length;
-    expect(blocked).toBe(1);
-    expect(failed).toBe(1);
-    expect(results.length - blocked - failed).toBe(2);
-    expect(typeof CallRecordingProcessorReal.processAllPending).toBe('function');
+  test('a classified voicemail is processed; a blocked claim and an ownership loss are not', () => {
+    const result = summarizeBatch([
+      { success: true },
+      { success: true, skipped: true, reason: 'voicemail' },
+      { success: false, skipped: true, reason: 'already_processing' },
+      { success: false, skipped: true, reason: 'terminal_write_ownership_lost' },
+      { success: false, error: 'provider timeout' },
+    ]);
+    expect(result).toEqual({ processed: 2, skipped: 2, failed: 1, attempted: 5 });
+  });
+
+  test('an empty batch reports nothing rather than dividing by itself', () => {
+    expect(summarizeBatch([])).toEqual({ processed: 0, skipped: 0, failed: 0, attempted: 0 });
   });
 });

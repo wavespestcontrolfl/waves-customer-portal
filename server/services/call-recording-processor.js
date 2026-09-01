@@ -1909,6 +1909,31 @@ const {
 // attribution retire path mirrors this exact gate on customer-less
 // phone-matched successors; never re-inline or duplicate it.
 const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
+// Distinct counts for a bulk run. Extracted so the rule is testable without
+// standing up the pending-query builder — the counting, not the SQL, is what
+// the admin toast reports.
+//
+// `skipped` alone does NOT mean nothing happened: spam, voicemail, a policy
+// hold and a rejected transcript are skips that COMPLETED real work and
+// persisted a terminal status. The discriminator is `success`, which this
+// pass made honest — a blocked claim, a not-ready recording and an ownership
+// loss all return success:false, every settled outcome returns success:true.
+// So a batch that classified a voicemail reports it as processed instead of
+// "Processed 0 · skipped 1" inviting a needless reprocess (pre-push audit
+// P1), and a pass that lost its claim before the terminal write never counts
+// as work done.
+function summarizeBatch(results) {
+  const blocked = results.filter((r) => r.skipped && r.success === false).length;
+  const failed = results.filter((r) => r.success === false && !r.skipped).length;
+  return {
+    processed: results.length - blocked - failed,
+    skipped: blocked,
+    failed,
+    attempted: results.length,
+  };
+}
+
+
 
 // A claim is reclaimable when it STOPPED BEATING — or when it has simply been
 // held too long, whatever the beat says.
@@ -6560,7 +6585,13 @@ const CallRecordingProcessor = {
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!rejectionStampSettled) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
-        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+        // success:false — this pass did NOT finish. It lost its claim to a
+        // peer before the terminal write, so nothing it was asked to do was
+        // recorded. Reporting success let the bulk counters and the admin
+        // UI count it as processed work (pre-push audit P1); the boolean is
+        // the one discriminator both the counters and the client's
+        // settled-vs-blocked rule read.
+        return { success: false, skipped: true, reason: 'transcription_rejected_ownership_lost' };
       }
       // Dismiss any open Needs Review cards a prior hallucinated extraction
       // filed for this call — clearing review_status alone doesn't remove them
@@ -6955,7 +6986,9 @@ const CallRecordingProcessor = {
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!terminalSettled) {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+        // success:false — the claim was lost before the terminal write, so
+        // this pass finished nothing. See the note on the rejection path.
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
       // A previously classified call reprocessed into spam/non-workable
       // must not leave its property_role_confirm card actionable — the
@@ -7970,7 +8003,9 @@ const CallRecordingProcessor = {
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!vetoSettled) {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+        // success:false — the claim was lost before the terminal write, so
+        // this pass finished nothing. See the note on the rejection path.
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
       // Retire any open property_role_confirm card from a prior pass — the
       // veto blocks every canonical write, so its parked mutations are
@@ -14926,26 +14961,7 @@ const CallRecordingProcessor = {
         results.push({ callSid: call.twilio_call_sid, success: false, error: err.message });
       }
     }
-    // Distinct counts: a blocked claim and a failure are not processed work,
-    // and the bulk toast used to report all three as one inflated number.
-    //
-    // `skipped` alone does NOT mean nothing happened — spam, voicemail, a
-    // policy hold and a rejected transcript are all skips that COMPLETED
-    // real work and persisted a terminal status. The discriminator is
-    // `success`, which this pass made honest: a blocked or not-ready run
-    // returns success:false, every settled outcome returns success:true. So
-    // a batch that classified a voicemail reports it as processed, not as
-    // "Processed 0 · skipped 1" prompting a needless reprocess (pre-push
-    // audit P1) — the same settled-vs-blocked line the admin UI draws.
-    const blocked = results.filter((r) => r.skipped && r.success === false).length;
-    const failed = results.filter((r) => r.success === false && !r.skipped).length;
-    return {
-      processed: results.length - blocked - failed,
-      skipped: blocked,
-      failed,
-      attempted: results.length,
-      results,
-    };
+    return { ...summarizeBatch(results), results };
   },
 
   /**
@@ -15405,6 +15421,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  summarizeBatch,
   leadFirstContactAt,
   composeLeadAddress,
   analyzeLeadAddress,
