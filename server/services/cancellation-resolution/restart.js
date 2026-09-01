@@ -327,6 +327,15 @@ async function ownedResidualFamilies(dbh, customerId) {
     residualBase().whereNotIn('s.status', TERMINAL_HISTORY_STATUSES).where('s.is_recurring', true)
       .where(function upcomingOrRebook() {
         this.where('s.scheduled_date', '>=', etDateString()).orWhere('s.status', 'rescheduled');
+      })
+      // The tracker can LEAD the legacy status (track-transitions flips
+      // track_state first, the status sync is best-effort) — a row a tech
+      // already completed is done work, not an upcoming obligation, and
+      // the sweep excludes it for the same reason (codex GH r17 P1).
+      // NULL-safe for legacy rows; en_route/on_property stay owned (live
+      // work). Same guard as the processor's sweep.
+      .where(function notTrackerComplete() {
+        this.whereNull('s.track_state').orWhere(function notComplete() { this.whereNot('s.track_state', 'complete'); });
       }),
     residualBase().where('s.recurring_ongoing', true),
   ]);

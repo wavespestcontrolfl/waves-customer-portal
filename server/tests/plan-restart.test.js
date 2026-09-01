@@ -725,6 +725,25 @@ describe('mintRestartEstimate', () => {
     expect(Object.keys(estimateData.engineInputs.services).sort()).toEqual(['lawn', 'pest']);
   });
 
+  test('a tracker-COMPLETED row is not residual ownership; a tech en route still is (codex GH r17 P1)', async () => {
+    // track_state leads the legacy status (the sync is best-effort) — a
+    // completed visit stuck on status 'confirmed' is done work the sweep
+    // also excludes, not an upcoming obligation.
+    tables.scheduled_services = [
+      { id: 'done-1', customer_id: 'cust-1', status: 'confirmed', is_recurring: true, scheduled_date: '2099-01-01', track_state: 'complete', service_type: 'Quarterly Pest Control' },
+    ];
+    tables.estimates = [];
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const [withComplete] = recompute.mock.calls[recompute.mock.calls.length - 1];
+    expect(Object.keys(withComplete.engineInputs.services).sort()).toEqual(['lawn', 'pest']);
+
+    tables.scheduled_services[0].track_state = 'en_route';
+    tables.estimates = [];
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('0123456789abcdef') });
+    const [withLive] = recompute.mock.calls[recompute.mock.calls.length - 1];
+    expect(Object.keys(withLive.engineInputs.services)).toEqual(['lawn']);
+  });
+
   test('a STORED commercial property never gets an online restart price — refused before reuse or mint (codex pre-push P0)', async () => {
     tables.customers[0].property_type = 'commercial';
     // Even a LIVE reusable restart estimate must not be handed back.

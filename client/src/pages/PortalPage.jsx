@@ -9947,7 +9947,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
   const [showTierExplorer, setShowTierExplorer] = useState(false);
-  const lawnHealth = useLawnHealth(customer.id);
+  // C4: /api/lawn-health is deliberately NOT a cancelled read — a null id
+  // disables the hook so the default Plan tab mount doesn't 401 into the
+  // API client's retry traffic for data the cancelled panel never renders
+  // (codex GH r17 P2).
+  const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id);
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as

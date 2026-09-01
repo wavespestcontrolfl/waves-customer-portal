@@ -2117,6 +2117,16 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (estimate?.price_locked_at) {
     return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
   }
+  // Customer plan-restart quotes are never revised in place (codex GH r17
+  // P1 on #3671): their scope is fixed by the cancellation attempt and
+  // their price is always today's mint (owner ruling — one honorable
+  // price). An edited copy either bricked acceptance (planRestart dropped
+  // wholesale) or, preserved, let a changed composition restart work
+  // outside the cancellation scope; blocking is the only shape that keeps
+  // both invariants.
+  if (String(estimate?.source || '') === 'plan_restart') {
+    return { message: 'This is a customer plan-restart quote — its scope is fixed by the cancellation and it always prices at the current mint. It cannot be edited in place; the customer re-taps "Restart my plan" for a fresh quote.', statusCode: 409 };
+  }
   const status = String(estimate?.status || '');
   if (status === 'sending') {
     return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };
@@ -2363,18 +2373,6 @@ async function reviseAdminEstimate({
         if (nextEngine[key] === priorValue) continue;
         nextEngine[key] = priorValue;
         nextData.estimatorEngine = nextEngine;
-        preserved = true;
-      }
-      // planRestart is provenance too (codex GH r16 P1 on #3671): the V2
-      // revision payload never carries it, and dropping it bricks the
-      // restart acceptance (quoted reads null, every attempt 409s) —
-      // while an edited copy must never repoint the quote at a different
-      // cancellation attempt or scope. FORCED from the stored row, same
-      // rule as the engine keys above: an operator revise may reprice a
-      // restart quote, not change what it restarts.
-      if (existingData.planRestart !== undefined
-          && JSON.stringify(nextData.planRestart) !== JSON.stringify(existingData.planRestart)) {
-        nextData.planRestart = existingData.planRestart;
         preserved = true;
       }
       if (preserved) writeFields.estimate_data = JSON.stringify(nextData);
