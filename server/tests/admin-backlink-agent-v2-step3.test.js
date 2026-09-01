@@ -22,10 +22,16 @@ jest.mock('../models/db', () => {
     const q = {
       _table: table,
       where: jest.fn(() => q), whereIn: jest.fn(() => q), whereILike: jest.fn(() => q),
+      whereNotIn: jest.fn((col, arr) => { q._notIn = { col, arr }; return q; }),
       clone: () => q, orderBy: () => q, orderByRaw: () => q, limit: () => q, select: () => q,
       offset: () => Promise.resolve(mockState.domains),
       first: jest.fn(async () => (table === 'seo_link_domains' ? mockState.firstDomain : undefined)),
-      update: jest.fn(async (patch) => { mockState.updates.push({ table, patch }); return 1; }),
+      update: jest.fn(async (patch) => {
+        // honor the conditional UPDATE's whereNotIn guard like Postgres would
+        if (q._notIn && q._notIn.col === 'agent_state' && mockState.firstDomain && q._notIn.arr.includes(mockState.firstDomain.agent_state)) return 0;
+        mockState.updates.push({ table, patch });
+        return 1;
+      }),
       then: (res, rej) => Promise.resolve(
         table === 'seo_link_acquisition_paths' ? mockState.paths
           : table === 'seo_link_domain_sources' ? mockState.touches

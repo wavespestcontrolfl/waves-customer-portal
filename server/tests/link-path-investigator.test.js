@@ -380,7 +380,8 @@ describe('full run', () => {
     const db = makeDb({ seo_link_domains: [d] });
     await investigatePaths(db, runOpts(db));
     const repriced = modelPath({ price_text: 'USD 120 / year', renewal_price_text: 'USD 120', quotes: ['USD 120 / year'] });
-    await investigatePaths(db, runOpts(db, { domainIds: [d.id], llmDispatch: async () => ({ ok: true, json: verdictOf([repriced]) }) }));
+    const fetch120 = async (url) => ({ status: 200, finalUrl: url, html: `<html><body>Join for USD 120 / year — ${url}</body></html>`, blocked: false, truncated: false });
+    await investigatePaths(db, runOpts(db, { domainIds: [d.id], fetchPage: fetch120, llmDispatch: async () => ({ ok: true, json: verdictOf([repriced]) }) }));
     const p = db._tables.seo_link_acquisition_paths[0];
     expect(p.estimated_cost_cents).toBe(12000);
     expect([p.revision, p.revision_payment, p.revision_communication, p.revision_execution]).toEqual([2, 2, 1, 1]);
@@ -461,6 +462,40 @@ describe('full run', () => {
     const dom = db._tables.seo_link_domains[0];
     expect(dom.agent_state).toBe('not_reproducible');
     expect(dom.best_path_id).toBeNull(); // a zero-value path never becomes best
+  });
+
+  test('an unverified price claim fails closed: quote not on the cited page ⇒ unknown currency, null cents (Codex r2 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    // the fetched page quotes USD 95; the model claims USD 500
+    const inflated = modelPath({ price_text: 'USD 500 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'quote', page_url: 'https://example.com/join' } });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([inflated]) }) }));
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.currency).toBe('unknown');
+    expect(p.estimated_cost_cents).toBeNull();
+    const evidence = JSON.parse(p.investigation);
+    expect(evidence.price_text).toBe('USD 500 / year'); // claim preserved for the owner card
+    expect(evidence.price_verification).toMatchObject({ price_text: 'not_on_fetched_page' });
+  });
+
+  test('jsonld currency evidence verifies against the RAW html of the cited fetched page', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const jsonldFetch = async (url) => ({ status: 200, finalUrl: url, html: `<html><script type="application/ld+json">{"@type":"Offer","priceCurrency":"USD"}</script><body>Join for $95 / year — ${url}</body></html>`, blocked: false, truncated: false });
+    const path = modelPath({ price_text: '$95 / year', renewal_price_text: null, renewal_price_page_url: null, currency_evidence: { marker: 'USD', kind: 'jsonld_price_currency', page_url: 'https://example.com/join' } });
+    await investigatePaths(db, runOpts(db, { fetchPage: jsonldFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([path]) }) }));
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.currency).toBe('USD'); // bare-$ quote + VERIFIED jsonld marker
+    expect(p.estimated_cost_cents).toBe(9500);
+  });
+
+  test('processor_currency evidence is unverifiable from a static fetch and never proves USD in step 3', async () => {
+    const { verifyPriceEvidence } = _internals;
+    const pages = [{ url: 'https://example.com/join', text: 'join for $95 / year', html: '<html>join for $95 / year</html>' }];
+    const v = verifyPriceEvidence(pages, { price_text: '$95 / year', price_page_url: 'https://example.com/join', currency_evidence: { marker: 'USD', kind: 'processor_currency', page_url: 'https://example.com/join' } });
+    expect(v.price_text).toBe('$95 / year'); // the quote itself is on the page
+    expect(v.currency_evidence).toBeNull();
+    expect(v.verification.currency_evidence).toBe('processor_currency_unverifiable_static');
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {

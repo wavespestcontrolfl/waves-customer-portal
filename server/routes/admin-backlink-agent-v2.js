@@ -349,13 +349,20 @@ router.patch('/registry/:id', async (req, res, next) => {
     if (!nextState) return res.status(400).json({ error: `invalid action; must be one of ${Object.keys(REGISTRY_ACTIONS).join(', ')}` });
     const domain = await db('seo_link_domains').where({ id: req.params.id }).first('id', 'domain', 'agent_state');
     if (!domain) return res.status(404).json({ error: 'not found' });
-    if (['acquiring', 'acquired'].includes(domain.agent_state)) {
-      return res.status(409).json({ error: `agent_state '${domain.agent_state}' is lane-owned; registry actions apply to pre-acquisition states only` });
-    }
     const now = new Date();
     const patch = { agent_state: nextState, updated_at: now };
     patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
-    await db('seo_link_domains').where({ id: domain.id }).update(patch);
+    // Guard is IN the update: a lane can move the row to acquiring/acquired
+    // between read and write, so the condition rides the UPDATE and a zero
+    // count means the race (or a delete) was lost — never overwrite it.
+    const n = await db('seo_link_domains')
+      .where({ id: domain.id }).whereNotIn('agent_state', ['acquiring', 'acquired'])
+      .update(patch);
+    if (!n) {
+      const current = await db('seo_link_domains').where({ id: domain.id }).first('agent_state');
+      if (!current) return res.status(404).json({ error: 'not found' });
+      return res.status(409).json({ error: `agent_state '${current.agent_state}' is lane-owned; registry actions apply to pre-acquisition states only` });
+    }
     logger.info(`[backlink-registry] admin ${action}: ${domain.domain} (${domain.agent_state} -> ${nextState})`);
     res.json({ id: domain.id, domain: domain.domain, agent_state: nextState, watch_recheck_at: patch.watch_recheck_at });
   } catch (err) { next(err); }

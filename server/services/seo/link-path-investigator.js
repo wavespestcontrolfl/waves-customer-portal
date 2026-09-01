@@ -396,6 +396,66 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now }) {
   return newId;
 }
 
+// ---------------------------------------------------------------------------
+// Price-evidence verification — the model's quote is a CLAIM until the exact
+// text is found on the fetched page it cites. An unverified quote or marker is
+// treated as absent: currency stays 'unknown' (step 4's price-entry card),
+// cents stay null, and the original claim + failure reason live in the
+// evidence. A page-level prompt injection or hallucination can therefore
+// never mint an authoritative-looking USD price.
+// ---------------------------------------------------------------------------
+
+const normQuote = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const findPage = (pages, pageUrl) => {
+  if (!pageUrl) return null;
+  const key = registry.normalizeSubmissionUrl(pageUrl);
+  return pages.find((pg) => registry.normalizeSubmissionUrl(pg.url) === key) || null;
+};
+const quoteOnPage = (pages, pageUrl, quote) => {
+  const page = findPage(pages, pageUrl);
+  return !!(page && quote && normQuote(page.text).includes(normQuote(quote)));
+};
+
+/**
+ * verifyPriceEvidence(pages, modelPath) → { price_text, renewal_price_text,
+ * currency_evidence, verification } — verified fields only; failures nulled.
+ * Evidence kinds: 'quote' verifies against a verified quote's own text;
+ * 'jsonld_price_currency' against the cited page's RAW html (canonicalize
+ * strips <script>, so JSON-LD lives only there); 'processor_currency' is
+ * unverifiable from a static fetch in step 3 and never proves anything here
+ * (live-checkout observation is the runner's, step 5).
+ */
+function verifyPriceEvidence(pages, p) {
+  const verification = {};
+  const priceOk = quoteOnPage(pages, p.price_page_url, p.price_text);
+  const renewalOk = quoteOnPage(pages, p.renewal_price_page_url, p.renewal_price_text);
+  if (p.price_text) verification.price_text = priceOk ? 'verified' : 'not_on_fetched_page';
+  if (p.renewal_price_text) verification.renewal_price_text = renewalOk ? 'verified' : 'not_on_fetched_page';
+  let evidence = null;
+  const ev = p.currency_evidence;
+  if (ev && ev.marker) {
+    if (ev.kind === 'quote') {
+      const verifiedQuotes = [priceOk ? p.price_text : '', renewalOk ? p.renewal_price_text : ''].join(' ');
+      if (verifiedQuotes.includes(ev.marker)) evidence = ev;
+      else verification.currency_evidence = 'marker_not_in_verified_quote';
+    } else if (ev.kind === 'jsonld_price_currency') {
+      const page = findPage(pages, ev.page_url);
+      const re = new RegExp(`"priceCurrency"\\s*:\\s*"${ev.marker.replace(/[^A-Za-z$]/g, '')}"`);
+      if (page && re.test(page.html)) evidence = ev;
+      else verification.currency_evidence = 'jsonld_not_on_fetched_page';
+    } else {
+      verification.currency_evidence = 'processor_currency_unverifiable_static';
+    }
+    if (evidence) verification.currency_evidence = 'verified';
+  }
+  return {
+    price_text: priceOk ? p.price_text : null,
+    renewal_price_text: renewalOk ? p.renewal_price_text : null,
+    currency_evidence: evidence,
+    verification,
+  };
+}
+
 const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 /** §3.2 canonicalized agreement text: tags stripped, whitespace collapsed. */
 function canonicalizeTerms(html) {
@@ -466,9 +526,12 @@ async function investigatePaths(db, {
         for (const url of urls) {
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
           out.fetches += 1;
-          const page = await fetcher(url);  
+          const page = await fetcher(url);
           if (page && page.html && !page.blocked && !page.error) {
-            pages.push({ url: page.finalUrl || url, status: page.status, excerpt: canonicalizeTerms(page.html).slice(0, PAGE_EXCERPT_CHARS) });
+            const text = canonicalizeTerms(page.html);
+            // html/text stay only for THIS domain's evidence verification —
+            // never persisted, never prompted beyond the excerpt.
+            pages.push({ url: page.finalUrl || url, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html });
           } else {
             fetchErrors.push({ url, reason: (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}` });
           }
@@ -521,16 +584,22 @@ async function investigatePaths(db, {
         await db.transaction(async (trx) => {
           const writtenIds = [];
           for (const p of writable) {
+            // The model's price claims count only when the exact quote/marker
+            // is found on the fetched page it cites; failures derive as if no
+            // price was seen (currency 'unknown', cents null) and the claim +
+            // reason are preserved in the evidence for the owner card.
+            const verified = verifyPriceEvidence(pages, p);
             const evidence = {
               investigated_at: now.toISOString(),
               price_text: p.price_text, price_page_url: p.price_page_url,
               renewal_price_text: p.renewal_price_text, renewal_price_page_url: p.renewal_price_page_url,
               currency_evidence: p.currency_evidence, legal_terms_url: p.legal_terms_url,
               reasons: p.reasons, quotes: p.quotes,
-              pages_fetched: pages.map((pg) => pg.url), fetch_errors: fetchErrors,
+              pages_fetched: pages.map((pg) => pg.url), fetch_errors: fetchErrors.map((f) => ({ url: f.url, reason: f.reason })),
+              ...(Object.keys(verified.verification).length ? { price_verification: verified.verification } : {}),
               ...(Object.keys(p.offhost).length ? { offhost_urls: p.offhost } : {}),
             };
-            const row = pathRowFrom(p, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
+            const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
             const replaces = p.replaces_path_id && validIds.has(p.replaces_path_id) ? p.replaces_path_id : null;
             const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now });
             if (id) {
@@ -603,7 +672,7 @@ module.exports = {
   MAX_FETCHES_PER_DOMAIN,
   TERMS_FETCH_BUDGET,
   _internals: {
-    deriveCurrency, centsFor, candidateUrls, hostBound, buildPrompt, investigateWithModel,
+    deriveCurrency, centsFor, candidateUrls, hostBound, verifyPriceEvidence, buildPrompt, investigateWithModel,
     selectTargets, pathRowFrom, upsertPath, changedInputs, scoreDomain, pathValue,
     canonicalizeTerms, batchSize, SYSTEM_PROMPT, TYPE_WEIGHT,
     PAYMENT_INPUTS, COMMUNICATION_INPUTS, EXECUTION_INPUTS, CLAIMABLE_STATES,
