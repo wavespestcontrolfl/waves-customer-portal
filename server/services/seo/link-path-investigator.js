@@ -737,10 +737,16 @@ async function investigatePaths(db, {
           out.fetches += 1;
           const probe = await fetcher(p.submission_url, { resolveOnly: true });
           const finalUrl = (probe && probe.finalUrl) || p.submission_url;
-          if (probe && !probe.error && !probe.blocked && probe.status >= 200 && probe.status < 400 && hostBound(host, finalUrl)) {
+          // The probe must land on the CLAIMED URL itself (scheme-insensitive
+          // — http→https and trailing-slash redirects are the same page): a
+          // hallucinated path that soft-redirects to the homepage or any
+          // other same-host page proves nothing about the claimed one.
+          const schemeless = (u) => registry.normalizeSubmissionUrl(u).replace(/^https?:\/\//, '');
+          const landedOnClaim = schemeless(finalUrl) === schemeless(p.submission_url);
+          if (probe && !probe.error && !probe.blocked && probe.status >= 200 && probe.status < 400 && hostBound(host, finalUrl) && landedOnClaim) {
             fetchedKeys.add(key);
           } else {
-            p.submissionUnverified = (probe && (probe.error || (probe.blocked && 'blocked'))) || `status_${probe && probe.status}`;
+            p.submissionUnverified = (probe && (probe.error || (probe.blocked && 'blocked') || (!landedOnClaim && 'redirected_off_claim'))) || `status_${probe && probe.status}`;
           }
         }
 

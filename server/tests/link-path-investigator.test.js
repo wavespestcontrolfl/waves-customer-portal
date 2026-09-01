@@ -384,6 +384,31 @@ describe('full run', () => {
     expect(dom.best_path_id).toBeNull(); // never a contradictory actionable best path
   });
 
+  test('a probe that soft-redirects to another same-host page proves nothing about the claimed URL (Codex r15 P1)', async () => {
+    const d = domainRow();
+    const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/page-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    // the hallucinated /ghost-join resolves… to the homepage
+    const homeRedirect = jest.fn(async (url, opts) => (opts && opts.resolveOnly
+      ? { status: 200, finalUrl: 'https://example.com/', html: null, blocked: false }
+      : okFetch(url)));
+    const ghost = modelPath({ submission_url: 'https://example.com/ghost-join' });
+    await investigatePaths(db, runOpts(db, { fetchPage: homeRedirect, llmDispatch: async () => ({ ok: true, json: verdictOf([ghost]) }) }));
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.confidence).toBe(0);
+    expect(JSON.parse(p.investigation).submission_verification).toBe('redirected_off_claim');
+    // …while an https upgrade / trailing-slash redirect of the SAME page still verifies
+    const okUpgrade = jest.fn(async (url, opts) => (opts && opts.resolveOnly
+      ? { status: 301, finalUrl: `${url.replace('http://', 'https://')}/`, html: null, blocked: false }
+      : okFetch(url)));
+    const d2 = domainRow({ domain: 'other.com' });
+    const touches2 = Array.from({ length: 12 }, (_, i) => ({ domain_id: d2.id, source: 'list_import', source_detail: `https://other.com/page-${i}`, source_ref: null }));
+    const db2 = makeDb({ seo_link_domains: [d2], seo_link_domain_sources: touches2 });
+    const upgraded = modelPath({ submission_url: 'http://other.com/join-up' });
+    await investigatePaths(db2, runOpts(db2, { fetchPage: okUpgrade, llmDispatch: async () => ({ ok: true, json: verdictOf([upgraded]) }) }));
+    expect(Number(db2._tables.seo_link_acquisition_paths[0].confidence)).toBe(0.7);
+  });
+
   test('an omitted path OUTSIDE this pass\'s fetch coverage is preserved, never disproven (Codex r9 P1)', async () => {
     const d = domainRow({ agent_state: 'investigating' });
     const uncovered = {
