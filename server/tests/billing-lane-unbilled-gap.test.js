@@ -196,3 +196,49 @@ describe('payer gaps never borrow the service customer wallet', () => {
     expect(gap.payerBilled).toBeUndefined();
   });
 });
+
+describe('a priced visit that will never mint an invoice (Codex GH P1)', () => {
+  const priced = { ...unbilledShape, estimatedPrice: 129 };
+
+  test('predicting an invoice is not the same as one existing', () => {
+    const p = predictCompletionBilling(priced);
+    expect(p.kind).toBe('invoice');
+    // shouldAutoInvoiceCompletion declines when create_invoice_on_complete is
+    // false, the billing mode is null, there is no membership tier and
+    // GATE_AUTOINVOICE_PRICED_VISITS is off — nothing bills despite the price.
+    expect(unbilledCompletionGap({ prediction: p, willMint: false }))
+      .toMatchObject({ reason: 'no_invoice_will_mint' });
+    expect(unbilledCompletionGap({ prediction: p, willMint: true })).toBeNull();
+  });
+
+  test('an unaskable mint decision is never a gap', () => {
+    const p = predictCompletionBilling(priced);
+    expect(unbilledCompletionGap({ prediction: p })).toBeNull();
+    expect(unbilledCompletionGap({ prediction: p, willMint: null })).toBeNull();
+  });
+
+  test('willMint never manufactures a gap on a covered or payer visit', () => {
+    // The new arm only reads invoice/auto_charge predictions, so coverage and
+    // payer AR are untouched by a false mint verdict.
+    for (const shape of [
+      { ...priced, lane: 'monthly_membership', billingMode: 'monthly_membership', monthlyRate: 46.33, autopayActive: true, estimatedPrice: null },
+      { ...priced, payerBilled: true },
+    ]) {
+      const p = predictCompletionBilling(shape);
+      expect(['invoice', 'auto_charge']).not.toContain(p.kind);
+      expect(unbilledCompletionGap({ prediction: p, willMint: false })).toBeNull();
+    }
+  });
+
+  test('a PRICED callback that mints nothing IS a gap', () => {
+    // completionInvoiceAmount returns the stamped price for a callback, so the
+    // prediction is 'invoice'; shouldAutoInvoiceCompletion takes the
+    // create_invoice_on_complete stamp before its callback exclusion, so with
+    // that flag off nothing mints. Warning here is correct — the visit is
+    // priced and bills nobody.
+    const p = predictCompletionBilling({ ...priced, isCallback: true });
+    expect(p.kind).toBe('invoice');
+    expect(unbilledCompletionGap({ prediction: p, willMint: false })).toMatchObject({ reason: 'no_invoice_will_mint' });
+    expect(unbilledCompletionGap({ prediction: p, willMint: true })).toBeNull();
+  });
+});

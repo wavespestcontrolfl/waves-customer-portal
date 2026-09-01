@@ -116,9 +116,13 @@ export default function BillingLaneCard({ billingLane, style, onSendCardLink, se
               Nothing will bill for this visit.
             </div>
             <div style={{ fontSize: 12, marginTop: 2 }}>
-              {gap.noPaymentMethod === true
-                ? 'No rate or price is set, and there is no card on file.'
-                : 'No rate or price is set on this account.'}
+              {gap.reason === 'no_invoice_will_mint'
+                ? (gap.noPaymentMethod === true
+                  ? 'This visit is priced, but no invoice will be created on completion — and there is no card on file.'
+                  : 'This visit is priced, but no invoice will be created on completion.')
+                : gap.noPaymentMethod === true
+                  ? 'No rate or price is set, and there is no card on file.'
+                  : 'No rate or price is set on this account.'}
             </div>
             {onSendCardLink && gap.noPaymentMethod === true && (
               <button

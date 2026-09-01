@@ -203,3 +203,29 @@ describe('MobileAppointmentDetailSheet money-gap warning', () => {
     expect(complete).toBeEnabled();
   });
 });
+
+describe('MobileAppointmentDetailSheet priced-but-unminted warning', () => {
+  it('says the visit is priced but no invoice will be created', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: 129,
+          customerId: 'cust-1',
+          billingLane: {
+            mode: 'per_visit',
+            source: 'inferred',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 129, conflictStampedPrice: false },
+            unbilledGap: { reason: 'no_invoice_will_mint', noPaymentMethod: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Nothing will bill for this visit/i)).toBeInTheDocument();
+    expect(screen.getByText(/priced, but no invoice will be created/i)).toBeInTheDocument();
+    // Not the "no rate is set" copy — a rate is not the problem here.
+    expect(screen.queryByText(/No rate or price is set/i)).not.toBeInTheDocument();
+  });
+});

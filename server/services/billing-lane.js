@@ -628,7 +628,7 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
 // free visit: nothing bills only because no number is on the account.
 // 'callback' / 'always_free_service_type' / 'annual_renewal_owned' are the
 // by-design half and never appear here.
-const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file']);
+const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file', 'no_invoice_will_mint']);
 
 /**
  * Does completing this visit leave money on the table? Reads the SAME
@@ -645,8 +645,23 @@ const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file']);
  *
  * Returns null when there is no gap, else { reason, noPaymentMethod }.
  */
-function unbilledCompletionGap({ prediction, hasChargeableMethod = null }) {
+function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMint = null }) {
   if (!prediction) return null;
+  // A prediction of 'invoice' answers "what would this bill", not "will an
+  // invoice exist". They diverge: a priced visit with
+  // create_invoice_on_complete false, a null billing mode, no membership
+  // tier and GATE_AUTOINVOICE_PRICED_VISITS off predicts an invoice that
+  // shouldAutoInvoiceCompletion then declines to mint
+  // (admin-dispatch.js:16155-16157). The booking gate already asks the real
+  // decision; the warning must too, or the sheet stays silent on the one
+  // shape it exists to surface. `willMint` null = the caller could not ask —
+  // never treated as a gap.
+  if (willMint === false && ['invoice', 'auto_charge'].includes(prediction.kind)) {
+    return {
+      reason: 'no_invoice_will_mint',
+      noPaymentMethod: hasChargeableMethod == null ? null : hasChargeableMethod === false,
+    };
+  }
   // A payer says WHO owes, never HOW MUCH. Completion still derives the
   // amount from the visit price / rate alone and categorically refuses to
   // mint at <= 0, so an UNPRICED payer-billed visit bills nobody — the

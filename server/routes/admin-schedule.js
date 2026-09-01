@@ -3205,7 +3205,9 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction }) {
 // Fails toward NOT flagging, like the reads it wraps: an unreadable wallet
 // yields noPaymentMethod null (never a false "no card on file"), and any
 // lookup error leaves the payload exactly as it was.
-async function enrichBillingLaneWithWalletGap({ billingLane, customerId, achStatus, alerts }) {
+async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts }) {
+  const customerId = svc?.customer_id;
+  const achStatus = svc?.ach_status;
   const needsWallet = billingLane?.prediction?.kind === 'invoice'
     || !!unbilledCompletionGap({ prediction: billingLane?.prediction });
   if (!needsWallet) return billingLane;
@@ -3236,7 +3238,47 @@ async function enrichBillingLaneWithWalletGap({ billingLane, customerId, achStat
     const unbilledAlert = unbilledVisitAlert({ hasChargeableMethod, prediction: billingLane.prediction });
     if (unbilledAlert) alerts.push(unbilledAlert);
   }
-  billingLane.unbilledGap = unbilledCompletionGap({ prediction: billingLane.prediction, hasChargeableMethod });
+  // Will an invoice actually EXIST? The prediction answers what the visit
+  // would bill; only shouldAutoInvoiceCompletion answers whether anything
+  // gets minted, and the two diverge (Codex GH P1 — the same divergence the
+  // booking gate already asks about). Every completion-time suppressor is a
+  // reason NOT to mint, so leaving them false asks the permissive question:
+  // even at its best, does this visit bill? Failure leaves willMint null,
+  // which is never treated as a gap.
+  let willMint = null;
+  if (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind)) {
+    try {
+      const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+      willMint = shouldAutoInvoiceCompletion({
+        recapReviewOnly: false,
+        alreadyPaid: false,
+        prepaidCovered: false,
+        autopayCoversVisit: false,
+        preMintedInvoice: false,
+        existingCompletionInvoice: false,
+        createInvoiceOnComplete: !!svc?.create_invoice_on_complete,
+        waveguardTier: svc?.waveguard_tier || null,
+        explicitMembership: svc?.billing_mode === 'monthly_membership',
+        explicitPerVisitLane: ['per_visit', 'one_time'].includes(svc?.billing_mode),
+        perApplicationBilling: svc?.billing_mode === 'per_application',
+        annualPrepayBilling: svc?.billing_mode === 'annual_prepay',
+        hasVisitPrice: svc?.estimated_price != null && Number(svc.estimated_price) > 0,
+        invoiceAmount: Number(billingLane.prediction.amount) || 0,
+        autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+        serviceType: svc?.service_type,
+        isCallback: !!svc?.is_callback,
+        visitPerformed: true,
+      });
+    } catch { willMint = null; }
+  }
+  const gap = unbilledCompletionGap({ prediction: billingLane.prediction, hasChargeableMethod, willMint });
+  if (Array.isArray(alerts) && gap && gap.reason === 'no_invoice_will_mint') {
+    alerts.push({
+      type: 'unbilled_visit',
+      text: 'NOTHING WILL BILL — this visit is priced but no invoice will be created',
+    });
+  }
+  billingLane.unbilledGap = gap;
   return billingLane;
 }
 
@@ -3693,12 +3735,7 @@ router.get('/', async (req, res, next) => {
       // just any payment_methods row. Fail toward NOT flagging, like the
       // reads above: a wrong badge on a covered customer teaches the tech
       // to ignore it.
-      await enrichBillingLaneWithWalletGap({
-        billingLane,
-        customerId: s.customer_id,
-        achStatus: s.ach_status,
-        alerts,
-      });
+      await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts });
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
@@ -4221,12 +4258,7 @@ router.get('/week', async (req, res, next) => {
         // Week rows open the SAME detail sheet as the day feed, so they get
         // the same wallet read and money-gap note (Codex P1). No alerts array
         // here — the propertyAlerts feed is a day-view concept.
-        await enrichBillingLaneWithWalletGap({
-          billingLane,
-          customerId: s.customer_id,
-          achStatus: s.ach_status,
-          alerts: null,
-        });
+        await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts: null });
         return {
           id: s.id,
           customerId: s.customer_id,
