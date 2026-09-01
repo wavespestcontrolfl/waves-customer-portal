@@ -37,6 +37,9 @@ const KNOWN_SOURCES = [
   // Report click-to-estimate mints (#3391) — the conversion lane this card
   // exists to measure must not fold into 'other'.
   'service_report_cta',
+  // Plan-restart mints (C4) — same publish-without-delivery shape, own
+  // bucket so restart taps don't contaminate the catch-all.
+  'plan_restart',
 ];
 const SOURCE_ORDER = [...KNOWN_SOURCES, 'other'];
 

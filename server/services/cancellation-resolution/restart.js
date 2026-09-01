@@ -329,66 +329,16 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       throw new RestartUnavailableError('pricing_unavailable', 'This restart needs to be set up by hand — please call or text us and we will take care of it.');
     }
 
-    // Reuse a live restart estimate ONLY after the scope + ownership checks
-    // above, and only when it quotes exactly today's eligible families — a
-    // quote minted before staff restored a service, or before a
-    // re-cancellation changed the scope, is archived and re-priced instead
-    // of handed back stale (idempotent button; one honorable price at a
-    // time).
+    // Any prior lineage rows — the reuse decision itself is deferred until
+    // TODAY's inputs have been resolved and priced (below): reusing here
+    // would hand back a quote the current property context no longer
+    // supports (codex pre-push P0 — a corrected measurement, a cache/
+    // override update, or a commercial reclassification since mint).
     const priorRows = await trx('estimates')
       .where({ customer_id: fresh.id, source: SOURCE })
       .whereNull('archived_at')
       .orderBy('created_at', 'desc')
       .limit(10);
-    const live = liveRestartEstimate(priorRows, nowDate);
-    if (live) {
-      // Compare against the ELIGIBLE set, not the raw cancellation scope —
-      // a quote minted before staff restored one of its families would
-      // otherwise re-sell the now-live service.
-      const liveFamilies = parseJson(live.estimate_data, {})?.planRestart?.families;
-      const sameScope = Array.isArray(liveFamilies)
-        && liveFamilies.length === eligibleFamilies.length
-        && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
-      if (sameScope) {
-        // Price re-verification (codex pre-push P0): a live quote is reused
-        // ONLY when the server recompute over ITS OWN inputs still lands on
-        // the frozen totals — a pricing-config change since mint archives
-        // the row and re-prices instead of re-serving the old dollars
-        // (owner ruling: restart ALWAYS reprices at the current price).
-        // Any recompute miss falls through to the fresh mint, whose own
-        // recompute is the dollar authority.
-        let samePrice = false;
-        try {
-          const check = await persistence.serverRecomputeFromEstimateData(parseJson(live.estimate_data, {}), {
-            priorQualifyingServices: [...ownedFamilies],
-            recurringCustomer: ownedFamilies.length > 0,
-          });
-          const cents = (v) => Math.round(Number(v || 0) * 100);
-          const t = check?.recomputed ? (check.serverTotals || {}) : null;
-          samePrice = !!t
-            && cents(t.monthlyTotal) === cents(live.monthly_total)
-            && (cents(t.annualTotal) || cents(t.monthlyTotal) * 12) === cents(live.annual_total)
-            && cents(t.onetimeTotal) === cents(live.onetime_total);
-        } catch (err) {
-          logger.warn(`[plan-restart] reuse price re-verification failed for ${fresh.id} — re-minting: ${err.message}`);
-        }
-        if (samePrice) {
-          return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
-        }
-      }
-    }
-    // Minting a replacement: archive the WHOLE unaccepted restart lineage
-    // first — not just a scope-mismatched live row. An EXPIRED restart quote
-    // left unarchived stays revivable for seven days through
-    // /extension-request (restart mints stamp sent_at), which would put an
-    // older price or cancellation scope back in the wild beside the new
-    // quote (codex GH r6 P1). Query-shaped (not the limit-10 id list) so no
-    // straggler row survives; accepted rows are history and stay.
-    await trx('estimates')
-      .where({ customer_id: fresh.id, source: SOURCE })
-      .whereNull('archived_at')
-      .whereNot('status', 'accepted')
-      .update({ archived_at: nowDate, updated_at: nowDate });
 
     // Property context: profile first, then the SAME cache-only lookup +
     // accepted-estimate seed discipline the portal offer surfaces price
@@ -532,6 +482,41 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     const serverTier = recomputed.rawEngineResult?.waveGuard?.tier
       || recomputed.rawEngineResult?.waveGuard?.label || null;
 
+    // Reuse decision — only NOW, with today's property context resolved,
+    // the commercial / verified-override / review-marker gates passed, and
+    // TODAY's recompute in hand (codex pre-push P0): a live quote is handed
+    // back only when it names exactly today's eligible families AND today's
+    // totals land on its frozen dollars. Anything else — price-config
+    // drift, corrected measurements, a changed scope — retires the lineage
+    // and mints fresh (owner ruling: restart ALWAYS reprices at the
+    // current price; idempotent button, one honorable price at a time).
+    const live = liveRestartEstimate(priorRows, nowDate);
+    if (live) {
+      const liveFamilies = parseJson(live.estimate_data, {})?.planRestart?.families;
+      const sameScope = Array.isArray(liveFamilies)
+        && liveFamilies.length === eligibleFamilies.length
+        && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
+      const cents = (v) => Math.round(Number(v || 0) * 100);
+      if (sameScope
+        && cents(monthlyTotal) === cents(live.monthly_total)
+        && cents(annualTotal) === cents(live.annual_total)
+        && cents(onetimeTotal) === cents(live.onetime_total)) {
+        return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+      }
+    }
+    // Minting a replacement: archive the WHOLE unaccepted restart lineage
+    // first — an EXPIRED restart quote left unarchived stays revivable for
+    // seven days through /extension-request (restart mints stamp sent_at),
+    // which would put an older price or cancellation scope back in the wild
+    // beside the new quote (codex GH r6 P1). Query-shaped (not the limit-10
+    // id list) so no straggler row survives; accepted rows are history and
+    // stay.
+    await trx('estimates')
+      .where({ customer_id: fresh.id, source: SOURCE })
+      .whereNull('archived_at')
+      .whereNot('status', 'accepted')
+      .update({ archived_at: nowDate, updated_at: nowDate });
+
     const token = randomBytes(16).toString('hex');
     const [created] = await trx('estimates').insert({
       estimate_data: JSON.stringify(estimateData),
@@ -665,11 +650,15 @@ async function assertRestartAcceptEligible(trx, estimate) {
   // accept would re-price — refuse; the customer re-taps for a fresh quote.
   const owned = new Set(ownedFamilies.map(pricingKeyFor));
   if (quoted.some((f) => owned.has(pricingKeyFor(f)))) throw changed();
-  // Every quoted family must belong to the latest cancellation attempt —
-  // an older quote surviving a re-cancellation with a different scope must
-  // not restart a service outside the plan the customer just cancelled.
-  const latestSet = new Set((latestFamilies || []).map(pricingKeyFor));
-  if (quoted.some((f) => !latestSet.has(pricingKeyFor(f)))) throw changed();
+  // The quote must EQUAL the latest attempt's eligible set (families minus
+  // residual-owned) — not merely fit inside it: after a broader
+  // re-cancellation, an older narrower quote would restart a subset at a
+  // composition the current attempt never priced (codex pre-push P1 on GH
+  // r8; same equality the mint's reuse check applies).
+  const latestEligible = (latestFamilies || []).filter((f) => !owned.has(pricingKeyFor(f)));
+  const latestSet = new Set(latestEligible.map(pricingKeyFor));
+  const quotedSet = new Set(quoted.map(pricingKeyFor));
+  if (quotedSet.size !== latestSet.size || [...quotedSet].some((k) => !latestSet.has(k))) throw changed();
 }
 
 module.exports = {

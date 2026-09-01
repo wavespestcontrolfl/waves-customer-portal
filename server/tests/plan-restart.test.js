@@ -325,8 +325,8 @@ describe('mintRestartEstimate', () => {
     });
     const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     expect(result.reused).toBe(false);
-    // Verification + the fresh mint's own recompute.
-    expect(recompute).toHaveBeenCalledTimes(2);
+    // One recompute serves both the reuse comparison and the fresh mint.
+    expect(recompute).toHaveBeenCalledTimes(1);
     expect(tables.estimates.find((r) => r.id === 'est-old-price').archived_at).not.toBeNull();
     expect(Number(tables.estimates.find((r) => r.id !== 'est-old-price').monthly_total)).toBe(138);
   });
@@ -703,6 +703,15 @@ describe('assertRestartAcceptEligible', () => {
       { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
     ];
     await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test('a NARROWER older quote refuses too — the quote must EQUAL the latest attempt\'s eligible set (codex pre-push P1)', async () => {
+    // The latest attempt (default case) cancelled pest + lawn; an older
+    // pest-only token would restart a subset at a composition the current
+    // attempt never priced.
+    tables.estimates[0].estimate_data = JSON.stringify({ planRestart: { families: ['pest_control'] } });
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
   });
 
   test('a quote from an EARLIER cancellation refuses once a re-cancellation changed the scope (codex GH r8 P1)', async () => {
