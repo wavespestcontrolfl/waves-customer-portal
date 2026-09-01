@@ -54,6 +54,7 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
+ *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -1447,6 +1448,18 @@ const gates = {
   // route answers the generic 404, indistinguishable from an unknown token.
   // Enable with GATE_ESTIMATE_SERVICE_OPT_OUT=true.
   estimateServiceOptOut: process.env.GATE_ESTIMATE_SERVICE_OPT_OUT === 'true',
+
+  // Owner-side "reading it now" bell: when the engagement engine's
+  // multi_view_high_intent rule matches on a page open (>= minSessions
+  // sittings inside windowHours — the DB-tunable rule params), raise ONE
+  // admin notification per estimate per 24h so the owner can call while the
+  // estimate is open in front of the customer. NOT a customer message — the
+  // customer email job path is untouched. Category estimate_hot_view is
+  // silent by default under the admin bell policy (owner ruling 2026-08-28)
+  // and the owner enables it under push settings.
+  // STRICT opt-in in EVERY environment (a local run must never ring the
+  // office). Enable with GATE_ESTIMATE_HOT_VIEW_ALERT=true.
+  estimateHotViewAlert: process.env.GATE_ESTIMATE_HOT_VIEW_ALERT === 'true',
 
   // The `lawn_area` block on POST /public/quote/calculate — the priced
   // treatable-area basis the website estimator renders as "Priced for N sq

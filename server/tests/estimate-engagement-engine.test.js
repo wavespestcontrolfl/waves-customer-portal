@@ -39,6 +39,12 @@ jest.mock('../services/click-followup-gate', () => ({
   leadConvertedSince: jest.fn(async () => ({ converted: false })),
   phoneConvertedSince: jest.fn(async () => ({ converted: false })),
 }));
+// The owner-side hot-view bell rides the multi_view_high_intent match but is
+// its own gated module with its own suite (estimate-hot-view-alert.test.js);
+// inert here so this suite keeps pinning the email lane alone.
+jest.mock('../services/estimate-hot-view-alert', () => ({
+  maybeRaiseHotViewAlert: jest.fn(async () => ({ raised: false, reason: 'mocked' })),
+}));
 jest.mock('../services/estimate-engagement-sessions', () => ({
   sessionsForEstimate: jest.fn(async () => []),
   SESSION_GAP_MINUTES: 30,
@@ -265,6 +271,30 @@ describe('onEstimateViewed (view-event rules)', () => {
     await Engine.onEstimateViewed(baseEstimate(), NOW);
 
     expect(rawJobs.map((j) => j.bindings[1])).toEqual(['multi_view_high_intent']);
+    // The owner-side hot-view bell rides the SAME match: called once with the
+    // estimate, the sessions, the live rule row, and the hook's clock. Its
+    // own gate/dedupe live in estimate-hot-view-alert (own suite).
+    const { maybeRaiseHotViewAlert } = require('../services/estimate-hot-view-alert');
+    expect(maybeRaiseHotViewAlert).toHaveBeenCalledTimes(1);
+    expect(maybeRaiseHotViewAlert).toHaveBeenCalledWith(expect.objectContaining({
+      estimate: expect.objectContaining({ id: 'est-1' }),
+      sessions: expect.any(Array),
+      rule: expect.objectContaining({ rule_key: 'multi_view_high_intent' }),
+      now: NOW,
+    }));
+  });
+
+  test('the hot-view bell hook does not fire when multi_view_high_intent does not match', async () => {
+    enqueueViewRules();
+    sessionsForEstimate.mockResolvedValue([
+      session('2026-06-06T12:00:00Z', '2026-06-06T12:10:00Z'),
+      session('2026-06-10T14:55:00Z'),
+    ]);
+
+    await Engine.onEstimateViewed(baseEstimate(), NOW);
+
+    const { maybeRaiseHotViewAlert } = require('../services/estimate-hot-view-alert');
+    expect(maybeRaiseHotViewAlert).not.toHaveBeenCalled();
   });
 
   test('prior send or terminal job suppresses the enqueue inside ONE statement', async () => {
