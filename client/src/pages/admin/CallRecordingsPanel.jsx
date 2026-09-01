@@ -42,6 +42,11 @@ import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudi
 import { formatAddress } from "../../utils/format-address";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
+// Only the process route's documented 409 conflict is a classifiable process
+// outcome; any other non-2xx keeps the server's own message rather than
+// being flattened into "did not confirm the run" (pre-push audit P1).
+const processConflict = (err) => (err?.status === 409 && err?.body?.reason ? err.body : null);
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple/gray fold to zinc tokens. Semantic green/amber/red preserved.
 const D = {
@@ -99,6 +104,7 @@ function adminFetch(path, options = {}) {
         message = payload?.error || payload?.message || message;
       } catch { /* non-JSON error body */ }
       const error = new Error(message);
+      error.status = r.status;
       error.body = payload;
       throw error;
     }
@@ -284,9 +290,11 @@ export default function CallRecordingsPanel() {
     } catch (e) {
       // A 409 arrives here as a thrown error but is a real, classifiable
       // outcome — read it as one rather than reporting a bare failure.
-      const verdict = e?.body ? describeProcessResult(e.body) : null;
-      if (verdict) showToast(verdict.text, verdict.severity);
-      else showToast(`Failed: ${e.message}`, "failed");
+      const conflict = processConflict(e);
+      if (conflict) {
+        const verdict = describeProcessResult(conflict);
+        showToast(verdict.text, verdict.severity);
+      } else showToast(`Failed: ${e.message}`, "failed");
     }
   };
 
@@ -724,7 +732,8 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
       if (!stillShowing()) return;
       // Same as processOne: a 409 blocked claim is a classifiable outcome,
       // not a bare failure.
-      setProcessVerdict(e?.body ? describeProcessResult(e.body) : {
+      const conflict = processConflict(e);
+      setProcessVerdict(conflict ? describeProcessResult(conflict) : {
         didWork: false,
         severity: "failed",
         text: `Process failed — ${e.message || "unknown error"}`,

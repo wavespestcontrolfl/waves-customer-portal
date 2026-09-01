@@ -37,6 +37,13 @@ import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudi
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
+// A 409 from the process route is the documented blocked-claim conflict and
+// carries a classifiable body. Any other non-2xx — an expired session, a
+// server error — is NOT a process outcome, and running it through the
+// interpreter would replace the server's actionable message with a generic
+// "did not confirm the run" (pre-push audit P1).
+const processConflict = (err) => (err?.status === 409 && err?.body?.reason ? err.body : null);
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // 'blocked' is amber, not alert red: nothing broke, but nothing ran either —
 // the operator has to hit Reprocess. alert-fg stays reserved for a genuine
@@ -94,6 +101,7 @@ async function adminFetch(path, options = {}) {
     // claim, which is a classifiable OUTCOME rather than a bare failure —
     // describeProcessResult turns it into the actionable line.
     const error = new Error(message);
+    error.status = response.status;
     error.body = payload;
     throw error;
   }
@@ -495,7 +503,8 @@ export default function CallLogTabV2() {
       setProcessResult({ ...verdict, callSid });
       await loadCalls(callLogSearch.trim());
     } catch (err) {
-      const verdict = err?.body ? describeProcessResult(err.body) : {
+      const conflict = processConflict(err);
+      const verdict = conflict ? describeProcessResult(conflict) : {
         didWork: false,
         severity: "failed",
         text: `Process failed — ${err.message || "unknown error"}`,
