@@ -5164,9 +5164,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // monthly_rate 0 pass on a catalog price and then receive rows with
       // neither a price nor collectible dues (Codex P0). For covered rows the
       // stamp is addon-only — mirror that exactly.
+      // Booster rows are is_recurring:false — completion bills them as one-off
+      // visits at their OWN price, so the member-series stripping deliberately
+      // does not touch them (:5488). Applying the covered-member addon-only
+      // rule to booster dates understated them and could 409 a legitimately
+      // priced series whose boosters carry the primary price (Codex P1).
+      const boosterDateSet = new Set(plannedBoosterDates);
       const floorForDate = (targetDate) => {
         const lines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective);
-        return memberSeriesCovered
+        return memberSeriesCovered && !boosterDateSet.has(targetDate)
           ? addonOnlyTotal(lines)
           : (calculateVisitFinancialsForAddons(pricing, lines).price || 0);
       };
