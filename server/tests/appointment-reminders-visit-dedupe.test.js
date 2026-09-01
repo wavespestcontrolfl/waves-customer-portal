@@ -59,7 +59,7 @@ function reminderRow(overrides = {}) {
  * recorded into `state.reminderUpdates` with the preceding where args.
  */
 function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
-  const state = { reminderUpdates: [] };
+  const state = { reminderUpdates: [], arChains: [] };
   let arCalls = 0;
   const genericChain = (firstValue = null) => {
     const c = {
@@ -91,13 +91,19 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
       arCalls += 1;
       if (arCalls === 1) return genericChain(); // stranded sweep (select → [])
       if (arCalls === 2) { const c = genericChain(); c.select = jest.fn().mockResolvedValue(rows); return c; }
-      // move-hold checks + flag updates
-      return genericChain(holdUntil ? { move_hold_until: holdUntil } : null);
+      // move-hold checks + flag updates. A function-valued holdUntil is
+      // read per check, so a test can raise the hold mid-flight (after
+      // the SMS handoff, before the email fallback's own recheck).
+      const hold = typeof holdUntil === 'function' ? holdUntil() : holdUntil;
+      return genericChain(hold ? { move_hold_until: hold } : null);
     }
     if (table === 'appointment_reminders as ar') {
-      // closeVisitTierRows' member-row scan (durable sent-state fallback).
+      // closeVisitTierRows' member-row scan (durable sent-state fallback)
+      // and visitReminderCopyInputs' member scan — chains recorded so the
+      // predicates can be asserted.
       const c = genericChain();
       c.select = jest.fn().mockResolvedValue(state.visitMemberRows || []);
+      state.arChains.push(c);
       return c;
     }
     if (String(table).startsWith('scheduled_services')) {
@@ -265,6 +271,47 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     );
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
   });
+
+  test('grouped copy inputs read SENDABLE members only: a pending-rebook sibling cannot set the advertised arrival (GH codex r5 P1)', async () => {
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // The member scan joins scheduled_services and filters to the same
+    // sendable statuses buildMergedServiceLabel uses — a 'rescheduled'
+    // placeholder that kept its visit_id is excluded from the earliest-
+    // arrival pick, not just from the label.
+    const memberScan = state.arChains.find((c) => c.whereIn.mock.calls.some(([col]) => col === 'ss.status'));
+    expect(memberScan).toBeDefined();
+    expect(memberScan.join).toHaveBeenCalledWith('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id');
+    expect(memberScan.whereIn).toHaveBeenCalledWith('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+  });
+
+  test('SMS failed, fallback email HELD by a move at its handoff: claim released as retryable, row unmarked — never suppressed (GH codex r5 P1)', async () => {
+    // The hold appears only AFTER the SMS provider handoff: the entry and
+    // pre-dispatch checks pass, the text fails, and the email fallback's
+    // own handoff recheck sees the in-progress move.
+    const state = installDb({
+      rows: [reminderRow()],
+      visitIdByService: { 'svc-1': VISIT },
+      holdUntil: () => (sendCustomerMessage.mock.calls.length > 0 ? new Date(fixedNow.getTime() + 3600000) : null),
+    });
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'PROVIDER_ERROR', retryable: true });
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(result.sent24h).toBe(0);
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledTimes(1);
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+      VISIT, 'reminder_24h', 'retry', expect.any(Date), 'tok-1',
+      { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
+    );
+    expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+  });
 });
 
 describe('grouped-visit reminder dedupe (72h tier wiring)', () => {
@@ -310,7 +357,7 @@ describe('round-3 wiring pins (source contracts)', () => {
   const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
 
   test('the SMS-fallback email carries the aggregated grouped hold note', () => {
-    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null })");
+    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null })");
     expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote })');
   });
 

@@ -387,7 +387,10 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // Send the email version of an appointment notice after the SMS could not be
 // delivered. Returns true if the email was sent. On no-email-on-file, raises the
 // no-channel admin alert. Best-effort — never throws.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null }) {
+// `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
+// the email handoff is recorded there as MOVE_HOLD so the notice defers
+// (row unmarked, visit claim released) instead of reading as suppressed.
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null }) {
   if (!customerId) return false;
   const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote });
   if (res?.ok) {
@@ -396,7 +399,14 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
   }
   // Grouped-move hold at the handoff: a deferral, not an unreachable
   // customer — no alert; the caller's unmarked row retries after release.
-  if (res?.held) return false;
+  // Surfaced as MOVE_HOLD (GH codex r5 P1): a bare false here read as
+  // "neither channel reached them" to the reminder cron, which finalized
+  // the visit effect as suppressed and closed the row — every member's
+  // only reminder lost instead of retried after the move.
+  if (res?.held) {
+    if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+    return false;
+  }
   if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
     // No usable channel: the SMS failed and email is either unavailable (no
     // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
@@ -554,7 +564,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     // A successful fallback email IS a real delivery (GH codex r2 P1):
     // callers that ledger the visit effect must see it, or a failed
     // finalize would skip the durable close and a sibling could resend.
-    const fallbackOk = await deliverAppointmentEmailFallback(emailArgs);
+    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome });
     if (fallbackOk && smsOutcome) smsOutcome.fallbackEmailOk = true;
   }
   return smsOk;
@@ -1160,6 +1170,13 @@ async function visitReminderCopyInputs(visitId, row) {
       .where('ss.visit_id', visitId)
       .where('ar.cancelled', false)
       .where('ar.windows_preclosed', false)
+      // Sendable members only, mirroring buildMergedServiceLabel (GH codex
+      // r5 P1): a 'rescheduled' pending-rebook sibling keeps its visit_id
+      // and its uncancelled reminder until a new stop is chosen, so its
+      // withdrawn appointment_time must not become the stop's advertised
+      // earliest arrival — the visit effect would then bar the live
+      // sibling from correcting it.
+      .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
       .select('ar.appointment_time', 'ar.scheduled_service_id');
     if (!members.length) return fallback();
     let earliest = new Date(members[0].appointment_time);
@@ -3429,12 +3446,33 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] Skipping email fallback for cancelled appointment ${scheduledServiceId || customerId}`);
         return;
       }
+      let cardHoldNote = null;
       if (reminderRow) {
         apptTime = new Date(reminderRow.appointment_time);
         serviceLabel = smsServiceLabelStored(reminderRow.service_type);
+        // Grouped stop (GH codex r5 P1): the bounced text was the visit's
+        // ONE reminder, sent by the claim owner on behalf of every member
+        // — rebuilding from the owner's row alone would email the owner's
+        // time and service. Rebuild the grouped copy from the CURRENT
+        // visit (earliest sendable member, merged member label, every
+        // held member's disclosure). Best-effort: a dissolved visit or a
+        // failed read falls through to the per-row copy above.
+        if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
+          try {
+            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+            if (svc?.visit_id) {
+              const copy = await visitReminderCopyInputs(svc.visit_id, reminderRow);
+              apptTime = copy.apptTime;
+              cardHoldNote = copy.holdNote;
+              serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: svc.visit_id });
+            }
+          } catch (visitErr) {
+            logger.warn(`[appt-remind] grouped copy rebuild failed for ${scheduledServiceId} — emailing the per-row copy: ${visitErr.message}`);
+          }
+        }
       }
 
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel });
+      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }
