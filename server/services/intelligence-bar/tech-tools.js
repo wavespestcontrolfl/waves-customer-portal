@@ -300,13 +300,15 @@ async function getStopDetails(input, techId = null) {
       // Re-verify the assignment AFTER the facts queries (same race the
       // visit-brief route closes, Codex P1 on #3638): they run outside
       // the scoped fetch above, so a dispatch reassignment during them
-      // would otherwise hand gate/garage/lockbox codes to the former
+      // would otherwise hand the stale authorized snapshot to the former
       // technician. Ownership KNOWN lost mid-request → withhold the WHOLE
       // answer (customer, notes, history), not just the codes — same as
-      // the visit-brief route's post-facts recheck. A facts FAILURE is
-      // different: fail-soft to property:null, rest of the answer intact.
+      // the visit-brief route's post-facts recheck, and INDEPENDENT of
+      // whether the facts read succeeded (a facts failure must not skip
+      // the only post-read ownership check). A facts FAILURE with
+      // ownership intact stays fail-soft: property null, rest intact.
       // Admin callers (no techId) skip the recheck.
-      if (facts && techId) {
+      if (techId) {
         const stillOwned = !!(await db('scheduled_services')
           .where({
             id: todayService.id,

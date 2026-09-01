@@ -171,6 +171,26 @@ describe('get_stop_details access-facts gate', () => {
     expect(r.customer).toBeUndefined();
   });
 
+  test('facts failure + ownership lost mid-read still withholds the WHOLE answer', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-1';
+    mockDeterministicVisitFacts.mockImplementation(async () => {
+      state.scheduled_services[0].technician_id = 'tech-2'; // reassigned mid-read
+      throw new Error('facts backend down');
+    });
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r).toEqual({ error: 'Customer not found' });
+  });
+
+  test('facts failure with ownership intact stays fail-soft for a tech caller', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-1';
+    mockDeterministicVisitFacts.mockRejectedValue(new Error('boom'));
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.property).toBeNull();
+    expect(r.todays_service).toMatchObject({ id: 's1' });
+  });
+
   test('a supplied service_id selects THAT stop, not an arbitrary sibling', async () => {
     mockVisitFactsGateEnabled.mockReturnValue(true);
     state.scheduled_services = [
