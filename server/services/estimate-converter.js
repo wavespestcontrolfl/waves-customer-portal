@@ -6259,9 +6259,16 @@ const EstimateConverter = {
               // setup × baseRate of the invoice's tax — a blended-rate
               // subtraction left part of that tax inside the coverage
               // basis. Residential (no rate) stays byte-identical.
+              // The unified setup fee leaves the coverage basis too (audit
+              // r4 P0): it is one-time setup money, never per-visit
+              // coverage value — leaving it in would split the fee across
+              // covered visits and overstate rebill fallbacks. Unified
+              // quotes are never commercial (quote basis excludes
+              // commercial), so it subtracts at face — no tax share.
               prepayAmount: draftInvoiceAmount != null
                 ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
-                  - prepayRodentSetupAmount * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
+                  - prepayRodentSetupAmount * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))
+                  - prepayUnifiedSetupAmount) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get

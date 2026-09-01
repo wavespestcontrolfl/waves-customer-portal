@@ -196,6 +196,10 @@ describe('decide-once enforcement on the billing/handoff paths (pre-push audit P
     // Copy: a riding fee suppresses the waiver claim in description AND notes.
     expect(src).toMatch(/prepayUnifiedSetupAmount > 0\s*\n\s*\/\/ The unified fee rides this invoice — never claim a waiver\./);
     expect(src).toMatch(/one-time setup fee billed with the prepay\./);
+    // The term's coverage basis excludes the one-time fee — prepayAmount
+    // subtracts it beside the rodent setup, so covered-visit math never
+    // splits setup money across visits.
+    expect(src).toMatch(/- prepayRodentSetupAmount \* \(1 \+ \(hasCommercialRecurring[\s\S]{0,120}- prepayUnifiedSetupAmount\) \* 100\) \/ 100\)/);
   });
 
   test('estimate page + payment previews disclose a frozen unified fee as CHARGED, never prepay-waived (source contracts)', () => {
