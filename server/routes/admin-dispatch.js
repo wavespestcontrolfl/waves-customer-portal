@@ -88,6 +88,7 @@ const {
   TWO_TREATMENT_PACKAGE_KEYS,
   FOLLOWUP_CHILD_INACTIVE_STATUSES,
 } = require('../services/typed-followup-obligation');
+const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -6642,6 +6643,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               svc.time_on_site_correction_seq = bumpedSeq;
             }
           }
+          // Freeze the closeout requirements in force at completion — the
+          // LOCKED row's catalog identity, not the handler-entry svc (same
+          // staleness rule as the tier snapshot below). Null = lookup failed:
+          // freeze nothing, readers keep the live-catalog fallback. An
+          // INCOMPLETE visit freezes nothing either (pre-push codex P1) —
+          // its eventual completion writes the real completion-time freeze,
+          // and first-freeze-wins would otherwise keep this stale one
+          // (mirrors the backfill migration's status='completed' scope).
+          const closeoutRequirementsSnapshot = isIncompleteVisit ? null
+            : await resolveCloseoutRequirementsSnapshotForCompletion({
+              trx,
+              serviceId: svc.id,
+              catalogServiceId: (lockedSvcRow || svc).service_id || null,
+              serviceType: (lockedSvcRow || svc).service_type || null,
+            });
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -6754,6 +6770,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // silently drop (or invent) an owed included treatment
             // (Codex r4).
             ...(followupSuggestion ? { typedFollowupVerdict: followupSuggestion } : {}),
+            // Closeout requirements frozen at completion: a later catalog
+            // edit or rename must not flip this visit's apparent status or
+            // mint attention alerts against closed history
+            // (service-closeout-requirements.js frozenCloseoutRequirements).
+            ...(closeoutRequirementsSnapshot ? { closeoutRequirements: closeoutRequirementsSnapshot } : {}),
           };
           const serviceData = {
             protocol: {

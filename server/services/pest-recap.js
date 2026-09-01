@@ -23,6 +23,7 @@
  */
 const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
+const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
@@ -415,6 +416,8 @@ async function submitRecap({
         ...(serviceRecordCols.is_callback ? ['is_callback'] : []),
         ...(serviceRecordCols.service_tier ? ['service_tier'] : []),
         ...(serviceRecordCols.service_tier_source ? ['service_tier_source'] : []),
+        ...(serviceRecordCols.service_id ? ['service_id'] : []),
+        ...(serviceRecordCols.service_type ? ['service_type'] : []),
       );
 
     // Tier/provenance/callback snapshot — the SAME shared builder the heavy
@@ -445,6 +448,26 @@ async function submitRecap({
         isCallback: locked ? locked.is_callback === true : !!svc.is_callback,
       });
     } catch { tierSnapshot = {}; /* legacy insert shape — never block the recap */ }
+
+    // Freeze the closeout requirements in force at completion.
+    // Identity (GH codex r2 P2): a re-recap of an ALREADY-COMPLETED record
+    // freezes the RECORD's own historical identity — update-details may
+    // have repointed the scheduled row after completion, and the freeze
+    // must record the service that actually completed (same rule as the
+    // backfill migration). A recap that IS the completion uses the LOCKED
+    // row's identity (codex r20 rule, as frozenTraceIdentity below).
+    // SAVEPOINT-wrapped inside the helper; null = lookup failed, freeze
+    // nothing — never block the recap.
+    const recapFreezeIdentity = (existing && String(existing.status) === 'completed'
+      && (existing.service_id || existing.service_type))
+      ? existing
+      : (locked || svc);
+    const closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+      trx,
+      serviceId,
+      catalogServiceId: recapFreezeIdentity.service_id || null,
+      serviceType: recapFreezeIdentity.service_type || null,
+    });
 
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
@@ -589,6 +612,23 @@ async function submitRecap({
         ...smsClaim,
         updated_at: new Date(),
       });
+      // Merge-if-absent requirement freeze — ATOMIC guarded jsonb key
+      // merge on the CURRENT column value (GH codex r2 P1): concurrent
+      // structured_notes writers (deferred completion finalization's SMS
+      // claims) merge keys without the scheduled-service lock, so a
+      // whole-column read-modify-write here could erase them. The IS NULL
+      // guard keeps first-freeze-wins.
+      if (closeoutSnap && !existingNotes.closeoutRequirements) {
+        await trx('service_records')
+          .where({ id: existing.id })
+          .whereRaw(`(structured_notes -> 'closeoutRequirements') IS NULL`)
+          .update({
+            structured_notes: trx.raw(
+              `COALESCE(structured_notes, '{}'::jsonb) || jsonb_build_object('closeoutRequirements', ?::jsonb)`,
+              [JSON.stringify(closeoutSnap)],
+            ),
+          });
+      }
       recordId = existing.id;
     } else {
       const inserted = await trx('service_records').insert({
@@ -600,6 +640,9 @@ async function submitRecap({
         status: 'completed',
         technician_notes: note || null,
         ...tierSnapshot,
+        ...(closeoutSnap && serviceRecordCols.structured_notes
+          ? { structured_notes: JSON.stringify({ closeoutRequirements: closeoutSnap }) }
+          : {}),
         ...(Object.keys(frozenTraceIdentity).length
           ? { service_data: JSON.stringify(frozenTraceIdentity) }
           : {}),
