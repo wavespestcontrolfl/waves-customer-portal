@@ -23,6 +23,7 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
 const mockResolveLeadForUpdate = jest.fn();
@@ -47,6 +48,15 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 
 jest.mock('../services/intelligence-bar/tools', () => ({
   TOOLS: [],
+  // Mirror of the executor's sanitizer allowlist — the proposal's
+  // refuse-don't-drop key check (GH r20 P2) reads it.
+  UPDATABLE_FIELDS: {
+    first_name: 'first_name', last_name: 'last_name', email: 'email',
+    phone: 'phone', city: 'city', state: 'state', zip: 'zip',
+    address_line1: 'address_line1', address_line2: 'address_line2', waveguard_tier: 'waveguard_tier',
+    pipeline_stage: 'pipeline_stage', lead_source: 'lead_source',
+    monthly_rate: 'monthly_rate', active: 'active', notes: 'crm_notes',
+  },
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
@@ -57,7 +67,10 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], exec
 jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT_TOOLS: [], executeProcurementTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/review-tools', () => ({ REVIEW_TOOLS: [], executeReviewTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/review-tools', () => ({
+  REVIEW_TOOLS: [], executeReviewTool: jest.fn(), hasRecentReviewRequest: jest.fn(async () => false),
+  loadReviewRecipient: (...args) => mockLoadReviewRecipient(...args),
+}));
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
@@ -81,6 +94,9 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   cancelPendingAction: (...args) => mockCancelPendingAction(...args),
   recordResult: (...args) => mockRecordResult(...args),
 }));
+// create_appointment proposals project the customer's inspection credit
+// (W0B disclosure) — keep it off the db stub here.
+jest.mock('../services/inspection-credit', () => ({ projectRedeemableOfferAmount: jest.fn(async () => ({ amount: 0 })) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -158,6 +174,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
 
   afterAll(() => {
     delete process.env.GATE_IB_UI_CONFIRM;
+    // W0B r8: update_customer proposals resolve the target to a name for
+    // the card — the pin resolver must return a row or the proposal refuses.
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
   });
 
   test('echo attack: model-supplied confirmed:true is stripped, write is proposed not executed, id never reaches the model', async () => {
@@ -203,6 +222,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
   });
 
   test('legacy bare write (update_customer) is never executed from the loop — proposal synthesized', async () => {
+    // W0B r8: update_customer proposals resolve the target to a name for
+    // the card — the pin resolver must return a row or the proposal refuses.
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
     mockCreatePendingAction.mockResolvedValue({
       id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
     });
@@ -318,6 +340,9 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
 
   test('NO env value restores direct model-loop writes: retired gate=false still proposes', async () => {
     process.env.GATE_IB_UI_CONFIRM = 'false';
+    // W0B r8: update_customer proposals resolve the target to a name for
+    // the card — the pin resolver must return a row or the proposal refuses.
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
       [{ type: 'text', text: 'Proposed.' }],
@@ -458,7 +483,7 @@ describe('/confirm-action commit path', () => {
 
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
-      expect(mockClaimForConfirm).toHaveBeenCalledWith(PENDING_ID, 'admin-1');
+      expect(mockClaimForConfirm).toHaveBeenCalledWith(PENDING_ID, 'admin-1', { contractHash: null });
       expect(mockExecuteTool).toHaveBeenCalledWith(
         'create_customer',
         { first_name: 'Jeff', phone: '9415550100', confirmed: true },
@@ -864,7 +889,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
   test('bulk_update_leads: dry-run runs at proposal, stored params carry dry_run:false + the pinned id set', async () => {
     mockPreviewBulkLeadUpdate.mockResolvedValue({
-      dry_run: true,
+      all_names: ['lead a', 'lead b', 'lead c'].slice(0, 3), dry_run: true,
       matches: 3,
       matched_ids: ['l1', 'l2', 'l3'],
       preview: [{ name: 'Testa A' }, { name: 'Testb B' }],
@@ -885,7 +910,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
   });
 
   test('bulk_update_leads with zero matches proposes nothing', async () => {
-    mockPreviewBulkLeadUpdate.mockResolvedValue({ dry_run: true, matches: 0, matched_ids: [], preview: [] });
+    mockPreviewBulkLeadUpdate.mockResolvedValue({ all_names: ['lead a', 'lead b', 'lead c'].slice(0, 3), dry_run: true, matches: 0, matched_ids: [], preview: [] });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'bulk_update_leads', input: { current_status: 'unresponsive', new_status: 'lost' } }],
       [{ type: 'text', text: 'Nothing to do.' }],
@@ -906,6 +931,8 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
         params: { current_status: 'unresponsive', new_status: 'lost', dry_run: false, lead_ids: ['l1', 'l2'] },
       },
     });
+    // W0B set recheck: every pinned lead must still match at Confirm.
+    mockPreviewBulkLeadUpdate.mockResolvedValue({ matched_ids: ['l1', 'l2'] });
     mockExecuteTool.mockResolvedValue({ success: true, updated: 2 });
 
     await withServer(async (baseUrl) => {
