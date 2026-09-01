@@ -4249,7 +4249,12 @@ const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']
 // payment intents into B. It also neutralizes a slow /:token/data fetch: a
 // response for A that resolves after navigating to B lands on the unmounted
 // old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
-export function estimateHasRegulatedCertificateSurface(serviceCategory, services = [], oneTimeItems = []) {
+// The server's decision (estimate.regulatedCertificateSurface, computed from
+// the raw one-time rows before any breakdown alignment) wins outright; the
+// row-based derivation below is the fail-closed fallback for payloads that
+// predate the flag and for the dev-preview fixtures.
+export function estimateHasRegulatedCertificateSurface(serviceCategory, services = [], oneTimeItems = [], serverAffirmed = false) {
+  if (serverAffirmed === true) return true;
   const regulatedCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
   return regulatedCategories.has(serviceCategory)
     || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
@@ -5949,6 +5954,7 @@ function EstimateViewPageInner() {
     serviceCategory,
     services,
     pricing?.oneTimeBreakdown?.items || [],
+    estimate?.regulatedCertificateSurface === true,
   );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category

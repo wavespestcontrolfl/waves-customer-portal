@@ -148,6 +148,8 @@ function preslabScenario() {
     estimate: {
       ...BASE_ESTIMATE,
       serviceCategory: 'pre_slab_termiticide',
+      // Mirrors the server's regulated-surface decision on the /data payload.
+      regulatedCertificateSurface: true,
       isOneTimeOnly: true,
       defaultServiceMode: 'one_time',
     },
@@ -828,8 +830,8 @@ const recurringFixture = ({ key, label, category = key, monthly, visitsPerYear, 
   cta: { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking: false },
 });
 
-const oneTimeFixture = ({ category, service, label, amount, detail, intelligence = null, reviewBeforeBooking = false }) => ({
-  estimate: { ...BASE_ESTIMATE, serviceCategory: category, intelligence, isOneTimeOnly: true, defaultServiceMode: 'one_time' },
+const oneTimeFixture = ({ category, service, label, amount, detail, intelligence = null, reviewBeforeBooking = false, regulated = false }) => ({
+  estimate: { ...BASE_ESTIMATE, serviceCategory: category, intelligence, isOneTimeOnly: true, defaultServiceMode: 'one_time', ...(regulated ? { regulatedCertificateSurface: true } : {}) },
   pricing: {
     services: [],
     renderFlags: {},
@@ -873,7 +875,7 @@ function rodentScenario() {
 }
 
 function wdoScenario() {
-  return oneTimeFixture({ category: 'wdo_inspection', service: 'wdo_inspection', label: 'WDO Inspection', amount: 125, detail: 'Wood-destroying organism inspection with required Florida reporting' });
+  return oneTimeFixture({ category: 'wdo_inspection', service: 'wdo_inspection', label: 'WDO Inspection', amount: 125, detail: 'Wood-destroying organism inspection with required Florida reporting', regulated: true });
 }
 
 function termiteFoamScenario() {

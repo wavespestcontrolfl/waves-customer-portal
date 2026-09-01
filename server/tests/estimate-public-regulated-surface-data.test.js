@@ -119,6 +119,8 @@ describe('GET /:token/data — regulated certificate surface', () => {
       const body = await res.json();
       expect(body.estimate.intelligence ?? body.intelligence ?? null).toBeNull();
       expect(body.pricing.askChips).toEqual([]);
+      // The React page consumes this ahead of its own row-based derivation.
+      expect(body.estimate.regulatedCertificateSurface).toBe(true);
     });
   });
 
@@ -140,6 +142,7 @@ describe('GET /:token/data — regulated certificate surface', () => {
     await withServer(async (baseUrl) => {
       const body = await (await fetch(`${baseUrl}/estimates/termiteinspectiontoken/data`)).json();
       expect(body.pricing.askChips.length).toBeGreaterThan(0);
+      expect('regulatedCertificateSurface' in body.estimate).toBe(false);
     });
   });
 });

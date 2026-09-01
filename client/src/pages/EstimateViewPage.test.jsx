@@ -16,6 +16,15 @@ describe('regulated certificate estimate surfaces', () => {
       [{ service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment' }],
     )).toBe(true);
   });
+
+  it('honors the server decision when the public breakdown no longer carries the regulated row', () => {
+    // show_one_time_option alignment shape: category bundle, synthetic pest
+    // choice row only — the WDO row is gone from the rows the client sees.
+    const alignedRows = [{ service: 'one_time_pest', label: 'One-Time Pest Control' }];
+    const pest = [{ key: 'pest_control', name: 'Pest Control' }];
+    expect(estimateHasRegulatedCertificateSurface('bundle', pest, alignedRows)).toBe(false);
+    expect(estimateHasRegulatedCertificateSurface('bundle', pest, alignedRows, true)).toBe(true);
+  });
 });
 
 describe('EstimateAskBar', () => {

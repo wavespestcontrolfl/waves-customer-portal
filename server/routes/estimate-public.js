@@ -24888,6 +24888,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
           : (estimate.satellite_url || null),
         intelligence,
+        // The server's regulated-surface decision (WDO / pre-treatment
+        // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
+        // the raw one-time rows BEFORE any breakdown alignment. The React page
+        // consumes this ahead of its own row-based derivation, so a public
+        // breakdown that no longer carries the regulated row cannot resurrect
+        // the Ask bar (codex r5 P1). Present only when true so every other
+        // response stays byte-identical.
+        ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
