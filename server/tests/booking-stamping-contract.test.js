@@ -34,9 +34,11 @@ function makeConn(catalog = []) {
     chain.first = () => Promise.resolve(
       catalog.find((r) => r.id === chain._where?.id),
     );
-    chain.select = () => Promise.resolve(
-      catalog.filter((r) => r.is_active && String(r.name).toLowerCase() === String(chain._name || '').toLowerCase()),
-    );
+    chain.select = () => Promise.resolve(catalog.filter((r) => {
+      if (chain._where && !Object.entries(chain._where).every(([k, v]) => r[k] === v)) return false;
+      if (chain._name !== undefined && String(r.name).toLowerCase() !== String(chain._name).toLowerCase()) return false;
+      return true;
+    }));
     chain.insert = (payload) => { calls.inserts.push({ table, payload }); return chain; };
     chain.onConflict = (col) => { calls.onConflict.push(col); return chain; };
     chain.ignore = () => { calls.ignored += 1; chain._ignored = true; return chain; };
@@ -96,6 +98,13 @@ describe('validation (ungated)', () => {
     await expect(completeScheduledServiceInsert({ ...BASE, source_action: 'legacy_lane' }, { trx: makeConn(), cols: COLS }))
       .resolves.toBeTruthy();
   });
+
+  test('a null/blank payload source_action is treated as absent — the supplied source stamps over it', async () => {
+    for (const empty of [null, '']) {
+      const out = await run({ ...BASE, source_action: empty });
+      expect(out.source_action).toBe('test_lane');
+    }
+  });
 });
 
 describe('gate OFF — no behavioral enrichment', () => {
@@ -135,6 +144,19 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(out.service_id).toBe('svc-2');
     expect(out.service_key_snapshot).toBe('lawn_care');
     expect(out.service_category_snapshot).toBe('lawn');
+  });
+
+  test('a durable service_key_snapshot outranks the mutable name (deleted-catalog-row shape)', async () => {
+    // Row shape after ON DELETE SET NULL: snapshot key survives, id gone,
+    // and the display name has since been reused by a DIFFERENT service.
+    const catalog = [
+      { id: 'svc-new', name: 'Quarterly Pest Control', service_key: 'pest_q_v2', category: 'pest', is_active: true },
+      { id: 'svc-old', name: 'Quarterly Pest Control (2025)', service_key: 'pest_quarterly', category: 'pest', is_active: true },
+    ];
+    const out = await run({ ...BASE, service_key_snapshot: 'pest_quarterly' }, catalog);
+    expect(out.service_id).toBe('svc-old'); // resolved by the snapshot key, not the name
+    expect(out.service_key_snapshot).toBe('pest_quarterly'); // untouched
+    expect(out.service_category_snapshot).toBe('pest');
   });
 
   test('caller-stamped snapshot fields are never overridden', async () => {
@@ -205,6 +227,14 @@ describe('createScheduledService wrapper', () => {
       idempotencyKey: 'idem-1',
     });
     expect(row.idempotency_key).toBe('idem-1');
+  });
+
+  test('a SUPPLIED blank idempotencyKey fails closed instead of inserting unguarded', async () => {
+    for (const blank of ['', null]) {
+      await expect(createScheduledService({
+        trx: makeConn(), insertData: { ...BASE }, cols: COLS, source: { sourceAction: 'x' }, idempotencyKey: blank,
+      })).rejects.toThrow(/blank/);
+    }
   });
 
   test('idempotencyKey without the column throws instead of silently double-booking', async () => {

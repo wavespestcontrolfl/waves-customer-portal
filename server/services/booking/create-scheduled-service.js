@@ -50,9 +50,12 @@ function contractError(message) {
   return err;
 }
 
-// Resolve {service_id, service_key, category} from the live catalog for the
-// identity snapshot. service_id wins; otherwise a UNIQUE active name match
-// on service_type. Ambiguous or missing → null (the caller's row simply
+// Resolve {service_id, service_key, category} from the live catalog for
+// the identity snapshot, in DURABILITY order (the same precedence
+// service-catalog-names uses): service_id → the row's own
+// service_key_snapshot (survives a catalog-row delete's ON DELETE SET
+// NULL, unlike the mutable display name) → a UNIQUE active name match on
+// service_type. Ambiguous or missing → null (the caller's row simply
 // stays snapshot-less, exactly as today — enrichment never guesses).
 // A QUERY ERROR propagates: inside a PostgreSQL transaction the failed
 // statement has already aborted the trx, so swallowing it would only trade
@@ -64,6 +67,13 @@ async function resolveCatalogIdentity(conn, insertData) {
       .where({ id: insertData.service_id })
       .first('id', 'service_key', 'category');
     return row || null;
+  }
+  const snapshotKey = String(insertData.service_key_snapshot || '').trim();
+  if (snapshotKey) {
+    const byKey = await conn('services')
+      .where({ service_key: snapshotKey, is_active: true })
+      .select('id', 'service_key', 'category');
+    return byKey.length === 1 ? byKey[0] : null;
   }
   const name = String(insertData.service_type || '').trim();
   if (!name) return null;
@@ -112,10 +122,13 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   const data = { ...insertData };
 
   // Attribution stamps are part of the ungated contract — they add
-  // provenance, never change scheduling/billing behavior. Caller-provided
-  // values always win.
-  if (cols.source_action && data.source_action === undefined) data.source_action = sourceAction;
-  if (cols.booking_source && data.booking_source === undefined && source?.bookingSource) {
+  // provenance, never change scheduling/billing behavior. A caller's
+  // NON-EMPTY value always wins; null/'' counts as absent (a fixed-shape
+  // payload carrying source_action: null must not persist blank
+  // provenance past the requirement check — GH Codex P2).
+  const blank = (v) => v == null || v === '';
+  if (cols.source_action && blank(data.source_action)) data.source_action = sourceAction;
+  if (cols.booking_source && blank(data.booking_source) && source?.bookingSource) {
     data.booking_source = source.bookingSource;
   }
 
@@ -152,7 +165,14 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
  */
 async function createScheduledService({ trx, insertData, cols, source, idempotencyKey, allowNullCustomer } = {}) {
   const data = await completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer });
-  if (idempotencyKey) {
+  // Distinguish "idempotency not requested" (option omitted) from a
+  // SUPPLIED blank key: a caller that opted in but computed '' must fail
+  // closed, not fall through to an unguarded insert a retry would
+  // double-book (GH Codex P1).
+  if (idempotencyKey !== undefined) {
+    if (!idempotencyKey || typeof idempotencyKey !== 'string') {
+      throw contractError('idempotencyKey was supplied but is blank — refuse rather than insert unguarded');
+    }
     if (!cols.idempotency_key) throw contractError('idempotencyKey passed but scheduled_services has no idempotency_key column');
     // A payload carrying a DIFFERENT key would make the conflict guard
     // dedupe on the wrong value and let retries under the intended key

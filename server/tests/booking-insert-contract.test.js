@@ -29,8 +29,10 @@ const REPO_ROOT = path.join(SERVER_ROOT, '..');
 // seeds write historical/demo data by design; tests exercise mocks.
 const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'seeds', 'coverage', 'dist', 'fixtures']);
 
-// The contract's own home — the only place a new insert may live.
-const CONTRACT_HOME = path.join('server', 'services', 'booking');
+// The contract module itself — the ONLY file allowed to hold a bare
+// insert. Exempting the whole services/booking directory would let a new
+// sibling module become a parallel booking mechanism (GH Codex P2).
+const CONTRACT_MODULE = 'server/services/booking/create-scheduled-service.js';
 
 // Frozen 2026-09-01 inventory: 26 sites, 14 files. Shrink-only.
 const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
@@ -88,7 +90,7 @@ describe('booking insert-site contract', () => {
   const found = new Map(); // repo-relative path -> count
   for (const file of files) {
     const rel = relRepo(file);
-    if (rel.split('/').slice(0, 3).join('/').startsWith(CONTRACT_HOME.split(path.sep).join('/'))) continue;
+    if (rel === CONTRACT_MODULE) continue;
     const n = countInsertSites(fs.readFileSync(file, 'utf8'));
     if (n > 0) found.set(rel, n);
   }
