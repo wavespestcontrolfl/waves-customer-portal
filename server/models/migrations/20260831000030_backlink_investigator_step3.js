@@ -50,9 +50,15 @@ exports.up = async function up(knex) {
   }
   if (await knex.schema.hasTable('seo_link_domains')) {
     const domCols = await knex('seo_link_domains').columnInfo();
+    // each column guarded independently — a partial prior run must neither
+    // skip the missing one nor re-add the existing one
     if (!domCols.investigate_after) {
       await knex.schema.alterTable('seo_link_domains', (t) => {
         t.timestamp('investigate_after');
+      });
+    }
+    if (!domCols.investigate_failures) {
+      await knex.schema.alterTable('seo_link_domains', (t) => {
         t.integer('investigate_failures').notNullable().defaultTo(0);
       });
     }

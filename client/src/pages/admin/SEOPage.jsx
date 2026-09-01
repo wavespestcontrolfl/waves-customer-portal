@@ -3292,7 +3292,7 @@ function BacklinkRegistryCard() {
                               </div>
                               {detail.attempts.map((a) => (
                                 <div key={a.id} style={{ fontSize: 12, color: D.text, padding: "2px 0" }}>
-                                  {new Date(a.created_at).toLocaleDateString()} · {a.provider} · {a.action} → {a.outcome}
+                                  {formatETDate(a.created_at)} · {a.provider} · {a.action} → {a.outcome}
                                   {a.cost_cents ? ` · $${(a.cost_cents / 100).toFixed(2)}` : ""}
                                   {a.sandbox ? " · sandbox" : ""}
                                 </div>
