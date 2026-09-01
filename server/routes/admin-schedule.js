@@ -9352,31 +9352,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 && resolveBillingLane(memberCustomer).mode === 'monthly_membership';
             }
           } catch { memberSeriesCovered = false; }
-          // SAME billable-amount gate as POST creation (Codex P0): this path
-          // also mints a recurring series, and its children are inserted with
-          // NO estimated_price of their own (only the member add-on stamp
-          // below), so an unpriced parent on a rate-less account spawns a
-          // whole plan that completes uninvoiced. Throws inside the
-          // transaction so nothing is written.
-          {
-            const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first()
-              .catch(() => null);
-            const spawnInv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
-            const unbillableSpawn = gateCustomer && recurringWithoutBillableAmount({
-              isRecurring: true,
-              // Children on this path carry no price of their own; a covered
-              // member's add-on stamp only ever ADDS, and that case exits on
-              // dues coverage before the amount matters.
-              recurringFloorPrice: 0,
-              customer: gateCustomer,
-              createInvoiceOnComplete: memberSeriesCovered ? false : spawnInv,
-              isCallback: !!parent.is_callback,
-              serviceType: parent.service_type,
-            });
-            if (unbillableSpawn) {
-              throw Object.assign(httpError(409, unbillableSpawn.error), { code: unbillableSpawn.code });
-            }
-          }
           // Make-this-recurring re-anchors the series on THIS row's current
           // values — stale template overrides from an earlier series life
           // must not shadow them for later extension writers. (Never
@@ -9444,6 +9419,52 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
           } catch { existingUpcomingChildren = 0; }
           const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
+          // SAME billable-amount gate as POST creation (Codex P0, round 19):
+          // this path also mints a recurring series and never consulted it.
+          // Placed HERE because every input the insert loop prices with is in
+          // scope: the planned child dates, the parent's stored financials,
+          // the date-filtered add-ons and the discount scope. An earlier cut
+          // hardcoded the floor to 0 on the belief that children carry no
+          // price — wrong, applyStoredVisitFinancials copies the parent's
+          // price onto each child (:9507), so priced per_visit appointments
+          // were refused (Codex P1, round 20). Same calculation as the loop,
+          // minimum across the dates it will actually write.
+          {
+            const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first().catch(() => null);
+            const gateDates = [baseDateStr, ...planSpawnChildDates({
+              baseDateStr, pattern: recurringPattern, rOpts, skip: skipChild, dir: dirChild,
+              seen: new Set(), spawnCount, spawnTarget, blackoutDates: spawnBlackoutDates,
+            })];
+            const spawnInv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
+            const spawnFloor = gateDates.reduce((min, d) => {
+              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, spawnBlackoutDates, skipChild);
+              if (memberSeriesCovered) {
+                // Covered rows are stamped add-on-only, mirroring the insert.
+                const addonStamp = dueAddons.reduce((sum, a) => {
+                  const n = Number(a.estimated_price);
+                  return Number.isFinite(n) && n > 0 ? sum + n : sum;
+                }, 0);
+                return Math.min(min, addonStamp);
+              }
+              const f = calculateStoredVisitFinancials(
+                { ...parent, discount_type: discountType !== undefined ? discountType : parent.discount_type,
+                  discount_amount: discountAmount !== undefined ? discountAmount : parent.discount_amount },
+                dueAddons, parentAddons, storedDiscountScope,
+              );
+              return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
+            }, Infinity);
+            const unbillableSpawn = gateCustomer && recurringWithoutBillableAmount({
+              isRecurring: true,
+              recurringFloorPrice: Number.isFinite(spawnFloor) ? spawnFloor : 0,
+              customer: gateCustomer,
+              createInvoiceOnComplete: memberSeriesCovered ? false : spawnInv,
+              isCallback: !!parent.is_callback,
+              serviceType: parent.service_type,
+            });
+            if (unbillableSpawn) {
+              throw Object.assign(httpError(409, unbillableSpawn.error), { code: unbillableSpawn.code });
+            }
+          }
           // Iterate by inserts (matches POST spawn): skip-weekends can
           // collapse multiple raw recurrences onto the same shifted weekday,
           // and a fixed-count plan still owes spawnTarget children. Same
