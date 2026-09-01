@@ -765,10 +765,16 @@ async function investigatePaths(db, {
         // Compare-and-set against the SELECTED state — an admin reject/watch
         // or a lane move between selection and this statement wins, and the
         // claim is abandoned before any fetch is spent.
-        if (claimState && domain.agent_state !== 'investigating') {
+        // …and a row SELECTED as `investigating` still re-validates with the
+        // same CAS (a cheap touch): an admin reject/watch between selection
+        // and this statement must stop the paid work here, not after the
+        // fetches and model call.
+        if (claimState) {
           const claimed = await db('seo_link_domains')
             .where({ id: domain.id, agent_state: domain.agent_state })
-            .update({ agent_state: 'investigating', updated_at: now });
+            .update(domain.agent_state === 'investigating'
+              ? { updated_at: now }
+              : { agent_state: 'investigating', updated_at: now });
           if (!claimed) { out.staleClaims += 1; continue; }
         }
 
