@@ -16,7 +16,12 @@ const ALL_SCENARIOS = [
   'proposal_structured', 'proposal_programs', 'preslab',
 ];
 const requestedScenarios = String(process.env.ESTIMATE_PREVIEW_SCENARIOS || '').split(',').map((value) => value.trim()).filter(Boolean);
+const unknownScenarios = requestedScenarios.filter((scenario) => !ALL_SCENARIOS.includes(scenario));
+if (unknownScenarios.length) {
+  throw new Error(`Unknown estimate preview scenario(s): ${unknownScenarios.join(', ')}`);
+}
 const SCENARIOS = requestedScenarios.length ? ALL_SCENARIOS.filter((scenario) => requestedScenarios.includes(scenario)) : ALL_SCENARIOS;
+if (!SCENARIOS.length) throw new Error('No estimate preview scenarios selected');
 const VIEWPORTS = { desktop: { width: 1280, height: 900 }, mobile: { width: 390, height: 844 } };
 const baseUrl = process.env.ESTIMATE_PREVIEW_BASE_URL || 'http://127.0.0.1:4178';
 const artifactDir = process.env.ESTIMATE_PREVIEW_ARTIFACT_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'waves-estimate-audit-'));
