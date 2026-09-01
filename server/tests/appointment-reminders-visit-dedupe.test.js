@@ -64,7 +64,7 @@ function reminderRow(overrides = {}) {
  * recorded into `state.reminderUpdates` with the preceding where args.
  */
 function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {} }) {
-  const state = { reminderUpdates: [], arChains: [] };
+  const state = { reminderUpdates: [], arChains: [], ssChains: [] };
   let arCalls = 0;
   const genericChain = (firstValue = null) => {
     const c = {
@@ -103,12 +103,19 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {
       return genericChain(hold ? { move_hold_until: hold } : null);
     }
     if (table === 'appointment_reminders as ar') {
-      // closeVisitTierRows' member-row scan (durable sent-state fallback)
-      // and visitReminderCopyInputs' member scan — chains recorded so the
-      // predicates can be asserted.
+      // closeVisitTierRows' member-row scan (member rows to close).
       const c = genericChain();
       c.select = jest.fn().mockResolvedValue(state.visitMemberRows || []);
       state.arChains.push(c);
+      return c;
+    }
+    if (table === 'scheduled_services as ss') {
+      // visitReminderCopyInputs' member scan (scheduled_services-driven,
+      // reminder row optional) — chains recorded so the predicates can be
+      // asserted.
+      const c = genericChain();
+      c.select = jest.fn().mockResolvedValue(state.visitMemberRows || []);
+      state.ssChains.push(c);
       return c;
     }
     if (String(table).startsWith('scheduled_services')) {
@@ -315,6 +322,30 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(1);
   });
 
+  test('a live sibling with NO reminder row still sets the earliest arrival + its hold line (GH codex r8 P1)', async () => {
+    // svc-2 has no appointment_reminders row (registration failed / self-heal
+    // backlog); its time composes from scheduled_date + window_start and it
+    // is EARLIER than the owner.
+    const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
+    state.visitMemberRows = [
+      { scheduled_service_id: 'svc-1', scheduled_date: '2026-05-07', window_start: '09:00:00', appointment_time: new Date('2026-05-07T13:00:00.000Z') },
+      { scheduled_service_id: 'svc-2', scheduled_date: '2026-05-07', window_start: '08:00:00', appointment_time: null },
+    ];
+    const { cardHoldReminderLine } = require('../services/estimate-card-holds');
+    cardHoldReminderLine.mockImplementation(async (id) => (id === 'svc-2' ? 'Unregistered sibling hold clause.' : ''));
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-1', dedupeKey: `${VISIT}:reminder_24h:2026-05-07` });
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(smsTemplatesRouter.getTemplate).toHaveBeenCalledWith(
+      'reminder_24h',
+      expect.objectContaining({ time: '8:00 AM', card_hold_policy_line: 'Unregistered sibling hold clause.' }),
+      expect.anything(),
+    );
+    cardHoldReminderLine.mockImplementation(async () => '');
+  });
+
   test("'both' channel, SMS held at the quiet-hours boundary AFTER the email leg went out: the email is sent under the VISIT-scoped key so a sibling's retry dedupes (GH codex r7 P1)", async () => {
     const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT }, prefsRow: { service_reminder_24h_channel: 'both', email_enabled: true } });
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD' });
@@ -359,10 +390,14 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     // sendable statuses buildMergedServiceLabel uses — a 'rescheduled'
     // placeholder that kept its visit_id is excluded from the earliest-
     // arrival pick, not just from the label.
-    const memberScan = state.arChains.find((c) => c.whereIn.mock.calls.some(([col]) => col === 'ss.status'));
+    const memberScan = state.ssChains.find((c) => c.whereIn.mock.calls.some(([col]) => col === 'ss.status'));
     expect(memberScan).toBeDefined();
-    expect(memberScan.join).toHaveBeenCalledWith('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id');
+    // Membership comes from scheduled_services; the reminder row is a
+    // LEFT join (GH codex r8 P1 — a live sibling with no reminder row
+    // still shapes the grouped copy).
+    expect(memberScan.leftJoin).toHaveBeenCalledWith('appointment_reminders as ar', expect.any(Function));
     expect(memberScan.whereIn).toHaveBeenCalledWith('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+    expect(memberScan.whereNotNull).toHaveBeenCalledWith('ss.window_start');
   });
 
   test('SMS failed, fallback email HELD by a move at its handoff: claim released as retryable, row unmarked — never suppressed (GH codex r5 P1)', async () => {

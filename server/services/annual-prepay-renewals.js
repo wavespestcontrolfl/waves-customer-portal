@@ -1019,6 +1019,15 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       `The promised first visit (${promisedFirstVisit}) had already passed when payment arrived. Coverage now starts ${firstTargetDate} — confirm the new date with the customer.`);
   }
 
+  // Property identity for the visit-group stamp (GH codex #3699 r8 P2):
+  // prepaid seeds carry no estimate for the linkage regroup, so an
+  // unstamped property makes maybeGroupRow refuse forever. Only the
+  // customer's SOLE active property is unambiguous (same rule as the
+  // manual admin-schedule / admin-leads / availability bookings);
+  // multi-property customers stay office-placed. Resolved once per term.
+  const seedPropertyId = cols.property_id
+    ? await require('./customer-properties').soleActivePropertyId(term.customer_id, conn)
+    : null;
   const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
       customer_id: term.customer_id,
@@ -1028,6 +1037,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
+    if (cols.property_id && seedPropertyId) insertData.property_id = seedPropertyId;
     if (cols.service_id && coverageCatalogServiceId) insertData.service_id = coverageCatalogServiceId;
     if (cols.service_key_snapshot && coverageCatalogKey) insertData.service_key_snapshot = coverageCatalogKey;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;

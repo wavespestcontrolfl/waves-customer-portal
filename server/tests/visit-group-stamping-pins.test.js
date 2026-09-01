@@ -34,6 +34,12 @@ describe('every booking path stamps or deliberately skips', () => {
     expect((src.match(/VisitGroups\.maybeGroupRow\(/g) || []).length).toBe(2);
   });
 
+  test('annual-prepay timed seeds carry the sole-property anchor (GH codex r8 P2)', () => {
+    const src = read('services/annual-prepay-renewals.js');
+    expect(src).toContain("if (cols.property_id && seedPropertyId) insertData.property_id = seedPropertyId;");
+    expect(src).toMatch(/const seedPropertyId = cols\.property_id\s*\n\s*\? await require\('\.\/customer-properties'\)\.soleActivePropertyId\(term\.customer_id, conn\)/);
+  });
+
   test('admin-dispatch follow-up booking stamps inside the comms-lock trx', () => {
     const src = read('routes/admin-dispatch.js');
     expect(src).toMatch(/const inserted = await trx\('scheduled_services'\)\.insert\(insertData\)\.returning\('\*'\);[\s\S]{0,600}maybeGroupRow\(inserted\[0\]\.id, \{ database: trx, createdBy: 'dispatch' \}\)/);

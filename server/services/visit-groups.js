@@ -747,6 +747,41 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
  * one untouched row it dissolves too, returning both rows to the legacy
  * per-row path.
  */
+/**
+ * A row leaving a visit (split / split-triggered dissolve) carries the
+ * visit's already-decided reminder tiers with it (GH codex r8 P2): the
+ * owner's send closes every member row afterwards, but a split that lands
+ * between the ledger finalize and that close — or after a worker crash —
+ * leaves the detached row armed, and armed-without-a-visit means the
+ * per-row path texts the same tier again. Reads the ledger for the row's
+ * OWN occurrence date (the dedupe key carries it) and closes the row's
+ * flag for every tier the visit already sent or suppressed; a `failed`
+ * (retryable) tier stays armed — over-notify, never silence. Same
+ * transaction as the detach, so there is no window.
+ */
+const REMINDER_TIER_FLAGS = Object.freeze({
+  reminder_72h: ['reminder_72h_sent', 'reminder_72h_sent_at'],
+  reminder_24h: ['reminder_24h_sent', 'reminder_24h_sent_at'],
+});
+async function carryVisitReminderState(t, visit, rows) {
+  for (const row of rows) {
+    const keys = Object.keys(REMINDER_TIER_FLAGS)
+      .map((effectType) => dedupeKeyFor({ id: visit.id, scheduled_date: row.scheduled_date }, effectType));
+    const decided = await t('visit_effects')
+      .where({ visit_id: visit.id })
+      .whereIn('dedupe_key', keys)
+      .whereIn('status', ['sent', 'suppressed'])
+      .select('effect_type');
+    for (const eff of decided) {
+      const [flag, at] = REMINDER_TIER_FLAGS[eff.effect_type] || [];
+      if (!flag) continue;
+      await t('appointment_reminders')
+        .where({ scheduled_service_id: row.id, cancelled: false, [flag]: false })
+        .update({ [flag]: true, [at]: t.fn.now() });
+    }
+  }
+}
+
 async function splitChild({ visitId, scheduledServiceId, createdBy }) {
   return db.transaction(async (t) => {
     const visit = await t('service_visits').where({ id: visitId }).first();
@@ -764,6 +799,7 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
     if (!child) throw new Error('row is not a member of this visit');
 
     await t('scheduled_services').where({ id: child.id }).update({ visit_id: null });
+    await carryVisitReminderState(t, visit, [child]);
 
     const remaining = await t('scheduled_services')
       .where({ visit_id: visitId })
@@ -773,7 +809,9 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
     if (Number(remaining.n) <= 1) {
       const still = await visitActivity(visitId, t);
       if (canDissolve(still).ok) {
+        const lastMembers = await t('scheduled_services').where({ visit_id: visitId }).select('id', 'scheduled_date');
         await t('scheduled_services').where({ visit_id: visitId }).update({ visit_id: null });
+        await carryVisitReminderState(t, visit, lastMembers);
         await t('service_visits').where({ id: visitId })
           .update({ status: 'dissolved', close_reason: 'operator', closed_at: t.fn.now() });
         dissolved = true;

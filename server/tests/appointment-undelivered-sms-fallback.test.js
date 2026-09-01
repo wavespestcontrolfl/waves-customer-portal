@@ -344,8 +344,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     const ownerRow = { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' };
     const membersChain = chain({});
     membersChain.select = jest.fn(async () => [
-      { appointment_time: '2026-06-22T14:00:00.000Z', scheduled_service_id: 'ss-owner' },
-      { appointment_time: '2026-06-22T13:00:00.000Z', scheduled_service_id: 'ss-sib' },
+      { appointment_time: '2026-06-22T14:00:00.000Z', scheduled_service_id: 'ss-owner', scheduled_date: '2026-06-22', window_start: '10:00:00' },
+      { appointment_time: '2026-06-22T13:00:00.000Z', scheduled_service_id: 'ss-sib', scheduled_date: '2026-06-22', window_start: '09:00:00' },
     ]);
     const labelChain = chain({});
     labelChain.select = jest.fn(async () => [
@@ -359,7 +359,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       appointment_reminders: [chain({ first: ownerRow }), chain({})], // owner row + email-handoff move-hold recheck (no hold)
       scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
       service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-22' } })],
-      'appointment_reminders as ar': [membersChain, labelChain],
+      'scheduled_services as ss': [membersChain],
+      'appointment_reminders as ar': [labelChain],
       'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
       scheduled_service_addons: [chain({}), chain({})],
     });

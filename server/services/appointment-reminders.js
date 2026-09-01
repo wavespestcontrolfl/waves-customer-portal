@@ -580,17 +580,24 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
 // visit genuinely has no time" (null — fee-free is correct) from "the
 // lookup FAILED" (unresolved — a fee may still apply); the default
 // fail-soft null is unchanged for every existing caller.
+// Pure composer for the row shape above ({ scheduled_date, window_start }):
+// null when either part is missing.
+function composeScheduledApptTime(svc) {
+  if (!svc) return null;
+  const datePart = svc.scheduled_date instanceof Date
+    ? svc.scheduled_date.toISOString().slice(0, 10)
+    : String(svc.scheduled_date || '').slice(0, 10);
+  const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+  return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+}
+
 async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = false } = {}) {
   try {
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('scheduled_date', 'window_start');
     if (!svc) return null;
-    const datePart = svc.scheduled_date instanceof Date
-      ? svc.scheduled_date.toISOString().slice(0, 10)
-      : String(svc.scheduled_date || '').slice(0, 10);
-    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
-    return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+    return composeScheduledApptTime(svc);
   } catch (err) {
     logger.warn(`[appt-remind] appt-time lookup failed for service ${scheduledServiceId}: ${err.message}`);
     if (throwOnError) throw err;
@@ -1184,24 +1191,37 @@ async function visitReminderCopyInputs(visitId, row) {
   const fallback = async () => ({ apptTime: new Date(row.appointment_time), holdLine: await ownLine(), holdNote: null });
   if (!visitId) return fallback();
   try {
-    const members = await db('appointment_reminders as ar')
-      .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+    // Member set from scheduled_services — the visit's own membership —
+    // with the reminder row OPTIONAL (GH codex r8 P1): a live sibling whose
+    // reminder registration failed (or is still in the self-heal backlog)
+    // must not vanish from the grouped copy; its time composes from its
+    // own date + window instead, exactly as the recovery paths do.
+    // Sendable members only, mirroring buildMergedServiceLabel (GH codex
+    // r5 P1): a 'rescheduled' pending-rebook sibling keeps its visit_id
+    // and its uncancelled reminder until a new stop is chosen, so its
+    // withdrawn appointment_time must not become the stop's advertised
+    // earliest arrival — the visit effect would then bar the live
+    // sibling from correcting it. Windowless pre-closed placeholders stay
+    // out (they share 08:00 by convention only).
+    const rows = await db('scheduled_services as ss')
+      .leftJoin('appointment_reminders as ar', function reminderRow() {
+        this.on('ar.scheduled_service_id', 'ss.id').andOn('ar.cancelled', db.raw('false'));
+      })
       .where('ss.visit_id', visitId)
-      .where('ar.cancelled', false)
-      .where('ar.windows_preclosed', false)
-      // Sendable members only, mirroring buildMergedServiceLabel (GH codex
-      // r5 P1): a 'rescheduled' pending-rebook sibling keeps its visit_id
-      // and its uncancelled reminder until a new stop is chosen, so its
-      // withdrawn appointment_time must not become the stop's advertised
-      // earliest arrival — the visit effect would then bar the live
-      // sibling from correcting it.
       .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
-      .select('ar.appointment_time', 'ar.scheduled_service_id');
+      .whereNotNull('ss.window_start')
+      .select('ss.id as scheduled_service_id', 'ss.scheduled_date', 'ss.window_start', 'ar.appointment_time', 'ar.windows_preclosed');
+    const members = [];
+    for (const m of Array.isArray(rows) ? rows : []) {
+      if (m.windows_preclosed === true) continue;
+      const t = m.appointment_time ? new Date(m.appointment_time) : composeScheduledApptTime(m);
+      if (!(t instanceof Date) || Number.isNaN(t.getTime())) continue;
+      members.push({ scheduled_service_id: m.scheduled_service_id, apptTime: t });
+    }
     if (!members.length) return fallback();
-    let earliest = new Date(members[0].appointment_time);
+    let earliest = members[0].apptTime;
     for (const m of members) {
-      const t = new Date(m.appointment_time);
-      if (t < earliest) earliest = t;
+      if (m.apptTime < earliest) earliest = m.apptTime;
     }
     const lines = [];
     const notes = [];
