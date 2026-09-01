@@ -37,7 +37,7 @@ const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApp
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
-const { tipsForVisit } = require('../services/service-report/tip-library');
+const { tipsForVisit, freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue } = require('../config/feature-gates');
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
@@ -1978,10 +1978,15 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    const visitDate = svc.scheduled_date ? new Date(svc.scheduled_date) : new Date();
+    // The visit's calendar day as YYYY-MM-DD (same derivation the rest of
+    // this file uses for scheduled_date) — never `new Date('YYYY-MM-DD')`,
+    // which is UTC midnight, i.e. the previous ET evening.
+    const visitDay = svc.scheduled_date
+      ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+      : null;
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
-      date: Number.isNaN(visitDate.getTime()) ? new Date() : visitDate,
+      date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     const [sentRows, prefs] = await Promise.all([
       svc.customer_id
@@ -5333,6 +5338,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
     );
+    // Tips from your tech: the client sends ids (+ an optional line in the
+    // tech's own words); the registry copy is resolved and frozen here so
+    // the report shows what the customer was told on the day, and a custom
+    // line goes through the customer-copy screen like every other verbatim
+    // customer string. Ids on the wire, never copy.
+    const techTipsFreeze = freezeTechTips(req.body?.techTips);
+    for (const drop of techTipsFreeze.dropped) {
+      logger.warn(`[tech-tips] custom tip dropped on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
+    }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
@@ -6793,6 +6807,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             observations: reportObservations,
             recommendations: reportRecommendations,
             formRecommendations,
+            ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)

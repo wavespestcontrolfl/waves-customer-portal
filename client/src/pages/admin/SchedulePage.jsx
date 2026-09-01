@@ -13583,8 +13583,8 @@ export function CompletionPanel({
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
-        // Tips from your tech — ids only; the server resolves the copy
-        // (ignored until the persistence PR lands, harmless before it).
+        // Tips from your tech — ids only; the server resolves the copy and
+        // freezes it into structured_notes.techTips (freezeTechTips).
         techTips: { ids: selectedTipIds, custom: customTip.trim() || null },
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.

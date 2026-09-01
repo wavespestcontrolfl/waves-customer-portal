@@ -24,6 +24,7 @@
  */
 
 const { etParts } = require('../../utils/datetime-et');
+const { customerCopyViolations } = require('./technician-report-copy');
 
 const SERVICE_LINES = Object.freeze(['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree_shrub']);
 const SEASONS = Object.freeze(['wet', 'dry', 'all']);
@@ -34,8 +35,12 @@ const MAX_TIPS_PER_VISIT = 3;
 // answers a different question and deliberately isn't reused here.
 const WET_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]);
 
+// Accepts a Date (read in ET) or a 'YYYY-MM-DD' calendar day, which is how
+// the schedule stores a visit date — never parse that string through
+// `new Date()`, which reads it as UTC midnight (the previous ET evening).
 function seasonForDate(date = new Date()) {
-  const { month } = etParts(date);
+  const day = typeof date === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim()) : null;
+  const month = day ? Number(day[2]) : etParts(date).month;
   return WET_SEASON_MONTHS.has(month) ? 'wet' : 'dry';
 }
 
@@ -351,6 +356,30 @@ function resolveTipIds(ids) {
   return resolved;
 }
 
+/**
+ * What the completion route freezes into structured_notes.techTips from the
+ * client's { ids, custom } payload: library ids resolved to their copy, then
+ * the optional "write your own" line — the tech's own words about this
+ * house, so it skips the visit-claim rule but goes through the same
+ * customer-copy screen as every other verbatim customer string. A line the
+ * screen rejects is dropped (reported back so the caller can log it), the
+ * whole set is capped at MAX_TIPS_PER_VISIT, and anything malformed yields
+ * an empty freeze rather than a throw.
+ */
+function freezeTechTips(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
+  const tips = resolveTipIds(input.ids);
+  const dropped = [];
+  const custom = String(input.custom || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  if (custom) {
+    const violations = customerCopyViolations(custom);
+    if (violations.length) dropped.push({ copy: custom, violations });
+    else if (tips.length < MAX_TIPS_PER_VISIT) tips.push({ id: 'custom', copy: custom, source: 'technician' });
+    else dropped.push({ copy: custom, violations: ['over_cap'] });
+  }
+  return { tips, dropped };
+}
+
 module.exports = {
   TIPS,
   TIP_GROUPS,
@@ -361,4 +390,5 @@ module.exports = {
   registryLineFor,
   tipsForVisit,
   resolveTipIds,
+  freezeTechTips,
 };

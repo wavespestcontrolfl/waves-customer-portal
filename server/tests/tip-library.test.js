@@ -17,6 +17,7 @@ const {
   registryLineFor,
   tipsForVisit,
   resolveTipIds,
+  freezeTechTips,
 } = require('../services/service-report/tip-library');
 const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 
@@ -88,6 +89,41 @@ describe('seasonForDate', () => {
   test('the ET calendar day decides, not UTC', () => {
     // 2026-05-31 23:30 ET is still May in ET but already June 1 in UTC.
     expect(seasonForDate(new Date('2026-06-01T03:30:00Z'))).toBe('dry');
+  });
+
+  test('a YYYY-MM-DD calendar day is read as that day, never as UTC midnight', () => {
+    expect(seasonForDate('2026-06-01')).toBe('wet');
+    expect(seasonForDate('2026-11-01')).toBe('dry');
+    expect(seasonForDate('2026-10-31')).toBe('wet');
+  });
+});
+
+describe('freezeTechTips', () => {
+  test('resolves ids and appends a clean custom line as the technician\'s own', () => {
+    const { tips, dropped } = freezeTechTips({ ids: ['light_warm_bulbs'], custom: '  Keep the lanai door sweep tight — that is where the ants come in.  ' });
+    expect(dropped).toEqual([]);
+    expect(tips.map((t) => t.id)).toEqual(['light_warm_bulbs', 'custom']);
+    expect(tips[1]).toEqual({ id: 'custom', copy: 'Keep the lanai door sweep tight — that is where the ants come in.', source: 'technician' });
+  });
+
+  test('a custom line the customer-copy screen rejects is dropped and reported', () => {
+    const { tips, dropped } = freezeTechTips({ ids: [], custom: 'The ants are gone and your home is safe now.' });
+    expect(tips).toEqual([]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0].violations.length).toBeGreaterThan(0);
+  });
+
+  test('the cap counts the custom line; three library picks leave no room', () => {
+    const { tips, dropped } = freezeTechTips({ ids: ['light_warm_bulbs', 'water_bromeliads', 'moisture_ac_drip'], custom: 'Flip the mats.' });
+    expect(tips).toHaveLength(MAX_TIPS_PER_VISIT);
+    expect(tips.map((t) => t.source)).toEqual(['library', 'library', 'library']);
+    expect(dropped).toEqual([{ copy: 'Flip the mats.', violations: ['over_cap'] }]);
+  });
+
+  test('malformed input freezes nothing', () => {
+    for (const bad of [undefined, null, 'x', 42, ['light_warm_bulbs'], { ids: 'light_warm_bulbs' }]) {
+      expect(freezeTechTips(bad).tips).toEqual([]);
+    }
   });
 });
 

@@ -159,6 +159,18 @@ describe('GET /:serviceId/tech-tips', () => {
   });
 });
 
+describe('completion freeze contract', () => {
+  test('the complete route freezes the picks through freezeTechTips into structured_notes.techTips', () => {
+    const start = source.indexOf("router.post('/:serviceId/complete'");
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf("\nrouter.", start + 1));
+    expect(block).toContain('freezeTechTips(req.body?.techTips)');
+    expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
+    // ids resolve server-side — the client's copy never reaches the freeze
+    expect(block).not.toMatch(/techTips\.copy|body\.techTips\.tips/);
+  });
+});
+
 describe('route wiring contracts', () => {
   test('the handler is registered after the router-level tech-or-admin auth', () => {
     const layer = routeLayer('get', '/:serviceId/tech-tips');
