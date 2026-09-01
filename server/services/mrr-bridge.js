@@ -254,56 +254,45 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     for (const r of rows) conversionMonthById.set(r.id, r.conv_month);
   }
 
-  // Ids EXITING a diffable month whose customer is still LIVE on a
-  // non-monthly lane — a monthly member who converted to annual prepay /
-  // per-application (payment stamps the new billing_mode and the narrowed
-  // population drops the row). Booked as CONTRACTION, not churn (Codex
-  // #3669 r10). Classified PER EXIT MONTH: the lane switch only explains
-  // an exit if no churn EVENT dates in-or-after that month — a customer
-  // who genuinely churned in June and reactivated on prepay in August
-  // keeps the June churn (churned_at is sticky through reactivation, which
-  // is exactly the evidence needed here; a churn its sparse stamp missed
-  // degrades to the lane-switch read — bounded, the customer is live on a
-  // recurring lane either way). Fail-soft to "churned" on a read failure.
-  // One query over just the exited ids.
-  const exitedIdsByMonth = new Map(); // monthKey -> Set(ids exiting that diff)
-  const allExitedIds = new Set();
-  for (let i = 0; i < monthKeys.length; i++) {
-    const key = monthKeys[i];
-    const prev = snapshotsByMonth.get(i > 0 ? monthKeys[i - 1] : prevMonthKey(key));
-    const curr = snapshotsByMonth.get(key);
-    if (!prev || !curr) continue;
-    for (const id of prev.keys()) {
-      if (curr.has(id)) continue;
-      if (!exitedIdsByMonth.has(key)) exitedIdsByMonth.set(key, new Set());
-      exitedIdsByMonth.get(key).add(String(id));
-      allExitedIds.add(id);
-    }
-  }
+  // Ids EXITING the IN-PROGRESS month's diff whose customer is still LIVE
+  // on a non-monthly lane — a monthly member who converted to annual
+  // prepay / per-application (payment stamps the new billing_mode and the
+  // narrowed population drops the row). Booked as CONTRACTION, not churn
+  // (Codex #3669 r10). Restricted to the current month DELIBERATELY (Codex
+  // r10 follow-up): only there is the live customers row the exit-TIME
+  // state — no per-month lane history exists, so classifying an older
+  // frozen exit from today's row would relabel a genuine June churn as
+  // contraction after a prepay reactivation (reactivation clears
+  // churned_at, customer-stages.js), or miss a June switch that later
+  // churned. Historical exits therefore keep the conservative churn label;
+  // a durable historical classification needs a dated lane-change record,
+  // which this PR does not introduce. Fail-soft to "churned" on a read
+  // failure.
   const laneSwitchedIdsByMonth = new Map();
-  if (allExitedIds.size) {
-    try {
-      const { resolveBillingLane } = require('./billing-lane');
-      const { CUSTOMER_STAGES: liveStages } = require('./customer-stages');
-      const rows = await db('customers')
-        .whereIn('id', [...allExitedIds])
-        .where('active', true)
-        .whereNull('deleted_at')
-        .whereIn('pipeline_stage', liveStages)
-        .select('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"));
-      const byId = new Map(rows.map((r) => [String(r.id), r]));
-      for (const [key, ids] of exitedIdsByMonth) {
-        const exitYm = ymOf(key);
-        for (const id of ids) {
-          const r = byId.get(id);
-          if (!r) continue; // not live now → churn stands
-          if (resolveBillingLane(r).mode === 'monthly_membership') continue; // back on dues → not a switch exit
-          if (r.churned_month && r.churned_month >= exitYm) continue; // a real churn event explains this exit
-          if (!laneSwitchedIdsByMonth.has(key)) laneSwitchedIdsByMonth.set(key, new Set());
-          laneSwitchedIdsByMonth.get(key).add(id);
+  const currIdx = monthKeys.indexOf(currentMonthKey);
+  const currDiff = currIdx >= 0 ? snapshotsByMonth.get(currentMonthKey) : null;
+  const currPrev = currIdx >= 0
+    ? snapshotsByMonth.get(currIdx > 0 ? monthKeys[currIdx - 1] : prevMonthKey(currentMonthKey))
+    : null;
+  if (currDiff && currPrev) {
+    const exitedNow = [...currPrev.keys()].filter((id) => !currDiff.has(id));
+    if (exitedNow.length) {
+      try {
+        const { resolveBillingLane } = require('./billing-lane');
+        const { CUSTOMER_STAGES: liveStages } = require('./customer-stages');
+        const rows = await db('customers')
+          .whereIn('id', exitedNow)
+          .where('active', true)
+          .whereNull('deleted_at')
+          .whereIn('pipeline_stage', liveStages)
+          .select('id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+        const switched = new Set();
+        for (const r of rows) {
+          if (resolveBillingLane(r).mode !== 'monthly_membership') switched.add(String(r.id));
         }
-      }
-    } catch { /* unresolvable — exits stay classified as churn */ }
+        if (switched.size) laneSwitchedIdsByMonth.set(currentMonthKey, switched);
+      } catch { /* unresolvable — exits stay classified as churn */ }
+    }
   }
 
   // Customers-table approximation for months that can't diff snapshots.
