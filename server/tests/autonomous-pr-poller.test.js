@@ -290,7 +290,7 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
   // (Codex #3646 r15 P1) — a fake gh serves the fixture registry (or a
   // mutated one) as the astro base registry.json.
   const liveReg = () => JSON.parse(require('node:fs').readFileSync(__affReg, 'utf8'));
-  const ghFor = (registry) => ({ getFile: async (path) => (path === 'packages/affiliate-registry/registry.json' && registry !== null ? { content: JSON.stringify(registry) } : null) });
+  const ghFor = (registry) => ({ env: () => ({ defaultBranch: 'main' }), getBranchSha: async () => 'regbase1', getFile: async (path) => (path === 'packages/affiliate-registry/registry.json' && registry !== null ? { content: JSON.stringify(registry) } : null) });
   const belt = (run, head, sha, gh = ghFor(liveReg())) => affiliateBeltVerdict(run, head, sha, gh);
   let prevGate;
   beforeEach(() => { prevGate = process.env.GATE_AFFILIATE_LINKS; process.env.GATE_AFFILIATE_LINKS = 'true'; });
@@ -308,7 +308,7 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
     expect(await belt(approved, body, 'headsha1', ghFor({ version: 1, products: [] }))).toMatchObject({ ok: false, reason: expect.stringMatching(/UNREGISTERED_AFFILIATE_LINK/) });
     // live registry unreadable → withheld (fail closed), never local fallback
     expect(await belt(approved, body, 'headsha1', ghFor(null))).toMatchObject({ ok: false, reason: expect.stringMatching(/authoritative astro registry unreadable/) });
-    expect(await belt(approved, body, 'headsha1', null)).toMatchObject({ ok: false, reason: expect.stringMatching(/authoritative astro registry unreadable/) });
+    expect(await belt(approved, body, 'headsha1', null)).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot pin the astro base/) });
     // post_type narrowed out of eligibility since approval
     const wrongType = body.replace('post_type: protocol', 'post_type: seasonal');
     const approvedWrong = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body: wrongType, trust_build_approved_head_sha: 'headsha1' }) };
@@ -353,6 +353,17 @@ describe('affiliate belt (owner ruling 2026-08-31)', () => {
   test('an unresolvable head file fails closed; a resolved non-affiliate file passes', async () => {
     expect((await belt({}, null)).ok).toBe(false);
     expect((await belt({}, { content: '---\ntitle: Service page\n---\nplain' })).ok).toBe(true);
+  });
+
+  test('the registry read is PINNED: no pinnable base or a moved tip fails closed (Codex #3646 r22)', async () => {
+    const body = '---\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>';
+    const approved = { trust_build_approved_by: 'adam', draft_payload: JSON.stringify({ body, trust_build_approved_head_sha: 'headsha1' }) };
+    // gh without getBranchSha → cannot pin → withheld.
+    const noPin = { getFile: async () => __liveRegFile };
+    expect(await affiliateBeltVerdict(approved, body, 'headsha1', noPin)).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot pin/) });
+    // A clean verdict carries the snapshot for the pre-merge recheck.
+    const ok = await belt(approved, body, 'headsha1');
+    expect(ok).toMatchObject({ ok: true, registryBaseSha: 'regbase1' });
   });
 
   test('tag-shaped text ONLY in frontmatter is not rendered affiliate material — never withheld (Codex #3646 r17)', async () => {
@@ -1211,6 +1222,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
       publisher.assertCodexReviewClear.mockResolvedValue(true);
       gh.mergePr.mockResolvedValue({ merged: true });
+      gh.getBranchSha.mockResolvedValue('regbase1');
       gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/test-post.mdx' ? affiliateFile : path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
     };
     // 1. No approval stamp → withheld, never merged.
@@ -1240,6 +1252,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
       publisher.assertCodexReviewClear.mockResolvedValue(true);
       gh.mergePr.mockResolvedValue({ merged: true });
+      gh.getBranchSha.mockResolvedValue('regbase1');
       gh.getFile.mockImplementation(async (path) => (path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
     };
     const refresh = (over = {}) => makeRun({

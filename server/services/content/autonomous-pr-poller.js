@@ -395,9 +395,23 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   // placements) until a portal sync + deploy, so the merge-time recheck
   // reads the LIVE base-branch registry.json with the same client that
   // fetched the head file; unreadable fails closed (Codex #3646 r15 P1).
+  // PINNED read: the registry is fetched at the default branch's current
+  // SHA and that SHA is re-checked immediately before gh.mergePr — a
+  // registry row paused/narrowed between the read and the merge withholds
+  // instead of merging atop the newer base (Codex #3646 r22 P1; covers
+  // the case where the body-image snapshot guard is a no-op).
   let liveRegistry = null;
+  let registryBaseSha = null;
   try {
-    const f = gh ? await gh.getFile('packages/affiliate-registry/registry.json') : null;
+    registryBaseSha = gh && typeof gh.getBranchSha === 'function'
+      ? await gh.getBranchSha(typeof gh.env === 'function' ? gh.env().defaultBranch : undefined)
+      : null;
+  } catch (_) { registryBaseSha = null; }
+  if (!registryBaseSha) {
+    return { ok: false, reason: 'cannot pin the astro base for the registry read — auto-merge withheld (fail closed)' };
+  }
+  try {
+    const f = await gh.getFile('packages/affiliate-registry/registry.json', registryBaseSha);
     if (f && typeof f.content === 'string') liveRegistry = JSON.parse(f.content);
   } catch (_) { liveRegistry = null; }
   if (!liveRegistry || typeof liveRegistry !== 'object') {
@@ -413,7 +427,17 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   if (hard.length) {
     return { ok: false, reason: `affiliate guardrail contract no longer clear at merge time: ${[...new Set(hard.map((f) => f.code))].join(', ')} — re-verify the registry rows or dismiss` };
   }
-  return { ok: true };
+  return { ok: true, registryBaseSha };
+}
+
+// The belt's registry snapshot must still be the base tip right before the
+// merge call — a registry merge landing mid-gate invalidates the verdict.
+async function registryBaseMoved(aff, gh) {
+  if (!aff || !aff.registryBaseSha) return false; // non-affiliate PR — no snapshot taken
+  try {
+    const tip = await gh.getBranchSha(typeof gh.env === 'function' ? gh.env().defaultBranch : undefined);
+    return String(tip || '') !== String(aff.registryBaseSha);
+  } catch (_) { return true; } // unknown tip — fail closed
 }
 
 const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
@@ -1563,6 +1587,11 @@ async function maybeAutoMerge(run, pr) {
           withheld = { pending: true, reason: 'base_moved_during_gating' };
           return null;
         }
+        // 3.9a …and the one the affiliate belt read the registry at.
+        if (await registryBaseMoved(aff, gh)) {
+          withheld = { pending: true, reason: 'registry_base_moved_during_gating' };
+          return null;
+        }
         return doMerge();
       });
       if (withheld) {
@@ -1593,6 +1622,7 @@ async function maybeAutoMerge(run, pr) {
           return null;
         }
         if (await baseMovedSinceBodyImageCheck()) { withheld = { pending: true, reason: 'base_moved_during_gating' }; return null; }
+        if (await registryBaseMoved(aff, gh)) { withheld = { pending: true, reason: 'registry_base_moved_during_gating' }; return null; }
         return doMerge();
       });
       if (withheld) return withheld;

@@ -690,7 +690,9 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
         // sits left of; a deeper marker nests.
         while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > markerIndent) listStack.pop();
         listStack.push({ col: marker[0].length, depth });
-      } else if (!blank && depth === topDepth() && indent < topCol() && prevBlank) {
+      } else if (!blank && depth === topDepth() && indent < topCol() && (prevBlank || /^ {0,3}(?:#{1,6}\s|>|(?:-{3,}|_{3,}|\*{3,})\s*$)/.test(strippedLine))) {
+        // An interrupting block (ATX heading, blockquote, thematic break)
+        // ends the list even with no blank line before it (Codex #504 r24).
         // Dedent pops only the containers it leaves — parents whose content
         // column the line still satisfies remain.
         while (listStack.length && listStack[listStack.length - 1].depth === depth && listStack[listStack.length - 1].col > indent) listStack.pop();
@@ -763,7 +765,9 @@ function blankNonRenderedCode(src: string): string {
 // with a later --> and swallow real components (Codex #504 r23). The scan
 // runs on the attr-masked view; blanking applies to the source.
 function blankNonRenderedComments(src: string): string {
-  const view = maskJsxAttrQuotes(src);
+  // Expression STRINGS are inert too: {'<!--'}<TypoWidget />{'-->'} must
+  // not pair across a real component (Codex #504 r24).
+  const view = blankExpressionStrings(maskJsxAttrQuotes(src));
   const out = src.split('');
   const re = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
   let m: RegExpExecArray | null;
@@ -1150,6 +1154,12 @@ function* markdownLinkDests(src: string): Generator<{ dest: string; label: strin
     // CommonMark destination: the first token — <>-wrapped or bare — with
     // anything after whitespace being the (ignored) title.
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
+    // CommonMark: anything after the destination must be a VALID quoted or
+    // parenthesized title — [q](/quote/ garbage) renders no anchor at all.
+    if (dm) {
+      const rest = inner.slice(dm[0].length).trim();
+      if (rest && !/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))$/.test(rest)) { i = k; continue; }
+    }
     // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
     // </quote/ > renders /quote/%20, never the service route) — only the
     // syntax whitespace outside <…> is trimmed. The LABEL rides along so
@@ -1757,6 +1767,19 @@ function parseJsxProps(attrs: string): {
     } else {
       expressions.add(propName);
     }
+  }
+
+  // BARE shorthand (<SpiderIdBoard species />) — JSX passes {true}, which
+  // the string/array schemas must see and reject; scan a value-blanked
+  // view so a bare-looking word inside a quoted value never matches
+  // (Codex #3646 r22 P1).
+  const bareView = attrs
+    .replace(/(["'])(?:(?!\1)[\s\S])*\1/g, (q) => q[0] + ' '.repeat(q.length - 2) + q[q.length - 1])
+    .replace(/\{[\s\S]*?\}/g, (b) => ' '.repeat(b.length));
+  const bare = /(?:^|\s)([a-zA-Z_$][\w$]*)(?=\s|\/|$)(?!\s*=)/g;
+  while ((m = bare.exec(bareView)) !== null) {
+    const propName = m[1];
+    if (!(propName in simple) && !expressions.has(propName)) simple[propName] = true;
   }
 
   return { simple, expressions };

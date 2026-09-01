@@ -805,6 +805,22 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('nested components in prop expressions validate; expression-string routes; invalid titles (Codex #3646 r22)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // A component nested in another component's prop expression validates.
+    expect(codesOf(guardrails.evaluate({ body: wrap('<InlineCTA description={<SpiderIdBoard species={42} />} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_SPIDERIDBOARD_PROPS')).toBeGreaterThan(0);
+    expect(codesOf(guardrails.evaluate({ body: wrap('<SpiderIdBoard caption={<InlineCTA tel="bad" />} />'), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    // Expression-string component text never flags a route.
+    const exprRoute = "Intro.\n\n## Sec\n\nDocs show {'<InlineCTA ctaHref=\"/example-only/\" />'} as markup.\n\nProse.";
+    expect(codesOf(guardrails.evaluate({ body: exprRoute, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'UNKNOWN_INTERNAL_ROUTE')).toBe(0);
+    // Invalid trailing title text renders no anchor — never the CTA.
+    const badTitle = `Intro.\n\n## Sec\n\nGet a [quote](/quote/ garbage).\n\nUse <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>.`;
+    withAffiliateEnv(() => {
+      expect(affiliateCodes(guardrails.evaluate({ body: badTitle, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P1:SERVICE_CTA_MISSING_FROM_LOCAL_ARTICLE');
+    });
+  });
+
   test('bare shorthand props fail closed; CTA links need visible labels (Codex #3646 r21)', () => {
     withAffiliateEnv(() => {
       const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;

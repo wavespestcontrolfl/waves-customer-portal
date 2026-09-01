@@ -1685,7 +1685,7 @@ function literalAttribute(attrs, name) {
 // brace span (length-preserving) so tag scans can position-check against
 // this view while still reading attrs from the unblanked text (a REAL
 // expression-wrapped tag's quoted props stay validatable).
-function blankExpressionStringLiterals(text) {
+function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
   const s = String(text || '');
   const out = s.split('');
   let depth = 0;
@@ -1703,7 +1703,7 @@ function blankExpressionStringLiterals(text) {
       // Quoted attr VALUES are blanked (quotes kept): tag-shaped text in a
       // descendant attribute (title="</div>") never closes a wrapper or
       // fakes a component (astro parity, Codex #504 r20).
-      if (attrQ) { if (c === attrQ) { attrQ = null; } else if (out[i] !== '\n') { out[i] = ' '; } continue; }
+      if (attrQ) { if (c === attrQ) { attrQ = null; } else if (attrValues && out[i] !== '\n') { out[i] = ' '; } continue; }
       if (inTag) {
         if (c === '"' || c === "'" || c === '`') { attrQ = c; continue; }
         if (c === '>') { inTag = false; continue; }
@@ -1992,6 +1992,12 @@ function hasServiceCtaLink(body) {
     if (!attrMasked.slice(span.labelStart + 1, span.labelEnd).trim()) continue;
     const inner = attrMasked.slice(span.destStart, span.destEnd + 1).trim();
     const dm = /^<([^<>\n]*)>|^(\S+)/.exec(inner);
+    // Only a valid quoted/parenthesized TITLE may follow the destination —
+    // [q](/quote/ garbage) renders no anchor at all (astro parity).
+    if (dm) {
+      const rest = inner.slice(dm[0].length).trim();
+      if (rest && !/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))$/.test(rest)) continue;
+    }
     // Angle-bracket destinations keep INTERNAL whitespace (CommonMark:
     // </quote/ > renders /quote/%20, not the service route) — only the
     // syntax whitespace outside <…> is trimmed.
@@ -2078,11 +2084,15 @@ function inlineCtaContractFinding(body) {
   // contract-loop parity; Codex #3646 r11 P1).
   const strView = blankExpressionStringLiterals(text);
   const attrView = maskJsxAttrQuotes(text);
-  for (const tag of eachTag(text)) {
-    // Case-sensitive + never from expression strings or attr-quoted text
-    // (astro contract-loop parity — none of those mount the component).
-    if (tag.isClose || tag.name !== 'inlinecta' || !isExactTagAt(text, tag.start, 'InlineCTA')) continue;
-    if (strView[tag.start] === ' ' || attrView[tag.start] === ' ') continue;
+  // DIRECT position scan (astro parity): a component nested in another
+  // component's prop expression (description={<InlineCTA …/>}) renders and
+  // must validate — eachTag consumes the outer tag whole (Codex #3646 r22).
+  const ctaRe = /<InlineCTA(?=[\s/>])/g;
+  let ctaM;
+  while ((ctaM = ctaRe.exec(text)) !== null) {
+    if (strView[ctaM.index] === ' ' || attrView[ctaM.index] === ' ') continue;
+    const tag = { start: ctaM.index, attrs: tagAttrsAt(text, ctaM.index) };
+    if (tag.attrs === null) continue; // unterminated — renders nothing to validate
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_INLINECTA_DESTINATION', 'Draft contains an <InlineCTA> carrying a JSX spread ({...}) — a spread can override the destination at render time, so the CTA cannot be validated.');
     }
@@ -2152,9 +2162,13 @@ function spiderIdBoardContractFinding(body) {
   const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
   const strView = blankExpressionStringLiterals(text);
   const attrView = maskJsxAttrQuotes(text);
-  for (const tag of eachTag(text)) {
-    if (tag.isClose || tag.name !== 'spideridboard' || !isExactTagAt(text, tag.start, 'SpiderIdBoard')) continue;
-    if (strView[tag.start] === ' ' || attrView[tag.start] === ' ') continue;
+  // Direct position scan — nested invocations validate (Codex #3646 r22).
+  const sibRe = /<SpiderIdBoard(?=[\s/>])/g;
+  let sibM;
+  while ((sibM = sibRe.exec(text)) !== null) {
+    if (strView[sibM.index] === ' ' || attrView[sibM.index] === ' ') continue;
+    const tag = { start: sibM.index, attrs: tagAttrsAt(text, sibM.index) };
+    if (tag.attrs === null) continue;
     if (hasAttrSpreadAfter(tag.attrs)) {
       return finding('P0', 'INVALID_SPIDERIDBOARD_PROPS', 'Draft contains a <SpiderIdBoard> carrying a JSX spread ({...}) — its props cannot be validated against the schema.');
     }
@@ -4580,7 +4594,11 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
   // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
   // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
   // validators apply (Codex #3646 r18 P1). Length-preserving.
-  const text = blankNonRenderedMarkdown(blankComments(String(body || '')));
+  // Expression STRINGS are inert prose ({'<InlineCTA ctaHref=…/>'})
+  // — masked before route collection (attr VALUES kept: href/src/ctaHref
+  // are read from them; display-text matches are position-filtered in
+  // collectInternalDestinations). (Codex #3646 r22 P1.)
+  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(blankComments(String(body || ''))), { attrValues: false });
   if (!text.trim()) return null;
   const allowed = new Set(ALLOWED_INTERNAL_LINKS);
   for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
@@ -5959,7 +5977,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // route that lived only in a fenced/commented example of the prior
     // body grants no exemption for a newly RENDERED occurrence (Codex
     // #3646 r19 P1).
-    for (const { norm } of collectInternalDestinations(blankNonRenderedMarkdown(blankComments(refreshPriorBody)))) {
+    for (const { norm } of collectInternalDestinations(blankExpressionStringLiterals(blankNonRenderedMarkdown(blankComments(refreshPriorBody)), { attrValues: false }))) {
       refreshExemptRoutes.set(norm, (refreshExemptRoutes.get(norm) || 0) + 1);
     }
   }
