@@ -7486,7 +7486,7 @@ function EstimateViewPageInner() {
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
-          {data?.softExit === true && !(ctaPhase === 'review' && reservation)
+          {data?.softExit === true && !isRegulatedCertificateSurface && !(ctaPhase === 'review' && reservation)
             ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
         </>
       )}
