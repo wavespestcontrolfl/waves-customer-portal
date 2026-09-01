@@ -398,6 +398,10 @@ async function comparePeriods(input) {
           .leftJoin({ c: 'customers' }, 'e.customer_id', 'c.id')
           .whereNotNull('e.sent_at')
           .whereBetween('e.sent_at', [fromTs, toTs])
+          // plan_restart sent_at is a synthetic publish stamp (the
+          // customer self-served the quote; nothing was delivered) — it
+          // is not an estimate SENT (codex GH r19 P1 on #3671).
+          .whereNot('e.source', 'plan_restart')
       ).count('* as count').first();
       m.estimates_sent = parseInt(es?.count || 0);
     }

@@ -349,6 +349,31 @@ describe('mintRestartEstimate', () => {
     expect(firstRow.archived_at != null).toBe(true);
   });
 
+  test('a mid-delivery lineage row refuses the mint — never archive a token the provider is about to deliver (codex GH r19 P0)', async () => {
+    // An operator send claims the row 'sending' before the provider call;
+    // finalization does not reject an archived row.
+    tables.estimates = [{
+      id: 'est-sending', customer_id: 'cust-1', source: 'plan_restart', status: 'sending', token: 'tok-s',
+      expires_at: '2099-01-01', archived_at: null, estimate_data: JSON.stringify({ planRestart: { families: ['x'] } }),
+    }];
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
+      .rejects.toMatchObject({ code: 'delivery_in_flight' });
+    expect(tables.estimates).toHaveLength(1);
+    expect(tables.estimates[0].archived_at == null).toBe(true);
+
+    // A staff-scheduled delivery blocks the same way.
+    tables.estimates[0].status = 'scheduled';
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() }))
+      .rejects.toMatchObject({ code: 'delivery_in_flight' });
+
+    // A CRASHED 'sending' claim (window lapsed) is dead — archives + mints.
+    tables.estimates[0].status = 'sending';
+    tables.estimates[0].expires_at = '2020-01-01';
+    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(result.reused).toBe(false);
+    expect(tables.estimates.find((e) => e.id === 'est-sending').archived_at != null).toBe(true);
+  });
+
   test('same totals but a drifted offer body does NOT reuse — the full fingerprint decides (codex GH r9 P1)', async () => {
     const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     // Offsetting price changes: aggregates identical, per-service result
@@ -549,6 +574,29 @@ describe('mintRestartEstimate', () => {
     const found = await actualRestart.cancelledFamiliesFor('cust-1', t);
     expect(found.families).toEqual(['pest_control']);
     expect(found.source).toBe('cancelled_rows');
+  });
+
+  test('a term whose terminal flip predates THIS attempt is not evidence — an old refunded cycle must not resurrect (codex GH r19 P1)', async () => {
+    // Previous cancel-and-refund cycle: the term's date range still covers
+    // the new attempt, its paid marker survives, but updated_at records a
+    // terminal flip months before this cancellation.
+    tables.cancellation_cases = [{
+      id: 'case-12', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-21',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-old', customer_id: 'cust-1', status: 'cancelled', term_start: '2026-01-01', term_end: '2026-12-31',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: 'inv-old',
+      paid_at: '2026-01-02T00:00:00Z', updated_at: '2026-03-01T00:00:00Z',
+    }];
+    const stale = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(stale).toEqual({ families: [], caseId: 'case-12', requestId: null, source: 'none' });
+
+    // The SAME shape flipped during this attempt (the r11 cancel-then-
+    // refund) stays evidence.
+    tables.annual_prepay_terms[0].updated_at = '2026-08-23T12:20:00Z';
+    const current = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(current.families).toEqual(['pest_control']);
   });
 
   test('a NEVER-PAID pending term whose voided invoice cancelled it is NOT purchase evidence (codex pre-push r18 P1)', async () => {

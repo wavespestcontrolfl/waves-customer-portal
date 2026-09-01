@@ -1125,6 +1125,13 @@ async function fetchEstimates({ search, source, ownerId }) {
     .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
     .select('estimates.*', 'technicians.name as created_by_name')
     .whereNull('estimates.archived_at')
+    // Customer plan-restart mints are self-serve, not sales opportunities
+    // (codex GH r19 P1 on #3671): their synthetic sent/viewed state would
+    // derive "Follow up" next-actions despite the mint's zero-delivery /
+    // no-follow-up contract, prompting an operator to contact a customer
+    // nobody quoted. Acceptance converts on its own; cancel/restart state
+    // lives on the customer-intel surfaces.
+    .whereNot('estimates.source', 'plan_restart')
     .orderBy('estimates.created_at', 'desc')
     .limit(MAX_CANDIDATES + 1);
 

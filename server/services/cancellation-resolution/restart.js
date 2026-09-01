@@ -182,7 +182,12 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     // unavailable instead of merely narrowing the evidence. A nested
     // transaction scopes the abort to this optional lookup, same shape as
     // the mint's seed lookup.
-    const prepayKeys = await dbh.transaction((sp) => prepayTermFamilyKeys(sp, customerId, attemptDate, { historical: true }));
+    const prepayKeys = await dbh.transaction((sp) => prepayTermFamilyKeys(sp, customerId, attemptDate, {
+      historical: true,
+      // Terminal-transition lower bound: the same attempt anchor (minus
+      // the processor's stamping slack) the row correlation uses.
+      attemptBound: attemptAnchor ? attemptBoundFor(attemptAnchor) : null,
+    }));
     for (const key of prepayKeys) {
       if (!keys.includes(key)) keys.push(key);
     }
@@ -238,7 +243,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
 //     shape); never-paid invoices get VOIDED, not refunded. Legacy terms
 //     with no invoice linkage keep their historical semantics, same as
 //     coveredTermsAsOf's live and decided arms.
-async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = false } = {}) {
+async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = false, attemptBound = null } = {}) {
   const {
     detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow,
   } = require('../self-booking-plan-sync');
@@ -258,13 +263,34 @@ async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = fal
             .whereNot('t.status', 'canceled')
             .whereNot('t.status', 'refunded');
         })
-          .orWhere('i.status', 'paid')
-          .orWhereNotNull('i.paid_at')
-          .orWhereNotNull('i.payment_recorded_at')
-          .orWhere('i.status', 'refunded')
-          .orWhere(function legacyTerminalNoInvoice() {
-            this.whereNot('t.status', 'payment_pending')
-              .whereNull('t.prepay_invoice_id');
+          .orWhere(function pendingPaid() {
+            this.where('t.status', 'payment_pending')
+              .andWhere(function paidEvidence() {
+                this.where('i.status', 'paid').orWhereNotNull('i.paid_at').orWhereNotNull('i.payment_recorded_at');
+              });
+          })
+          .orWhere(function terminalBoughtThisAttempt() {
+            this.where(function terminalShape() {
+              this.whereIn('t.status', ['cancelled', 'canceled', 'refunded']);
+            })
+              .andWhere(function boughtEvidence() {
+                this.where('i.status', 'paid').orWhereNotNull('i.paid_at')
+                  .orWhereNotNull('i.payment_recorded_at').orWhere('i.status', 'refunded')
+                  .orWhereNull('t.prepay_invoice_id');
+              });
+            // The terminal transition must belong to THIS attempt (codex
+            // GH r19 P1): an earlier cancel-and-refund cycle's term can
+            // still have a date range covering today's attempt, and its
+            // refunded invoice would otherwise resurrect a family that
+            // ended before the current plan existed. updated_at records
+            // the terminal flip (the r11 cancel-then-refund shape lands
+            // at/after its attempt); NULL-tolerant for legacy rows with
+            // no timestamp to compare.
+            if (attemptBound) {
+              this.andWhere(function transitionedThisAttempt() {
+                this.where('t.updated_at', '>=', attemptBound).orWhereNull('t.updated_at');
+              });
+            }
           });
       })
     : coveredTermsAsOf(dbh, dateStr);
@@ -692,6 +718,26 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
         && offerFingerprint(liveData) === offerFingerprint(estimateData)) {
         return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
       }
+    }
+    // Mid-delivery lineage refuses the mint FIRST (codex GH r19 P0 — the
+    // same guard click-estimate-mint applies): an operator send claims the
+    // row 'sending' and its finalization does not reject an archived row,
+    // so archiving here would let the provider deliver a token we just
+    // killed; a 'scheduled' send would be silently retired before its
+    // worker runs. Query-shaped like the archive below so no straggler
+    // hides past the limit-10 reuse read. A crashed 'sending' claim
+    // (expiry window lapsed) is dead and archives normally —
+    // priorMintStillLive draws the same live/stale line the click-mint
+    // uses. Sends finish in seconds; the customer's next tap proceeds.
+    const { priorMintStillLive } = require('../service-report/click-estimate-mint');
+    const midDelivery = (await trx('estimates')
+      .where({ customer_id: fresh.id, source: SOURCE })
+      .whereNull('archived_at')
+      .whereIn('status', ['sending', 'scheduled'])
+      .select('id', 'status', 'archived_at', 'expires_at'))
+      .find((row) => priorMintStillLive(row, nowDate));
+    if (midDelivery) {
+      throw new RestartUnavailableError('delivery_in_flight', 'This quote is on its way to you right now — give it a moment, then try again.');
     }
     // Minting a replacement: archive the WHOLE unaccepted restart lineage
     // first — an EXPIRED restart quote left unarchived stays revivable for
