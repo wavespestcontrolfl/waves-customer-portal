@@ -48,8 +48,11 @@ const batchSize = () => {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 500) : DEFAULT_BATCH;
 };
 
-// §5 cost discipline: ~8 fetches + 1 LLM call per domain.
+// §5 cost discipline: ~8 fetches + 1 LLM call per domain, plus a small
+// reserved budget for legal-terms hashing (the candidate loop always exhausts
+// the page cap, and a legal path without its terms hash is INVALID in §6.3).
 const MAX_FETCHES_PER_DOMAIN = 8;
+const TERMS_FETCH_BUDGET = 2;
 const PAGE_EXCERPT_CHARS = 6000;
 const REINVESTIGATE_AFTER_DAYS = 90;
 const WATCH_RECHECK_DAYS = 30;
@@ -105,6 +108,18 @@ const centsFor = (currency, text) => (currency === 'USD' ? parsePriceTextCents(t
 
 const looksLikeUrl = (s) => /^https?:\/\//i.test(String(s || '').trim());
 
+/**
+ * A URL is bound to the investigated registry domain when its canonical host
+ * IS the domain or a subdomain of it. Everything the model reports and
+ * everything this job fetches is held to this — model output is derived from
+ * fetched (untrusted) pages, so an unbound URL would let page-level prompt
+ * injection register an unrelated site as this row's executable path.
+ */
+function hostBound(host, url) {
+  const h = canonicalProspectDomain(url);
+  return !!h && (h === host || h.endsWith(`.${host}`));
+}
+
 /** URLs worth fetching for a domain, own-host only, deduped, uncapped (the fetch loop caps). */
 function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [] } = {}) {
   const seen = new Set();
@@ -112,7 +127,7 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   const push = (raw) => {
     const s = String(raw || '').trim();
     if (!looksLikeUrl(s)) return;
-    if (canonicalProspectDomain(s) !== host) return; // never fetch off-domain
+    if (!hostBound(host, s)) return; // never fetch off-domain
     const key = registry.normalizeSubmissionUrl(s);
     if (!key || seen.has(key)) return;
     seen.add(key);
@@ -472,15 +487,33 @@ async function investigatePaths(db, {
         const validIds = new Set(existingPaths.map((p) => p.id));
         // Paths of type not_reproducible/unknown carry no executable identity —
         // they live in the evidence, never as rows (§6.3 marks them INVALID).
-        const writable = (verdict.paths || []).filter((p) => p.acquisition_type !== 'not_reproducible' && p.acquisition_type !== 'unknown');
+        // Model-reported URLs are BOUND to the investigated domain before
+        // anything is fetched or persisted: the model read untrusted pages, so
+        // an off-host submission/terms URL (prompt injection, hallucination)
+        // is moved into the evidence and never becomes an executable target.
+        const writable = (verdict.paths || [])
+          .filter((p) => p.acquisition_type !== 'not_reproducible' && p.acquisition_type !== 'unknown')
+          .map((p) => {
+            const clean = { ...p, offhost: {} };
+            for (const key of ['submission_url', 'legal_terms_url']) {
+              if (clean[key] && !hostBound(host, clean[key])) {
+                clean.offhost[key] = clean[key];
+                clean[key] = null;
+              }
+            }
+            return clean;
+          });
 
-        // Legal terms: fetch + hash within the remaining budget (§3.2).
+        // Legal terms: fetch + hash (§3.2). Terms fetches have their OWN small
+        // budget — the candidate loop always exhausts the page cap (homepage +
+        // probes), and a legal_attestation path with no hash is INVALID under
+        // §6.3, so sharing one budget would starve every legal path.
         const termsHashByUrl = new Map();
         for (const p of writable) {
           if (!p.legal_attestation || !p.legal_terms_url || termsHashByUrl.has(p.legal_terms_url)) continue;
-          if (pages.length + fetchErrors.length + termsHashByUrl.size >= MAX_FETCHES_PER_DOMAIN) break;
+          if (termsHashByUrl.size >= TERMS_FETCH_BUDGET) break;
           out.fetches += 1;
-          const t = await fetcher(p.legal_terms_url);  
+          const t = await fetcher(p.legal_terms_url);
           if (t && t.html && !t.blocked && !t.error) termsHashByUrl.set(p.legal_terms_url, sha256(canonicalizeTerms(t.html)));
         }
 
@@ -495,6 +528,7 @@ async function investigatePaths(db, {
               currency_evidence: p.currency_evidence, legal_terms_url: p.legal_terms_url,
               reasons: p.reasons, quotes: p.quotes,
               pages_fetched: pages.map((pg) => pg.url), fetch_errors: fetchErrors,
+              ...(Object.keys(p.offhost).length ? { offhost_urls: p.offhost } : {}),
             };
             const row = pathRowFrom(p, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
             const replaces = p.replaces_path_id && validIds.has(p.replaces_path_id) ? p.replaces_path_id : null;
@@ -510,9 +544,31 @@ async function investigatePaths(db, {
           // proposed a different key for the real path.
           await trx('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').update({ last_investigated_at: now, updated_at: now });
 
-          // Finish the domain: best path, score, verdict.
+          // A full re-investigation DISPROVES what it did not re-report: any
+          // previously active, non-baseline path absent from this verdict is
+          // invalidated (confidence 0 + the reason in its evidence) so a
+          // reopened domain that comes back not_reproducible can never keep a
+          // stale executable path or feed it into best_path_id. Baselines are
+          // descriptive and stay; superseded rows were already handled.
+          if (claimState) {
+            const stale = await trx('seo_link_acquisition_paths')
+              .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
+              .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
+              .select('id', 'investigation');
+            for (const s of stale) {
+              const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
+              await trx('seo_link_acquisition_paths').where({ id: s.id }).update({
+                confidence: 0,
+                investigation: JSON.stringify({ ...prior, disproven_at: now.toISOString(), disproven_reason: `re-investigation verdict '${verdict.verdict}' did not reproduce this path` }),
+                updated_at: now,
+              });
+            }
+          }
+
+          // Finish the domain: best path, score, verdict. Zero-value paths
+          // (disproven, or confidence 0) never become the best path.
           const active = await trx('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').where({ baseline: false }).select('*');
-          const ranked = active.map((p) => ({ p, v: pathValue(p) })).sort((a, b) => b.v - a.v);
+          const ranked = active.map((p) => ({ p, v: pathValue(p) })).filter((r) => r.v > 0).sort((a, b) => b.v - a.v);
           const best = ranked.length ? ranked[0].p : null;
           const { score, reasons } = scoreDomain(domain, best);
           const watchNote = claimState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
@@ -545,8 +601,9 @@ module.exports = {
   LOCK_KEY,
   PROBE_PATHS,
   MAX_FETCHES_PER_DOMAIN,
+  TERMS_FETCH_BUDGET,
   _internals: {
-    deriveCurrency, centsFor, candidateUrls, buildPrompt, investigateWithModel,
+    deriveCurrency, centsFor, candidateUrls, hostBound, buildPrompt, investigateWithModel,
     selectTargets, pathRowFrom, upsertPath, changedInputs, scoreDomain, pathValue,
     canonicalizeTerms, batchSize, SYSTEM_PROMPT, TYPE_WEIGHT,
     PAYMENT_INPUTS, COMMUNICATION_INPUTS, EXECUTION_INPUTS, CLAIMABLE_STATES,

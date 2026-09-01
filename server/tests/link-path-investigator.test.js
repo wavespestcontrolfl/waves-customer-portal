@@ -405,6 +405,64 @@ describe('full run', () => {
     expect(db._tables.seo_link_prospects[0].path_id).toBe(fresh.id);
   });
 
+  test('legal paths get their terms hash from the RESERVED budget — the probe list cannot starve it (Codex r1 P1)', async () => {
+    const d = domainRow();
+    // enough hints that the candidate loop exhausts the page cap by itself
+    const touches = Array.from({ length: 12 }, (_, i) => ({ domain_id: d.id, source: 'list_import', source_detail: `https://example.com/page-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    const legal = modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    const fetcher = jest.fn(okFetch);
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([legal]) }) }));
+    expect(fetcher.mock.calls.map(([u]) => u)).toContain('https://example.com/terms');
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.legal_terms_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.fetches).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN + investigator.TERMS_FETCH_BUDGET);
+  });
+
+  test('off-host model URLs are never fetched or persisted — they move to the evidence (Codex r1 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const injected = modelPath({
+      submission_url: 'https://evil.example.net/join',
+      legal_attestation: true,
+      legal_terms_url: 'https://evil.example.net/terms',
+    });
+    const fetcher = jest.fn(okFetch);
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([injected]) }) }));
+    for (const [url] of fetcher.mock.calls) expect(url).not.toContain('evil.example.net');
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.submission_url).toBeNull();
+    expect(p.path_key).toBe('paid_listing:-');
+    expect(p.legal_terms_hash).toBeNull();
+    const evidence = JSON.parse(p.investigation);
+    expect(evidence.offhost_urls).toEqual({ submission_url: 'https://evil.example.net/join', legal_terms_url: 'https://evil.example.net/terms' });
+    expect(r.pathsWritten).toBe(1);
+    // a subdomain of the investigated host IS bound
+    expect(_internals.hostBound('example.com', 'https://members.example.com/join')).toBe(true);
+    expect(_internals.hostBound('example.com', 'https://notexample.com/join')).toBe(false);
+  });
+
+  test('a negative re-investigation invalidates the stale executable path and clears best_path_id (Codex r1 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating', best_path_id: null });
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false,
+      confidence: 0.7, last_investigated_at: new Date('2026-06-01'), investigation: JSON.stringify({ reasons: 'old pass' }),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath] });
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    expect(r.notReproducible).toBe(1);
+    const stale = db._tables.seo_link_acquisition_paths[0];
+    expect(stale.confidence).toBe(0);
+    const evidence = JSON.parse(stale.investigation);
+    expect(evidence.reasons).toBe('old pass'); // prior evidence kept
+    expect(evidence.disproven_reason).toMatch(/not_reproducible/);
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('not_reproducible');
+    expect(dom.best_path_id).toBeNull(); // a zero-value path never becomes best
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {
