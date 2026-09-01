@@ -271,9 +271,11 @@ async function getStopDetails(input, techId = null) {
   // customer (the same-day row can belong to another technician); admin/
   // unscoped callers (no techId) stay unrestricted.
   const today = etDateString();
+  // Dead rows (rescheduled/skipped/no-show/canceled) are not a live visit —
+  // they must neither display as today's service nor release access codes.
   const todayQuery = db('scheduled_services')
     .where({ customer_id: customer.id, scheduled_date: today })
-    .whereNotIn('status', ['cancelled']);
+    .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES);
   if (techId) todayQuery.where('technician_id', techId);
   const todayService = await todayQuery.first();
 
@@ -297,7 +299,7 @@ async function getStopDetails(input, techId = null) {
         if (techId) {
           stillOwned = !!(await db('scheduled_services')
             .where({ id: todayService.id, technician_id: techId })
-            .whereNotIn('status', ['cancelled'])
+            .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
             .first('id'));
         }
         property = stillOwned ? facts.access : null;

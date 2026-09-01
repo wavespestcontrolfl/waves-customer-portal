@@ -132,4 +132,30 @@ describe('get_stop_details access-facts gate', () => {
     const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
     expect(r.property).toEqual(ACCESS_BLOCK);
   });
+
+  test.each(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])(
+    'dead same-day row (%s) is not a live visit: no codes, no todays_service',
+    async (deadStatus) => {
+      mockVisitFactsGateEnabled.mockReturnValue(true);
+      state.scheduled_services[0].technician_id = 'tech-1';
+      state.scheduled_services[0].status = deadStatus;
+      // caller stays authorized via yesterday's completed visit
+      state.scheduled_services.push({ id: 's0', customer_id: 'c1', scheduled_date: etDateString(addETDays(new Date(), -1)), status: 'completed', technician_id: 'tech-1' });
+      const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+      expect(r.todays_service).toBeNull();
+      expect(r.property).toBeNull();
+      expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
+    },
+  );
+
+  test('reassignment race: a row going dead mid-read also withholds the codes', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-1';
+    mockDeterministicVisitFacts.mockImplementation(async () => {
+      state.scheduled_services[0].status = 'rescheduled'; // moved mid-read
+      return { access: ACCESS_BLOCK, last_visit: null };
+    });
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.property).toBeNull();
+  });
 });
