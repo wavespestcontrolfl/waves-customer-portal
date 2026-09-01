@@ -76,6 +76,9 @@ const WATCH_RECHECK_DAYS = 30;
 const INVESTIGATE_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const INVESTIGATE_BACKOFF_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_INVESTIGATE_FAILURES = 6;
+// ONE backoff curve for every retryable non-verdict — fetch/model failures
+// and stalled (no-progress) probe passes alike.
+const failureBackoffMs = (failures) => Math.min(INVESTIGATE_BACKOFF_BASE_MS * 2 ** (Math.max(1, failures) - 1), INVESTIGATE_BACKOFF_MAX_MS);
 const LLM_TIMEOUT_MS = 60000;
 
 // §5 fixed probe list, tried in order after the evidence-bearing candidates.
@@ -146,7 +149,11 @@ function deriveCurrency(path) {
   return 'unknown';
 }
 
-const centsFor = (currency, text) => (currency === 'USD' ? parsePriceTextCents(text) : null);
+// A MINIMUM-price quote ("USD 95+", "USD 95 and up", "minimum USD 95") is
+// not an exact price: the charge may be higher, so it never derives cents —
+// the price parser sees one numeric token and would otherwise accept it.
+const MIN_PRICE_QUOTE_RE = /\d\s*\+|\b(?:and up|or more|and above|and over|or higher|and higher|minimum|at least)\b|\bmin\./i;
+const centsFor = (currency, text) => (currency === 'USD' && !MIN_PRICE_QUOTE_RE.test(String(text || '')) ? parsePriceTextCents(text) : null);
 
 // ---------------------------------------------------------------------------
 // Candidate pages (§5): hint, competitor page, probe list — capped.
@@ -422,25 +429,20 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
   // investigation makes the path due now, not at the 90-day expiry.
   // Re-investigating stamps the path, so the same historical failure never
   // triggers twice; failures older than the stale horizon are covered by
-  // the ordinary stale bucket, which bounds the attempts scan.
+  // the ordinary stale bucket. The selection is BOUNDED IN SQL: the join
+  // to active paths, the newer-than-stamp test, and the per-domain limit
+  // all run in the database (indexed on path_id and (outcome, created_at)),
+  // so a growing attempt ledger never becomes an unbounded scan per sweep.
   const failedAttemptRows = async () => {
-    const attempts = await db('seo_link_attempts')
-      .whereIn('outcome', FAILED_ATTEMPT_OUTCOMES)
-      .where('created_at', '>', new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000))
-      .select('path_id', 'created_at');
-    const latestByPath = new Map();
-    for (const a of attempts) {
-      if (!a.path_id) continue;
-      const prev = latestByPath.get(a.path_id);
-      if (!prev || new Date(a.created_at) > new Date(prev)) latestByPath.set(a.path_id, a.created_at);
-    }
-    if (!latestByPath.size) return [];
-    const pathRows = await db('seo_link_acquisition_paths')
-      .whereIn('id', [...latestByPath.keys()]).whereNull('superseded_by')
-      .select('id', 'domain_id', 'last_investigated_at');
-    const dueDomainIds = [...new Set(pathRows
-      .filter((pr) => !pr.last_investigated_at || new Date(latestByPath.get(pr.id)) > new Date(pr.last_investigated_at))
-      .map((pr) => pr.domain_id))];
+    let due = db('seo_link_attempts as a')
+      .join('seo_link_acquisition_paths as p', 'p.id', 'a.path_id')
+      .whereNull('p.superseded_by')
+      .whereIn('a.outcome', FAILED_ATTEMPT_OUTCOMES)
+      .where('a.created_at', '>', new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000))
+      .where((b) => b.whereNull('p.last_investigated_at').orWhere('a.created_at', '>', db.ref('p.last_investigated_at')));
+    if (seen.size) due = due.whereNotIn('p.domain_id', [...seen]);
+    const dueRows = await due.groupBy('p.domain_id').select('p.domain_id').orderByRaw('MAX(a.created_at) DESC').limit(limit);
+    const dueDomainIds = [...new Set((dueRows || []).map((r) => r.domain_id).filter(Boolean))];
     if (!dueDomainIds.length) return [];
     return notSeen2(db('seo_link_domains')
       .whereIn('id', dueDomainIds)
@@ -533,7 +535,19 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
       const priorUrl = evUrl(existing.investigation);
       const claimedUrl = evUrl(row.investigation);
       const sameIdentity = !claimedUrl || (!!priorUrl && registry.normalizeSubmissionUrl(claimedUrl) === registry.normalizeSubmissionUrl(priorUrl));
-      if (sameIdentity) row = { ...row, legal_terms_hash: existing.legal_terms_hash };
+      if (sameIdentity) {
+        row = { ...row, legal_terms_hash: existing.legal_terms_hash };
+        // A retained hash keeps its IDENTITY: when this pass omitted the
+        // terms URL, the evidence must still carry the URL the hash was
+        // taken from — otherwise the next pass that names the original URL
+        // (and fetches it inconclusively) would see no prior identity and
+        // clear a valid hash of an unchanged agreement.
+        if (!claimedUrl && priorUrl && existing.legal_terms_hash) {
+          let inv = {};
+          try { inv = typeof row.investigation === 'string' ? JSON.parse(row.investigation) : (row.investigation || {}); } catch { inv = {}; }
+          row = { ...row, investigation: JSON.stringify({ ...inv, legal_terms_url: priorUrl, legal_terms_url_retained: true }) };
+        }
+      }
     }
     // The investigator never owns merchant_binding (an observed-checkout
     // artifact): whatever a runner verified onto the row stands.
@@ -568,9 +582,29 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
   if (id && replacesPathId && replacesPathId !== id) {
     const old = await trx('seo_link_acquisition_paths')
       .where({ id: replacesPathId, domain_id: domainId }).whereNull('superseded_by').first('id');
-    if (old) {
-      await trx('seo_link_acquisition_paths').where({ id: old.id }).update({ superseded_by: id, superseded_at: now, updated_at: now });
-      await trx('seo_link_prospects').where({ path_id: old.id }).update({ path_id: id, updated_at: now });
+    if (old) await trx('seo_link_acquisition_paths').where({ id: old.id }).update({ superseded_by: id, superseded_at: now, updated_at: now });
+  }
+  // Placements follow the successor ONLY while nobody holds their lease: a
+  // leased placement (claimed_at set) is mid-submission through the path it
+  // was claimed on — the signup runner acts between claim and report and
+  // records its attempt against that path — so repointing it now would
+  // leave the placement on the successor while its ledger names the
+  // predecessor. Leased rows keep the retired path and are repointed by the
+  // next upsert of this successor once the lease settles (report/release/
+  // sweep clear claimed_at), which is why this runs on EVERY upsert and
+  // covers every path this one superseded, not just the one matched now.
+  if (id) {
+    // the whole retirement chain (old → mid → this), bounded — a placement
+    // leased on a twice-superseded path still lands on the live successor
+    const retired = [];
+    let frontier = [id];
+    for (let hop = 0; hop < 8 && frontier.length; hop++) {
+      const rows = await trx('seo_link_acquisition_paths').where({ domain_id: domainId }).whereIn('superseded_by', frontier).select('id');
+      frontier = rows.map((r) => r.id).filter((x) => x !== id && !retired.includes(x));
+      retired.push(...frontier);
+    }
+    if (retired.length) {
+      await trx('seo_link_prospects').whereIn('path_id', retired).whereNull('claimed_at').update({ path_id: id, updated_at: now });
     }
   }
   return id;
@@ -627,10 +661,13 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // repeat the currency marker/symbol, and the check runs regardless of
     // how the quote itself ends (a cadence suffix must not hide the range)
     const rangeNext = /^\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?\d/.test(t.slice(idx + q.length));
+    // …and a quote continued by MINIMUM-price syntax is a truncated lower
+    // bound the same way: "USD 95+" / "USD 95 and up" never verify "USD 95"
+    const minimumNext = /^\s*(?:\+|and up\b|or more\b|and above\b|and over\b|or higher\b|and higher\b|minimum\b|min\.)/.test(t.slice(idx + q.length));
     // …and a quote directly preceded by a pricing qualifier is a starting/
-    // promo price, not the price — the same tokens the price parser rejects
-    const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));
-    if (!contBefore && !contAfter && !multiplierNext && !rangeNext && !qualifierBefore) return true;
+    // promo/minimum price, not the price — the same tokens the price parser rejects
+    const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|at least|minimum|min\.?|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));
+    if (!contBefore && !contAfter && !multiplierNext && !rangeNext && !minimumNext && !qualifierBefore) return true;
     idx = t.indexOf(q, idx + 1);
   }
   return false;
@@ -758,7 +795,7 @@ function canonicalizeTerms(html) {
  * failure ceiling parks it as `watching` on the normal recheck cadence.
  * Best-effort — a defer that itself fails only costs backoff, never data.
  */
-async function deferFailedDomain(db, domain, now, { claim = true, observedState = null } = {}) {
+async function deferFailedDomain(db, domain, now, { claim = true, observedState = null, claimToken = null } = {}) {
   try {
     const failures = (Number(domain.investigate_failures) || 0) + 1;
     const patch = { investigate_failures: failures, updated_at: now };
@@ -770,14 +807,17 @@ async function deferFailedDomain(db, domain, now, { claim = true, observedState 
     } else {
       // Refresh targets (lane-owned aggregate states) never get re-parked —
       // only deferred: the backoff caps at the max interval instead.
-      patch.investigate_after = new Date(now.getTime() + Math.min(INVESTIGATE_BACKOFF_BASE_MS * 2 ** (failures - 1), INVESTIGATE_BACKOFF_MAX_MS));
+      patch.investigate_after = new Date(now.getTime() + failureBackoffMs(failures));
     }
     // Compare-and-set on the state this run observed — a claim defers only
-    // while `investigating` stands (or, for a failure BEFORE the claim CAS,
-    // the still-unclaimed selected state via observedState); a refresh
-    // defers only while the domain still holds its lane-owned state. Never
-    // overwrite a newer state.
-    await db('seo_link_domains').where({ id: domain.id, agent_state: observedState || (claim ? 'investigating' : domain.agent_state) }).update(patch);
+    // while `investigating` stands UNDER THIS RUN'S claim token (or, for a
+    // failure BEFORE the claim CAS, the still-unclaimed selected state via
+    // observedState); a refresh defers only while the domain still holds
+    // its lane-owned state. Never overwrite a newer state or a reopened
+    // mandate.
+    const guard = { id: domain.id, agent_state: observedState || (claim ? 'investigating' : domain.agent_state) };
+    if (claim && !observedState && claimToken) guard.investigate_claim_token = claimToken;
+    await db('seo_link_domains').where(guard).update(patch);
   } catch (err) {
     logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
   }
@@ -823,6 +863,7 @@ async function investigatePaths(db, {
 
   const ran = await exclusive(LOCK_KEY, async () => {
     for (const { domain, claimState } of targets) {
+      let claimToken = null; // minted by the claim CAS below; read by the catch-path defer too
       try {
         const host = canonicalProspectDomain(domain.domain);
         if (!host) {
@@ -845,12 +886,17 @@ async function investigatePaths(db, {
         // same CAS (a cheap touch): an admin reject/watch between selection
         // and this statement must stop the paid work here, not after the
         // fetches and model call.
+        // The claim also mints a GENERATION token: `investigating` alone
+        // cannot tell this run's claim from a later one — an owner Watch/
+        // Reject followed by Reopen returns the state to `investigating`
+        // under a fresh mandate (mask + backoff reset), and a run that
+        // started before it must not finish on top of it. Reopen clears
+        // the token; the write phase and the failure defer both compare it.
         if (claimState) {
+          claimToken = crypto.randomUUID();
           const claimed = await db('seo_link_domains')
             .where({ id: domain.id, agent_state: domain.agent_state })
-            .update(domain.agent_state === 'investigating'
-              ? { updated_at: now }
-              : { agent_state: 'investigating', updated_at: now });
+            .update({ agent_state: 'investigating', investigate_claim_token: claimToken, updated_at: now });
           if (!claimed) { out.staleClaims += 1; continue; }
         }
 
@@ -882,11 +928,15 @@ async function investigatePaths(db, {
         const pages = [];
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
-        let cappedTail = false;
         const urlQueue = [...urls];
+        // fetch URL → the apex URL it stands in for (origin fallback re-basing):
+        // evidence keys (coverage, disproof, redirects) stay on the ORIGINAL
+        // URL, which is the identity every path row and hint carries
+        const rebasedFrom = new Map();
         for (let qi = 0; qi < urlQueue.length; qi++) {
           const url = urlQueue[qi];
-          if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
+          if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
+          const claimUrl = rebasedFrom.get(url) || url;
           const probeIdx = probeIdxFor(url);
           out.fetches += 1;
           const page = await fetcher(url);
@@ -896,11 +946,11 @@ async function investigatePaths(db, {
             // a binary 2xx body (PDF, image) decodes into `html` but is not
             // page text: it must never become model input, coverage, or
             // disproof — same textual-MIME rule the terms branch enforces
-            fetchErrors.push({ url, reason: 'non_text_body' });
+            fetchErrors.push({ url: claimUrl, reason: 'non_text_body' });
             probeDefinitive = true; // the route exists and will never be readable text
           } else if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
             const text = canonicalizeTerms(page.html);
-            redirectMap.set(registry.normalizeSubmissionUrl(url), registry.normalizeSubmissionUrl(finalUrl));
+            redirectMap.set(registry.normalizeSubmissionUrl(claimUrl), registry.normalizeSubmissionUrl(finalUrl));
             // html/text stay only for THIS domain's evidence verification —
             // never persisted, never prompted beyond the excerpt. `truncated`
             // rides along: a byte-capped page is positive evidence but never
@@ -908,27 +958,31 @@ async function investigatePaths(db, {
             // requestedUrl rides along: a followed canonical redirect
             // (http→https, slash) covers BOTH aliases — the original path's
             // URL must not stay "never covered" and re-select forever
-            pages.push({ url: finalUrl, requestedUrl: url, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
+            pages.push({ url: finalUrl, requestedUrl: claimUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
             probeDefinitive = true; // the route was actually inspected
-            // A WORKING fallback origin carries the probes too: the apex is
-            // dead, so re-base every still-queued apex probe onto the origin
-            // that answers — otherwise no route could ever be discovered
-            // before the no-progress valve closes the domain.
+            // A WORKING fallback origin carries EVERY still-queued apex URL:
+            // the apex is dead, so probes, known paths, and provenance hints
+            // alike re-base onto the origin that answers — a known custom
+            // route (/get-listed) would otherwise fail on every generation
+            // and stay due forever while the probes moved on.
             if (url === `https://www.${host}` || url === `http://${host}`) {
               for (let j = qi + 1; j < urlQueue.length; j++) {
-                if (urlQueue[j].startsWith(`https://${host}/`) && probeIdxFor(urlQueue[j]) !== undefined) {
-                  urlQueue[j] = url + new URL(urlQueue[j]).pathname;
+                if (urlQueue[j].startsWith(`https://${host}/`)) {
+                  const u = new URL(urlQueue[j]);
+                  const moved = `${url}${u.pathname}${u.search}`;
+                  rebasedFrom.set(moved, urlQueue[j]);
+                  urlQueue[j] = moved;
                 }
               }
             }
           } else if (page && page.html && !page.blocked && !page.error) {
             // the request was host-bound but a redirect left the domain —
             // an off-site page must never become model input or evidence
-            fetchErrors.push({ url, reason: 'offsite_redirect' });
+            fetchErrors.push({ url: claimUrl, reason: 'offsite_redirect' });
             probeDefinitive = true; // the route definitively leads off-site
           } else {
             const reason = (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}`;
-            fetchErrors.push({ url, reason });
+            fetchErrors.push({ url: claimUrl, reason });
             probeDefinitive = /^status_(404|410)$/.test(reason); // gone is a verdict; timeouts/blocks/5xx retry
             // BOUNDED origin fallbacks: a site reachable only via www or
             // plain http would otherwise fail every candidate at the
@@ -952,7 +1006,7 @@ async function investigatePaths(db, {
         // failed investigation (backoff applies) and spend no model call.
         if (!pages.some((pg) => pg.text.length >= MIN_COVERAGE_TEXT_CHARS)) {
           out.failed.push({ id: domain.id, domain: host, reason: pages.length ? 'no_substantive_page_evidence' : 'no_page_evidence' });
-          await deferFailedDomain(db, domain, now, { claim: claimState });
+          await deferFailedDomain(db, domain, now, { claim: claimState, claimToken });
           continue;
         }
 
@@ -963,7 +1017,7 @@ async function investigatePaths(db, {
         out.llmCalls += res.calls || 1;
         if (!res.ok) {
           out.failed.push({ id: domain.id, domain: host, reason: res.reason });
-          await deferFailedDomain(db, domain, now, { claim: claimState }); // backoff, never an hourly re-spend
+          await deferFailedDomain(db, domain, now, { claim: claimState, claimToken }); // backoff, never an hourly re-spend
           continue;
         }
         const verdict = res.data;
@@ -1154,12 +1208,14 @@ async function investigatePaths(db, {
         let txSuperseded = 0;
         await db.transaction(async (trx) => {
           const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate()
-            .first('agent_state', 'domain_rating', 'spam_score', 'organic_traffic', 'competitors_linked');
-          // Claims must still hold `investigating`; a REFRESH must still see
-          // the lane state it selected — either way, a state that moved
-          // during the un-locked network window owns the row now.
+            .first('agent_state', 'investigate_claim_token', 'best_path_id', 'domain_rating', 'spam_score', 'organic_traffic', 'competitors_linked');
+          // Claims must still hold `investigating` UNDER THIS RUN'S TOKEN
+          // (an ABA Watch→Reopen returns the state but not the token); a
+          // REFRESH must still see the lane state it selected — either way,
+          // a state that moved during the un-locked network window owns the
+          // row now.
           const expected = claimState ? 'investigating' : domain.agent_state;
-          if (!fresh || fresh.agent_state !== expected) { staleClaim = true; return; }
+          if (!fresh || fresh.agent_state !== expected || (claimState && fresh.investigate_claim_token !== claimToken)) { staleClaim = true; return; }
           const writtenIds = [];
           for (const p of writable) {
             // The model's price claims count only when the exact quote/marker
@@ -1338,6 +1394,19 @@ async function investigatePaths(db, {
           const active = await trx('seo_link_acquisition_paths').where({ domain_id: domain.id }).whereNull('superseded_by').where({ baseline: false }).select('*');
           const ranked = active.map((p) => ({ p, v: pathValue(p) })).filter((r) => r.v > 0).sort((a, b) => b.v - a.v);
           const best = ranked.length ? ranked[0].p : null;
+          // The baseline importer deliberately makes an imported domain's
+          // descriptive baseline path its best path (the live placement
+          // stays visible and seeds discovery). Baselines never RANK — they
+          // describe a link, not a reproducible route — but a negative
+          // refresh must not erase that pointer either: it stands until a
+          // ranked replacement exists or the baseline URL itself is gone.
+          let keptBaselineId = null;
+          if (!best && fresh.best_path_id) {
+            const held = await trx('seo_link_acquisition_paths')
+              .where({ id: fresh.best_path_id, domain_id: domain.id, baseline: true }).whereNull('superseded_by').first('id', 'submission_url');
+            const heldGone = !!(held && held.submission_url && goneKeys.has(registry.normalizeSubmissionUrl(held.submission_url)));
+            if (held && !heldGone) keptBaselineId = held.id;
+          }
           // Score from the LOCKED row — a concurrent enrichment (the Sunday
           // feeders can still be running at :20) must not leave a freshly
           // qualified domain scored on superseded quality inputs.
@@ -1363,7 +1432,11 @@ async function investigatePaths(db, {
           // added since (a new /register) could be closed on stale bits.
           // The decideState block below overrides this back to newProbeMask
           // when the pass defers near-term.
-          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null, probe_coverage_mask: 0 };
+          const patch = { best_path_id: best ? best.id : keptBaselineId, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null, probe_coverage_mask: 0 };
+          // how soon a near-term (transient) watching downgrade rechecks —
+          // the base interval, or the escalating failure curve for a pass
+          // that made no probe progress
+          let deferMs = INVESTIGATE_BACKOFF_BASE_MS;
           if (decideState) {
             // Defensive downgrades, both directions: a qualified verdict with
             // no executable best path parks `watching` (never a qualified
@@ -1392,16 +1465,19 @@ async function investigatePaths(db, {
               } else {
                 // NO progress is not proof of absence: a route that only
                 // times out or 5xxes must not be closed away during an
-                // outage. Retry on the escalating failure backoff; at the
-                // ceiling, PARK FOR REVIEW on the normal watch cadence
-                // (mask resets — the next generation re-earns coverage)
-                // instead of ever closing on an uninspected route.
+                // outage. Retry on the SAME escalating failure backoff a
+                // failed pass gets (6h · 12h · 24h · 48h · 96h — a multi-day
+                // route outage costs five model calls, not one every 6h);
+                // at the ceiling, PARK FOR REVIEW on the normal watch
+                // cadence (mask resets — the next generation re-earns
+                // coverage) instead of ever closing on an uninspected route.
                 const failures = (Number(domain.investigate_failures) || 0) + 1;
                 if (failures >= MAX_INVESTIGATE_FAILURES) {
                   effectiveVerdict = 'watching'; downgradeNote = 'probe routes never reached a definitive result — parked for review';
                 } else {
                   effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered probe has no definitive result yet'; tailDeferred = true;
                   patch.investigate_failures = failures;
+                  deferMs = failureBackoffMs(failures);
                 }
               }
             }
@@ -1413,7 +1489,7 @@ async function investigatePaths(db, {
             const transientDowngrade = downgradeNote && (unstampedIds.size > 0 || tailDeferred);
             if (effectiveVerdict === 'watching' && transientDowngrade) patch.probe_coverage_mask = newProbeMask; // the chain continues
             patch.watch_recheck_at = effectiveVerdict === 'watching'
-              ? new Date(now.getTime() + (transientDowngrade ? INVESTIGATE_BACKOFF_BASE_MS : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))
+              ? new Date(now.getTime() + (transientDowngrade ? deferMs : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))
               : null;
             if (downgradeNote) patch.score_reasons = `${patch.score_reasons} · downgraded: ${downgradeNote}`;
           }
@@ -1434,7 +1510,7 @@ async function investigatePaths(db, {
       } catch (err) {
         logger.error(`[link-investigator] ${domain.domain}: ${err.message}`);
         out.failed.push({ id: domain.id, domain: domain.domain, reason: `error: ${err.message}` });
-        await deferFailedDomain(db, domain, now, { claim: claimState });
+        await deferFailedDomain(db, domain, now, { claim: claimState, claimToken });
       }
     }
     return out;
@@ -1454,7 +1530,7 @@ module.exports = {
     deriveCurrency, centsFor, candidateUrls, hostBound, verifyPriceEvidence, buildPrompt, investigateWithModel,
     selectTargets, pathRowFrom, upsertPath, changedInputs, scoreDomain, pathValue,
     canonicalizeTerms, batchSize, SYSTEM_PROMPT, TYPE_WEIGHT,
-    deferFailedDomain, MAX_INVESTIGATE_FAILURES, INVESTIGATE_BACKOFF_BASE_MS,
+    deferFailedDomain, MAX_INVESTIGATE_FAILURES, INVESTIGATE_BACKOFF_BASE_MS, failureBackoffMs,
     PAYMENT_INPUTS, COMMUNICATION_INPUTS, EXECUTION_INPUTS, CLAIMABLE_STATES,
   },
 };

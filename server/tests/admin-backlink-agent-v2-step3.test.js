@@ -177,7 +177,10 @@ describe('PATCH /registry/:id', () => {
     // an explicit Reopen is a fresh mandate: the failure backoff is cleared (Codex PR r1 P2)
     expect(mockState.updates[2].patch.investigate_after).toBeNull();
     expect(mockState.updates[2].patch.investigate_failures).toBe(0);
+    // …and the claim generation: a run claimed before the reopen no longer matches (Codex PR r16 P1)
+    expect(mockState.updates[2].patch.investigate_claim_token).toBeNull();
     expect(mockState.updates[0].patch.investigate_after).toBeUndefined(); // watch/reject leave the backoff alone
+    expect(mockState.updates[0].patch.investigate_claim_token).toBeUndefined();
   });
   test('reopen clears the probe-tail deferral marker — a fresh mandate gets its own tail pass (Codex PR r8 P2)', async () => {
     mockState.firstDomain = { id: 'd1', domain: 'a.com', agent_state: 'watching', score_reasons: 'DR 40 · downgraded: terminal verdict deferred: unfetched candidate URLs remain' };

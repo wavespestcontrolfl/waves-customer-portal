@@ -33,30 +33,57 @@ function makeDb(seed = {}) {
   function builder(tableExpr) {
     const { table, alias } = stripAlias(tableExpr);
     const state = { table, alias, preds: [], join: null, select: null, order: [], limit: null, dedupe: false };
+    // Joined rows are { base, joined, byAlias } — a column reference resolves
+    // by its prefix (either side, either join direction); un-prefixed columns
+    // read the base table. A `db.ref('x.y')` value resolves the same way.
     const colVal = (row, col) => {
       const c = String(col);
-      if (state.join && c.includes('.')) {
-        const [pfx, name] = c.split('.');
-        return pfx === state.alias ? row.d[name] : row.p[name];
+      if (state.join) {
+        if (c.includes('.')) {
+          const [pfx, name] = c.split('.');
+          return (row.byAlias[pfx] || row.base)[name];
+        }
+        return row.base[c];
       }
       const name = c.includes('.') ? c.split('.')[1] : c;
-      return state.join ? row.d[name] : row[name];
+      return row[name];
     };
+    const val = (row, get, v) => (v && typeof v === 'object' && v.__ref ? get(row, v.__ref) : v);
+    const cmp = (op, l, r) => (op === '<=' ? l <= r : op === '<' ? l < r : op === '>' ? l > r : op === '>=' ? l >= r : l === r);
     const matches = (row) => state.preds.every((p) => p(row, colVal));
     const baseRows = () => {
       if (!state.join) return tables[table].filter(matches);
-      const { table: jt } = stripAlias(state.join.tableExpr);
-      const [lc] = state.join.on1.split('.').slice(1);
-      const joined = tables[table].flatMap((d) => tables[jt]
-        .filter((p) => p[lc] === d.id)
-        .map((p) => ({ d, p })));
+      const { table: jt, alias: ja } = stripAlias(state.join.tableExpr);
+      const side = (ref) => { const [pfx, col] = String(ref).split('.'); return { onBase: pfx === alias || pfx === table, col }; };
+      const s1 = side(state.join.on1); const s2 = side(state.join.on2);
+      const baseCol = s1.onBase ? s1.col : s2.col;
+      const joinCol = s1.onBase ? s2.col : s1.col;
+      const joined = tables[table].flatMap((b) => tables[jt]
+        .filter((j) => j[joinCol] === b[baseCol])
+        .map((j) => ({ base: b, joined: j, byAlias: { [alias || table]: b, [ja || jt]: j } })));
       return joined.filter(matches);
     };
     const resolve = () => {
       let rows = baseRows();
       if (state.join) {
+        // aggregate order (MIN/MAX(col) asc/desc) sorts the joined rows first,
+        // so the dedupe below keeps each group's extreme in group order
+        for (const o of [...state.order].reverse()) {
+          const m = o.raw && o.raw.match(/^(MIN|MAX)\(([\w.]+)\)\s*(asc|desc)?$/i);
+          if (!m) continue;
+          const desc = (m[1].toUpperCase() === 'MAX') === !/asc/i.test(m[3] || '');
+          rows = [...rows].sort((a, b) => (new Date(colVal(a, m[2])) - new Date(colVal(b, m[2]))) * (desc ? -1 : 1));
+        }
+        // projection: explicit prefixed columns → one row per distinct tuple
+        // (GROUP BY); otherwise the base rows, deduped by id
+        const projected = (state.select || []).filter((c) => typeof c === 'string' && c.includes('.') && !c.endsWith('.*'));
         const seen = new Set();
-        rows = rows.map((r) => r.d).filter((d) => (seen.has(d.id) ? false : (seen.add(d.id), true)));
+        if (projected.length) {
+          rows = rows.map((r) => Object.fromEntries(projected.map((c) => [c.split('.')[1], colVal(r, c)])))
+            .filter((r) => { const k = JSON.stringify(r); return seen.has(k) ? false : (seen.add(k), true); });
+        } else {
+          rows = rows.map((r) => r.base).filter((d) => (seen.has(d.id) ? false : (seen.add(d.id), true)));
+        }
       }
       for (const o of [...state.order].reverse()) {
         if (o.raw && /owner_seed/.test(o.raw)) {
@@ -77,10 +104,10 @@ function makeDb(seed = {}) {
           const sub = {
             whereNull(col) { preds.push((row, get) => get(row, col) == null); return sub; },
             whereNot(col, val) { preds.push((row, get) => get(row, col) !== val); return sub; },
-            orWhere(col, op, val) {
-              preds.push(val === undefined
+            orWhere(col, op, v) {
+              preds.push(v === undefined
                 ? (row, get) => get(row, col) === op
-                : (row, get) => (op === '<=' ? get(row, col) <= val : op === '<' ? get(row, col) < val : get(row, col) === val));
+                : (row, get) => cmp(op, get(row, col), val(row, get, v)));
               return sub;
             },
           };
@@ -89,7 +116,7 @@ function makeDb(seed = {}) {
           return q;
         }
         if (typeof a === 'object') state.preds.push((row, get) => Object.entries(a).every(([k, v]) => get(row, k) === v));
-        else if (c !== undefined) state.preds.push((row, get) => (b === '<=' ? get(row, a) <= c : b === '<' ? get(row, a) < c : b === '>' ? get(row, a) > c : b === '>=' ? get(row, a) >= c : get(row, a) === c));
+        else if (c !== undefined) state.preds.push((row, get) => cmp(b, get(row, a), val(row, get, c)));
         else state.preds.push((row, get) => get(row, a) === b);
         return q;
       },
@@ -129,9 +156,11 @@ function makeDb(seed = {}) {
   }
   const db = (t) => builder(t);
   db.raw = (sql) => ({ __raw: sql });
+  db.ref = (col) => ({ __ref: col });
   db.transaction = async (cb) => {
     const trx = (t) => builder(t);
     trx.raw = db.raw;
+    trx.ref = db.ref;
     return cb(trx);
   };
   db._tables = tables;
@@ -1840,5 +1869,194 @@ describe('full run', () => {
     // the real path was written beside it and became the best path
     const real = db._tables.seo_link_acquisition_paths.find((p) => p.id !== baseline.id);
     expect(db._tables.seo_link_domains[0].best_path_id).toBe(real.id);
+  });
+
+  // ---- Codex PR round 16 -------------------------------------------------
+
+  test('a LEASED placement is never repointed mid-submission; it follows once the lease settles (Codex PR r16 P1)', async () => {
+    const d = domainRow();
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
+      path_key: 'paid_listing:https://example.com/old-join', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    // the signup runner holds this one's lease (claim → browser action → report)
+    const leased = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect', claimed_at: new Date('2026-08-31T11:55:00Z') };
+    const idle = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect', claimed_at: null };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath], seo_link_prospects: [leased, idle] });
+    const goneFetch = async (url) => (url.includes('/old-join') ? { status: 404, finalUrl: url, html: null, blocked: false } : okFetch(url));
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ replaces_path_id: oldPath.id })]) }) }));
+    expect(r.superseded).toBe(1);
+    const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
+    const row = (id) => db._tables.seo_link_prospects.find((p) => p.id === id);
+    expect(row(idle.id).path_id).toBe(fresh.id); // idle placement follows the successor
+    expect(row(leased.id).path_id).toBe(oldPath.id); // the in-flight one stays on the path it is submitting through
+    // the lease settles (report/release cleared claimed_at); the next upsert
+    // of the successor — a plain re-investigation echoing it — repoints it
+    row(leased.id).claimed_at = null;
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: goneFetch }), domainIds: [d.id] });
+    expect(row(leased.id).path_id).toBe(fresh.id);
+  });
+
+  test('a no-progress probe pass retries on the ESCALATING failure backoff, not a flat six hours (Codex PR r16 P1)', async () => {
+    const { failureBackoffMs } = _internals;
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetcher = async (url) => (url === 'https://example.com/submit'
+      ? { status: null, finalUrl: null, html: null, blocked: false, error: 'timeout' } // a multi-day route outage
+      : okFetch(url));
+    const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    const dom = () => db._tables.seo_link_domains[0];
+    const pairs = []; // [failure count, recheck horizon] for every stalled pass
+    let t = NOW;
+    for (let i = 0; i < 10; i++) {
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: t, domainIds: [d.id] });
+      const f = Number(dom().investigate_failures) || 0;
+      if (f > 0) pairs.push([f, dom().watch_recheck_at.getTime() - t.getTime()]);
+      if (/parked for review/.test(String(dom().score_reasons))) break;
+      t = dom().watch_recheck_at;
+    }
+    const H = 60 * 60 * 1000;
+    expect(pairs.slice(0, 4)).toEqual([[1, 6 * H], [2, 12 * H], [3, 24 * H], [4, 48 * H]]);
+    expect(pairs.map(([f]) => f)).toEqual(pairs.map(([, ms]) => ms).map((ms, i) => (ms === failureBackoffMs(i + 1) ? i + 1 : -1)));
+    expect(dom().agent_state).toBe('watching'); // still parked for review at the ceiling — never a close
+  });
+
+  test('minimum-price syntax never verifies a truncated quote nor derives an exact cost (Codex PR r16 P1)', () => {
+    const { verifyPriceEvidence, centsFor } = _internals;
+    const claim = (price_text) => modelPath({ price_text, renewal_price_text: null, renewal_price_page_url: null, quotes: [price_text] });
+    const pageOf = (text) => ({ url: 'https://example.com/join', excerpt: text, text, html: '' });
+    const plus = pageOf('Directory listing page with membership details. Sponsor packages: USD 95+ per year. Contact us to reserve.');
+    expect(verifyPriceEvidence([plus], claim('USD 95')).price_text).toBeNull(); // "USD 95+" is a floor, not "USD 95"
+    expect(verifyPriceEvidence([plus], claim('USD 95+')).price_text).toBe('USD 95+'); // the verbatim floor verifies…
+    expect(centsFor('USD', 'USD 95+')).toBeNull(); // …but never becomes an exact cost
+    for (const text of ['USD 95 and up', 'USD 95 or more', 'minimum USD 95', 'at least USD 95', 'USD 95 min.']) expect(centsFor('USD', text)).toBeNull();
+    expect(centsFor('USD', 'USD 95 / year')).toBe(9500); // an exact quote still derives
+    const andUp = pageOf('Directory listing page with membership details. Sponsor packages: USD 95 and up per year. Contact us to reserve.');
+    expect(verifyPriceEvidence([andUp], claim('USD 95')).price_text).toBeNull();
+    const minimum = pageOf('Directory listing page with membership details. Sponsor packages: minimum USD 95 per year. Contact us to reserve.');
+    expect(verifyPriceEvidence([minimum], claim('USD 95')).price_text).toBeNull();
+  });
+
+  test('a retained terms hash keeps its URL identity — an omitting pass cannot set up the next pass to clear it (Codex PR r16 P1)', async () => {
+    const d = domainRow();
+    const priorHash = 'e'.repeat(64);
+    const existing = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      legal_attestation: true, legal_terms_hash: priorHash,
+      last_investigated_at: new Date('2026-08-01'), investigation: JSON.stringify({ legal_terms_url: 'https://example.com/terms' }),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [existing] });
+    const kept = () => db._tables.seo_link_acquisition_paths.find((p2) => p2.id === existing.id);
+    // pass 1: the model OMITS the terms URL — hash retained, and so is its identity
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ legal_attestation: true, legal_terms_url: null })]) }) }));
+    expect(kept().legal_terms_hash).toBe(priorHash);
+    expect(JSON.parse(kept().investigation)).toMatchObject({ legal_terms_url: 'https://example.com/terms', legal_terms_url_retained: true });
+    // pass 2: the model names the ORIGINAL URL again and its fetch is transiently inconclusive — same identity, hash stands
+    const fetcher = async (url) => (url.includes('/terms') ? { status: 503, finalUrl: url, html: null, blocked: false, error: 'http_503' } : okFetch(url));
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ legal_attestation: true, legal_terms_url: 'https://example.com/terms' })]) }) }), domainIds: [d.id] });
+    expect(kept().legal_terms_hash).toBe(priorHash);
+  });
+
+  test('a negative refresh keeps the baseline best path until a replacement exists or its URL is gone (Codex PR r16 P2)', async () => {
+    const d = domainRow({ agent_state: 'acquired' });
+    const baseline = {
+      id: uid(), domain_id: d.id, acquisition_type: 'editorial_outreach', submission_url: 'https://example.com/resources', baseline: true,
+      path_key: 'editorial_outreach:https://example.com/resources', superseded_by: null, last_investigated_at: null, confidence: 0.1,
+      investigation: JSON.stringify({ baseline: true }), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    d.best_path_id = baseline.id; // the importer's deliberate pointer at the live placement
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [baseline] });
+    const negative = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    await investigatePaths(db, { ...runOpts(db, { llmDispatch: negative }), domainIds: [d.id] });
+    expect(db._tables.seo_link_domains[0].best_path_id).toBe(baseline.id); // no reproducible route ≠ no link
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('acquired');
+    // a real path outranks it
+    await investigatePaths(db, { ...runOpts(db), domainIds: [d.id] });
+    const real = db._tables.seo_link_acquisition_paths.find((p) => !p.baseline);
+    expect(db._tables.seo_link_domains[0].best_path_id).toBe(real.id);
+    // …and once the baseline's own URL is GONE, a negative refresh clears the pointer
+    const db2 = makeDb({ seo_link_domains: [domainRow({ agent_state: 'acquired', best_path_id: baseline.id })], seo_link_acquisition_paths: [{ ...baseline, domain_id: undefined }] });
+    db2._tables.seo_link_acquisition_paths[0].domain_id = db2._tables.seo_link_domains[0].id;
+    const gone = async (url) => (url.includes('/resources') ? { status: 404, finalUrl: url, html: null, blocked: false } : okFetch(url));
+    await investigatePaths(db2, { ...runOpts(db2, { fetchPage: gone, llmDispatch: negative }), domainIds: [db2._tables.seo_link_domains[0].id] });
+    expect(db2._tables.seo_link_domains[0].best_path_id).toBeNull();
+  });
+
+  test('a working fallback origin carries KNOWN paths too, crediting the apex identity (Codex PR r16 P2)', async () => {
+    const d = domainRow();
+    const custom = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/get-listed',
+      path_key: 'paid_listing:https://example.com/get-listed', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: null, investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [custom] });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url.startsWith('https://www.example.com')) return okFetch(url);
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' }; // apex dead
+    };
+    const echoed = modelPath({ submission_url: 'https://www.example.com/get-listed', price_page_url: 'https://www.example.com/get-listed', renewal_price_page_url: 'https://www.example.com/get-listed' });
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
+    expect(fetched).toContain('https://www.example.com/get-listed'); // the known custom route re-based onto the live origin
+    expect(fetched.filter((u) => u.startsWith('https://example.com/'))).toHaveLength(0); // nothing else wasted on the dead apex
+    expect(r.investigated).toBe(1);
+    const path = db._tables.seo_link_acquisition_paths.find((p) => p.id === custom.id);
+    expect(path.last_investigated_at).toEqual(NOW); // covered under its apex identity — no longer due forever
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(1); // the www echo IS the same path (identity strips www)
+  });
+
+  test('an owner Watch → Reopen during the model call is a NEW generation — the old run aborts stale (Codex PR r16 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const reopen = (row) => Object.assign(row, { agent_state: 'investigating', investigate_claim_token: null, probe_coverage_mask: 0, investigate_failures: 0, investigate_after: null });
+    const llm = jest.fn(async () => {
+      const row = db._tables.seo_link_domains[0];
+      expect(typeof row.investigate_claim_token).toBe('string'); // the claim minted a token
+      row.agent_state = 'watching'; // owner: Watch
+      reopen(row); // owner: Reopen — same state, fresh mandate
+      return { ok: true, json: verdictOf([modelPath()]) };
+    });
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    expect(r.staleClaims).toBe(1);
+    expect(r.pathsWritten).toBe(0);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(0);
+    expect(db._tables.seo_link_domains[0]).toMatchObject({ agent_state: 'investigating', investigate_claim_token: null, probe_coverage_mask: 0 }); // the reopened mandate stands untouched
+    // …and the failure defer is bound the same way: a reopened counter is never re-deferred by the stale run
+    const db2 = makeDb({ seo_link_domains: [domainRow({ investigate_failures: 2 })] });
+    const llm2 = async () => { reopen(db2._tables.seo_link_domains[0]); return { ok: false, reason: 'provider_down' }; };
+    await investigatePaths(db2, runOpts(db2, { llmDispatch: llm2 }));
+    expect(db2._tables.seo_link_domains[0]).toMatchObject({ investigate_failures: 0, investigate_after: null, agent_state: 'investigating' });
+  });
+
+  test('failed-attempt selection is bounded by the batch limit in SQL, newest failure first (Codex PR r16 P2)', async () => {
+    const mkPath = (d) => ({
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: `https://${d.domain}/join`,
+      path_key: `paid_listing:https://${d.domain}/join`, superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-08-20'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    const older = domainRow({ agent_state: 'qualified', domain: 'older.com' });
+    const newer = domainRow({ agent_state: 'qualified', domain: 'newer.com' });
+    const stamped = domainRow({ agent_state: 'qualified', domain: 'stamped.com' }); // its failure PREDATES the stamp — not due
+    const [po, pn, ps] = [mkPath(older), mkPath(newer), mkPath(stamped)];
+    const retired = { ...mkPath(older), superseded_by: po.id }; // a failure on a RETIRED path never re-selects
+    const attempt = (path, created_at, outcome = 'failed') => ({ id: uid(), path_id: path.id, prospect_id: null, provider: 'deterministic_runner', action: 'submit', outcome, created_at });
+    const db = makeDb({
+      seo_link_domains: [older, newer, stamped],
+      seo_link_acquisition_paths: [po, pn, ps, retired],
+      seo_link_attempts: [attempt(po, new Date('2026-08-25')), attempt(pn, new Date('2026-08-30')), attempt(ps, new Date('2026-08-10')), attempt(retired, new Date('2026-08-31')), attempt(ps, new Date('2026-08-30'), 'placed')],
+    });
+    const one = await investigatePaths(db, { ...runOpts(db), limit: 1, dryRun: true });
+    expect(one.selected).toBe(1); // the limit bounds the failure bucket itself
+    const { selectTargets } = _internals;
+    const picked = await selectTargets(db, { limit: 1, now: NOW });
+    expect(picked.map((t) => t.domain.domain)).toEqual(['newer.com']); // newest qualifying failure first
+    const all = await selectTargets(db, { limit: 10, now: NOW });
+    expect(all.map((t) => t.domain.domain).sort()).toEqual(['newer.com', 'older.com']); // stamped.com's failure predates its stamp
   });
 });
