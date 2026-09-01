@@ -224,24 +224,49 @@ function insertArgument(text) {
 // compliant, not bare, and must be able to leave the frozen inventory
 // (GH Codex r5 P2). Recognized: `.insert(await completeScheduledServiceInsert(…))`
 // inline, or an identifier whose EVERY write in the file — assignment or
-// `.push(` (an empty-array accumulator initializer is neutral) — runs the
-// helper. An identifier with any helper-free write stays bare: importing
+// `.push(` (an empty-array accumulator initializer is neutral) — has a
+// value ROOTED in the helper: the whole value is one helper call, or one
+// `Promise.all(list.map(… => helper(…)))`. A statement that merely
+// contains the call somewhere (`cond ? await helper(…) : buildRaw()`) is
+// not rooted, so one bypassing branch keeps the site bare (pre-push Codex
+// r6 P1). An identifier with any helper-free write stays bare: importing
 // the helper elsewhere in the file launders nothing. A payload MUTATED
 // after completion (`data.x = …`, `data[k] = …`, `Object.assign(data, …)`,
 // `delete data.x`) is bare too — the final payload never passed validation
 // (pre-push Codex r6 P1); an adopter shapes the payload BEFORE the helper.
-const HELPER_CALL = /\bcompleteScheduledServiceInsert\s*\(/;
+// `text` is exactly one `<name>(…)` call: returns its argument text, or
+// null when it is not, or when anything follows the closing paren.
+function wholeCall(text, name) {
+  const m = new RegExp(`^${name}\\s*\\(`).exec(text);
+  if (!m) return null;
+  const open = m[0].length - 1;
+  const end = balancedParens(text, open);
+  return end === text.length ? text.slice(open + 1, end - 1) : null;
+}
+
+function rootedInHelper(value) {
+  const v = String(value || '').trim().replace(/;\s*$/, '').replace(/^await\s+/, '').trim();
+  if (wholeCall(v, 'completeScheduledServiceInsert') !== null) return true;
+  const all = wholeCall(v, 'Promise\\s*\\.\\s*all');
+  if (all === null || !/^[\w$.]+\s*\.\s*map\s*\(/.test(all.trim())) return false;
+  const arrow = /=>\s*([\s\S]*)\)\s*$/.exec(all);
+  return !!arrow && wholeCall(arrow[1].trim().replace(/^await\s+/, ''), 'completeScheduledServiceInsert') !== null;
+}
+
 function isContractCompleted(source, arg) {
   const text = String(arg || '').trim();
-  if (/^await\s+completeScheduledServiceInsert\s*\(/.test(text)) return true;
+  if (rootedInHelper(text)) return true;
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) return false;
   const writes = new RegExp(`(?:\\b(?:const|let|var)\\s+)?\\b${text}\\b\\s*(?:=(?![=>])|\\.\\s*push\\s*\\()`, 'g');
   let completed = 0;
   let w;
   while ((w = writes.exec(source)) !== null) {
     const stmt = source.slice(w.index, statementEnd(source, w.index));
-    if (HELPER_CALL.test(stmt)) completed += 1;
-    else if (!/=\s*\[\s*\]\s*$/.test(stmt)) return false;
+    const value = w[0].endsWith('(')
+      ? stmt.slice(w[0].length, balancedParens(stmt, w[0].length - 1) - 1)
+      : stmt.slice(w[0].length);
+    if (rootedInHelper(value)) completed += 1;
+    else if (!/^\s*\[\s*\]\s*;?\s*$/.test(value)) return false;
   }
   if (!completed) return false;
   const mutated = new RegExp(
@@ -420,6 +445,11 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');")).toEqual([]);
     // …but importing the helper elsewhere in the file launders nothing…
     expect(collectInsertSites("const ok = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(other);")).toEqual(["await trx( scheduled_services').insert(other"]);
+    // …a value only PARTLY rooted in the helper stays bare (pre-push r6 P1)…
+    expect(collectInsertSites("const data = useContract ? await completeScheduledServiceInsert(raw, opts) : buildRaw();\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
+    expect(collectInsertSites("const data = { ...(await completeScheduledServiceInsert(raw, opts)), extra: 1 };\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
+    expect(collectInsertSites("await trx('scheduled_services').insert((await completeScheduledServiceInsert(raw, opts)) || raw);")).toHaveLength(1);
+    expect(collectInsertSites("const rows = await Promise.all(raws.map((r) => r.ok ? completeScheduledServiceInsert(r, opts) : r));\nawait trx('scheduled_services').insert(rows);")).toHaveLength(1);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
     for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;']) {
       expect(collectInsertSites(`const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
