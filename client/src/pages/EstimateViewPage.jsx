@@ -6797,6 +6797,16 @@ function EstimateViewPageInner() {
   // (configure branch) and also after the confirmation card (review branch) so
   // the price-before-AI ordering holds while the panel + ask stay available
   // during the held-slot review step too.
+  // One prop object for EVERY active offer-card site (glass tail and the
+  // non-glass / review aiPanelBlock alike), so a category outside the glass
+  // pack still gets the dry-run price preview (GH codex P2 r2).
+  const pricedAddProps = pricedAddOffer ? {
+    phase: optOut.sectionKey === pricedAddOffer.serviceKey ? optOut.phase : 'idle',
+    quote: optOut.sectionKey === pricedAddOffer.serviceKey ? optOut.quote : null,
+    onPreview: () => onPreviewRestoreService(pricedAddOffer.serviceKey),
+    onConfirm: () => commitOptOut(pricedAddOffer.serviceKey, true, optOut.quote?.previewBasis || null),
+    onCancel: cancelRemoveService,
+  } : null;
   const aiPanelBlock = (
     <>
       <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
@@ -6811,6 +6821,7 @@ function EstimateViewPageInner() {
         offer={addServiceOffer}
         requestState={addServiceRequestState}
         onRequest={handleAddServiceRequest}
+        priced={pricedAddProps}
       />
     </>
   );
@@ -7280,13 +7291,7 @@ function EstimateViewPageInner() {
                 offer={addServiceOffer}
                 requestState={addServiceRequestState}
                 onRequest={handleAddServiceRequest}
-                priced={pricedAddOffer ? {
-                  phase: optOut.sectionKey === pricedAddOffer.serviceKey ? optOut.phase : 'idle',
-                  quote: optOut.sectionKey === pricedAddOffer.serviceKey ? optOut.quote : null,
-                  onPreview: () => onPreviewRestoreService(pricedAddOffer.serviceKey),
-                  onConfirm: () => commitOptOut(pricedAddOffer.serviceKey, true, optOut.quote?.previewBasis || null),
-                  onCancel: cancelRemoveService,
-                } : null}
+                priced={pricedAddProps}
               />
             </>
           ) : null}

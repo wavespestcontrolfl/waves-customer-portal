@@ -14759,7 +14759,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // FAIL CLOSED on removals with no trustworthy before-state: without one
     // the bundled-charge refusal cannot run, and that guard is an owner
     // ruling, not a best-effort disclosure.
-    if (included === false && !optOutResultHasPricingRows(beforeResult)) {
+    // ...and on ADDS: without a priced before-state the confirm panel could
+    // not disclose how the existing lines change (tier, per-application), so
+    // the customer would confirm blind (GH codex P1 r2).
+    if ((included === false || mode === 'add') && !optOutResultHasPricingRows(beforeResult)) {
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
     const beforeData = JSON.parse(JSON.stringify(parsedData));

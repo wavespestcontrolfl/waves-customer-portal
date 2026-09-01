@@ -1260,7 +1260,9 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // finalize) must not revert a quote the customer already holds (GH codex
   // P1). Best-effort: a failed revert is logged and the row keeps the offer
   // shape a resend would carry anyway.
-  if (leadShapeRef.parkedKey && !leadShapeRef.delivered && (thrown || (result && result.sent === false))) {
+  // Reverts on ANY exit without a real handoff — sent:false, a throw, or a
+  // sent:true built only from suppression sentinels (r2).
+  if (leadShapeRef.parkedKey && !leadShapeRef.delivered) {
     await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
   }
   if (thrown) throw thrown;
@@ -1580,14 +1582,16 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
-  // A provider handoff succeeded: the customer holds the single-service
-  // quote, so the send-time park must NEVER be reverted from here on — even
-  // if the snapshot read or the status finalize below throws (GH codex P1).
-  if (options.leadShapeRef && sentChannels.length > 0) options.leadShapeRef.delivered = true;
   // Channels whose delivery counts as a first response: sms only when the
   // provider send was REAL (not a suppression sentinel); email's ok already
   // implies a real handoff.
   const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
+  // A REAL provider handoff succeeded: the customer holds the single-service
+  // quote, so the send-time park must NEVER be reverted from here on — even
+  // if the snapshot read or the status finalize below throws. A suppressed
+  // SMS (gate/template/owner kill) reports ok with real:false and is NOT a
+  // handoff, so it never sets this (GH codex P1 r1 + r2).
+  if (options.leadShapeRef && stampChannels.length > 0) options.leadShapeRef.delivered = true;
   const sent = sentChannels.length > 0;
 
   if (!sent) {
