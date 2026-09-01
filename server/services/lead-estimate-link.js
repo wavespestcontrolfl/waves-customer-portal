@@ -1276,10 +1276,6 @@ async function attributeSelfBooking({
 module.exports = {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
-  // The repo's closed-lead convention (includes 'unresponsive', unlike the
-  // call processor's reuse-specific terminal set) — for callers needing
-  // "is this lead still open" semantics.
-  CLOSED_LEAD_STATUSES,
   leadMatchesEstimateContact,
   // The same contact normalization the lead-match rule uses, for callers that
   // need to apply the identical match semantics against other tables

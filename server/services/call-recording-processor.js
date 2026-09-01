@@ -2270,11 +2270,11 @@ function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workab
 async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {}, knownSiblingId = null, knownSiblingExact = false }) {
   if (!phone || !leadId) return null;
   try {
-    // Sibling selection uses the repo's CLOSED convention, not this
-    // processor's reuse-specific TERMINAL set: an 'unresponsive' lead is
-    // closed for "work that lead instead" purposes.
-    const { CLOSED_LEAD_STATUSES } = require('./lead-estimate-link');
-    const closedStatuses = [...CLOSED_LEAD_STATUSES];
+    // Sibling selection is POSITIVE membership in the canonical open set —
+    // a whereNotIn(closed-ish) silently re-includes any status it forgot
+    // (spam, cancelled), and this note must never tell staff to work a
+    // non-engageable lead (see lead-statuses.js).
+    const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
     // A known sibling elects the pair ONLY when it is EXACT — the row a
     // guarded write just bounced off, i.e. the specific lead this caller
     // was being matched into. A lookup's newest-name-conflict id is NOT
@@ -2294,7 +2294,7 @@ async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {},
         // can move that lead to a different number, and the note would then
         // draw a consolidation arrow between two unrelated timelines.
         .where({ id: knownSiblingId, phone })
-        .whereNotIn('status', closedStatuses)
+        .whereIn('status', OPEN_LEAD_STATUSES)
         .whereNull('converted_at')
         .first('id', 'first_name', 'last_name', 'status', 'estimate_id');
     }
@@ -2303,7 +2303,7 @@ async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {},
         .whereNull('deleted_at')
         .where('phone', phone)
         .whereNot('id', leadId)
-        .whereNotIn('status', closedStatuses)
+        .whereIn('status', OPEN_LEAD_STATUSES)
         .whereNull('converted_at')
         .orderBy('created_at', 'desc')
         .limit(2);

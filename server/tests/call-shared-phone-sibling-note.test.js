@@ -21,7 +21,8 @@ function makeDb({ sibling = null, siblings = null, byId = {}, failInsert = false
         return q;
       },
       whereNot: () => q,
-      whereNotIn: (col, vals) => { database._statusExclusions.push(vals); return q; },
+      whereNotIn: () => q,
+      whereIn: (col, vals) => { database._statusFilters.push(vals); return q; },
       orderBy: () => q,
       limit: async () => {
         if (table !== 'leads') return [];
@@ -47,7 +48,7 @@ function makeDb({ sibling = null, siblings = null, byId = {}, failInsert = false
     return q;
   };
   database._inserts = inserts;
-  database._statusExclusions = [];
+  database._statusFilters = [];
   return database;
 }
 
@@ -76,9 +77,11 @@ describe('noteSharedPhoneSibling', () => {
     expect(rows.every((r) => r.activity_type === 'shared_phone_note')).toBe(true);
     expect(rows[0].description).toContain('lead-old');
     expect(rows[1].description).toContain('lead-new');
-    // Sibling selection uses the repo's CLOSED set — an 'unresponsive'
-    // lead must never be elected as "work that lead instead".
-    for (const vals of db._statusExclusions) expect(vals).toContain('unresponsive');
+    // Sibling selection is POSITIVE membership in the canonical open set —
+    // an 'unresponsive'/'spam'/'cancelled' lead must never be elected as
+    // "work that lead instead".
+    expect(db._statusFilters.length).toBeGreaterThan(0);
+    for (const vals of db._statusFilters) expect(vals).toEqual(['new', 'contacted', 'estimate_sent', 'estimate_viewed']);
   });
 
   test('a non-exact known id never elects a pair among multiple open siblings', async () => {
