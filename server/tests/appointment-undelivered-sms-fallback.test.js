@@ -395,12 +395,22 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
         metadata: { original_message_type: 'reminder_24h', scheduled_service_id: 'ss-owner', rendered_slot_ms: Date.parse('2026-06-22T13:00:00.000Z') },
       },
     });
+    // Everything a (wrong) recovery send would need is queued, so this
+    // pins the SKIP — not an accidental read failure.
+    const movedMembers = chain({});
+    movedMembers.select = jest.fn(async () => [{ appointment_time: '2026-06-25T14:00:00.000Z', scheduled_service_id: 'ss-owner', scheduled_date: '2026-06-25', window_start: '10:00:00' }]);
+    const movedLabel = chain({});
+    movedLabel.select = jest.fn(async () => [{ scheduled_service_id: 'ss-owner', label: 'Quarterly Pest Control' }]);
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })],
-      appointment_reminders: [chain({ first: { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-25T14:00:00.000Z', service_type: 'Quarterly Pest Control' } })],
+      appointment_reminders: [chain({ first: { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-25T14:00:00.000Z', service_type: 'Quarterly Pest Control' } }), chain({})],
       scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
       service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-25' } })], // moved: 22nd → 25th
+      'scheduled_services as ss': [movedMembers],
+      'appointment_reminders as ar': [movedLabel],
+      'scheduled_services as s': [chain({ first: null })],
+      scheduled_service_addons: [chain({})],
     });
 
     await AppointmentReminders.handleUndeliveredSms({
