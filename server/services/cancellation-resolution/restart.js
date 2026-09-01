@@ -328,7 +328,31 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
         && liveFamilies.length === eligibleFamilies.length
         && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
       if (sameScope) {
-        return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+        // Price re-verification (codex pre-push P0): a live quote is reused
+        // ONLY when the server recompute over ITS OWN inputs still lands on
+        // the frozen totals — a pricing-config change since mint archives
+        // the row and re-prices instead of re-serving the old dollars
+        // (owner ruling: restart ALWAYS reprices at the current price).
+        // Any recompute miss falls through to the fresh mint, whose own
+        // recompute is the dollar authority.
+        let samePrice = false;
+        try {
+          const check = await persistence.serverRecomputeFromEstimateData(parseJson(live.estimate_data, {}), {
+            priorQualifyingServices: [...ownedFamilies],
+            recurringCustomer: ownedFamilies.length > 0,
+          });
+          const cents = (v) => Math.round(Number(v || 0) * 100);
+          const t = check?.recomputed ? (check.serverTotals || {}) : null;
+          samePrice = !!t
+            && cents(t.monthlyTotal) === cents(live.monthly_total)
+            && (cents(t.annualTotal) || cents(t.monthlyTotal) * 12) === cents(live.annual_total)
+            && cents(t.onetimeTotal) === cents(live.onetime_total);
+        } catch (err) {
+          logger.warn(`[plan-restart] reuse price re-verification failed for ${fresh.id} — re-minting: ${err.message}`);
+        }
+        if (samePrice) {
+          return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+        }
       }
     }
     // Minting a replacement: archive the WHOLE unaccepted restart lineage
