@@ -193,5 +193,9 @@ describe('route wiring contracts', () => {
     for (const forbidden of ['.update(', '.insert(', '.del(', 'sendCustomerMessage', 'markComplete', 'transitionJobStatus', 'twilio']) {
       expect(block).not.toContain(forbidden);
     }
+    // the 90-day window is an ET calendar day bound from the shared helpers,
+    // never the session-zone CURRENT_DATE
+    expect(block).not.toMatch(/CURRENT_DATE|now\(\)/i);
+    expect(block).toContain('etDateString(addETDays(new Date(), -90))');
   });
 });

@@ -1988,12 +1988,17 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       serviceLine: detectServiceLine(svc.service_type),
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
+    // The 90-day window is ET calendar days: the database's own current
+    // date follows the session zone (UTC on Railway) and would roll the
+    // cutoff a day early through the Eastern evening. service_date is a
+    // DATE column, so the bound is the ET day string itself.
+    const sentSinceDay = etDateString(addETDays(new Date(), -90));
     const [sentRows, prefs] = await Promise.all([
       svc.customer_id
         ? db('service_records')
           .where({ customer_id: svc.customer_id })
           .whereRaw("structured_notes->'techTips' IS NOT NULL")
-          .where('service_date', '>=', db.raw("CURRENT_DATE - INTERVAL '90 days'"))
+          .where('service_date', '>=', sentSinceDay)
           .orderBy('service_date', 'desc')
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
           .catch(() => [])
