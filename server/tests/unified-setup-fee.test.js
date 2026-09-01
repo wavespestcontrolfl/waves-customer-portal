@@ -201,10 +201,13 @@ describe('decide-once enforcement on the billing/handoff paths (pre-push audit P
   test('prepay accepts CHARGE a frozen positive unified fee — its line rides the prepay invoice, and the "setup fee waived" copy never fires beside it', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
     // The fee line rides the SAME InvoiceService.create lineItems array as
-    // the rodent setup line, gated on the frozen unified quote + the
-    // operator waiver.
-    expect(src).toMatch(/prepayUnifiedSetupAmount = prepayUnifiedQuote\?\.kind === 'unified'[\s\S]{0,200}estimateOperatorSetupFeeWaived\(estimateData\)/);
+    // the rodent setup line, governed by the pre-seeding locked decision
+    // (frozen-positive quotes route through its one-fee-per-account
+    // dedupe), amount frozen-first.
+    expect(src).toMatch(/prepayUnifiedSetupAmount = acceptUnifiedDecision === true\s*\n\s*\? unifiedAcceptSetupFeeAmount\(estimateData\)/);
     expect(src).toMatch(/prepayUnifiedSetupAmount > 0 \? \[\{\s*description: 'Setup Fee — one-time \(billed with prepay\)'/);
+    // The frozen-positive dedupe exists and can only WAIVE.
+    expect(src).toMatch(/hasActiveRecurringService\(database, customerId\)\)\) return false;\s*\n\s*if \(customerId && \(await hasConsumableSetupClaim\(database, customerId\)\)\) return false;\s*\n\s*return true;/);
     // Copy: a riding fee suppresses the waiver claim in description AND notes.
     expect(src).toMatch(/prepayUnifiedSetupAmount > 0\s*\n\s*\/\/ The unified fee rides this invoice — never claim a waiver\./);
     expect(src).toMatch(/one-time setup fee billed with the prepay\./);

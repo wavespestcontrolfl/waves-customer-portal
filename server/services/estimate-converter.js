@@ -2399,15 +2399,40 @@ function frozenRodentBaitSetupAmount(estimateData = {}) {
 //   false → decided and waived (existing customer / operator waiver /
 //           in-flight claim / no recurring service)
 async function acceptTimeUnifiedSetupFeeDecision(database, { customerId = null, recurringServices = [], estimateData = {} } = {}) {
-  const { unifiedSetupFeeEnabled, decideUnifiedSetupFee } = require('./unified-setup-fee');
+  const {
+    unifiedSetupFeeEnabled, decideUnifiedSetupFee, hasActiveRecurringService, hasConsumableSetupClaim,
+  } = require('./unified-setup-fee');
   if (!unifiedSetupFeeEnabled()) return null;
   const data = normalizeEstimateData(estimateData);
-  if (data?.setupFeeQuote) return null;
+  if (data?.setupFeeQuote) {
+    const q = data.setupFeeQuote;
+    // A frozen ZERO (waived) or a legacy-kind freeze governs untouched.
+    if (q.kind !== 'unified' || !(Number(q.amount) > 0)) return null;
+    if (estimateOperatorSetupFeeWaived(data)) return false;
+    // Accept-time DEDUPE of a frozen POSITIVE unified quote (audit r10 P0
+    // — one setup per account): the frozen decision stands, unless the
+    // account gained a live recurring service or an in-flight claim since
+    // the freeze (e.g. a second quote accepted after the first already
+    // seeded the series and billed the fee). This is a dedupe, not an
+    // eligibility re-derivation — it can only WAIVE, never re-add.
+    if (customerId && (await hasActiveRecurringService(database, customerId))) return false;
+    if (customerId && (await hasConsumableSetupClaim(database, customerId))) return false;
+    return true;
+  }
   if (!(Array.isArray(recurringServices) && recurringServices.length > 0)) return false;
   if (estimateOperatorSetupFeeWaived(data)) return false;
   if (frozenRodentBaitSetupAmount(data) > 0) return null;
   const verdict = await decideUnifiedSetupFee(database, { customerId });
   return Number(verdict.amount) > 0;
+}
+
+// The amount an accept bills when acceptTimeUnifiedSetupFeeDecision is
+// true: the FROZEN unified amount when one exists (disclosure ↔ charge),
+// else the DB-configured live amount (no-freeze staff/AI/call lanes).
+function unifiedAcceptSetupFeeAmount(estimateData = {}) {
+  const q = normalizeEstimateData(estimateData)?.setupFeeQuote;
+  if (q?.kind === 'unified' && Number(q.amount) > 0) return Math.round(Number(q.amount) * 100) / 100;
+  return require('./unified-setup-fee').unifiedSetupFeeAmount();
 }
 
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
@@ -5951,7 +5976,7 @@ const EstimateConverter = {
       // bills exactly what the quote disclosed. A LIVE unified decision has
       // no freeze to read — it bills the DB-configured unified amount.
       const setupFeeAmount = acceptUnifiedDecision === true
-        ? require('./unified-setup-fee').unifiedSetupFeeAmount()
+        ? unifiedAcceptSetupFeeAmount(estimateData)
         : frozenSetupFeeAmount(estimateData);
       const hasDraftAmount = billingTerm === 'prepay_annual'
         ? annualPrepayAmount > 0
@@ -5982,16 +6007,12 @@ const EstimateConverter = {
           // The operator's explicit per-estimate waiver still zeroes it.
           // Unified quotes are never commercial (the quote basis excludes
           // commercial), so the commercial tax blend needs no unified arm.
-          const prepayUnifiedQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
-          const prepayUnifiedSetupAmount = prepayUnifiedQuote?.kind === 'unified'
-            && Number(prepayUnifiedQuote.amount) > 0
-            && !estimateOperatorSetupFeeWaived(estimateData)
-            ? Math.round(Number(prepayUnifiedQuote.amount) * 100) / 100
-            // No frozen quote (staff/AI/call lanes): the accept-time live
-            // decision above governs the prepay term too.
-            : (acceptUnifiedDecision === true
-              ? require('./unified-setup-fee').unifiedSetupFeeAmount()
-              : 0);
+          // The pre-seeding locked decision governs (frozen-positive quotes
+          // route through its accept-time dedupe too — audit r10 P0);
+          // amount is frozen-first.
+          const prepayUnifiedSetupAmount = acceptUnifiedDecision === true
+            ? unifiedAcceptSetupFeeAmount(estimateData)
+            : 0;
           const prepayLineDescription = commercialOnlyRecurring
             ? `${prepayPlanPrefix} — 12 months prepaid`
             : prepayDiscountApplied
@@ -7016,6 +7037,7 @@ module.exports.estimateHasCommercialOneTime = estimateHasCommercialOneTime;
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
 module.exports.acceptTimeUnifiedSetupFeeDecision = acceptTimeUnifiedSetupFeeDecision;
+module.exports.unifiedAcceptSetupFeeAmount = unifiedAcceptSetupFeeAmount;
 module.exports.frozenRodentBaitSetupAmount = frozenRodentBaitSetupAmount;
 module.exports.estimateRodentBaitIsCommercial = estimateRodentBaitIsCommercial;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math

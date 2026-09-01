@@ -10333,7 +10333,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // and the decision itself, so conversion and the detectors read
             // the same decide-once verdict.
             nextEstimateData.acceptedSetupFeeAmount = freezeUnifiedDecision === true
-              ? require('../services/unified-setup-fee').unifiedSetupFeeAmount()
+              ? EstimateConverter.unifiedAcceptSetupFeeAmount(nextEstimateData)
               : EstimateConverter.frozenSetupFeeAmount(nextEstimateData);
             if (freezeUnifiedDecision === true && !nextEstimateData.setupFeeQuote) {
               nextEstimateData.setupFeeQuote = {
@@ -11134,17 +11134,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           rodentSetupAmount: treatAsOneTime
             ? 0
             : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
-          // The frozen unified verdict (decided pre-seeding; nextEstimateData
-          // carries the accept-time freeze when acceptedEstDataForPricing
-          // predates it).
-          unifiedSetupAmount: (() => {
+          // The unified verdict, decided through the shared accept-time
+          // helper (frozen-positive quotes get its one-fee-per-account
+          // dedupe; this mint runs BEFORE any conversion seeding, so the
+          // probe never reads this accept's own rows). Amount frozen-first.
+          unifiedSetupAmount: await (async () => {
             if (treatAsOneTime) return 0;
+            const EstimateConverterMod = require('../services/estimate-converter');
             const d = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
-            const q = d?.setupFeeQuote;
-            return q?.kind === 'unified' && Number(q.amount) > 0
-              && !require('../services/estimate-converter').estimateOperatorSetupFeeWaived(d)
-              ? Math.round(Number(q.amount) * 100) / 100
-              : 0;
+            const dec = await EstimateConverterMod.acceptTimeUnifiedSetupFeeDecision(trx, {
+              customerId,
+              recurringServices: recurringSvcList,
+              estimateData: d,
+            });
+            return dec === true ? EstimateConverterMod.unifiedAcceptSetupFeeAmount(d) : 0;
           })(),
         });
         // Acceptance deposit credits this first invoice through create()'s
@@ -11567,7 +11570,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // A LIVE unified decision has no freeze — it bills the
             // DB-configured unified amount.
             const acceptSetupFeeAmount = acceptUnifiedDecision === true
-              ? require('../services/unified-setup-fee').unifiedSetupFeeAmount()
+              ? EstimateConverter.unifiedAcceptSetupFeeAmount(conversionEstData)
               : EstimateConverter.frozenSetupFeeAmount(conversionEstData);
             if (setupFeeApplies) {
               lineItems.push({
