@@ -115,6 +115,21 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
         `(function\\s+${g.name}\\b|(const|let|var)\\s+${g.name}\\b|(async\\s+)?function\\s+${g.name}\\b)`
       ).test(src);
       expect({ guard: g.name, module: g.module, defined }).toEqual({ guard: g.name, module: g.module, defined: true });
+      // A 4-arity middleware is an ERROR handler to Express — it is skipped
+      // on ordinary requests, so a GUARD refactored to (err, req, res, next)
+      // would silently stop guarding while staying registry-credited.
+      // Passthroughs are exempt: a reviewed error shaper is 4-arity by
+      // design and skipping it cannot weaken auth.
+      if (!g.factory && registry.guards.includes(g)) {
+        const pm = src.match(new RegExp(`function\\s+${g.name}\\s*\\(([^)]*)\\)`))
+          || src.match(new RegExp(`(?:const|let|var)\\s+${g.name}\\s*=\\s*(?:async\\s*)?function[^(]*\\(([^)]*)\\)`))
+          || src.match(new RegExp(`(?:const|let|var)\\s+${g.name}\\s*=\\s*(?:async\\s*)?\\(([^)=]*)\\)\\s*=>`));
+        if (pm) {
+          const arity = pm[1].trim() ? pm[1].split(',').length : 0;
+          expect({ guard: g.name, errorHandlerShaped: arity >= 4 })
+            .toEqual({ guard: g.name, errorHandlerShaped: false });
+        }
+      }
       // The export must be the SAME-NAMED value — `module.exports = {
       // adminAuthenticate: noop }` would keep the definition check green
       // while runtime Express receives the no-op. Local entries are consumed
@@ -2214,6 +2229,36 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(res.problems.some((p) => p.includes('with statement'))).toBe(true);
+  });
+
+  test('a SEQUENCE-wrapped alias (const api = (0, router)) still registers', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const api = (0, router);',
+        "api.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('a block-local CLASS shadowing an imported guard namespace refuses credit', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const auth = require('../middleware/a');",
+        "const router = require('express').Router();",
+        '{',
+        '  class auth { static guardA(req, res, next) { next(); } }',
+        "  router.get('/leak', auth.guardA, (req, res) => res.json({}));",
+        '}',
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // The shadowed reference is never credited — the route surfaces public.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toContain('GET /api/x/leak');
   });
 
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {

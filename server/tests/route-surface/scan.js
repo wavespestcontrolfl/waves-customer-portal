@@ -515,6 +515,11 @@ class ModuleAnalysis {
       } else if (node.type === 'FunctionDeclaration' && node.id) {
         this.countWrite(node.id.name);
         this.setBinding(node.id.name, { kind: 'function', node, topLevel: ctx.topLevel });
+      } else if (node.type === 'ClassDeclaration' && node.id) {
+        // A class binds (and can SHADOW an imported guard namespace) exactly
+        // like a function — record it so the shadow refuses guard credit.
+        this.countWrite(node.id.name);
+        this.setBinding(node.id.name, { kind: 'other', node, topLevel: ctx.topLevel });
       } else if (node.type === 'ForOfStatement'
         && node.left.type === 'VariableDeclaration'
         && node.left.declarations.length === 1
@@ -1309,8 +1314,13 @@ class ModuleAnalysis {
 
   recordBinding(name, init, topLevel) {
     // `exports = module.exports = router` — a chained assignment's VALUE is
-    // its rightmost operand; the inner assignment is visited separately.
-    while (init && init.type === 'AssignmentExpression' && init.operator === '=') init = init.right;
+    // its rightmost operand (the inner assignment is visited separately);
+    // `(0, router)` — a sequence evaluates to its LAST expression.
+    for (;;) {
+      if (init && init.type === 'AssignmentExpression' && init.operator === '=') init = init.right;
+      else if (init && init.type === 'SequenceExpression') init = init.expressions[init.expressions.length - 1];
+      else break;
+    }
     if (init) this.countWrite(name);
     if (this.isRouterFactory(init) || this.isAppFactory(init)) {
       this.routers.add(name);
