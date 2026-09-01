@@ -41,6 +41,19 @@ const SERVER_ROOT = path.join(__dirname, '..');
 // exact predicate line, and why the raw predicate is legitimate there.
 const ALLOWLIST = [
   {
+    file: 'services/intelligence-bar/authorization-contract.js',
+    match: 'Number(params?.updates?.monthly_rate) > 0',
+    context: 'isCustomerUpdate',
+    count: 1,
+    // Disclosure trigger, not a lane predicate: it inspects the PROPOSED
+    // update params (no customer row, no query) to decide whether the
+    // confirm card must disclose the executor's #3140 billing-lane stamp
+    // side effect. The stamp itself lives in the executor, which resolves
+    // the lane canonically; there is no row in hand to run through
+    // resolveBillingLane here.
+    reason: 'confirm-card disclosure trigger on proposed update params; selects nothing, stamps nothing',
+  },
+  {
     file: 'services/billing-cron.js',
     match: ".where('monthly_rate', '>', 0)",
     context: ".whereNull('service_paused_at')",
