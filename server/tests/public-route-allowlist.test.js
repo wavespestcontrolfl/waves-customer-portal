@@ -1378,6 +1378,31 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('overwriting a registered guard'))).toBe(true);
   });
 
+  test('a method-specific exemption on router.all() opens ONLY that method, stamped into the identity', () => {
+    // Dropping the guard later yields the bare `ALL /api/open` key — an auth
+    // widening always breaks the allowlist match and forces review.
+    const registry = {
+      guards: [{ name: 'exceptOpen', module: 'server/middleware/e.js', exempts: ['GET /open'] }],
+    };
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry,
+      files: {
+        'server/index.js': app([
+          "const { exceptOpen } = require('./middleware/e');",
+          "app.use('/api', exceptOpen, require('./routes/x'));",
+        ].join('\n')),
+        'server/routes/x.js': [
+          "const router = require('express').Router();",
+          "router.all('/open', (req, res) => res.json({}));",
+          'module.exports = router;',
+        ].join('\n'),
+      },
+    }).scan();
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}${r.extra ? ` (${r.extra})` : ''}`))
+      .toEqual(['ALL /api/open (exempt: GET)']);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),

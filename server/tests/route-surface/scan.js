@@ -1634,7 +1634,21 @@ class Scanner {
   }
 
   makeRoute({ method, fullPath, routerFile, mountPrefix, guards, resolved, conditional, cond, extra, loc }) {
-    const effective = guards.filter((g) => !isExempt(g, method, fullPath));
+    let effective = guards.filter((g) => !isExempt(g, method, fullPath));
+    if (method === 'ALL' && effective.length) {
+      // Methods exempt from EVERY remaining guard are open; the subset is
+      // part of the route's identity so an auth widening changes the key.
+      let open = null;
+      for (const g of effective) {
+        const s = exemptMethodsOn(g, fullPath);
+        open = open === null ? s : new Set([...open].filter((x) => s.has(x)));
+        if (!open.size) break;
+      }
+      if (open && open.size) {
+        effective = [];
+        extra = `${extra ? `${extra}; ` : ''}exempt: ${[...open].sort().join(',')}`;
+      }
+    }
     const names = [...new Set(effective.map((g) => g.name))];
     return {
       method,
@@ -1707,20 +1721,38 @@ function inEffectGuards(inEffect, fullPath) {
  * middleware), so a guard mounted above a nested router still matches the
  * path shape its own code sees at runtime.
  */
-function isExempt(guard, method, fullPath) {
-  if (!guard.exempts || !guard.exempts.length || typeof fullPath !== 'string') return false;
+function exemptRelPath(guard, fullPath) {
+  if (!guard.exempts || !guard.exempts.length || typeof fullPath !== 'string') return null;
   const base = guard.baseScope || '/';
-  let rel;
-  if (base === '/' || base === '') rel = fullPath;
-  else if (fullPath === base) rel = '/';
-  else if (fullPath.startsWith(`${base}/`)) rel = fullPath.slice(base.length);
-  else return false;
+  if (base === '/' || base === '') return fullPath;
+  if (fullPath === base) return '/';
+  if (fullPath.startsWith(`${base}/`)) return fullPath.slice(base.length);
+  return null;
+}
+
+function isExempt(guard, method, fullPath) {
+  const rel = exemptRelPath(guard, fullPath);
+  if (rel === null) return false;
   return guard.exempts.some((e) => {
     const [m, p] = e.split(/\s+/);
-    // ALL covers every concrete method, so ANY method-specific exemption on
-    // the path applies (fail closed: exempting widens the PUBLIC surface).
-    return (m === '*' || m === method || method === 'ALL') && p === rel;
+    // A method-specific exemption never fully exempts an ALL registration —
+    // it opens only ITS method; makeRoute() carries that subset in the
+    // route's identity so widening it (or dropping the guard) breaks the
+    // allowlist match and forces review.
+    return (m === '*' || m === method) && p === rel;
   });
+}
+
+/** The specific methods a guard's exemptions open on this path. */
+function exemptMethodsOn(guard, fullPath) {
+  const rel = exemptRelPath(guard, fullPath);
+  const out = new Set();
+  if (rel === null) return out;
+  for (const e of guard.exempts) {
+    const [m, p] = e.split(/\s+/);
+    if (p === rel && m !== '*') out.add(m);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
