@@ -182,3 +182,22 @@ test('a refused or throwing revert is logged, never thrown, and reports false', 
   mockMix.responder = () => ({ status: 200, body: { previewBasis: 'd' } });
   expect(await revertLeadServiceForSend('est-1', 'lawn_care')).toBe(false);
 });
+
+test('a post-commit reread failure aborts the send with the parked key preserved for compensation (pre-push codex P1)', async () => {
+  const row = newCustomerRow();
+  // Claimed row first, then NO row on the post-park reread.
+  mockRows.queue = [claimedRowFor(row), null];
+  const leadShapeRef = { parkedKey: null };
+  await expect(applyLeadServiceForSend(row, { leadShapeRef })).rejects.toMatchObject({ statusCode: 503, leadServiceParkedKey: 'lawn_care' });
+  expect(leadShapeRef.parkedKey).toBe('lawn_care');
+  expect(mockMixCalls).toHaveLength(2);
+});
+
+test('a pre-commit failure is still swallowed (nothing was parked)', async () => {
+  const row = newCustomerRow();
+  mockRows.queue = [claimedRowFor(row), parkedRow];
+  const leadShapeRef = { parkedKey: null };
+  mockMix.responder = ({ body }) => { if (body.dryRun) throw new Error('boom'); return { status: 200, body: {} }; };
+  expect(await applyLeadServiceForSend(row, { leadShapeRef })).toEqual({ estimate: row, parkedKey: null });
+  expect(leadShapeRef.parkedKey).toBeNull();
+});

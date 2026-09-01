@@ -877,8 +877,12 @@ router.post('/:id/send', async (req, res, next) => {
 // bound to that preview — so the parked lines re-enter the plan through the
 // customer's own "Add it" tap on the page. Returns the fresh row (or the
 // input row untouched when nothing applied).
-async function applyLeadServiceForSend(estimate) {
+// `leadShapeRef` (from sendEstimateNow) receives the parked key the moment
+// the commit lands — before any post-commit step can fail — so compensation
+// never depends on this function returning normally.
+async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
   const untouched = { estimate, parkedKey: null };
+  let parkedKey = null;
   const featureGates = require('../config/feature-gates');
   if (!featureGates.isEnabled('estimateLeadServiceSend')) return untouched;
   if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
@@ -933,7 +937,6 @@ async function applyLeadServiceForSend(estimate) {
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (toPark.length !== 1) return untouched;
 
-    let parkedKey = null;
     for (const serviceKey of toPark) {
       // The rail's own resolver re-runs on every step (removability shrinks
       // as lines leave — the last recurring line is never removable).
@@ -952,14 +955,26 @@ async function applyLeadServiceForSend(estimate) {
         continue;
       }
       parkedKey = serviceKey;
+      if (leadShapeRef) leadShapeRef.parkedKey = serviceKey;
+      // The park is COMMITTED. From here every failure must surface — a
+      // swallowed reread would deliver full-bundle in-memory content over a
+      // parked row and lose the key compensation needs (pre-push codex P1).
       const fresh = await db('estimates').where({ id: estimate.id }).first();
-      if (!fresh) break;
+      if (!fresh) throw new Error('post-park reread found no row');
       // Keep the caller's in-flight status (the route-level 'sending' claim)
       // while taking every parked total from the row.
       current = { ...fresh, status: estimate.status };
     }
     return parkedKey ? { estimate: current, parkedKey } : untouched;
   } catch (err) {
+    if (parkedKey) {
+      // Post-commit failure: abort the send (the wrapper compensates through
+      // leadShapeRef, the route releases its claim on the throw).
+      const abort = new Error(`lead-service send: ${err.message}`);
+      abort.statusCode = 503;
+      abort.leadServiceParkedKey = parkedKey;
+      throw abort;
+    }
     logger.warn(`[admin-estimates] lead-service send skipped for estimate ${estimate?.id}: ${err.message}`);
     return untouched;
   }
@@ -1266,9 +1281,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // design — a refusal or engine miss sends the full bundle exactly as today
   // (never a blocked send), and the row is re-read so the message text and
   // the delivery claim below see the parked totals.
-  const leadShape = await applyLeadServiceForSend(estimate);
+  const leadShape = await applyLeadServiceForSend(estimate, { leadShapeRef: options.leadShapeRef || null });
   estimate = leadShape.estimate;
-  if (options.leadShapeRef) options.leadShapeRef.parkedKey = leadShape.parkedKey;
 
   // Group pre-flight runs before ANY channel delivery (see helper above).
   let claimedGroupSiblings = [];
