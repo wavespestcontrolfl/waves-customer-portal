@@ -10316,6 +10316,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 decided_at: new Date().toISOString(),
               };
             }
+          } else if (freezeUnifiedDecision === false && !nextEstimateData.setupFeeQuote
+            && frozenRecurring.length > 0) {
+            // Freeze the WAIVED verdict too (decide-once made durable): the
+            // conversion below seeds this customer's series, so any later
+            // re-decision would read the just-created rows as "existing" —
+            // the frozen zero is what keeps every downstream reader on the
+            // verdict taken BEFORE the seeding.
+            nextEstimateData.setupFeeQuote = {
+              kind: 'unified',
+              amount: 0,
+              waived: 'accept_time_decision',
+              decided_at: new Date().toISOString(),
+            };
           }
         } catch (feeFreezeErr) {
           logger.warn(`[estimate-public] accept-time setup-fee freeze skipped: ${feeFreezeErr.message}`);
@@ -11469,14 +11482,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const conversionEstData = acceptedEstimateForScheduling.estimate_data || {};
           const conversionRecurringServices = EstimateConverter.recurringServicesFromEstimateData(conversionEstData);
           // Estimates with NO frozen quote (staff/AI/call lanes never run
-          // /calculate's freeze) get their unified decision at this accept
+          // /calculate's freeze) get their unified decision at accept
           // (GATE_UNIFIED_SETUP_FEE, owner ruling 2026-09-01); null =
-          // legacy predicate governs.
-          const acceptUnifiedDecision = await EstimateConverter.acceptTimeUnifiedSetupFeeDecision(trx, {
-            customerId,
-            recurringServices: conversionRecurringServices,
-            estimateData: conversionEstData,
-          });
+          // legacy predicate governs. PREFER the conversion's own verdict —
+          // it was decided BEFORE the series rows were seeded (audit r6
+          // P0); the live call here is only the fallback for shapes the
+          // conversion did not carry it through, and can read the freshly
+          // seeded series as "existing" (customer-favorable bounded miss).
+          const acceptUnifiedDecision = standardConversionResult?.acceptUnifiedDecision
+            ?? await EstimateConverter.acceptTimeUnifiedSetupFeeDecision(trx, {
+              customerId,
+              recurringServices: conversionRecurringServices,
+              estimateData: conversionEstData,
+            });
           const setupFeeApplies = acceptUnifiedDecision
             ?? EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
               recurringServices: conversionRecurringServices,

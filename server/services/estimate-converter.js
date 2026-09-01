@@ -3938,6 +3938,18 @@ const EstimateConverter = {
       ? []
       : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isLegacyRodentRow(svc));
     const pinnedLegacyRodentOnlyPlan = !suppressRecurringConversion && isPinnedLegacyRodentOnlyPlan(recurringServices, isLegacyRodentRow);
+    // Unified accept-time decision for estimates with NO frozen quote
+    // (staff/AI/call lanes; GATE_UNIFIED_SETUP_FEE, owner ruling
+    // 2026-09-01) — decided HERE, BEFORE any customer/visit/term/invoice
+    // write: the conversion is about to seed this customer's recurring
+    // series, and a decision taken after seeding would read the just-
+    // created series as "existing customer" and self-waive every new
+    // customer's fee (audit r6 P0). null = legacy predicate governs.
+    const acceptUnifiedDecision = await acceptTimeUnifiedSetupFeeDecision(database, {
+      customerId,
+      recurringServices: recurringServicesForConversion,
+      estimateData,
+    });
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -5928,16 +5940,9 @@ const EstimateConverter = {
           allowFallback: opts.allowFirstApplicationFallback !== false,
         })
         : 0;
-      // Estimates with NO frozen quote (staff/AI/call lanes never run
-      // /calculate's freeze) get their unified decision HERE — the one
-      // chokepoint every estimate lane converts through (owner ruling
-      // 2026-09-01, GATE_UNIFIED_SETUP_FEE). null = live decision does not
-      // apply; legacy predicate governs.
-      const acceptUnifiedDecision = await acceptTimeUnifiedSetupFeeDecision(database, {
-        customerId,
-        recurringServices: recurringServicesForConversion,
-        estimateData,
-      });
+      // acceptUnifiedDecision was decided ABOVE, before any rows were
+      // written (audit r6 P0 — a post-seeding read self-waives via the
+      // just-created series). null = legacy predicate governs.
       const setupFeeApplies = billingTerm === 'standard'
         ? (acceptUnifiedDecision ?? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData }))
         : false;
@@ -6928,6 +6933,11 @@ const EstimateConverter = {
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
+      // The unified verdict taken BEFORE any rows were seeded (audit r6
+      // P0) — callers minting their own invoices (skipSetupInvoice accepts)
+      // must reuse this instead of re-deciding after seeding, when the
+      // just-created series reads as "existing customer".
+      acceptUnifiedDecision,
     };
   },
 };
