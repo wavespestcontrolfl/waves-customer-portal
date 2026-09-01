@@ -15683,7 +15683,9 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
           // customer's own code lands. COALESCE keeps any earlier staff
           // stamp either way — a staff ruling on a live row is rare and
           // deliberate, and the customer's words survive in the note.
-          disposition: trx.raw('COALESCE(disposition, ?)', [customerReason?.disposition || 'declined_by_customer']),
+          disposition: customerReason
+            ? trx.raw('COALESCE(disposition, ?)', [customerReason.disposition])
+            : trx.raw("COALESCE(disposition, 'declined_by_customer')"),
           disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
           disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
           ...(customerReason ? {
