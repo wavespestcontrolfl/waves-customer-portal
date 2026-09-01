@@ -70,4 +70,13 @@ describe('synthetic specialty completion → customer report contract', () => {
     expect(pdf.container.textContent).toContain('No treatment was applied during this visit.');
     expect(pdf.container.querySelector('#products-applied')).toBeNull();
   });
+
+  test('a productless treatment action still uses application-condition labeling', async () => {
+    const base = SPECIALTY_SERVICE_REPORT_FIXTURES.find(({ key }) => key === 'bee_wasp_removal').payload;
+    const payload = { ...base, applications: [], applicationMade: true };
+    const web = renderWeb(payload);
+    await waitFor(() => expect(web.container.textContent).toContain('Yellowjacket Removal'));
+    expect(web.container.textContent).toContain('Conditions at application');
+    expect(web.container.textContent).not.toContain('Conditions at visit');
+  });
 });

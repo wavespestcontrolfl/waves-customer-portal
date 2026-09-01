@@ -120,7 +120,7 @@ describe('termite typed cutover — field parity contract', () => {
       'Foundation perimeter', 'Wall void', 'Bait station locations',
     ]));
     expect(method.options).toEqual(expect.arrayContaining([
-      'Liquid perimeter', 'Foam / void injection', 'Drill-and-inject',
+      'Liquid perimeter', 'Rodding', 'Foam / void injection', 'Drill-and-inject',
       'Bait station setup', 'Cartridge replacement',
     ]));
   });

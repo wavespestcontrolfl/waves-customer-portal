@@ -2494,7 +2494,8 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
-          applicationMade={(data.applications || []).some(isProductApplication)}
+          applicationMade={data.applicationMade === true
+            || (data.applications || []).some(isProductApplication)}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn'
             // Legacy lawn payloads (no reportV2) still carry the weekly

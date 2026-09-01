@@ -49,6 +49,17 @@ describe("rodent trapping initial-setup pre-submit mirror", () => {
   });
 });
 
+describe("termite posted-notice pre-submit mirror", () => {
+  it("treats rodding as a perimeter soil application", () => {
+    const conflicts = typedFieldValueConflicts("termite_treatment", {
+      treatment_method: "Rodding",
+      posted_notice: "Not applicable",
+    });
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toContain("exterior/perimeter treatments require the posted notice");
+  });
+});
+
 // Round 15: Number("1.0") and Number("1e1") are positive integers, but the
 // server's count validator requires a digit-only string — so a
 // coercion-only mirror still let through the 422 it exists to prevent.

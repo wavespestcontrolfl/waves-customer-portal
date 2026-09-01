@@ -224,6 +224,8 @@ function formatMultiSelectValue(values) {
 function InlineChipsInput({ id, name, value, onChange, options = [], T }) {
   const selected = useMemo(() => parseMultiSelectValue(value), [value]);
   const selectedSet = useMemo(() => new Set(selected.map((item) => item.toLowerCase())), [selected]);
+  const optionSet = useMemo(() => new Set(options.map((item) => String(item).toLowerCase())), [options]);
+  const legacySelections = selected.filter((item) => !optionSet.has(item.toLowerCase()));
 
   const toggleOption = (option) => {
     const normalized = String(option || '').trim();
@@ -237,6 +239,28 @@ function InlineChipsInput({ id, name, value, onChange, options = [], T }) {
   return (
     <div id={id} style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
       <input type="hidden" name={name} value={formatMultiSelectValue(selected)} />
+      {legacySelections.map((legacy) => (
+        <button
+          key={`legacy-${legacy}`}
+          type="button"
+          onClick={() => toggleOption(legacy)}
+          aria-label={`Remove legacy value ${legacy}`}
+          aria-pressed="true"
+          style={{
+            minHeight: 38,
+            padding: '8px 14px',
+            borderRadius: 999,
+            border: `1px solid ${T.selectedBg}`,
+            background: T.selectedBg,
+            color: T.selectedFg,
+            fontSize: 14,
+            fontWeight: 500,
+            cursor: 'pointer',
+          }}
+        >
+          {legacy} ×
+        </button>
+      ))}
       {options.map((option) => {
         const isSelected = selectedSet.has(String(option).toLowerCase());
         return (

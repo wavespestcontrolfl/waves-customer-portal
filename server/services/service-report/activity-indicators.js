@@ -1215,6 +1215,13 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       errors.push('Inspection-only or deferred work cannot be combined with performed treatment actions');
     }
   }
+  if (type === 'termite_treatment') {
+    const evidence = list(values.termite_evidence);
+    if (evidence.includes('Preventive treatment — no activity observed')
+      && evidence.some((item) => ['Live termites observed', 'Active shelter tubes'].includes(item))) {
+      errors.push('Preventive treatment with no observed activity cannot be combined with active termite evidence');
+    }
+  }
   if (type === 'palm_injection') {
     for (const key of ['deficiency_signs', 'pest_disease_signs']) {
       const findings = list(values[key]);

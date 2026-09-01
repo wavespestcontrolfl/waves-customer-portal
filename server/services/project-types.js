@@ -19,9 +19,9 @@
 // - Perimeter methods are the exterior applications carrying the
 //   FS 482.2265 posted-notice duty — 'Not applicable' is a contradiction
 //   there, not an answer.
-const TERMITE_LIQUID_DILUTION_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Wood treatment'];
+const TERMITE_LIQUID_DILUTION_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Rodding', 'Wood treatment'];
 const TERMITE_NON_DILUTION_METHODS = ['Bait station setup', 'Cartridge replacement', 'Other'];
-const TERMITE_PERIMETER_METHODS = ['Liquid perimeter', 'Trenching'];
+const TERMITE_PERIMETER_METHODS = ['Liquid perimeter', 'Trenching', 'Rodding'];
 
 const WDO_TARGET_OPTIONS = [
   'Subterranean termites',
@@ -1051,6 +1051,9 @@ const PROJECT_TYPES = {
         'Heat treatment', 'Hybrid heat + chemical treatment',
         'Chemical / IPM treatment', 'Targeted follow-up treatment',
         'Inspection / monitoring only',
+        // Permanent snapshots and open drafts created before this vocabulary
+        // change must remain valid and editable.
+        'Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical',
       ] },
       { key: 'work_completed', detail: true, label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
         'Crack & crevice treatment', 'Mattress / box spring treatment', 'Bed frame treatment',

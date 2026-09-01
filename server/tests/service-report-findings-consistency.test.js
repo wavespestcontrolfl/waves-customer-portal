@@ -1,4 +1,4 @@
-const { PROJECT_TYPES } = require('../services/project-types');
+const { PROJECT_TYPES, TERMITE_PERIMETER_METHODS } = require('../services/project-types');
 const { validateTypedFindings } = require('../services/service-report/activity-indicators');
 
 function validate(type, values) {
@@ -43,6 +43,7 @@ describe('editable service-report findings consistency', () => {
     ['one_time_pest_treatment', { evidence_observed: 'No evidence observed, Live pests observed' }],
     ['one_time_pest_treatment', { work_completed: 'Inspection / identification only, Bait placement' }],
     ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Exterior perimeter application' }],
+    ['termite_treatment', { termite_evidence: 'Preventive treatment — no activity observed, Live termites observed' }],
     ['palm_injection', { pest_disease_signs: 'None observed today, Scale' }],
   ])('%s rejects a zero-state paired with positive technician evidence', (type, values) => {
     expect(validate(type, values).ok).toBe(false);
@@ -63,6 +64,10 @@ describe('editable service-report findings consistency', () => {
     const termiteEvidence = PROJECT_TYPES.termite_treatment.findingsFields.find(({ key }) => key === 'termite_evidence');
     expect(termiteEvidence?.type).toBe('chips');
     expect(termiteEvidence.options).toContain('Preventive treatment — no activity observed');
+  });
+
+  test('rodding carries the termite perimeter posted-notice classification', () => {
+    expect(TERMITE_PERIMETER_METHODS).toContain('Rodding');
   });
 
   test('general one-time pest work uses controlled, field-accurate protocol choices', () => {
@@ -101,13 +106,16 @@ describe('editable service-report findings consistency', () => {
 
   test('bed-bug treatment methods describe the heat/hybrid service model', () => {
     const method = PROJECT_TYPES.bed_bug.findingsFields.find(({ key }) => key === 'treatment_method');
-    expect(method?.options).toEqual([
+    expect(method?.options).toEqual(expect.arrayContaining([
       'Heat treatment',
       'Hybrid heat + chemical treatment',
       'Chemical / IPM treatment',
       'Targeted follow-up treatment',
       'Inspection / monitoring only',
-    ]);
+    ]));
+    expect(method?.options).toEqual(expect.arrayContaining([
+      'Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical',
+    ]));
   });
 
   test('protected report schemas are not part of this findings pass', () => {

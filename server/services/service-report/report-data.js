@@ -4046,6 +4046,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceType: service.service_type,
     serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
+    applicationMade: readTimeSprayEvidence,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   SERVICE_COMPLETION_PRESETS,
+  reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
   specialtyCompletionFor,
@@ -56,6 +57,24 @@ describe("specialty pest completion configuration", () => {
       group,
       "No active fire ants observed",
     )).toEqual(["Widespread activity", "No active fire ants observed"]);
+  });
+
+  test("dependent specialty findings cannot retain contradictory activity", () => {
+    const fireAnt = SERVICE_COMPLETION_PRESETS.fire_ant;
+    expect(reconcileDependentFindingSelections(
+      fireAnt,
+      ["Active mounds observed", "Widespread activity"],
+      fireAnt.findingGroups[0],
+      "No active fire ants observed",
+    )).toEqual(["No active fire ants observed"]);
+
+    const bee = SERVICE_COMPLETION_PRESETS.bee_wasp_removal;
+    expect(reconcileDependentFindingSelections(
+      bee,
+      ["Inactive or abandoned nest"],
+      bee.findingGroups[2],
+      "Active",
+    )).toEqual(["Active"]);
   });
 
   test("each protocol action has explicit treatment and scope metadata", () => {

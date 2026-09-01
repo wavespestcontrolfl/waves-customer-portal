@@ -47,8 +47,8 @@ import {
   pestDefaultMixSelections,
 } from "../../lib/pest-default-mix";
 import {
+  reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
-  replaceFindingGroupSelection,
   specialtyCompletionFor,
 } from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
@@ -7002,7 +7002,7 @@ export function typedFieldValueConflicts(schemaType, values) {
     const method = String(values?.treatment_method ?? "").trim();
     const notice = String(values?.posted_notice ?? "").trim();
     if (
-      ["Liquid perimeter", "Trenching"].includes(method) &&
+      ["Liquid perimeter", "Trenching", "Rodding"].includes(method) &&
       notice &&
       notice !== "Yes"
     ) {
@@ -10738,7 +10738,10 @@ export function CompletionPanel({
       });
     return () => { live = false; };
   }, [service?.id, sprayEvidenceInForm]);
+  const typedFindingsOwnAreas = (typedFindingsSchema?.fields || [])
+    .some((field) => field?.key === "areas_treated");
   const areasTreatedHidden = treeShrubCloseoutOn
+    || typedFindingsOwnAreas
     || [
       "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
       "rodent_inspection", "rodent_bait_station", "bed_bug",
@@ -13520,6 +13523,7 @@ export function CompletionPanel({
       ).filter(
         (label) =>
           !isLawn ||
+          specialtyProtocolActions.length > 0 ||
           (protocolActionsLoaded &&
             protocolActions.some(
               (action) =>
@@ -13948,7 +13952,7 @@ export function CompletionPanel({
     isLawn &&
     !protocolActionsLoading &&
     !protocolActionError &&
-    protocolActions.length === 0;
+    effectiveProtocolActions.length === 0;
   const protocolActionSelectOptions = effectiveProtocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
@@ -14043,22 +14047,29 @@ export function CompletionPanel({
   }
   function handleSpecialtyFindingChange(group, value) {
     if (generating || photoAnalyzing) return;
-    invalidateGeneratedReportOnTypedEdit();
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     const groupValues = new Set((group?.options || []).map((item) => item.value));
-    if (!chipLinesDetached) {
+    const reconciled = reconcileDependentFindingSelections(
+      specialtyCompletion,
+      selectedObservationLabels,
+      group,
+      value,
+    );
+    if (!detachedAfterInvalidation) {
       setNotes((current) => current
         .split("\n")
         .filter((line) => {
           const match = line.match(/^\s*\[Found\]\s+(.+)$/i);
-          return !match || !groupValues.has(match[1].trim());
+          return !match || (
+            !groupValues.has(match[1].trim())
+            && reconciled.includes(match[1].trim())
+          );
         })
+        .concat(value ? [`[Found] ${value}`] : [])
         .join("\n")
         .trim());
     }
-    setSelectedObservationLabels((current) =>
-      replaceFindingGroupSelection(current, group, value),
-    );
-    if (value) addChipNote("Found", value);
+    setSelectedObservationLabels(reconciled);
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
@@ -14115,7 +14126,7 @@ export function CompletionPanel({
   // the tech already edited is their reviewed copy and stays.
   function invalidateGeneratedReportOnTypedEdit() {
     const installed = generatedReportTextRef.current;
-    if (!installed) return;
+    if (!installed) return chipLinesDetached;
     generatedReportTextRef.current = null;
     if (String(notes || "").trim() === installed) {
       // The tech's handwritten pre-generation notes come BACK when the
@@ -14126,12 +14137,15 @@ export function CompletionPanel({
       // The restored notes' [Protocol]/[Found]/[Next] marker lines own
       // selection again — the detachment state travels with the notes it
       // described (codex r77).
-      setChipLinesDetached(preGenerationChipDetachedRef.current === true);
+      const restoredDetached = preGenerationChipDetachedRef.current === true;
+      setChipLinesDetached(restoredDetached);
       preGenerationNotesRef.current = null;
       preGenerationChipDetachedRef.current = false;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
+      return restoredDetached;
     }
+    return chipLinesDetached;
   }
   function handleTypedFindingChange(key, value) {
     // While a Generate request is in flight the snapshot must stay what the

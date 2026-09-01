@@ -275,6 +275,33 @@ export function replaceFindingGroupSelection(current, group, nextValue) {
   return [...(current || []).filter((value) => !groupValues.has(value)), ...(nextValue ? [nextValue] : [])];
 }
 
+export function reconcileDependentFindingSelections(preset, current, group, nextValue) {
+  let next = replaceFindingGroupSelection(current, group, nextValue);
+  const remove = (values) => {
+    const blocked = new Set(values);
+    next = next.filter((value) => !blocked.has(value));
+  };
+
+  if (preset === SERVICE_COMPLETION_PRESETS.fire_ant) {
+    const noActivity = "No active fire ants observed";
+    const distribution = preset.findingGroups.find(({ key }) => key === "fire_ant_distribution");
+    const distributionValues = (distribution?.options || []).map(({ value }) => value);
+    if (nextValue === noActivity) remove(distributionValues);
+    if (distributionValues.includes(nextValue)) remove([noActivity]);
+  }
+
+  if (preset === SERVICE_COMPLETION_PRESETS.bee_wasp_removal) {
+    const inactiveNest = "Inactive or abandoned nest";
+    const activity = preset.findingGroups.find(({ key }) => key === "nest_activity");
+    const activeValues = (activity?.options || [])
+      .map(({ value }) => value)
+      .filter((value) => value !== "Inactive");
+    if (nextValue === inactiveNest) remove(activeValues);
+    if (activeValues.includes(nextValue)) remove([inactiveNest]);
+  }
+  return next;
+}
+
 export function reconcileExclusiveProtocolSelections(current, protocols, nextLabel) {
   const selected = Array.isArray(current) ? current : [];
   const byLabel = new Map((protocols || []).map((action) => [action.label, action]));
