@@ -33,6 +33,9 @@ const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 // `.modify(qb => qb.whereIn('id', ids.map(fn)))` — don't stop the walk.
 const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*`;
 const Q = '[\'"`]'; // quote class incl. backtick
+// `.insert(` in either spelling — dot access or literal bracket access
+// (`db('leads')['insert'](row)`).
+const INSERT_CALL = String.raw`(?:\.\s*insert|\[\s*['"\x60]insert['"\x60]\s*\])\s*\(`;
 // Optional schema qualifier INSIDE the literal too — knex accepts
 // `db('public.leads')` as a schema-qualified table name.
 const LITERAL_LEADS = String.raw`${Q}(?:[\w$]+\.)?leads${Q}`;
@@ -46,16 +49,16 @@ function knexInsertPatterns(token) {
   return [
     // Optional factory call between the identifier and the table argument —
     // the `getDb()('leads')` callable-factory style (routes/knowledge.js).
-    new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+    new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
     // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
-    new RegExp(String.raw`\.\s*table\s*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+    new RegExp(String.raw`\.\s*table\s*\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
     new RegExp(String.raw`\.into\(\s*${token}\s*\)`, 'g'),
     // Table selected AFTER the insert — `db.insert(row).table('leads')`,
     // the insert-first analog of `.into`.
-    new RegExp(String.raw`\.\s*insert\s*\((?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.\s*table\s*\(\s*${token}\s*\)`, 'g'),
+    new RegExp(String.raw`${INSERT_CALL}(?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.\s*table\s*\(\s*${token}\s*\)`, 'g'),
     new RegExp(String.raw`\binsert\s*\(\s*${token}\s*\)`, 'g'),
     new RegExp(String.raw`\bbatchInsert\s*\(\s*${token}`, 'g'),
-    new RegExp(String.raw`\bfrom\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+    new RegExp(String.raw`\bfrom\(\s*${token}\s*\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   ];
 }
 
@@ -64,8 +67,13 @@ function knexInsertPatterns(token) {
 // optional ONLY keyword. Word characters after `leads` (lead_activities
 // etc.) break the \b and don't match. The scan runs on comment-blanked
 // source, so a comment merely saying "insert into leads" is not a site.
+// Keyword separator: whitespace OR a string-fragment boundary
+// (`'INSERT ' + 'INTO leads'`) — constant SQL split at token boundaries is
+// still one statement. (A mid-word split is deliberate obfuscation beyond
+// textual scanning.)
+const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s+)`;
 const RAW_SQL_INSERT_RE = new RegExp(
-  String.raw`\binsert\s+into\s+(?:only\s+)?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
+  String.raw`\binsert${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
   'gi'
 );
 
@@ -105,7 +113,7 @@ function aliasInsertPatterns(src, token) {
   const patterns = [];
   let decl;
   while ((decl = declRe.exec(src))) {
-    patterns.push(new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
+    patterns.push(new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*${INSERT_CALL}`, 'g'));
   }
   // Arrow FACTORY returning the builder — `const baseQuery = () =>
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
@@ -116,7 +124,7 @@ function aliasInsertPatterns(src, token) {
   );
   let fac;
   while ((fac = factoryRe.exec(src))) {
-    patterns.push(new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'));
+    patterns.push(new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g'));
   }
   return patterns;
 }
@@ -183,12 +191,28 @@ function lexBlank(code, { keepStrings = false } = {}) {
       continue;
     }
     if (c === "'" || c === '"') {
-      emitStr(c); i += 1;
+      // Buffer the whole string, then decide: in keepStrings mode a string
+      // is preserved only when it PLAUSIBLY names a table (a short
+      // word/dot token) or is SQL text (starts with a SQL keyword) — a
+      // code-shaped doc string ("await db('leads').insert(row)") blanks
+      // out so it can never read as a live writer.
+      let buf = c;
+      i += 1;
       while (i < n && code[i] !== c && code[i] !== '\n') {
-        if (code[i] === '\\') { emitStr(code[i]); i += 1; }
-        if (i < n) { emitStr(code[i]); i += 1; }
+        if (code[i] === '\\') { buf += code[i]; i += 1; }
+        if (i < n) { buf += code[i]; i += 1; }
       }
-      if (i < n) { emitStr(code[i]); i += 1; }
+      if (i < n) { buf += code[i]; i += 1; }
+      const content = buf.slice(1, buf[buf.length - 1] === c ? -1 : undefined);
+      // Keep a string UNLESS it embeds quote characters — that's what makes
+      // a doc string code-shaped ("await db('leads').insert(row)"): its
+      // inner quotes would otherwise read as live table literals. Table
+      // names and raw SQL fragments carry no nested quotes and stay.
+      const plausible = !/['"`]/.test(content);
+      for (const ch of buf) {
+        if (keepStrings && plausible) out += ch;
+        else out += ch === '\n' ? '\n' : ' ';
+      }
       lastSig = c; // after a string, `/` is division
       continue;
     }
@@ -219,12 +243,22 @@ function lexBlank(code, { keepStrings = false } = {}) {
   }
   return out;
 }
+// Several contract passes lex the same ~1600 sources — cache per source
+// string so each file is lexed at most once per mode.
+const lexCache = new Map();
+function cachedLex(code, keepStrings) {
+  let entry = lexCache.get(code);
+  if (!entry) { entry = {}; lexCache.set(code, entry); }
+  const key = keepStrings ? 'keep' : 'bare';
+  if (!(key in entry)) entry[key] = lexBlank(code, { keepStrings });
+  return entry[key];
+}
 // Full blanking (strings + comments gone) — the dynamic scan's view.
-const blankCommentsAndStrings = (code) => lexBlank(code, { keepStrings: false });
+const blankCommentsAndStrings = (code) => cachedLex(code, false);
 // Comments-only blanking (strings preserved) — the LITERAL scan's view, so
 // `db(/* primary table */ 'leads').insert(` reads as an ordinary literal
 // insert, and a comment merely SAYING "insert into leads" is not a site.
-const blankComments = (code) => lexBlank(code, { keepStrings: true });
+const blankComments = (code) => cachedLex(code, true);
 
 // ANY table argument, running over BLANKED code: a pure string-literal
 // argument blanks to whitespace (skipped — the literal scan owns it), while
@@ -235,11 +269,11 @@ const blankComments = (code) => lexBlank(code, { keepStrings: true });
 // reads as one argument.
 const DYN_EXPR = String.raw`((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)`;
 const DYNAMIC_INSERT_PATTERNS = [
-  new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  new RegExp(String.raw`\.\s*table\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
+  new RegExp(String.raw`\.\s*table\s*\(${DYN_EXPR}\)${CHAIN}\s*${INSERT_CALL}`, 'g'),
   new RegExp(String.raw`\bbatchInsert\s*\(${DYN_EXPR},`, 'g'),
   new RegExp(String.raw`\.into\(${DYN_EXPR}\)`, 'g'),
-  new RegExp(String.raw`\.\s*insert\s*\((?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.\s*table\s*\(${DYN_EXPR}\)`, 'g'),
+  new RegExp(String.raw`${INSERT_CALL}(?:[^()]|\([^()]*\))*\)${CHAIN}\s*\.\s*table\s*\(${DYN_EXPR}\)`, 'g'),
 ];
 
 function scanSourceForDynamicTableInserts(src) {
@@ -291,7 +325,7 @@ function scanSourceForDynamicTableInserts(src) {
   let decl;
   while ((decl = dynDeclRe.exec(code))) {
     if (!decl[2].trim() || isResolved(decl[2])) continue;
-    const useRe = new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g');
+    const useRe = new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, decl[2]);
   }
@@ -304,7 +338,7 @@ function scanSourceForDynamicTableInserts(src) {
   let fac;
   while ((fac = dynFactoryRe.exec(code))) {
     if (!fac[2].trim() || isResolved(fac[2])) continue;
-    const useRe = new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g');
+    const useRe = new RegExp(String.raw`\b${escapeRe(fac[1])}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
     let use;
     while ((use = useRe.exec(code))) record(use.index, use[0].length, fac[2]);
   }
@@ -448,6 +482,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['factory-returned stored builder', "const target = getDb()('leads');\nawait target.insert(row);"],
     ['arrow factory returning the builder', "const baseQuery = () => db('leads');\nawait baseQuery().insert(row);"],
     ['table selected after insert', "await db.insert(row).table('leads');"],
+    ['bracket-notation insert', "await db('leads')['insert'](row);"],
+    ['raw SQL split at a token boundary', "await db.raw('INSERT ' + 'INTO leads (name) VALUES (?)', [name]);"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -460,6 +496,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['read-only query', "const open = await db('leads').where({ status: 'new' }).select('id');"],
     ['insert into another table', "await db('lead_activities').insert({ a: 1 });"],
     ['raw SQL insert into another table', "await db.raw('INSERT INTO lead_activities (a) VALUES (?)', [1]);"],
+    ['code-shaped doc string is not a writer', 'const example = "await db(\'leads\').insert(row)";'],
     ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
     ['computed table name is not the constant form', "const t = 'leads' + suffix;\nawait audit(t);"],
   ])('ignores: %s', (_name, src) => {
@@ -717,6 +754,34 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         }
         expect({ file: w.file, spreads: (objBare.match(/\.\.\./g) || []).length })
           .toEqual({ file: w.file, spreads: 0 });
+        // EVERY top-level entry must be an OBJECT LITERAL declaring each
+        // governed prop as a literal — `extra: runtimeConfig` (nothing to
+        // inspect) or an entry missing a governed prop fails.
+        const inner = objBare.slice(1, -1);
+        const innerText = objText.slice(1, -1);
+        let dEnt = 0;
+        let segStart = 0;
+        const entries = [];
+        for (let k = 0; k <= inner.length; k += 1) {
+          const chS = inner[k];
+          if (chS === '{' || chS === '(' || chS === '[') dEnt += 1;
+          else if (chS === '}' || chS === ')' || chS === ']') dEnt -= 1;
+          else if ((chS === ',' && dEnt === 0) || k === inner.length) {
+            if (inner.slice(segStart, k).trim()) entries.push({ segS: inner.slice(segStart, k), segT: innerText.slice(segStart, k) });
+            segStart = k + 1;
+          }
+        }
+        expect(entries.length).toBeGreaterThanOrEqual(1);
+        for (const { segS, segT } of entries) {
+          const label = segT.trim().slice(0, 40);
+          expect({ file: w.file, entry: label, objectLiteral: /^\s*[\w$]+\s*:\s*\{/.test(segS) })
+            .toEqual({ file: w.file, entry: label, objectLiteral: true });
+          for (const p of cc.props) {
+            const literal = new RegExp(String.raw`\b${escapeRe(p)}\s*:\s*'[\w.]+'`).test(segT);
+            expect({ file: w.file, entry: label, prop: p, literal })
+              .toEqual({ file: w.file, entry: label, prop: p, literal: true });
+          }
+        }
         const propAlt = cc.props.map(escapeRe).join('|');
         const shorthand = [...objBare.matchAll(new RegExp(String.raw`[{,]\s*(?:${propAlt})\s*(?=[,}])`, 'g'))];
         expect(shorthand.map((s) => s[0].trim())).toEqual([]);
@@ -797,27 +862,32 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           while ((m = re.exec(bareSrc))) {
             callers += 1;
             const after = codeSrc.slice(re.lastIndex, re.lastIndex + 600);
-            const openIdx = after.search(/\S/);
-            const objectLiteral = after[openIdx] === '{';
+            // STRUCTURE (braces, boundaries) reads from the fully blanked
+            // view — a '}' inside a string value must not close the object;
+            // CONTENT (binding values) reads from the string-preserving view.
+            const afterBare = bareSrc.slice(re.lastIndex, re.lastIndex + 600);
+            const openIdx = afterBare.search(/\S/);
+            const objectLiteral = afterBare[openIdx] === '{';
             expect({ caller: `${rel}@${m.index}`, objectLiteral })
               .toEqual({ caller: `${rel}@${m.index}`, objectLiteral: true });
             // Balanced-brace extraction of THIS call's object literal, so an
             // adjacent call's binding cannot be borrowed.
             let depth = 0;
             let end = openIdx;
-            for (; end < after.length; end += 1) {
-              if (after[end] === '{') depth += 1;
-              else if (after[end] === '}') { depth -= 1; if (depth === 0) break; }
+            for (; end < afterBare.length; end += 1) {
+              if (afterBare[end] === '{') depth += 1;
+              else if (afterBare[end] === '}') { depth -= 1; if (depth === 0) break; }
             }
-            const arg = after.slice(openIdx, end + 1);
             // Only TOP-LEVEL properties of the call's object count — a
             // matching prop nested one level down ({ options: { table: … } })
             // is not the binding the helper reads. Nested braces blank out.
             let d2 = 0;
             let top = '';
-            for (const ch of arg) {
-              if (ch === '{') { d2 += 1; top += d2 === 1 ? ch : ' '; continue; }
-              if (ch === '}') { d2 -= 1; top += d2 === 0 ? ch : ' '; continue; }
+            for (let k = openIdx; k <= end; k += 1) {
+              const struct = afterBare[k];
+              const ch = after[k];
+              if (struct === '{') { d2 += 1; top += d2 === 1 ? ch : ' '; continue; }
+              if (struct === '}') { d2 -= 1; top += d2 === 0 ? ch : ' '; continue; }
               top += d2 === 1 ? ch : ' ';
             }
             // A top-level spread could overwrite the binding after the
@@ -833,6 +903,11 @@ describe('lead-writer registry (#3137 groundwork)', () => {
             const sneakyKey = top.match(new RegExp(String.raw`["'\x60]${escapeRe(cc.prop)}["'\x60]\s*[:\]]`));
             expect({ caller: `${rel}@${m.index}`, sneakyKey: sneakyKey && sneakyKey[0] })
               .toEqual({ caller: `${rel}@${m.index}`, sneakyKey: null });
+            // ANY computed property key at the top level ([key]: …) can
+            // resolve to the protected prop at runtime — rejected outright.
+            const computedKey = top.match(/\[[^\]]*\]\s*:/);
+            expect({ caller: `${rel}@${m.index}`, computedKey: computedKey && computedKey[0] })
+              .toEqual({ caller: `${rel}@${m.index}`, computedKey: null });
             // The COMPLETE value must be the literal or the indirect
             // expression — a delimiter must follow, so `'lead' + 's'` and
             // `config.photoTableSuffix` don't pass on a prefix. The
