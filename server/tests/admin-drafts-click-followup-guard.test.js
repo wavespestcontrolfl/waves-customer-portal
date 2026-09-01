@@ -497,3 +497,41 @@ describe('revise — same gate before the edited send', () => {
     ]));
   });
 });
+
+describe('reject — pending-only claim (concurrent owner sessions)', () => {
+  const rejectReq = (base, id = 'draft-1') => fetch(`${base}/admin/drafts/${id}/reject`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+
+  test('reject on an already-actioned draft returns 409 and releases no linked action', async () => {
+    enqueue('message_drafts', { update: 0 }); // pending-scoped claim misses (draft already sent)
+    enqueue('message_drafts', { first: draftRow({ status: 'approved' }) }); // exists → conflict
+    await withServer(async (base) => {
+      const res = await rejectReq(base);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/no longer pending/);
+    });
+    expect(updates.filter((u) => u.table === 'click_followup_actions')).toHaveLength(0);
+    expect(updates.filter((u) => u.payload && u.payload.status === 'rejected')).toHaveLength(1); // the attempted claim only
+  });
+
+  test('reject on a missing draft returns 404', async () => {
+    enqueue('message_drafts', { update: 0 });
+    enqueue('message_drafts', { first: undefined });
+    await withServer(async (base) => {
+      expect((await rejectReq(base, 'draft-x')).status).toBe(404);
+    });
+  });
+
+  test('reject on a pending draft succeeds and dismisses the linked open action', async () => {
+    enqueue('message_drafts', { update: 1 }); // pending-scoped claim lands
+    enqueue('click_followup_actions', { update: 1 });
+    await withServer(async (base) => {
+      expect((await rejectReq(base)).status).toBe(200);
+    });
+    expect(updates).toEqual(expect.arrayContaining([
+      { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected' }) },
+      { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'dismissed' }) },
+    ]));
+  });
+});

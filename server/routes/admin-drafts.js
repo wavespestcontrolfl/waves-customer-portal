@@ -945,15 +945,27 @@ router.put('/:id/reject', async (req, res, next) => {
     // Scoped to open statuses: an action the approval gate already retired
     // (converted/dismissed) keeps its more specific outcome. Non-click
     // intents have no linked action row and the update is a no-op.
+    // Pending-only, same as approve/revise: with a list surface, concurrent
+    // owner sessions are real — an unconditional update-by-id would relabel
+    // an already-SENT row as rejected and report success.
+    let updated = 0;
     await db.transaction(async (trx) => {
-      await trx('message_drafts').where({ id: req.params.id }).update({
-        status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
-      });
+      updated = await trx('message_drafts')
+        .where({ id: req.params.id, status: 'pending' })
+        .update({
+          status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+        });
+      if (!updated) return;
       await trx('click_followup_actions')
         .where({ draft_id: req.params.id })
         .whereIn('status', ['pending', 'drafted'])
         .update({ status: 'dismissed', updated_at: db.fn.now() });
     });
+    if (!updated) {
+      const existing = await db('message_drafts').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Draft not found' });
+      return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
