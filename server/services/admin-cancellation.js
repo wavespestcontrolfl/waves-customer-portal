@@ -670,6 +670,51 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     // open acceptance is that proof; without one this really is an account
     // with nothing to cancel.
     if (!(await findOpenAcceptance())) {
+      // A CLEAN run resolved its acceptance — a lost-response retry must
+      // still answer with the recorded outcome, never nothing_to_cancel
+      // (the operator cannot tell a completed cancel from an empty
+      // account). Keyed on the same subject/actor/24h window, and only the
+      // recorded case echoes — nothing re-runs; a genuine post-win-back
+      // cancel has cancellable work and never reaches this branch.
+      try {
+        const resolved = await db('service_requests')
+          .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'resolved', subject })
+          .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
+          .orderBy('created_at', 'desc')
+          .first('id');
+        const priorCase = resolved ? await db('cancellation_cases')
+          .where({ service_request_id: resolved.id })
+          .orderBy('created_at', 'desc')
+          .first('id', 'status', 'snapshot') : null;
+        if (priorCase) {
+          const snap = typeof priorCase.snapshot === 'string' ? JSON.parse(priorCase.snapshot) : (priorCase.snapshot || {});
+          const outcome = snap.outcome || null;
+          logger.info(`[admin-cancellation] retry after a resolved clean run for ${customerId} — echoing case ${priorCase.id}`);
+          return {
+            requestId: resolved.id,
+            caseId: priorCase.id,
+            duplicate: true,
+            processed: priorCase.status !== 'open',
+            visitsPulled: outcome ? Number(outcome.visitsPulled) || 0 : 0,
+            scope: outcome && Array.isArray(outcome.scope) ? outcome.scope : [],
+            remaining: [],
+            tierBefore: outcome ? outcome.tierBefore ?? null : null,
+            tierAfter: outcome ? outcome.tierAfter ?? null : null,
+            effectiveDate: snap.effectiveOn || etDateString(),
+            keptThrough: snap.effectiveDate === 'end_of_coverage' ? snap.effectiveOn || null : null,
+            lateFeeWaived: outcome ? outcome.lateFeeWaived === true : false,
+            prepayDisposition: snap.prepayDisposition || null,
+            prepayTermOutcome: snap.prepayTermOutcome || null,
+            ...(snap.refund ? { refund: snap.refund } : {}),
+            confirmation: outcome ? outcome.confirmation ?? null : null,
+            confirmationChannels: outcome && Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [],
+            confirmationRequested: outcome ? outcome.confirmationRequested === true : false,
+            errors: outcome && Array.isArray(outcome.errors) ? outcome.errors : [],
+          };
+        }
+      } catch (echoErr) {
+        logger.warn(`[admin-cancellation] resolved-acceptance echo failed for ${customerId}: ${echoErr.message}`);
+      }
       throw new CancelPlanError(400, 'nothing_to_cancel',
         'There is no active plan, recurring service, or upcoming visit on this account to cancel.');
     }

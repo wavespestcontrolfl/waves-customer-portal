@@ -53,7 +53,22 @@ jest.mock('../services/cancellation-resolution/impact', () => ({
     termiteRental: false, wholeAccount: true, scopedSupported: null,
   }),
 }));
-const mockOpenCase = jest.fn(async (args) => ({ id: 'case-1', ...args }));
+// Persists a real row so retry latches and lost-response echoes can read
+// back what the commit recorded (the outcome update patches it in place).
+// beforeEach RE-ARMS this default — a test's mockImplementation would
+// otherwise silently replace it for every later test.
+const defaultOpenCase = async (args) => {
+  (mockState.cancellation_cases ??= []).push({
+    id: 'case-1',
+    customer_id: args.customerId,
+    service_request_id: args.serviceRequestId,
+    status: args.processed ? 'committed' : 'open',
+    snapshot: JSON.stringify(args.snapshot || {}),
+    created_at: new Date(),
+  });
+  return { id: 'case-1', ...args };
+};
+const mockOpenCase = jest.fn(defaultOpenCase);
 jest.mock('../services/cancellation-resolution', () => ({
   cancelFlowV2Enabled: () => process.env.GATE_CANCEL_FLOW_V2 === 'true',
   openCancellationCase: (...args) => mockOpenCase(...args),
@@ -244,7 +259,7 @@ beforeEach(() => {
   mockProcess.mockReset().mockResolvedValue({ ...PROCESSED });
   mockPlan.mockReset().mockResolvedValue({ ok: true, inScope: ['lawn_care'], remaining: ['pest_control'], tierBefore: 'Silver', tierAfter: 'Bronze' });
   hasCancellableWork.mockResolvedValue(true);
-  mockOpenCase.mockClear();
+  mockOpenCase.mockReset().mockImplementation(defaultOpenCase);
   mockRecordDecision.mockClear();
   mockHoldPreview.mockClear().mockResolvedValue({ held: false, feeApplies: false });
   mockApptPreview.mockClear().mockResolvedValue({ secured: false, feeApplies: false });
@@ -452,6 +467,27 @@ describe('POST /:id/cancel-plan', () => {
     const third = await (await post(baseUrl, '/cancel-plan')).json();
     expect(third.requestId).not.toBe(first.requestId);
     expect(mockState.inserted.filter((i) => i.table === 'service_requests')).toHaveLength(2);
+  }));
+
+  test('a lost-response retry after a CLEAN run echoes the recorded outcome — never nothing_to_cancel', () => withServer(async (baseUrl) => {
+    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(first.errors).toEqual([]);
+    // The clean run resolved its acceptance and left nothing cancellable.
+    hasCancellableWork.mockResolvedValue(false);
+    mockProcess.mockClear();
+    sendCancellationConfirmations.mockClear();
+    const retry = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(retry).toEqual(expect.objectContaining({
+      duplicate: true, requestId: first.requestId, caseId: 'case-1', processed: true,
+      visitsPulled: 3, confirmation: 'sms', confirmationChannels: ['sms', 'email'], errors: [],
+    }));
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+    // A genuinely empty account (no recorded case) still refuses.
+    mockState.cancellation_cases = [];
+    const res = await post(baseUrl, '/cancel-plan');
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
 
   test('a LOST acceptance close is a surfaced follow-up failure — never a clean run leaving a reusable stale request', () => withServer(async (baseUrl) => {
