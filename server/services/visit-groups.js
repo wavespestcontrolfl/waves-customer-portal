@@ -150,6 +150,9 @@ function canDissolve(activity) {
 function canSplit(activity) {
   if (!activity) return { ok: false, reason: 'missing' };
   if (String(activity.status) !== 'open') return { ok: false, reason: 'visit_not_open' };
+  // A reminder send is in flight (claimed, inside its lease): the office
+  // retries in a moment — see visitActivity.reminderClaimLive.
+  if (activity.reminderClaimLive) return { ok: false, reason: 'reminder_in_flight' };
   // ANY packet — active, done, or failed — freezes membership: a failed
   // packet can be retried against its recorded items (doc rev 5d).
   if (activity.activePacket || activity.anyPacket) return { ok: false, reason: 'packet_in_flight' };
@@ -340,8 +343,19 @@ function windowedMembersConnected(members) {
 async function visitActivity(visitId, trx = db) {
   const visit = await trx('service_visits').where({ id: visitId }).first();
   if (!visit) return null;
-  const [effects, packets, children] = await Promise.all([
+  const [effects, reminderClaim, packets, children] = await Promise.all([
     trx('visit_effects').where({ visit_id: visitId }).whereNot('status', 'pending').first(),
+    // A reminder tier claimed inside its lease: an owner is mid-send, or
+    // delivered and not yet ledgered/closed (GH codex #3699 r9 P2). A
+    // split in that window would detach an armed row the owner's
+    // post-send member close can no longer see. Lease-bounded, so a
+    // finalize failure that leaves the row `claimed` forever cannot
+    // freeze splits past the lease.
+    trx('visit_effects').where({ visit_id: visitId })
+      .whereIn('effect_type', [...REMINDER_EFFECT_TYPES])
+      .where('status', 'claimed')
+      .where('claimed_at', '>', new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS))
+      .first('id'),
     trx('visit_completion_packets').where({ visit_id: visitId }).select('status'),
     trx('scheduled_services').where({ visit_id: visitId }).select('id'),
   ]);
@@ -357,6 +371,7 @@ async function visitActivity(visitId, trx = db) {
   return {
     status: visit.status,
     effectsStarted: Boolean(effects),
+    reminderClaimLive: Boolean(reminderClaim),
     enRouteAt: visit.en_route_at,
     arrivedAt: visit.arrived_at,
     activePacket: packets.some((p) => ACTIVE_PACKET_STATUSES.includes(String(p.status))),

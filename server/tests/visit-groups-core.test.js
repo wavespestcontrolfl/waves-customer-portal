@@ -142,6 +142,9 @@ describe('canSplit (rev 5d membership freeze)', () => {
     ['link_issued', { linkIssued: true }],
     ['payment_attempted', { paymentAttempted: true }],
     ['visit_not_open', { status: 'closed' }],
+    // A reminder tier claimed inside its lease (owner mid-send, or delivered
+    // and not yet closed on every member row — GH codex #3699 r9 P2).
+    ['reminder_in_flight', { reminderClaimLive: true }],
   ])('%s freezes membership', (reason, patch) => {
     expect(canSplit({ ...untouched, ...patch })).toEqual({ ok: false, reason });
   });
