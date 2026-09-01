@@ -214,9 +214,11 @@ async function createScheduledService({ trx, insertData, cols, source, idempoten
     // A payload carrying a DIFFERENT non-blank key would make the conflict
     // guard dedupe on the wrong value and let retries under the intended
     // key double-book (pre-push Codex P1) — refuse the ambiguity. A
-    // null/blank payload value counts as absent (the column is nullable)
-    // and the supplied option stamps over it (GH Codex r2 P2).
-    const payloadKey = data.idempotency_key;
+    // null/blank/whitespace payload value counts as absent (the column is
+    // nullable) and the supplied option stamps over it (GH Codex r2 P2);
+    // the payload key is judged TRIMMED, like the option, so a padded
+    // equivalent isn't a conflict (pre-push Codex r6 P1).
+    const payloadKey = typeof data.idempotency_key === 'string' ? data.idempotency_key.trim() : data.idempotency_key;
     if (payloadKey != null && payloadKey !== '' && payloadKey !== idempotencyKey) {
       throw contractError(`idempotencyKey '${idempotencyKey}' conflicts with insertData.idempotency_key '${payloadKey}'`);
     }

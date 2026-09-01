@@ -269,14 +269,27 @@ describe('createScheduledService wrapper', () => {
     })).rejects.toThrow(/conflicts with insertData.idempotency_key/);
   });
 
-  test('a NULL payload idempotency_key counts as absent — the option stamps over it', async () => {
-    const conn = makeConn(CATALOG);
+  test('a null/blank/whitespace payload idempotency_key counts as absent — the option stamps over it', async () => {
+    for (const absent of [null, '', '   ']) {
+      const conn = makeConn(CATALOG);
+      const row = await createScheduledService({
+        trx: conn,
+        insertData: { ...BASE, idempotency_key: absent },
+        cols: COLS,
+        source: { sourceAction: 'x' },
+        idempotencyKey: 'idem-1',
+      });
+      expect(row.idempotency_key).toBe('idem-1');
+    }
+  });
+
+  test('a padded payload key equal to the option after trimming is not a conflict', async () => {
     const row = await createScheduledService({
-      trx: conn,
-      insertData: { ...BASE, idempotency_key: null },
+      trx: makeConn(CATALOG),
+      insertData: { ...BASE, idempotency_key: '  idem-1 ' },
       cols: COLS,
       source: { sourceAction: 'x' },
-      idempotencyKey: 'idem-1',
+      idempotencyKey: ' idem-1',
     });
     expect(row.idempotency_key).toBe('idem-1');
   });
