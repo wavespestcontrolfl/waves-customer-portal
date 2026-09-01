@@ -3140,7 +3140,7 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || /\bpre\s+slab\b/.test(words)) return 'pre_slab_termiticide';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || raw.includes('slab_pretreat') || /\bpre\s+slab\b|\bslab\s+pre\s?treat\b/.test(words)) return 'pre_slab_termiticide';
   if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -3222,7 +3222,7 @@ function isPreSlabOneTimeItem(item = {}) {
     .join(' ')
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return raw.includes('pre slab')
+  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
     && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
 }
 
@@ -3275,7 +3275,7 @@ function boraCareCustomerCopy() {
 function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
-  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab/i.test(
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|slab pre ?treat/i.test(
     [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
   );
   return recurringRows.some(isRegulatedRow)
@@ -18399,7 +18399,14 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
-  if (service === 'wdo' || service === 'wdo_inspection' || service === 'termite_inspection') return 'wdo_inspection';
+  // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
+  // "not for real-estate transactions — use WDO for those") and stays OFF the
+  // regulated certificate surface; only the WDO report itself maps here.
+  if (service === 'wdo' || service === 'wdo_inspection') return 'wdo_inspection';
+  // Canonical catalog key for the slab pre-treat (completion-lane-registry routes
+  // it to pre_treatment_termite_certificate); the name-based matcher below
+  // covers its "Slab Pre-Treat Termite Service" label.
+  if (service === 'termite_slab_pretreat' || service.includes('slab_pretreat')) return 'pre_slab_termiticide';
   if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
   if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';

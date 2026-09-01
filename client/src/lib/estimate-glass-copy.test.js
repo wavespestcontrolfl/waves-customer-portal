@@ -105,8 +105,11 @@ describe('glassServiceSlug regulated certificate routing', () => {
     expect(glassServiceSlug(value)).toBe('pre_slab_termiticide');
   });
 
-  it('maps the legacy termite_inspection alias to the regulated WDO category', () => {
-    expect(glassServiceSlug('termite_inspection')).toBe('wdo_inspection');
+  it('keeps the standalone termite_inspection off the regulated WDO slug and recognizes the slab pre-treat catalog key', () => {
+    // FS 482.226 standalone inspection — not a real-estate WDO report.
+    expect(glassServiceSlug('termite_inspection')).not.toBe('wdo_inspection');
+    expect(glassServiceSlug('termite_slab_pretreat')).toBe('pre_slab_termiticide');
+    expect(glassServiceSlug('Slab Pre-Treat Termite Service')).toBe('pre_slab_termiticide');
   });
 
   it('does not classify ordinary termiticide treatment as pre-slab certificate work', () => {

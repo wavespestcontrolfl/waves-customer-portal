@@ -37,6 +37,13 @@ function lineItem({ description, unitPrice, frequency, visitsPerYear = 0 }) {
   };
 }
 
+// Returns the per-cadence recurring lines, or null when a cadence's rows do
+// not reconcile to its authoritative annual — production's synthesizer
+// rejects a candidate whose per-service rows do not add up to the stored
+// annual (perApplicationLinesForCandidate), so the harness must not print a
+// number the estimate page never showed. Fixture rows may carry a
+// pre-discount `perVisit` anchor beside a discounted `annual`; the discounted
+// per-application price is derived from the annual in that case.
 function recurringLines(pricing = {}) {
   const lines = [];
   for (const service of pricing.services || []) {
@@ -46,22 +53,28 @@ function recurringLines(pricing = {}) {
     const rows = Array.isArray(cadence.perServiceTreatments) && cadence.perServiceTreatments.length
       ? cadence.perServiceTreatments
       : [cadence];
+    const cadenceAnnual = round(cadence.annual);
+    const drafts = [];
     for (const row of rows) {
       const visits = Math.round(Number(row.visitsPerYear ?? cadence.visitsPerYear ?? CADENCE_VISITS[cadence.key]) || 0);
-      const perApplication = Number(row.displayPrice ?? row.perTreatment ?? row.perVisit) || 0;
       const monthly = Number(row.monthly) || 0;
       const name = row === cadence ? service.label : (row.label || row.service || 'Recurring service');
+      let perApplication = Number(row.displayPrice ?? row.perTreatment) || 0;
+      if (!perApplication && visits > 0) {
+        const anchor = Number(row.perVisit) || 0;
+        const anchorReconciles = anchor > 0 && (!(cadenceAnnual > 0) || Math.abs(round(anchor * visits) - cadenceAnnual) <= 0.05);
+        perApplication = anchorReconciles ? anchor : (cadenceAnnual > 0 ? round(cadenceAnnual / visits) : 0);
+      }
       if (perApplication > 0 && visits > 0) {
-        lines.push(lineItem({
-          description: `${name} — ${visits} applications/yr`,
-          unitPrice: perApplication,
-          frequency: 'per_application',
-          visitsPerYear: visits,
-        }));
+        drafts.push({ line: lineItem({ description: `${name} — ${visits} applications/yr`, unitPrice: perApplication, frequency: 'per_application', visitsPerYear: visits }), annual: round(perApplication * visits) });
       } else if (monthly > 0) {
-        lines.push(lineItem({ description: name, unitPrice: monthly, frequency: 'monthly' }));
+        drafts.push({ line: lineItem({ description: name, unitPrice: monthly, frequency: 'monthly' }), annual: round(monthly * 12) });
       }
     }
+    if (!drafts.length) continue;
+    const gross = round(drafts.reduce((sum, draft) => sum + draft.annual, 0));
+    if (cadenceAnnual > 0 && Math.abs(gross - cadenceAnnual) > 0.05) return null;
+    lines.push(...drafts.map((draft) => draft.line));
   }
   return lines;
 }
@@ -117,10 +130,14 @@ function computeTotals(buildings) {
 
 export function synthesizeDocumentProposal(payload = {}) {
   const estimate = payload.estimate || {};
+  const recurring = recurringLines(payload.pricing);
   const buildings = [{
     name: estimate.address || 'Service location',
     note: null,
-    lineItems: [...recurringLines(payload.pricing), ...oneTimeLines(payload.pricing)],
+    // An unreconciled recurring cadence rejects the whole synthesis (empty
+    // table → documentRender withheld → the audit fails the scenario loudly)
+    // rather than printing a partial or contradicting pricing table.
+    lineItems: recurring ? [...recurring, ...oneTimeLines(payload.pricing)] : [],
   }];
   return {
     enabled: false,

@@ -67,6 +67,15 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
       [],
       [{ service: 'termite_trenching', name: 'Liquid Termiticide Treatment' }],
     )).toBe(false);
+    // Canonical catalog key + label for the slab pre-treat (the completion lane
+    // routes it to pre_treatment_termite_certificate).
+    expect(hasRegulatedCertificateServiceMix([], [{ service: 'termite_slab_pretreat', name: 'Slab Pre-Treat Termite Service' }])).toBe(true);
+    expect(hasRegulatedCertificateServiceMix([], [{ name: 'Slab Pre-Treat Termite Service' }])).toBe(true);
+    expect(deriveServiceCategory({}, [], [{ service: 'termite_slab_pretreat', name: 'Slab Pre-Treat Termite Service' }])).toBe('pre_slab_termiticide');
+    // The standalone termite inspection (FS 482.226, "not for real-estate
+    // transactions") is NOT a WDO report: it keeps the intelligence + ask UI.
+    expect(hasRegulatedCertificateServiceMix([], [{ service: 'termite_inspection', name: 'Termite Inspection Service' }])).toBe(false);
+    expect(deriveServiceCategory({}, [], [{ service: 'termite_inspection', name: 'Termite Inspection Service' }])).not.toBe('wdo_inspection');
   });
 
   test('empty scope list releases every estimate', () => {

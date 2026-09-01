@@ -39,6 +39,59 @@ describe('estimate preview document proposal (mode=pdf parity)', () => {
     expect(documentRenderAffirmed(proposal)).toBe(true);
   });
 
+  it('derives the discounted per-application price when the fixture carries a pre-discount anchor', () => {
+    // bundle fixture shape: $147 anchor, Gold 15% → $124.95/visit, annual 499.8.
+    const proposal = synthesizeDocumentProposal({
+      estimate,
+      pricing: {
+        services: [{
+          key: 'pest_control',
+          label: 'Pest Control',
+          defaultFrequencyKey: 'quarterly',
+          frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 41.65, annual: 499.8, perVisit: 147 }],
+        }],
+        oneTimeBreakdown: { total: 0, items: [] },
+      },
+    });
+    expect(proposal.buildings[0].lineItems).toEqual([expect.objectContaining({
+      description: 'Pest Control — 4 applications/yr', unitPrice: 124.95, amount: 124.95, frequency: 'per_application', visitsPerYear: 4,
+    })]);
+    expect(proposal.totals.annualRecurring).toBe(499.8);
+  });
+
+  it('prefers the displayed per-application price and rejects synthesis when rows do not reconcile', () => {
+    const reconciled = synthesizeDocumentProposal({
+      estimate,
+      pricing: {
+        services: [{
+          key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'quarterly',
+          frequencies: [{
+            key: 'quarterly', annual: 385.2, perVisit: 107,
+            perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 96.3, perTreatment: 107, visitsPerYear: 4 }],
+          }],
+        }],
+        oneTimeBreakdown: { total: 0, items: [] },
+      },
+    });
+    expect(reconciled.buildings[0].lineItems).toEqual([expect.objectContaining({ description: 'Pest Control (Quarterly) — 4 applications/yr', unitPrice: 96.3 })]);
+
+    const contradicting = synthesizeDocumentProposal({
+      estimate,
+      pricing: {
+        services: [{
+          key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'quarterly',
+          frequencies: [{
+            key: 'quarterly', annual: 500,
+            perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 96.3, visitsPerYear: 4 }],
+          }],
+        }],
+        oneTimeBreakdown: { total: 125, items: [{ label: 'WDO Inspection', amount: 125, kind: 'charge' }] },
+      },
+    });
+    expect(contradicting.buildings[0].lineItems).toEqual([]);
+    expect(documentRenderAffirmed(contradicting)).toBe(false);
+  });
+
   it('prints charged and included one-time rows only when they reconcile to the total', () => {
     const reconciled = synthesizeDocumentProposal({
       estimate,
