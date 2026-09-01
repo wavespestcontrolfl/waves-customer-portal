@@ -153,13 +153,16 @@ describe('payer-billed visits', () => {
     expect(unbilledCompletionGap({ prediction: priced })).toBeNull();
   });
 
-  test('free-by-design payer work keeps its reason and never warns (Codex P1)', () => {
+  test('free-by-design payer work predicts no_charge, not a payer invoice (Codex P1)', () => {
+    // Completion suppresses callbacks and always-free types before the payer
+    // matters, so a 'payer' verdict made the sheet promise an AP invoice that
+    // completion will never cut.
     const cb = predictCompletionBilling({ ...payer, isCallback: true });
-    expect(cb).toMatchObject({ kind: 'payer', reason: 'callback' });
+    expect(cb).toMatchObject({ kind: 'no_charge', reason: 'callback' });
     expect(unbilledCompletionGap({ prediction: cb })).toBeNull();
 
     const free = predictCompletionBilling({ ...payer, serviceType: 'Pest Control Re-Service' });
-    expect(free).toMatchObject({ kind: 'payer', reason: 'always_free_service_type' });
+    expect(free).toMatchObject({ kind: 'no_charge', reason: 'always_free_service_type' });
     expect(unbilledCompletionGap({ prediction: free })).toBeNull();
   });
 });

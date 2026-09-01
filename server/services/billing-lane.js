@@ -221,9 +221,14 @@ function predictCompletionBilling({
     // only the stamped price made a payer visit that bills a monthly rate or
     // an acceptance fee look amountless (Codex P1). Free-by-design payer work
     // keeps its reason so it is never mistaken for a money gap either.
-    const payerFreeReason = isCallback
-      ? 'callback'
-      : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
+    // Free-by-design payer work bills NOBODY: shouldAutoInvoiceCompletion
+    // suppresses callbacks and always-free service types before the payer
+    // ever matters, so a 'payer' verdict here made the sheet promise "this
+    // invoices the third-party billing party" for a visit completion will not
+    // invoice at all (Codex P1). Same reasoned no_charge every other lane
+    // returns for the same work.
+    if (isCallback) return noCharge('callback');
+    if (isAlwaysFreeServiceType(serviceType)) return noCharge('always_free_service_type');
     const payerAmount = completionInvoiceAmount({
       estimatedPrice,
       isCallback,
@@ -236,7 +241,6 @@ function predictCompletionBilling({
       kind: 'payer',
       amount: payerAmount > 0 ? payerAmount : (hasVisitPrice ? Number(estimatedPrice) : null),
       conflictStampedPrice: false,
-      ...(payerFreeReason ? { reason: payerFreeReason } : {}),
     };
   }
   // Completion's numeric prepaid fallback covers ONLY out-of-band methods
