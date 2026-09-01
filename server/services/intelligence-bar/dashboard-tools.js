@@ -400,11 +400,15 @@ async function comparePeriods(input) {
           .whereBetween('e.sent_at', [fromTs, toTs])
           // plan_restart sent_at is a synthetic publish stamp (the
           // customer self-served the quote; nothing was delivered) — it
-          // is not an estimate SENT (codex GH r19 P1 on #3671).
+          // is not an estimate SENT (codex GH r19 P1 on #3671) UNLESS an
+          // operator later really delivered it: the admin send path stamps
+          // deliveryState.firstDeliveredAt, the same real-delivery witness
+          // estimate-source-performance counts for this source (r26 P2).
           // NULL-aware (r20 P2): legacy rows carry source NULL, which a
           // bare <> would drop from the count.
-          .where(function notPlanRestart() {
-            this.whereNull('e.source').orWhereNot('e.source', 'plan_restart');
+          .where(function notUndeliveredPlanRestart() {
+            this.whereNull('e.source').orWhereNot('e.source', 'plan_restart')
+              .orWhereRaw("(e.estimate_data #>> '{deliveryState,firstDeliveredAt}') IS NOT NULL");
           })
       ).count('* as count').first();
       m.estimates_sent = parseInt(es?.count || 0);

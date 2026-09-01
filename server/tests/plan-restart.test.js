@@ -638,6 +638,19 @@ describe('mintRestartEstimate', () => {
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-12', requestId: null, source: 'case_scope' });
   });
 
+  test('a failing churn-correlation read keeps the legacy correlation — the savepoint keeps the outer transaction usable (codex GH r26 P2)', async () => {
+    tables.cancellation_cases = [{
+      id: 'case-13', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-22',
+    }];
+    const t = fakeTrx(null, (table) => {
+      const b = builder(table);
+      if (table.startsWith('customers')) { b.first = async () => { throw new Error('schema skew boom'); }; }
+      return b;
+    });
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', t);
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-13', requestId: null, source: 'case_scope' });
+  });
+
   test('a failing prepay evidence read only NARROWS — the savepoint keeps the outer transaction usable (codex GH r18 P2)', async () => {
     // The prepay lookup is best-effort, but without a savepoint a pg
     // statement error aborts the OUTER mint transaction — the catch would

@@ -115,10 +115,14 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   // quote the account through normal tooling). The one-day tolerance
   // absorbs a request filed just before a midnight churn stamp. No stamp
   // (legacy) or an unreadable customers row keeps the legacy correlation.
+  // Savepoint-isolated (codex GH r26 P2): a pg statement error (a column
+  // missing mid-deploy) must not abort the caller's transaction, or the
+  // documented legacy fallback 500s on the next evidence query instead.
   const anchorTs = current ? current.created_at : (latestRequest ? latestRequest.created_at : null);
   if (anchorTs) {
     try {
-      const row = await dbh('customers').where({ id: customerId }).first('churned_at', 'pipeline_stage_changed_at', 'churn_reason');
+      const row = await dbh.transaction((sp) => sp('customers').where({ id: customerId })
+        .first('churned_at', 'pipeline_stage_changed_at', 'churn_reason'));
       const staleAttempt = () => ({ families: [], caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'none' });
       const transitionMs = row && row.pipeline_stage_changed_at ? new Date(row.pipeline_stage_changed_at).getTime() : NaN;
       if (!Number.isNaN(transitionMs)) {
