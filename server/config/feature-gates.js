@@ -55,7 +55,7 @@
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
- *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: extra recurring lines on a new customer's estimate are parked as staff opt-out events before delivery; STRICT opt-in, needs opt-out + add)
+ *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
  *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
@@ -1461,11 +1461,12 @@ const gates = {
   estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
 
   // Send-time "lead with one service": when a NEW residential customer's
-  // estimate carries two or more removable recurring lines, sendEstimateNow
-  // parks every line after the lead one as a staff-authored opt-out event
+  // estimate carries EXACTLY two recurring lines (the non-lead one removable),
+  // sendEstimateNow parks the second as a staff-authored opt-out event
   // (actor 'staff') before delivery, so the customer receives a single-
-  // service quote with the others offered as one-tap priced add-ons on the
-  // page. Lead = the estimator's first selected recurring service. Existing
+  // service quote with the other offered as a one-tap priced add-on on the
+  // page. Three-line estimates go out as the full bundle (one atomic park,
+  // never a partial mix). Lead = the estimator's first selected recurring service. Existing
   // members, commercial, grouped and proposal estimates are untouched.
   // STRICT opt-in: this changes what gets sent and billed.
   // Enable with GATE_ESTIMATE_LEAD_SERVICE_SEND=true (needs opt-out + add on).

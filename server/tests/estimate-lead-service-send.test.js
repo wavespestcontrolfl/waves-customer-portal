@@ -137,6 +137,17 @@ test('a refused preview never blocks the send — the full bundle goes out as to
   expect(mockMixCalls).toHaveLength(1);
 });
 
+test('a three-line estimate is never shaped — one atomic park or nothing (pre-push codex P0)', async () => {
+  const estimatePublic = require('../routes/estimate-public');
+  estimatePublic.buildPricingBundle.mockResolvedValueOnce({
+    services: [{ key: 'pest_control', isRecurring: true }, { key: 'lawn_care', isRecurring: true }, { key: 'mosquito', isRecurring: true }],
+  });
+  const row = newCustomerRow({ estimate_data: JSON.stringify({ engineRequest: { profile: {}, selectedServices: ['PEST', 'LAWN', 'MOSQUITO'], options: {} }, inputs: { services: { pest: {}, lawn: {}, mosquito: {} } } }) });
+  mockRows.queue = [claimedRowFor(row), parkedRow];
+  expect(await applyLeadServiceForSend(row)).toBe(row);
+  expect(mockMixCalls).toHaveLength(0);
+});
+
 test('an archived or locked claimed row is left alone', async () => {
   const row = newCustomerRow();
   mockRows.queue = [{ ...claimedRowFor(row), archived_at: 'x' }, parkedRow];

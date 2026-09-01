@@ -869,7 +869,8 @@ router.post('/:id/send', async (req, res, next) => {
 // Send-time "lead with one service" (GATE_ESTIMATE_LEAD_SERVICE_SEND).
 // Scope, all deliberate: NEW residential customers only (no membership
 // evidence — a member's combined tier is theirs to keep), ungrouped, not a
-// proposal, two or more REMOVABLE recurring lines per the opt-out resolver.
+// proposal, EXACTLY two recurring lines with the non-lead one REMOVABLE per
+// the opt-out resolver (one atomic park — never a partial multi-step mix).
 // Lead = the estimator's first selected recurring service (engineRequest
 // order, else section order). Every other removable line goes through the
 // shared applyServiceMixChange rail as actor 'staff' — dry run, then commit
@@ -925,7 +926,11 @@ async function applyLeadServiceForSend(estimate) {
     const removable = OptOut.serviceOptOutRemovableKeys(estData, sections, current.waveguard_tier);
     if (removable.size < 1) return estimate;
     const recurringKeys = sections.filter((s) => s && s.isRecurring === true).map((s) => String(s.key || ''));
-    if (recurringKeys.length < 2) return estimate;
+    // EXACTLY two recurring lines: one lead, one parked. A three-line
+    // estimate would need a multi-step park that can refuse midway and send
+    // a partial mix — neither the full bundle nor the single-service quote
+    // (pre-push codex P0). Those go out as the full bundle, as today.
+    if (recurringKeys.length !== 2) return estimate;
     // Lead: first selected recurring token in the estimator's own order.
     const tokenToKey = Object.fromEntries(Object.entries(OptOut.SERVICE_OPT_OUT_KEYS)
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
@@ -934,7 +939,7 @@ async function applyLeadServiceForSend(estimate) {
     const leadKey = [...selectedOrder, ...recurringKeys].find((k) => recurringKeys.includes(k));
     if (!leadKey) return estimate;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
-    if (!toPark.length) return estimate;
+    if (toPark.length !== 1) return estimate;
 
     let parked = 0;
     for (const serviceKey of toPark) {

@@ -1659,10 +1659,11 @@ violations at the severity noted.
   rail owns eligibility, recompute, digest, CAS write and audit. Second
   caller: `applyLeadServiceForSend` in admin-estimates `sendEstimateNowInner`
   (GATE_ESTIMATE_LEAD_SERVICE_SEND, strict opt-in): a NEW residential
-  customer's ungrouped, non-proposal estimate with two or more removable
-  recurring lines is sent leading with the estimator's first selected
-  service, every other removable line parked as an `actor:'staff'` removal
-  (dry run → commit) BEFORE any delivery; `/data` ships those keys as
+  customer's ungrouped, non-proposal estimate with EXACTLY two recurring
+  lines (the non-lead one removable) is sent leading with the estimator's
+  first selected service, the other parked as ONE `actor:'staff'` removal
+  (dry run → commit) BEFORE any delivery — three-line estimates go out as
+  the full bundle, so a park can never leave a partial mix; `/data` ships those keys as
   `serviceOptOut.staffOfferedKeys` and the page words them as an offer.
   Best-effort by design — any refusal sends the full bundle as today, never
   a blocked send — and a row that already carries `serviceOptOut` is never
