@@ -335,7 +335,7 @@ async function releaseClaims(claims = []) {
 }
 
 module.exports = {
-  claim, report, sweepExpiredClaims, releaseClaims, mapReportToPatch, businessProfile, isValidEmail,
+  claim, report, sweepExpiredClaims, releaseClaims, settleReleasedPlacements: settleReleased, mapReportToPatch, businessProfile, isValidEmail,
   effectiveAutomationPolicy,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS,
 };

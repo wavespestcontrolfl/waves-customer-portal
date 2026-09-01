@@ -28,6 +28,7 @@
  */
 
 const crypto = require('crypto');
+const psl = require('psl');
 const MODELS = require('../../config/models');
 const { dispatch } = require('../llm/call');
 const { isEnabled } = require('../../config/feature-gates');
@@ -177,7 +178,15 @@ function hostBound(host, url) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
   if (u.username || u.password) return false;
   const h = canonicalProspectDomain(u.hostname);
-  return !!h && (h === host || h.endsWith(`.${host}`));
+  if (!h) return false;
+  if (h === host) return true;
+  // Subdomains bind ONLY under a REGISTRABLE host: a registry row whose
+  // name is a public suffix (co.uk, github.io — intake admits dotted
+  // suffixes) would otherwise claim every unrelated organization beneath
+  // it, and a page or model response could register another company's
+  // site as this row's executable path. psl (already a dependency) is the
+  // authority; an unlisted/invalid host binds on exact match only.
+  return !!psl.get(host) && h.endsWith(`.${host}`);
 }
 
 /** URLs worth fetching for a domain, own-host only, deduped, uncapped (the fetch loop caps). */
@@ -621,6 +630,11 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
 // ---------------------------------------------------------------------------
 
 const normQuote = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+// Range recognition vocabulary (lowercased text): a currency marker that may
+// repeat on the upper bound, and a cadence suffix that may follow either
+// bound ("/year", "per year", "a month", "each year", "annually").
+const CURRENCY_MARKERS = '(?:usd|us\\$|ca\\$|au\\$|nz\\$|r\\$|[$€£¥₹₱₽₺₪฿])';
+const CADENCE_SUFFIX = '(?:\\s*\\/\\s*[a-z]+|\\s+per\\s+[a-z]+|\\s+(?:a|an|each|every)\\s+[a-z]+|\\s+(?:annually|yearly|monthly|weekly|daily|quarterly|annual|year|yr|month|mo|week|day))?';
 const findPage = (pages, pageUrl) => {
   if (!pageUrl) return null;
   const key = registry.normalizeSubmissionUrl(pageUrl);
@@ -661,7 +675,12 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // the separator may be a dash or the word "to", the upper bound may
     // repeat the currency marker/symbol, and the check runs regardless of
     // how the quote itself ends (a cadence suffix must not hide the range)
-    const rangeNext = /^\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?\d/.test(t.slice(idx + q.length));
+    // (a cadence suffix on the LOWER bound — "/year", "per year", "a
+    // month", "annually" — may sit between the quote and the separator;
+    // "between X and Y" is the same range with "and" as its separator)
+    const ctxBefore = t.slice(Math.max(0, idx - 40), idx);
+    const betweenBefore = new RegExp(`\\bbetween\\s+(?:${CURRENCY_MARKERS}\\s*)?$`).test(ctxBefore);
+    const rangeNext = new RegExp(`^${CADENCE_SUFFIX}\\s*(?:[-–—]|to\\b${betweenBefore ? '|and\\b' : ''})\\s*(?:${CURRENCY_MARKERS}\\s*)?\\d`).test(t.slice(idx + q.length));
     // …and a quote continued by MINIMUM-price syntax is a truncated lower
     // bound the same way: "USD 95+" / "USD 95 and up" never verify "USD 95"
     const minimumNext = /^\s*(?:\+|and up\b|or more\b|and above\b|and over\b|or higher\b|and higher\b|minimum\b|min\.)/.test(t.slice(idx + q.length));
@@ -670,7 +689,9 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // 150/year" never verify "USD 150" — a lower amount (with an optional
     // unit suffix) followed by the separator (and an optional repeated
     // currency marker) directly precedes the match
-    const rangeBefore = /\d(?:\s*\/\s*[a-z]+)?\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?$/.test(t.slice(Math.max(0, idx - 32), idx));
+    // ("USD 95 per year – USD 150 per year", "between USD 95 and USD 150")
+    const rangeBefore = new RegExp(`\\d${CADENCE_SUFFIX}\\s*(?:[-–—]|to\\b)\\s*(?:${CURRENCY_MARKERS}\\s*)?$`).test(ctxBefore)
+      || new RegExp(`\\bbetween\\s+(?:${CURRENCY_MARKERS}\\s*)?\\d[\\d,.]*${CADENCE_SUFFIX}\\s+and\\s+(?:${CURRENCY_MARKERS}\\s*)?$`).test(ctxBefore);
     // …and a quote directly preceded by a pricing qualifier is a starting/
     // promo/minimum price, not the price — the same tokens the price parser rejects
     const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|at least|minimum|min\.?|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));
@@ -963,6 +984,13 @@ async function investigatePaths(db, {
           const head = Math.max(0, budget - PROBE_SLOT_RESERVE);
           urlQueue.splice(from, rest.length, ...others.slice(0, head), ...probes, ...others.slice(head));
         };
+        // The apex homepage FAILED as an origin — a dead vhost, or one that
+        // redirects off-site (a parked/social landing) while www still
+        // serves the real site: try the bounded alternatives next.
+        const enqueueFallbacks = (at) => {
+          urlQueue.splice(at + 1, 0, ...fallbackOrigins);
+          reserveRemaining(at + 1); // the fallbacks spend slots the reservation never saw
+        };
         for (let qi = 0; qi < urlQueue.length; qi++) {
           const url = urlQueue[qi];
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
@@ -989,7 +1017,14 @@ async function investigatePaths(db, {
             // (http→https, slash) covers BOTH aliases — the original path's
             // URL must not stay "never covered" and re-select forever
             pages.push({ url: finalUrl, requestedUrl: claimUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
-            probeDefinitive = true; // the route was actually inspected
+            // the route counts as INSPECTED only when the model saw the
+            // whole page — same full-observation rule as content coverage:
+            // a byte-capped body or text past the prompt excerpt may hold
+            // the very form/instructions the verdict would close away, so
+            // the probe bit stays unset (existence, not coverage) and the
+            // no-progress valve parks the domain for review rather than
+            // closing a route nobody fully read
+            probeDefinitive = !page.truncated && text.length <= PAGE_EXCERPT_CHARS;
             // A WORKING fallback origin carries EVERY still-queued apex URL:
             // the apex is dead, so probes, known paths, and provenance hints
             // alike re-base onto the origin that answers — a known custom
@@ -1014,6 +1049,7 @@ async function investigatePaths(db, {
             // an off-site page must never become model input or evidence
             fetchErrors.push({ url: claimUrl, reason: 'offsite_redirect' });
             probeDefinitive = true; // the route definitively leads off-site
+            if (url === `https://${host}`) enqueueFallbacks(qi); // an off-site apex is a failed origin too
           } else {
             const reason = (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}`;
             fetchErrors.push({ url: claimUrl, reason });
@@ -1023,10 +1059,7 @@ async function investigatePaths(db, {
             // canonical https apex and park a domain with a valid route —
             // when the apex homepage itself fails, try its two origin
             // variants next (same cap, same host-bound rules).
-            if (url === `https://${host}`) {
-              urlQueue.splice(qi + 1, 0, ...fallbackOrigins);
-              reserveRemaining(qi + 1); // the fallbacks spend slots the reservation never saw
-            }
+            if (url === `https://${host}`) enqueueFallbacks(qi);
           }
           // Coverage records only DEFINITIVE probe outcomes — a transient
           // failure leaves the bit unset so the uncovered-first ordering

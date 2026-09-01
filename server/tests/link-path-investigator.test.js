@@ -2283,4 +2283,64 @@ describe('full run', () => {
     expect(prompts[1]).toMatch(/duplicates the identity/);
     expect(db._tables.seo_link_acquisition_paths).toHaveLength(1);
   });
+
+  // ---- Codex PR round 19 -------------------------------------------------
+
+  test('cadence-suffixed and between…and ranges never verify either bound (Codex PR r19 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const claim = (price_text) => modelPath({ price_text, renewal_price_text: null, renewal_price_page_url: null, quotes: [price_text] });
+    const pageOf = (text) => ({ url: 'https://example.com/join', excerpt: text, text, html: '' });
+    const lead = 'Directory listing page with membership details. ';
+    const worded = pageOf(`${lead}Sponsor packages: USD 95 per year – USD 150 per year.`);
+    expect(verifyPriceEvidence([worded], claim('USD 150 per year')).price_text).toBeNull(); // upper bound behind a worded cadence
+    expect(verifyPriceEvidence([worded], claim('USD 95 per year')).price_text).toBeNull(); // lower bound with the cadence before the dash
+    const between = pageOf(`${lead}Plans run between USD 95 and USD 150 per year.`);
+    expect(verifyPriceEvidence([between], claim('USD 150')).price_text).toBeNull();
+    expect(verifyPriceEvidence([between], claim('USD 95')).price_text).toBeNull();
+    const each = pageOf(`${lead}Sponsorships: USD 95 a month to USD 150 a month.`);
+    expect(verifyPriceEvidence([each], claim('USD 150 a month')).price_text).toBeNull();
+    // exact prices beside an "and" that is NOT a between-range still verify
+    expect(verifyPriceEvidence([pageOf(`${lead}Listing fee: USD 150 per year and a free trial month.`)], claim('USD 150 per year')).price_text).toBe('USD 150 per year');
+    expect(verifyPriceEvidence([pageOf(`${lead}Basic USD 95 and Pro USD 150 are the two options.`)], claim('USD 150')).price_text).toBe('USD 150');
+  });
+
+  test('a probe page longer than the prompt excerpt is existence, not probe coverage — no close on a half-read route (Codex PR r19 P1)', async () => {
+    const registerBit = 1 << investigator.PROBE_PATHS.indexOf('/register');
+    const d = domainRow({ agent_state: 'investigating', probe_coverage_mask: ((1 << investigator.PROBE_PATHS.length) - 1) & ~registerBit });
+    const db = makeDb({ seo_link_domains: [d] });
+    const longText = `Registration page. ${'Membership terms and general information paragraph. '.repeat(160)} The vendor application form is at the bottom.`;
+    const fetcher = async (url) => (url.endsWith('/register')
+      ? { status: 200, finalUrl: url, contentType: 'text/html', html: `<html><body>${longText}</body></html>`, blocked: false, truncated: false }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching'); // the only remaining probe was never fully observed — not a close
+    expect(Number(dom.probe_coverage_mask) & registerBit).toBe(0); // the bit stays unset for the retry chain
+    expect(dom.score_reasons).toContain('no definitive result yet');
+  });
+
+  test('a public-suffix registry host never binds unrelated organizations beneath it (Codex PR r19 P1)', () => {
+    const { hostBound } = _internals;
+    expect(hostBound('co.uk', 'https://unrelated-company.co.uk/join')).toBe(false);
+    expect(hostBound('github.io', 'https://someone.github.io/apply')).toBe(false);
+    expect(hostBound('co.uk', 'https://co.uk/')).toBe(true); // exact match only
+    expect(hostBound('example.co.uk', 'https://www.example.co.uk/join')).toBe(true); // registrable → subdomains bind
+    expect(hostBound('example.com', 'https://members.example.com/join')).toBe(true);
+  });
+
+  test('an off-site apex redirect is a failed origin — the www fallback is tried (Codex PR r19 P2)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url === 'https://example.com') return { status: 200, finalUrl: 'https://parked.example.net/', contentType: 'text/html', html: '<html><body>This domain is parked. Buy it today from our marketplace of premium names.</body></html>', blocked: false, truncated: false };
+      if (url.startsWith('https://www.example.com')) return okFetch(url);
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' };
+    };
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
+    expect(fetched).toContain('https://www.example.com'); // the real site still answers on www
+    expect(r.investigated).toBe(1);
+    expect(fetched.some((u) => u.startsWith('https://www.example.com/'))).toBe(true);
+  });
 });
