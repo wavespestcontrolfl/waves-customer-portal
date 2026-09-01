@@ -145,8 +145,8 @@ describe("PendingDraftsTab", () => {
     expect(screen.getByText("Sam Owner")).toBeInTheDocument(); // fell back to All
   });
 
-  it("pages older drafts with offset and appends without duplicates", async () => {
-    adminFetch.mockResolvedValue({ drafts: DRAFTS.drafts, pendingCount: 3 });
+  it("pages older drafts with the server cursor and appends without duplicates", async () => {
+    adminFetch.mockResolvedValue({ drafts: DRAFTS.drafts, pendingCount: 3, nextCursor: "2026-09-01T00:00:00.000Z|d2" });
     render(<PendingDraftsTab embedded />);
     await screen.findByText("Pat Customer");
     expect(screen.getByText("3 pending drafts")).toBeInTheDocument();
@@ -154,10 +154,14 @@ describe("PendingDraftsTab", () => {
     adminFetch.mockResolvedValueOnce({
       drafts: [DRAFTS.drafts[1], { ...DRAFTS.drafts[0], id: "d3", customerName: "Old Draft" }],
       pendingCount: 3,
+      nextCursor: null,
     });
-    fireEvent.click(screen.getByText("Load older drafts (1 more)"));
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending&offset=2"));
+    fireEvent.click(screen.getByText("Load older drafts"));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
+      "/admin/drafts?status=pending&before=2026-09-01T00%3A00%3A00.000Z%7Cd2",
+    ));
     await waitFor(() => expect(screen.getByText("Old Draft")).toBeInTheDocument());
     expect(screen.getAllByText("Sam Owner")).toHaveLength(1); // dedup by id
+    expect(screen.queryByText("Load older drafts")).not.toBeInTheDocument(); // cursor exhausted
   });
 });

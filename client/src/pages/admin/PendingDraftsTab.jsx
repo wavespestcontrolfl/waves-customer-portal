@@ -229,6 +229,7 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
 export default function PendingDraftsTab({ embedded = false }) {
   const [drafts, setDrafts] = useState([]);
   const [pendingCount, setPendingCount] = useState(0);
+  const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
@@ -243,6 +244,7 @@ export default function PendingDraftsTab({ embedded = false }) {
       const data = await adminFetch("/admin/drafts?status=pending");
       setDrafts(Array.isArray(data?.drafts) ? data.drafts : []);
       setPendingCount(Number(data?.pendingCount) || 0);
+      setNextCursor(data?.nextCursor || null);
     } catch (err) {
       setError(err.message || "Failed to load drafts");
     } finally {
@@ -250,14 +252,18 @@ export default function PendingDraftsTab({ embedded = false }) {
     }
   }, []);
 
-  // The API pages newest-first, 50 at a time; without this, older drafts
-  // past the first page would be unreachable and silently starve.
+  // The API pages newest-first, 50 at a time, by a server-issued
+  // (created_at, id) cursor — a client-derived offset would shift under
+  // concurrent inserts/approvals and could loop on duplicates forever.
+  // Without paging, older drafts past the first page silently starve.
   const loadOlder = useCallback(async () => {
+    if (!nextCursor) return;
     setLoadingMore(true);
     try {
-      const data = await adminFetch(`/admin/drafts?status=pending&offset=${drafts.length}`);
+      const data = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(nextCursor)}`);
       const older = Array.isArray(data?.drafts) ? data.drafts : [];
       setPendingCount(Number(data?.pendingCount) || 0);
+      setNextCursor(data?.nextCursor || null);
       setDrafts((current) => {
         const seen = new Set(current.map((d) => d.id));
         return [...current, ...older.filter((d) => !seen.has(d.id))];
@@ -267,7 +273,7 @@ export default function PendingDraftsTab({ embedded = false }) {
     } finally {
       setLoadingMore(false);
     }
-  }, [drafts.length]);
+  }, [nextCursor]);
 
   useEffect(() => {
     load();
@@ -393,14 +399,14 @@ export default function PendingDraftsTab({ embedded = false }) {
         />
       ))}
 
-      {!loading && drafts.length < pendingCount && (
+      {!loading && nextCursor && (
         <button
           type="button"
           onClick={loadOlder}
           disabled={loadingMore}
           style={{ justifySelf: "start", background: "#FFFFFF", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: "7px 14px", fontSize: 14, fontWeight: 500, cursor: loadingMore ? "default" : "pointer" }}
         >
-          {loadingMore ? "Loading older drafts" : `Load older drafts (${pendingCount - drafts.length} more)`}
+          {loadingMore ? "Loading older drafts" : "Load older drafts"}
         </button>
       )}
     </div>

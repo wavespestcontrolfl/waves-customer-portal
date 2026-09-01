@@ -596,21 +596,39 @@ async function finalizeDraftSend(draft, updates) {
 router.get('/', async (req, res, next) => {
   try {
     const { status = 'pending', campaign_type: campaignType } = req.query;
-    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    // Cursor pagination over a LIVE set: an offset would shift under
+    // concurrent inserts/approvals and could return overlapping pages
+    // forever (Codex #3700 r2 P1). The cursor is the last row's
+    // deterministic (created_at, id) position; ties on created_at are
+    // broken by id in both the ORDER BY and the tuple comparison.
+    let cursor = null;
+    if (req.query.before) {
+      const raw = String(req.query.before);
+      const split = raw.lastIndexOf('|');
+      const ts = split > 0 ? new Date(raw.slice(0, split)) : new Date(NaN);
+      const id = split > 0 ? raw.slice(split + 1) : '';
+      if (Number.isNaN(ts.getTime()) || !id) return res.status(400).json({ error: 'Invalid before cursor' });
+      cursor = { ts, id };
+    }
     let query = db('message_drafts')
       .where(status === 'all' ? {} : { status })
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage')
       .orderBy('message_drafts.created_at', 'desc')
-      .limit(50)
-      .offset(offset);
+      .orderBy('message_drafts.id', 'desc')
+      .limit(50);
+    if (cursor) {
+      query = query.whereRaw('(message_drafts.created_at, message_drafts.id) < (?, ?)', [cursor.ts, cursor.id]);
+    }
     if (campaignType === 'none') {
       query = query.whereNull('message_drafts.campaign_type');
     } else if (campaignType) {
       query = query.where('message_drafts.campaign_type', campaignType);
     }
     const drafts = await query;
+    const last = drafts.length === 50 ? drafts[drafts.length - 1] : null;
+    const nextCursor = last ? `${new Date(last.created_at).toISOString()}|${last.id}` : null;
 
     // The list must promise the SAME recipient/from the approve path will
     // use (resolveDraftRecipient: sms_log thread first, then flags, then
@@ -646,6 +664,7 @@ router.get('/', async (req, res, next) => {
         };
       }),
       pendingCount: await db('message_drafts').where({ status: 'pending' }).count('* as count').first().then(r => parseInt(r.count)),
+      nextCursor,
     });
   } catch (err) { next(err); }
 });
