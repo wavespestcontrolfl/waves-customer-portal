@@ -387,9 +387,9 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // Send the email version of an appointment notice after the SMS could not be
 // delivered. Returns true if the email was sent. On no-email-on-file, raises the
 // no-channel admin alert. Best-effort — never throws.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote });
   if (res?.ok) {
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
     return true;
@@ -3104,6 +3104,16 @@ const AppointmentReminders = {
                 const ownsNight = Boolean(nightClaim && nightClaim.state === 'owner');
                 const nightLabel = await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null });
                 const nightCopy = ownsNight ? await visitReminderCopyInputs(svcVisitId, r) : null;
+                // Tier recheck on the grouped copy (GH codex r3 P1): a
+                // move committed during the awaits above may have taken
+                // the visit off tomorrow — sending now would finalize the
+                // NEW date's effect and silence the correctly timed
+                // reminder when it actually comes due.
+                if (nightCopy && etDateString(nightCopy.apptTime) !== tomorrowET) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — grouped slot moved off tomorrow during the scan; claim released, row left unmarked`);
+                  continue;
+                }
                 // Lease renewal AFTER all copy prep, immediately before the
                 // provider call — see the 72h twin (and codex P1: prep
                 // reads must not eat the lease after renewal).

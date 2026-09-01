@@ -1596,6 +1596,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       };
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.urgency) insertData.urgency = 'routine';
+      // Property identity for the visit-group stamp below (GH codex r3):
+      // without it maybeGroupRow always refuses, and non-estimate bookings
+      // never regroup. Only the customer's SOLE active property is
+      // unambiguous; multi-property customers stay office-placed.
+      insertData.property_id = await require('../services/customer-properties')
+        .soleActivePropertyId(customerId, trx);
       const [appt] = await trx('scheduled_services').insert(insertData).returning('*');
 
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —

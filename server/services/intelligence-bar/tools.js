@@ -1915,6 +1915,9 @@ async function createAppointment(input) {
     }
     const [created] = await trx('scheduled_services').insert({
       customer_id,
+      // Sole-active-property anchor for the visit-group stamp below —
+      // see customer-properties.soleActivePropertyId (GH codex r3).
+      property_id: await require('../customer-properties').soleActivePropertyId(customer_id, trx),
       scheduled_date: dateStr,
       service_type,
       technician_id,

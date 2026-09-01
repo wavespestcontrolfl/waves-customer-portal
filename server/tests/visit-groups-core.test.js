@@ -269,8 +269,8 @@ describe('customerExcludedByAutopay (spec rev-2: autopay customers are not group
 
   afterEach(() => { jest.dontMock('../services/autopay-eligibility'); jest.resetModules(); });
 
-  const freshVG = (onAutopayImpl) => {
-    jest.doMock('../services/autopay-eligibility', () => ({ customerOnAutopay: onAutopayImpl }));
+  const freshVG = (onAutopayImpl, isPausedImpl = () => false) => {
+    jest.doMock('../services/autopay-eligibility', () => ({ customerOnAutopay: onAutopayImpl, isPaused: isPausedImpl }));
     jest.resetModules();
     return require('../services/visit-groups');
   };
@@ -300,6 +300,24 @@ describe('customerExcludedByAutopay (spec rev-2: autopay customers are not group
     expect(await vg.customerExcludedByAutopay('c1', knexFor({ id: 'c1' }))).toBe(true);
     const vg2 = freshVG(jest.fn(async () => false));
     expect(await vg2.customerExcludedByAutopay('c-missing', knexFor(undefined))).toBe(true);
+  });
+
+  test('a paused LEGACY enrollment (NULL flag + live pause) is excluded via isPaused, and an explicit false is not (GH r3 P1)', async () => {
+    // customerOnAutopay returns false for every pause before inspecting the
+    // method — a NULL-flag legacy enrollment must be caught by the pause
+    // itself (only enrolled accounts pause).
+    const onAutopay = jest.fn(async () => false);
+    const paused = jest.fn((c) => Boolean(c.autopay_paused_until));
+    const vg = freshVG(onAutopay, paused);
+    expect(await vg.customerExcludedByAutopay('c-legacy', knexFor({
+      id: 'c-legacy', autopay_enabled: null, autopay_paused_until: '2099-01-01',
+    }))).toBe(true);
+    expect(onAutopay).not.toHaveBeenCalled();
+    // Explicitly disabled = unenrolled, even with a stale pause stamp left
+    // behind — never excluded, and never consults the predicates.
+    expect(await vg.customerExcludedByAutopay('c-off', knexFor({
+      id: 'c-off', autopay_enabled: false, autopay_paused_until: '2099-01-01',
+    }))).toBe(false);
   });
 
   test('the predicate is called failClosed (an unreadable autopay state must throw, not read as unenrolled)', async () => {

@@ -305,3 +305,16 @@ describe('grouped-visit reminder dedupe (72h tier wiring)', () => {
     expect(flagUpdates(state, 'reminder_72h_sent')).toHaveLength(2);
   });
 });
+
+describe('round-3 wiring pins (source contracts)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
+
+  test('the SMS-fallback email carries the aggregated grouped hold note', () => {
+    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null })");
+    expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote })');
+  });
+
+  test('the night-email leg rechecks the grouped date before sending', () => {
+    expect(src).toMatch(/if \(nightCopy && etDateString\(nightCopy\.apptTime\) !== tomorrowET\) \{[\s\S]{0,400}finalizeVisitNotification\(svcVisitId, 'reminder_24h', 'retry'/);
+  });
+});

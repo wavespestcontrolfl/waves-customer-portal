@@ -528,6 +528,9 @@ class AvailabilityEngine {
       // Create scheduled_service so it shows on the dispatch board
       const [scheduledRow] = await trx('scheduled_services').insert({
         customer_id: customerId,
+        // Sole-active-property anchor for the visit-group stamp below —
+        // see customer-properties.soleActivePropertyId (GH codex r3).
+        property_id: await require('./customer-properties').soleActivePropertyId(customerId, trx),
         scheduled_date: dateStr,
         window_start: startTime,
         window_end: endTime,
