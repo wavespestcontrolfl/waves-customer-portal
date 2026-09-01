@@ -13,10 +13,13 @@
  * can only shrink.
  *
  * Division of labor (deliberate — see the PR that introduced this):
- *  - The contract OWNS: payload validation (customer/date/status against
- *    the DB CHECK set), source attribution, and — gated — completing the
- *    catalog-identity snapshot from the services table when the caller
- *    didn't stamp it.
+ *  - The contract OWNS: payload validation (customer/date), source
+ *    attribution, and — gated — completing the catalog-identity snapshot
+ *    from the services table when the caller didn't stamp it. Status
+ *    acceptance deliberately stays with the DB CHECK constraint
+ *    (scheduled_services_status_check, AGENTS.md) — a service-level list
+ *    would be a second gate every status migration must remember to
+ *    extend (GH Codex r5 P1).
  *  - The CALLER keeps: pricing computation, occupancy/comms lock ordering
  *    (scheduling/occupancy.js ORDERING CONTRACT), the transaction,
  *    registerAppointment (customer comms NEVER move in here), inspection
@@ -35,14 +38,6 @@
  * call site changes nothing at rest; ON = enrichment stamps apply.
  */
 const { isEnabled } = require('../../config/feature-gates');
-
-// scheduled_services_status_check — 20260426000004 relaxed set plus
-// 'no_show' (20260615000005). A status outside this list would be rejected
-// by the DB anyway; failing here names the contract instead of a raw 23514.
-const SCHEDULED_SERVICE_STATUSES = [
-  'pending', 'confirmed', 'rescheduled', 'en_route', 'on_site',
-  'completed', 'cancelled', 'skipped', 'no_show',
-];
 
 function contractError(message) {
   const err = new Error(`[booking-contract] ${message}`);
@@ -138,10 +133,6 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
     }
   }
   if (!insertData.scheduled_date) throw contractError('scheduled_date is required');
-  const status = insertData.status === undefined ? 'pending' : insertData.status;
-  if (!SCHEDULED_SERVICE_STATUSES.includes(String(status))) {
-    throw contractError(`status '${status}' is outside the scheduled_services CHECK set`);
-  }
   const sourceAction = source?.sourceAction || insertData.source_action;
   if (!sourceAction) {
     throw contractError('source attribution is required: pass source.sourceAction (e.g. admin_manual, voice_agent, admin_ib)');
@@ -188,8 +179,10 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
  * Thin insert wrapper for callers whose transaction shape allows it: runs
  * the contract, then performs the insert (opt-in idempotency via
  * onConflict('idempotency_key').ignore()). Callers with bespoke insert
- * shapes adopt completeScheduledServiceInsert directly instead — the
- * scanner test treats both as compliant.
+ * shapes (bulk rows, savepoints) adopt completeScheduledServiceInsert
+ * directly instead — the scanner test recognizes an insert whose payload
+ * came out of that helper as compliant, so both routes leave the frozen
+ * inventory.
  */
 async function createScheduledService({ trx, insertData, cols, source, idempotencyKey, allowNullCustomer } = {}) {
   const data = await completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer });
@@ -230,5 +223,4 @@ async function createScheduledService({ trx, insertData, cols, source, idempoten
 module.exports = {
   completeScheduledServiceInsert,
   createScheduledService,
-  SCHEDULED_SERVICE_STATUSES,
 };

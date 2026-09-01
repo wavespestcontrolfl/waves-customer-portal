@@ -2,7 +2,8 @@
  * services/booking/create-scheduled-service.js — the booking stamping
  * contract. Contract under test:
  *   - validation is ungated: customer_id (slot-hold escape hatch),
- *     scheduled_date, status against the DB CHECK set, source attribution
+ *     scheduled_date, source attribution — status is NOT gated here (the
+ *     DB CHECK constraint is the one authority)
  *   - gate OFF → no behavioral enrichment; only provenance attribution,
  *     caller values winning
  *   - gate ON → catalog-identity snapshot completion fills ONLY absent
@@ -20,7 +21,6 @@ jest.mock('../config/feature-gates', () => ({
 const {
   completeScheduledServiceInsert,
   createScheduledService,
-  SCHEDULED_SERVICE_STATUSES,
 } = require('../services/booking/create-scheduled-service');
 
 // Minimal knex-shaped conn: services reads resolve from `catalog`;
@@ -90,13 +90,14 @@ describe('validation (ungated)', () => {
     await expect(run({ ...BASE, scheduled_date: null })).rejects.toThrow(/scheduled_date/);
   });
 
-  test('status outside the CHECK set throws; every CHECK value passes; absent status passes (DB default)', async () => {
-    await expect(run({ ...BASE, status: 'booked' })).rejects.toThrow(/CHECK set/);
-    for (const status of SCHEDULED_SERVICE_STATUSES) {
-      await expect(run({ ...BASE, status })).resolves.toBeTruthy();
-    }
+  test('status is passed through untouched — acceptance stays with the DB CHECK constraint', async () => {
+    // No service-level status list: a value the CHECK set gains via a
+    // future migration must not be rejected here first (GH Codex r5 P1).
+    const out = await run({ ...BASE, status: 'some_future_status' });
+    expect(out.status).toBe('some_future_status');
     const { status, ...noStatus } = BASE;
-    await expect(run(noStatus)).resolves.toBeTruthy();
+    const absent = await run(noStatus);
+    expect(absent.status).toBeUndefined(); // DB default applies
   });
 
   test('source attribution is required (from opts or an already-stamped payload)', async () => {

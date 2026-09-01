@@ -3,8 +3,10 @@
  * scheduled_services inserts" (Tier 2 booking-consolidation track).
  *
  * Every production INSERT into scheduled_services must either go through
- * the booking contract (services/booking/create-scheduled-service.js) or
- * be one of the frozen legacy sites below. The inventory freezes each
+ * the booking contract (services/booking/create-scheduled-service.js —
+ * the createScheduledService wrapper, or a bespoke insert whose payload
+ * came out of completeScheduledServiceInsert) or be one of the frozen
+ * legacy sites below. The inventory freezes each
  * site's FINGERPRINT — the statement prefix (call-site identity: the
  * assignment/return context on the ref's line) plus the normalized
  * `('scheduled_services')…insert(<arg head>` expression — as a per-file
@@ -172,6 +174,59 @@ function balancedParens(source, i) {
   return i;
 }
 
+// Index just past the statement that starts at `i`: the first `;` at
+// bracket depth 0 (or the end of the enclosing block), strings and
+// comments skipped.
+function statementEnd(source, i) {
+  let depth = 0;
+  while (i < source.length) {
+    if (source.startsWith('//', i) || source.startsWith('/*', i)) { i = skipTrivia(source, i); continue; }
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i += 1;
+      while (i < source.length && source[i] !== ch) { if (source[i] === '\\') i += 1; i += 1; }
+    } else if ('([{'.includes(ch)) depth += 1;
+    else if (')]}'.includes(ch)) { depth -= 1; if (depth < 0) return i; }
+    else if (ch === ';' && depth === 0) return i;
+    i += 1;
+  }
+  return i;
+}
+
+// The text inside the `.insert(…)` argument list of a chain/statement.
+function insertArgument(text) {
+  const at = text.search(/\.insert\s*\(/);
+  if (at === -1) return null;
+  const open = text.indexOf('(', at);
+  return text.slice(open + 1, balancedParens(text, open) - 1);
+}
+
+// Whether an insert ARGUMENT already passed through the contract's
+// completion helper. A legacy writer whose transaction shape doesn't fit
+// createScheduledService (bulk rows, savepoints) adopts
+// completeScheduledServiceInsert and keeps its own insert; that insert is
+// compliant, not bare, and must be able to leave the frozen inventory
+// (GH Codex r5 P2). Recognized: `.insert(await completeScheduledServiceInsert(…))`
+// inline, or an identifier whose EVERY write in the file — assignment or
+// `.push(` (an empty-array accumulator initializer is neutral) — runs the
+// helper. An identifier with any helper-free write stays bare: importing
+// the helper elsewhere in the file launders nothing.
+const HELPER_CALL = /\bcompleteScheduledServiceInsert\s*\(/;
+function isContractCompleted(source, arg) {
+  const text = String(arg || '').trim();
+  if (/^await\s+completeScheduledServiceInsert\s*\(/.test(text)) return true;
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) return false;
+  const writes = new RegExp(`(?:\\b(?:const|let|var)\\s+)?\\b${text}\\b\\s*(?:=(?![=>])|\\.\\s*push\\s*\\()`, 'g');
+  let completed = 0;
+  let w;
+  while ((w = writes.exec(source)) !== null) {
+    const stmt = source.slice(w.index, statementEnd(source, w.index));
+    if (HELPER_CALL.test(stmt)) completed += 1;
+    else if (!/=\s*\[\s*\]\s*$/.test(stmt)) return false;
+  }
+  return completed > 0;
+}
+
 // The statement text on the ref's line BEFORE the match — call-site
 // identity, so two byte-identical insert expressions in one file still
 // carry distinct fingerprints (the assignment/return context differs) and
@@ -196,10 +251,16 @@ function statementPrefix(source, refIndex) {
 // `<alias>.insert(` in the file counts as a site (GH Codex #3702 r4 P2).
 function collectInsertSites(source) {
   const out = [];
+  // A site whose payload came out of the completion helper is compliant —
+  // it is what a bespoke adopter looks like — and is not reported.
+  const site = (fingerprint, arg) => {
+    if (!isContractCompleted(source, arg)) out.push(fingerprint.trim());
+  };
   // Raw SQL inserts are sites too — a knex.raw('INSERT INTO
   // scheduled_services …') must not slip past a builder-only scan
-  // (GH Codex r5 P1).
-  const rawRe = /INSERT\s+INTO\s+["'`]?scheduled_services\b/gi;
+  // (GH Codex r5 P1) — including a schema-qualified table
+  // (`INSERT INTO public.scheduled_services`, quoted or not; r5 P2).
+  const rawRe = /INSERT\s+INTO\s+(?:["'`]?\w+["'`]?\s*\.\s*)?["'`]?scheduled_services\b/gi;
   let rawM;
   while ((rawM = rawRe.exec(source)) !== null) {
     // Comment mentions are not sites (the iCal script documents its own
@@ -207,9 +268,10 @@ function collectInsertSites(source) {
     const lineStart = source.lastIndexOf('\n', rawM.index - 1) + 1;
     const line = source.slice(lineStart, rawM.index);
     if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
-    out.push(`${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`.trim());
+    site(`${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`, null);
   }
-  const re = /['"`]scheduled_services['"`]/g;
+  // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`).
+  const re = /['"`](?:\w+\.)?scheduled_services['"`]/g;
   let m;
   while ((m = re.exec(source)) !== null) {
     // Table-LAST builder forms: trx.insert(data).into('scheduled_services')
@@ -220,7 +282,7 @@ function collectInsertSites(source) {
     if (/\.(into|table)\s*\($/.test(before)) {
       const prefix = statementPrefix(source, m.index);
       if (/\.insert\s*\(/.test(prefix)) {
-        out.push(`${prefix} table-last:scheduled_services`.trim());
+        site(`${prefix} table-last:scheduled_services`, insertArgument(prefix));
       }
       continue;
     }
@@ -245,7 +307,7 @@ function collectInsertSites(source) {
     }
     const prefix = statementPrefix(source, m.index);
     if (/\.insert\s*\(/.test(chain)) {
-      out.push(`${prefix} ${fingerprintOf(chain)}`.trim());
+      site(`${prefix} ${fingerprintOf(chain)}`, insertArgument(chain));
       continue;
     }
     // No insert on the fluent chain — if the builder was captured in a
@@ -253,10 +315,13 @@ function collectInsertSites(source) {
     const assign = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/.exec(statementPrefix(source, m.index));
     if (assign) {
       const alias = assign[1];
-      const aliasRe = new RegExp(`\\b${alias}\\s*\\.\\s*insert\\s*\\(\\s*(\\{|[A-Za-z0-9_.$]+)?`, 'g');
+      const aliasRe = new RegExp(`\\b${alias}\\s*\\.\\s*insert\\s*\\(`, 'g');
       let am;
       while ((am = aliasRe.exec(source)) !== null) {
-        out.push(`${statementPrefix(source, am.index)} alias:${am[0].replace(/\s+/g, ' ')}`.trim());
+        const open = am.index + am[0].length - 1;
+        const arg = source.slice(open + 1, balancedParens(source, open) - 1);
+        const head = (/^\s*(\{|[A-Za-z0-9_.$]+)/.exec(arg) || [, ''])[1];
+        site(`${statementPrefix(source, am.index)} alias:${alias}.insert(${head}`, arg);
       }
     }
   }
@@ -310,6 +375,23 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("await trx.insert(data).into('scheduled_services');")).toEqual(["await trx.insert(data).into( table-last:scheduled_services"]);
     expect(collectInsertSites("await trx.insert(data).table('scheduled_services');")).toEqual(["await trx.insert(data).table( table-last:scheduled_services"]);
     expect(collectInsertSites("await db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
+    // Schema-qualified forms, raw or builder, are the same table (r5 P2).
+    expect(collectInsertSites("await db.raw(`INSERT INTO public.scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
+    expect(collectInsertSites('await db.raw(\'INSERT INTO "public"."scheduled_services" (a) VALUES (?)\', [1]);')).toHaveLength(1);
+    expect(collectInsertSites("await trx('public.scheduled_services').insert(x);")).toEqual(["await trx( scheduled_services').insert(x"]);
+    // A bespoke insert whose payload came out of the completion helper is
+    // COMPLIANT — it may leave the frozen inventory (GH Codex r5 P2)…
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, { trx, cols, source });\nconst [row] = await trx('scheduled_services').insert(data).returning('*');")).toEqual([]);
+    expect(collectInsertSites("await trx('scheduled_services').insert(await completeScheduledServiceInsert(raw, { trx, cols, source }));")).toEqual([]);
+    expect(collectInsertSites("const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, { trx, cols, source }));\nawait trx('scheduled_services').insert(rows);")).toEqual([]);
+    expect(collectInsertSites("const rows = await Promise.all(raws.map((r) => completeScheduledServiceInsert(r, { trx, cols, source })));\nconst visits = trx('scheduled_services');\nawait visits.insert(rows);")).toEqual([]);
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');")).toEqual([]);
+    // …but importing the helper elsewhere in the file launders nothing…
+    expect(collectInsertSites("const ok = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(other);")).toEqual(["await trx( scheduled_services').insert(other"]);
+    // …a payload REASSIGNED without the helper stays bare…
+    expect(collectInsertSites("let data = await completeScheduledServiceInsert(raw, opts);\ndata = buildRaw();\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
+    // …and raw SQL never passes through the helper.
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [data.a]);")).toHaveLength(1);
     // …but a table-last READ does not.
     expect(collectInsertSites("await trx.select('*').from('x').table('scheduled_services');")).toEqual([]);
     // A read chained near the ref must NOT count…
