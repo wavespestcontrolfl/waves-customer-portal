@@ -49,6 +49,9 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
+const fs = require('fs');
+const path = require('path');
+
 const corpus = require('../fixtures/lead-identity-corpus.json');
 const { toE164 } = require('../utils/phone');
 const { normalizeEmail } = require('../utils/contact-normalize');
@@ -116,6 +119,42 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   const CASE_FIELDS = new Set(['id', 'a', 'b', 'expected', 'rationale', 'checks']);
   const CHECK_FIELDS = new Set(['firstNameVariant', 'sameStreet']);
   const CONTACT_FIELDS = new Set(['first_name', 'last_name', 'phone', 'email', 'address']);
+
+  test('the RAW fixture JSON has no duplicate keys — a duplicate would let an overwritten value hide from every guard below', () => {
+    // require() keeps only the LAST value of a duplicated key, so an
+    // earlier real email/phone would stay committed in the file while
+    // every parsed-object assertion sees the reserved replacement. Walk
+    // the raw text with an object/array stack and reject any repeat.
+    const raw = fs.readFileSync(path.join(__dirname, '../fixtures/lead-identity-corpus.json'), 'utf8');
+    const stack = [];
+    const dupes = [];
+    let i = 0;
+    while (i < raw.length) {
+      const c = raw[i];
+      if (c === '"') {
+        let j = i + 1;
+        let str = '';
+        while (j < raw.length && raw[j] !== '"') {
+          if (raw[j] === '\\') { str += raw[j]; j += 1; }
+          str += raw[j]; j += 1;
+        }
+        let k = j + 1;
+        while (k < raw.length && /\s/.test(raw[k])) k += 1;
+        if (raw[k] === ':' && stack.length && stack[stack.length - 1].keys) {
+          const top = stack[stack.length - 1];
+          if (top.keys.has(str)) dupes.push(str);
+          top.keys.add(str);
+        }
+        i = j + 1;
+        continue;
+      }
+      if (c === '{') stack.push({ keys: new Set() });
+      else if (c === '[') stack.push({});
+      else if (c === '}' || c === ']') stack.pop();
+      i += 1;
+    }
+    expect(dupes).toEqual([]);
+  });
 
   test('at least 20 cases, unique ids, both verdicts represented, rationale on every case', () => {
     expect(CASES.length).toBeGreaterThanOrEqual(20);

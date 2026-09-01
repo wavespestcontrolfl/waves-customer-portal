@@ -71,9 +71,9 @@ function knexInsertPatterns(token) {
 // (`'INSERT ' + 'INTO leads'`) — constant SQL split at token boundaries is
 // still one statement. (A mid-word split is deliberate obfuscation beyond
 // textual scanning.)
-const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s+)`;
+const RAW_SEP = String.raw`(?:\s*${Q}\s*\+\s*${Q}\s*|\s*\/\*[\s\S]*?\*\/\s*|\s+)`;
 const RAW_SQL_INSERT_RE = new RegExp(
-  String.raw`\b(?:insert|merge)${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
+  String.raw`\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))${RAW_SEP}into${RAW_SEP}(?:only${RAW_SEP})?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
   'gi'
 );
 
@@ -121,7 +121,7 @@ function aliasInsertPatterns(src, token) {
   // (`let target; target = db('leads');`) is the same stored-builder form.
   // Optional factory call after the head identifier — `getDb()('leads')`.
   const declRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*\.\s*(?:table|from))?\s*\(\s*${token}\s*\)`,
     'g'
   );
   const builders = new Set();
@@ -362,7 +362,7 @@ function scanSourceForDynamicTableInserts(src) {
   // Stored builders over a dynamic table — `const target = db(table);
   // await target.insert(row);` — the dynamic mirror of the alias pass.
   const dynDeclRe = new RegExp(
-    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*\.\s*table)?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:${CHAIN}\s*\.\s*(?:table|from))?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   const dynBuilders = new Map(); // name -> table expr
@@ -420,16 +420,16 @@ function scanSourceForDynamicTableInserts(src) {
     // Optional literal schema qualifier and/or identifier quote around the
     // interpolated target — `INSERT INTO public.${table}` and
     // `INSERT INTO "${table}"` are both valid PostgreSQL.
-    /\b(?:insert|merge)\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?["'`]?\$\{([^}]+)\}/gi,
+    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?["'`]?\$\{([^}]+)\}/gi,
     // Concatenated target — a bare identifier/member OR a parenthesized
     // expression (`'INSERT INTO ' + (kind ? 'leads' : 'audit')`).
-    /\b(?:insert|merge)\s+into\s+(?:only\s+)?(?:[\w$]+\.)?['"`]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)/gi,
+    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:[\w$]+\.)?['"`]\s*\+\s*(\([^()]*\)|[\w$.[\]]+)/gi,
     // Knex identifier bindings at the table position — positional (??) or
     // named (:table:), with an optional literal schema qualifier
     // (`public.??`) — the bound value is runtime data, so it is dynamic by
     // definition (never resolvable).
-    /\b(?:insert|merge)\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(\?\?)/gi,
-    /\b(?:insert|merge)\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(:[\w$]+:)/gi,
+    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(\?\?)/gi,
+    /\b(?:insert|merge(?=[\s\S]{0,400}?\binsert\b))\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(:[\w$]+:)/gi,
   ];
   // Comment-blanked but STRING-PRESERVING view (offsets identical): the SQL
   // text lives in strings, but a COMMENT mentioning `INSERT INTO ${table}`
@@ -558,6 +558,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['named factory with statements before return', "function baseQuery() { audit(); return db('leads'); }\nawait baseQuery().insert(row);"],
     ['optional-chain insert', "await db('leads')?.insert(row);"],
     ['raw MERGE with insert action', "await db.raw('MERGE INTO leads USING src ON leads.id = src.id WHEN NOT MATCHED THEN INSERT (a) VALUES (src.a)');"],
+    ['SQL comment between INSERT and INTO', "await db.raw('INSERT /* audit */ INTO leads (a) VALUES (?)', [a]);"],
+    ['stored from-builder', "const target = db.from('leads');\nawait target.insert(row);"],
     ['transitive stored-builder alias', "const base = db('leads');\nconst target = base;\nawait target.insert(row);"],
     ['raw SQL behind a leading SQL comment', 'await db.raw("/* audit */ INSERT INTO leads (status) VALUES (\'new\')");'],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
@@ -575,6 +577,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['code-shaped doc string is not a writer', 'const example = "await db(\'leads\').insert(row)";'],
     ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
     ['computed table name is not the constant form', "const t = 'leads' + suffix;\nawait audit(t);"],
+    ['update-only MERGE cannot create a lead', "await db.raw('MERGE INTO leads USING src ON leads.id = src.id WHEN MATCHED THEN UPDATE SET a = src.a');"],
   ])('ignores: %s', (_name, src) => {
     expect(found(src)).toEqual([]);
   });
