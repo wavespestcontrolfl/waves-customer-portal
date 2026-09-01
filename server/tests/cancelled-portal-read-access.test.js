@@ -134,10 +134,15 @@ beforeAll((done) => {
   const app = express();
   app.use(express.json());
   app.use('/api/auth', authRouter);
-  // /api/billing/autopay is its own router in production (index.js) — the
-  // billing router has no /autopay route, so the request falls through.
-  app.use('/api/billing/autopay', standIn([['GET', '/'], ['PUT', '/'], ['POST', '/pause']]));
+  // PRODUCTION mount order (index.js: /api/billing at 502, its /autopay
+  // sibling router at 745): the wider prefix mounts FIRST, so its
+  // router-level authenticate evaluates /api/billing/autopay requests
+  // before the dedicated router does — the allowlist matcher must pass
+  // them through (baseUrl+path reconstruction) for the request to fall
+  // through to the autopay router (codex GH r24-audit P1: a reversed
+  // order here masked exactly that evaluation).
   app.use('/api/billing', standIn([['GET', '/'], ['GET', '/balance'], ['GET', '/cards'], ['POST', '/cards'], ['POST', '/cards/setup-intent'], ['DELETE', '/cards/:id'], ['PUT', '/cards/:id/default']]));
+  app.use('/api/billing/autopay', standIn([['GET', '/'], ['PUT', '/'], ['POST', '/pause']]));
   app.use('/api/schedule', standIn([['GET', '/'], ['GET', '/next'], ['POST', '/:id/confirm'], ['POST', '/:id/reschedule']]));
   app.use('/api/services', standIn([['GET', '/'], ['GET', '/stats/summary']]));
   app.use('/api/documents', standIn([['GET', '/'], ['GET', '/service-report/:id'], ['GET', '/:id/download'], ['POST', '/share/:id']]));
