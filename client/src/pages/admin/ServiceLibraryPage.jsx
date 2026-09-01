@@ -950,7 +950,7 @@ function DetailPane({
               lineHeight: 1.2,
             }}
           >
-            Add a Service
+            Add a service
           </h2>{" "}
           <div style={{ fontSize: 13, color: D.muted, marginTop: 6 }}>
             Define a new entry in the service catalog.
@@ -1684,7 +1684,7 @@ export default function ServiceLibraryPage() {
 
   const tabs = [
     { key: "catalog", label: "Service Catalog", Icon: Library },
-    { key: "protocols", label: "Protocol & Readiness", Icon: Sprout },
+    { key: "protocols", label: "Protocol & readiness", Icon: Sprout },
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
 

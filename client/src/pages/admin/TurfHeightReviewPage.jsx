@@ -68,7 +68,7 @@ export default function TurfHeightReviewPage() {
   return (
     <div style={{ background: M.bg, minHeight: "100%", padding: 24, fontFamily: "'Roboto', Arial, sans-serif", color: M.ink }}>
       <AdminCommandHeader
-        title="Turf Height Review"
+        title="Turf height review"
         icon={Ruler}
         actions={[{ key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: load }]}
       />

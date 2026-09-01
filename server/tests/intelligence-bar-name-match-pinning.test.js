@@ -16,6 +16,10 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // The single-lead status update commits status + activity in one
+  // transaction (GH r14 P2) — the trx handle is the same mock, so each
+  // test's per-table implementation serves both reads and the trx writes.
+  fn.transaction = jest.fn(async (cb) => cb(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

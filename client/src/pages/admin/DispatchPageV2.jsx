@@ -2345,7 +2345,7 @@ export default function DispatchPageV2({
       {/* Mobile "More" bottom sheet */}
       {showMoreSheet && createPortal(
         <div
-          className="fixed inset-0 z-[100] md:hidden"
+          className="fixed inset-0 z-[120] md:hidden"
           role="dialog"
           aria-modal="true"
         >
@@ -2732,6 +2732,10 @@ export default function DispatchPageV2({
       )}
       {continueProjectId && createPortal(
         <div
+          // Stays at z-[100]: this editor's Details action opens
+          // MobileAppointmentDetailSheet (z-[100], base of the schedule sheet
+          // ladder 100/105/110/115). It participates in that ladder — raising
+          // it to the z-[120] modal contract would bury its own child sheets.
           className="fixed inset-0 z-[100] bg-black/40 overflow-y-auto"
           onClick={() => {
             // A stray scrim tap must not silently discard unsaved report

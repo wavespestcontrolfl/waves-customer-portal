@@ -45,6 +45,7 @@
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
+ *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
@@ -1043,6 +1044,11 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Call-processing stall watchdog: recorded calls that never reach a
+  // terminal processing state (wedged claim, dead processor, provider
+  // outage) ring an admin bell instead of silently costing leads — the
+  // 2026-08-31 wedge and a row stuck since 07-10 both went unnoticed.
+  callProcessingStallWatchdog: process.env.GATE_CALL_PROCESSING_STALL_WATCHDOG === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -1721,6 +1727,14 @@ const gates = {
   // sitting in an open status (pending/confirmed/en_route/on_site).
   // Detection-only: never mutates the rows, no customer contact.
   staleVisitSweep: isProd ? process.env.GATE_STALE_VISIT_SWEEP === 'true' : true,
+  // Daily 6:55 ET lead-to-cash invariants sweep (services/lead-to-cash-
+  // invariants.js): a read-only registry over existing detectors (churned
+  // accounts with live plan state, WaveGuard field drift, recurring-schedule
+  // anomalies, stale open visits, converted-but-open estimates, completion-
+  // lane catalog coverage, failed closeout facts). Emails contact@ ONLY when
+  // a detector finds something or cannot run. Dark everywhere until flipped
+  // (it would email from every dev boot otherwise); kill = unset.
+  leadToCashInvariantSweep: process.env.GATE_LEAD_TO_CASH_SWEEP === 'true',
 
   // Customer rain chip — attaches a "chance of rain" percentage (NWS daily
   // outlook) to the customer portal's visit-tracker payload so the tracker

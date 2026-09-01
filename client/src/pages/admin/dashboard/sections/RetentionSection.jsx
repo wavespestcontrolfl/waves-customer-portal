@@ -140,11 +140,11 @@ export default function RetentionSection({
         </>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
-          <ChartCard title="MRR Trend" sub={mrrTrendSub}>
+          <ChartCard title="MRR trend" sub={mrrTrendSub}>
             <MrrTrendChart trend={mrrTrend?.trend || []} />
             <Verdict verdict={mrrVerdict(kpis?.momentum?.mrr)} />
           </ChartCard>
-          <ChartCard title="MRR Bridge" sub="why recurring revenue moved · month by month">
+          <ChartCard title="MRR bridge" sub="why recurring revenue moved · month by month">
             <MrrBridgeCard bridge={mrrBridge} />
           </ChartCard>
         </div>
@@ -167,7 +167,7 @@ export default function RetentionSection({
       ) : (
         <div className="mb-5">
           <ChartCard
-            title="Retention by Cohort"
+            title="Retention by cohort"
             sub="% of each signup month still active"
           >
             <RetentionCohortGrid
@@ -188,7 +188,7 @@ export default function RetentionSection({
         </MobileFold>
       ) : (
         <div className="mb-5">
-          <ChartCard title="Why Customers Leave" sub="churn reasons by lost MRR · last 12 months">
+          <ChartCard title="Why customers leave" sub="churn reasons by lost MRR · last 12 months">
             <ChurnParetoCard data={churnReasons} />
           </ChartCard>
         </div>

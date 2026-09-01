@@ -30,7 +30,7 @@ function paramsHash(toolName, params) {
     .digest('hex');
 }
 
-async function createPendingAction({ toolName, params, summary, requestedBy, context }) {
+async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash }) {
   const [row] = await db('ib_pending_actions').insert({
     tool_name: toolName,
     params: JSON.stringify(params || {}),
@@ -40,6 +40,10 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     context: context || null,
     status: 'pending',
     expires_at: new Date(Date.now() + TTL_MINUTES * 60 * 1000),
+    // W0B authorization contract: the structured effect set the card shows;
+    // its hash is what the operator's Confirm must echo.
+    contract: contract ? JSON.stringify(contract) : null,
+    contract_hash: contractHash || null,
   }).returning('*');
 
   logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
@@ -51,13 +55,24 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
  * UPDATE ... WHERE status='pending' is the replay guard: a second confirm
  * (or a concurrent one) finds no pending row to claim.
  *
+ * W0B exact-effect confirm: when the row carries a contract_hash, the claim
+ * succeeds only if the caller echoes the SAME hash (what the card displayed)
+ * — checked inside the atomic UPDATE so a stale or different contract can
+ * never claim the row. Rows without a contract (pre-W0B) are unaffected.
+ *
  * Returns { action } on success or { error } with one of:
- * not_found | actor_mismatch | already_used | cancelled | expired | hash_mismatch
+ * not_found | actor_mismatch | already_used | cancelled | expired |
+ * hash_mismatch | contract_mismatch
  */
-async function claimForConfirm(id, requestedBy) {
+async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
+  const echoed = contractHash ? String(contractHash) : null;
   const [claimed] = await db('ib_pending_actions')
     .where({ id, status: 'pending', requested_by: String(requestedBy) })
     .where('expires_at', '>', db.fn.now())
+    .where((qb) => {
+      qb.whereNull('contract_hash');
+      if (echoed) qb.orWhere('contract_hash', echoed);
+    })
     .update({ status: 'confirmed', consumed_at: db.fn.now(), updated_at: db.fn.now() })
     .returning('*');
 
@@ -67,6 +82,11 @@ async function claimForConfirm(id, requestedBy) {
     if (String(row.requested_by) !== String(requestedBy)) return { error: 'actor_mismatch' };
     if (row.status === 'confirmed') return { error: 'already_used' };
     if (row.status === 'cancelled') return { error: 'cancelled' };
+    if (row.status === 'pending' && row.contract_hash && row.contract_hash !== echoed
+      && new Date(row.expires_at).getTime() > Date.now()) {
+      logger.warn(`[intelligence-bar:pending] Contract hash mismatch on pending action ${id} — refused`);
+      return { error: 'contract_mismatch' };
+    }
     return { error: 'expired' };
   }
 
@@ -78,7 +98,8 @@ async function claimForConfirm(id, requestedBy) {
     return { error: 'hash_mismatch' };
   }
 
-  return { action: { ...claimed, params } };
+  const contract = typeof claimed.contract === 'string' ? JSON.parse(claimed.contract) : (claimed.contract || null);
+  return { action: { ...claimed, params, contract } };
 }
 
 async function cancelPendingAction(id, requestedBy) {

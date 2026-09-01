@@ -463,7 +463,7 @@ describe('review request follow-up flow', () => {
         scheduled_for: null,
         status: 'pending',
       }));
-      expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-admin');
+      expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-admin', { expectedPhone: null });
     } finally {
       ReviewService.sendSMS = originalSendSMS;
     }
@@ -529,7 +529,7 @@ describe('review request follow-up flow', () => {
         triggeredBy: 'tech',
       });
 
-      expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-existing');
+      expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-existing', { expectedPhone: null });
       expect(result).toMatchObject({ id: 'rr-existing', status: 'sent' });
     } finally {
       ReviewService.sendSMS = originalSendSMS;

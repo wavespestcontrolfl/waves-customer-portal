@@ -4147,8 +4147,17 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
  * money was provisionally clawed back, so normal billing resumes for the
  * dispute window.
  */
-async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db) {
-  if (!(await annualPrepayTableExists())) return new Set();
+async function getPaymentPendingCustomerIds(asOf = etDateString(), conn = db, { throwOnError = false } = {}) {
+  // Strict callers (the MRR snapshot writer's pendingPrepayIds) must see a
+  // schema-probe FAILURE as unavailable, not as "no table → nobody
+  // pending" (Codex #3669 r15; mirrors annualPrepayCoversVisit's
+  // throwOnError probe above): annualPrepayTableExists caches false on a
+  // failed probe, which would let a month-end snapshot persist minus every
+  // pending prepay account. Probing directly lets the error propagate; a
+  // genuinely absent table (fresh env) still returns the empty set.
+  if (throwOnError) {
+    if (!(await conn.schema.hasTable('annual_prepay_terms'))) return new Set();
+  } else if (!(await annualPrepayTableExists())) return new Set();
   const coverageDate = dateOnly(asOf) || etDateString();
   const cancelledStatuses = [...INVOICE_CANCELLED_STATUSES];
   const termCols = await annualPrepayColumns(conn);

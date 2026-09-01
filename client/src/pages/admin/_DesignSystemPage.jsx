@@ -99,7 +99,7 @@ export default function DesignSystemPage() {
         <div className="text-11 uppercase tracking-label text-ink-secondary">
           Internal
         </div>{" "}
-        <h1 className="text-28 font-normal tracking-tight">Design System</h1>{" "}
+        <h1 className="text-28 font-normal tracking-tight">Design system</h1>{" "}
         <p className="text-13 text-ink-secondary mt-1 max-w-2xl">
           Canonical reference for every primitive in the monochrome admin spec.
           When building a Tier 1 page, render the primitive here and match its
@@ -237,18 +237,35 @@ export default function DesignSystemPage() {
       </Section>{" "}
       <Section title="Card">
         {" "}
+        {/* Metric card: spec §3.4 — overline label (u-label, same as the live
+            KPI tiles) above the number. CardTitle is NOT the metric label. */}
         <Card className="max-w-md">
           {" "}
-          <CardHeader>
-            {" "}
-            <CardTitle>Revenue — last 30 days</CardTitle>{" "}
-          </CardHeader>{" "}
           <CardBody>
             {" "}
-            <div className="u-nums text-28 font-medium">$48,211</div>{" "}
+            <div className="u-label text-ink-secondary">
+              Revenue — last 30 days
+            </div>{" "}
+            <div className="u-nums text-28 font-medium mt-1.5">$48,211</div>{" "}
             <div className="text-12 text-ink-secondary mt-1">
               +4.2% vs prior
             </div>{" "}
+          </CardBody>{" "}
+        </Card>{" "}
+        {/* Content card: CardTitle is the card's actual title
+            (14 / 1.4 / 500 per the consistency contract). */}
+        <Card className="max-w-md mt-4">
+          {" "}
+          <CardHeader>
+            {" "}
+            <CardTitle>Service notes</CardTitle>{" "}
+          </CardHeader>{" "}
+          <CardBody>
+            {" "}
+            <p className="text-13 text-ink-secondary">
+              Perimeter treated; granular bait at the north fence line.
+              Follow-up scheduled for the first week of October.
+            </p>{" "}
           </CardBody>{" "}
         </Card>{" "}
       </Section>{" "}

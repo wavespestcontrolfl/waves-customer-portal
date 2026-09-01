@@ -28,11 +28,6 @@
   --text-tertiary: #78716c;
   --text-quaternary: #a8a29e;
 
-  /* Accent — Square blue, reserved for exactly one primary CTA per screen */
-  --accent-primary: #006aff;
-  --accent-primary-hover: #0052cc;
-  --accent-primary-fg: #ffffff;
-
   /* Keyboard hint chip */
   --kbd-bg: #f5f5f4;
   --kbd-border: #e7e5e4;

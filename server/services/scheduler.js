@@ -6028,6 +6028,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over
+  // existing detectors; emails contact@ only on a violation or an unrunnable
+  // check). 6:55 is deliberately AFTER the 6:00 estimate conversion guard and
+  // the 6:40 schedule-integrity watchdog: one of its checks asserts the guard
+  // converged. Minute unused elsewhere in this file (#3208 rule). Self-gated
+  // on GATE_LEAD_TO_CASH_SWEEP; cross-replica serialized here.
+  // =========================================================================
+  cron.schedule('55 6 * * *', async () => {
+    try {
+      await runExclusive('lead-to-cash-invariants', async () => {
+        const { runLeadToCashInvariantSweep } = require('./lead-to-cash-invariants');
+        const result = await runLeadToCashInvariantSweep();
+        logger.info(`[l2c-invariants] cron run: ${JSON.stringify({ sent: result?.sent || false, skipped: result?.skipped || null, violations: result?.violations ?? null, unavailable: result?.unavailable ?? null })}`);
+        // A sweep that found exceptions but could not deliver them must read
+        // as a FAILED run in job_health — rethrow so runExclusive records it.
+        if (result?.error || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`lead-to-cash invariants sweep did not complete (${result.error || result.skipped})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Lead-to-cash invariants sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:40PM — Stale-visit sweep (past-dated open appointments)
   // =========================================================================
   // Runs after the 6PM missed-appointment check on purpose: that check only
@@ -6298,6 +6323,36 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Call-ingest watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // Call-processing stall watchdog — every 7 min, ring an admin bell for any
+  // recorded call still without a terminal processing state past the grace
+  // window: a
+  // wedged claim, a dead processor, or a provider outage otherwise costs
+  // leads silently (2026-08-31: an 18-minute wedge on a hot lead; one row
+  // stuck in 'processing' since 07-10 with no alarm anywhere).
+  // Dark behind GATE_CALL_PROCESSING_STALL_WATCHDOG.
+  // See server/services/call-processing-stall-watchdog.js.
+  // =========================================================================
+  // Every 7 minutes, and 7 for a reason: a crash-reclaim loop only LOOKS
+  // stalled during the tail of each reclaim cycle, and the processor sweep
+  // that refreshes the claim runs '*/5'. Any 5-minute cadence here would
+  // phase-lock to it and observe the claim at the same age forever — a
+  // looping call could evade the watchdog indefinitely (codex r11 P1). A
+  // period coprime with 5 walks the phase through every offset, so the
+  // sampling lands inside a stale window within a few cycles. Each tick is
+  // one bounded, dedupe-filtered scan, and a no-op when the gate is off.
+  cron.schedule('*/7 * * * *', async () => {
+    try {
+      const { runCallProcessingStallWatchdog } = require('./call-processing-stall-watchdog');
+      const result = await runCallProcessingStallWatchdog();
+      if (!result.skipped && (result.stalled > 0 || result.alerted > 0)) {
+        logger.warn(`[call-stall-watchdog] scanned=${result.scanned} stalled=${result.stalled} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-processing stall watchdog tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

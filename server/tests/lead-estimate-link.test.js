@@ -1,3 +1,9 @@
+// Pin the portal origin to the production default before any module loads a
+// local .env: the iframe-deferral test posts a portal.wavespestcontrol.com
+// landing_url, and CLIENT_URL=http://localhost from a dev .env would make
+// attributeSelfBooking miss the portal-host match.
+process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-attribution', () => ({ markConverted: jest.fn() }));
 jest.mock('../services/lead-source-resolver', () => ({

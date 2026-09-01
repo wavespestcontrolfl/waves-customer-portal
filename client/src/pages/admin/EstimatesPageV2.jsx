@@ -567,7 +567,7 @@ function RowActionsMenu({ items, label = "More actions" }) {
       {open &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center sm:p-4"
+            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
             style={{ fontFamily: ROBOTO }}
@@ -577,7 +577,7 @@ function RowActionsMenu({ items, label = "More actions" }) {
             <div className="absolute inset-0 bg-zinc-900/30" />{" "}
             <div
               onClick={(e) => e.stopPropagation()}
-              className="relative bg-white border-hairline border-zinc-200 rounded-t-lg sm:rounded-md w-full sm:w-72 max-w-md shadow-lg overflow-hidden"
+              className="relative bg-white border-hairline border-zinc-200 rounded-t-md sm:rounded-md w-full sm:w-72 max-w-md shadow-lg overflow-hidden"
             >
               {" "}
               <div className="px-4 py-3 border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary font-medium flex items-center justify-between">
@@ -692,7 +692,7 @@ function FilterSheetV2({ value, onChange, options, counts }) {
       {open &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center sm:p-4"
+            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
             aria-label="Filter estimates"
@@ -1061,7 +1061,7 @@ function EstimatePricingAuditModal({
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-lg shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-5xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-md shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-5xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1070,7 +1070,7 @@ function EstimatePricingAuditModal({
           <div>
             {" "}
             <div className="text-16 font-medium text-zinc-900">
-              Estimate Pricing Audit
+              Estimate pricing audit
             </div>{" "}
             <div className="text-12 text-ink-secondary mt-1">
               {estimate.customerName || "Unknown"} ·{" "}
@@ -1240,7 +1240,7 @@ function EstimatePricingAuditModal({
                   ))}
                 </div>{" "}
               </div>{" "}
-              <div className="border-hairline border-zinc-200 rounded-lg overflow-hidden">
+              <div className="border-hairline border-zinc-200 rounded-md overflow-hidden">
                 {" "}
                 <div className="hidden md:grid grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
                   {" "}
@@ -1556,13 +1556,13 @@ export function EngineReviewModal({ estimate, onClose }) {
       onClick={onClose}
     >
       <div
-        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-lg shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-2xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-md shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-2xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
           <div>
             <div className="text-16 font-medium text-zinc-900">
-              AI Draft Review
+              AI draft review
             </div>
             <div className="text-12 text-ink-secondary mt-1">
               {estimate.customerName || "Unknown"} ·{" "}
@@ -2980,7 +2980,7 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
         aria-expanded={open}
         aria-label={`${label}: ${active.label}`}
         className={cn(
-          "inline-flex items-center gap-1.5 h-9 px-4 rounded-lg",
+          "inline-flex items-center gap-1.5 h-9 px-4 rounded-sm",
           "bg-zinc-100 border-hairline border-zinc-100",
           "text-13 text-zinc-600 u-focus-ring",
           "hover:bg-zinc-200 active:bg-zinc-200 whitespace-nowrap",
@@ -2993,7 +2993,7 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
       {open &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center sm:p-4"
+            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
             aria-label={title}

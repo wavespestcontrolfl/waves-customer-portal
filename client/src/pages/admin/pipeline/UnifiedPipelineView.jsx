@@ -421,7 +421,7 @@ export default function UnifiedPipelineView() {
       <Card className="mb-4">
         <CardHeader className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <CardTitle>Opportunity Queue</CardTitle>
+            <CardTitle>Opportunity queue</CardTitle>
             <div className="flex flex-wrap items-center gap-2 text-12 text-ink-tertiary">
               <Badge tone="neutral">{opportunities.length} opportunities</Badge>
               <Badge tone="neutral">{counts.needs_action || 0} need action</Badge>

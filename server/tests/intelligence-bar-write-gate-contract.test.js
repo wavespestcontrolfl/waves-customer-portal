@@ -62,7 +62,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -245,6 +245,8 @@ const READ_ONLY = [
   'get_apify_status', 'get_social_channel_status', 'get_managed_agent_runs',
   'get_scheduled_job_health',
   'search_call_research',
+  // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
+  'get_closeout_status', 'list_open_closeouts',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
