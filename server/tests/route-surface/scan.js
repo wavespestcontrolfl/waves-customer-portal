@@ -335,6 +335,9 @@ class ModuleAnalysis {
     const paramNames = new Set(); // function parameters — lexical shadows
     const callReceiverRegs = []; // current().get(...) — helper-returned receivers
     const descriptorCalls = []; // Object.defineProperty(...)-style writes
+    const fnArgCalls = []; // calls handing an inline FUNCTION to a consumer
+    const borrowedRegCalls = []; // router.get.call(...) — borrowed registrations
+    const factoryOptionCalls = []; // Router(<options>) — options need vetting
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
         && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
@@ -412,6 +415,36 @@ class ModuleAnalysis {
         // any identifier argument could be the receiver; taint them all
         // (only array bindings consult mutatedNames).
         for (const a of node.arguments) if (a && a.type === 'Identifier') mutatedNames.add(a.name);
+        // Borrowed REGISTRATION (`router.get.call(router, '/leak', h)` /
+        // `require('./x').get.call(...)`) — the borrowed method is a verb.
+        const inner = node.callee.object;
+        if ((inner.type === 'MemberExpression' || inner.type === 'OptionalMemberExpression')) {
+          const verb = memberPropName(inner);
+          if (verb && (VERBS.has(verb) || ['use', 'route', 'param'].includes(verb))) {
+            if (isRequireCall(inner.object)) {
+              const mod = this.resolveModule(inner.object.arguments[0].value);
+              if (mod) this.directExternalRegs.push({ module: mod, name: null, method: verb, loc: this.loc(node) });
+            } else {
+              borrowedRegCalls.push({ objectNode: inner.object, method: verb, node });
+            }
+          }
+        }
+      }
+      if ((node.type === 'CallExpression' || node.type === 'NewExpression')
+        && node.arguments.some((a) => a && (a.type === 'ArrowFunctionExpression' || a.type === 'FunctionExpression'))) {
+        fnArgCalls.push(node);
+      }
+      if (node.type === 'CallExpression' && node.arguments.length
+        && ((node.callee.type === 'MemberExpression' && memberPropName(node.callee) === 'Router')
+          || (node.callee.type === 'Identifier' && node.callee.name === 'Router'))) {
+        factoryOptionCalls.push(node);
+      }
+      if (node.type === 'CallExpression'
+        && node.callee.type === 'MemberExpression'
+        && ['set', 'enable'].includes(memberPropName(node.callee))
+        && node.arguments[0] && node.arguments[0].type === 'StringLiteral'
+        && ['strict routing', 'case sensitive routing'].includes(node.arguments[0].value)) {
+        this.pushSweepProblem(`${this.loc(node)}: ${node.arguments[0].value} is not modeled by the scanner — path identities assume Express's default matching`);
       }
       if (node.type === 'ArrayExpression') arrayLiterals.push(node);
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
@@ -696,7 +729,17 @@ class ModuleAnalysis {
     // assignment; an unresolvable property taints the whole module ('*').
     for (const d of descriptorCalls) {
       const target = d.arguments[0];
-      if (!target || target.type !== 'Identifier') continue;
+      if (!target) continue;
+      // A descriptor write to module/module.exports rewrites what consumers
+      // receive behind every assignment-based check — the export is opaque.
+      if ((target.type === 'Identifier' && target.name === 'module')
+        || (target.type === 'MemberExpression' && target.object.type === 'Identifier'
+          && target.object.name === 'module' && memberPropName(target) === 'exports')) {
+        this.exportUnstable = true;
+        this.pushSweepProblem(`${this.loc(d)}: descriptor rewrite of module.exports — the export cannot be trusted; use a plain module.exports assignment`);
+        continue;
+      }
+      if (target.type !== 'Identifier') continue;
       const b = this.bindings.get(this.canonName(target.name));
       if (b && (b.kind === 'require' || b.kind === 'requireMember') && b.module !== null) {
         const nameArg = d.arguments[1];
@@ -704,6 +747,54 @@ class ModuleAnalysis {
           && ['defineProperty', 'set'].includes(memberPropName(d.callee)) ? nameArg.value : '*';
         this.importMemberWrites.push({ module: b.module, prop, loc: this.loc(d) });
       }
+    }
+    // Borrowed registrations (`router.get.call(...)`) — the receiver rides
+    // the argument list, so attribution is unreliable; local routers/apps are
+    // rejected outright, imported routers go through the external sweep.
+    for (const br of borrowedRegCalls) {
+      const base = this.resolveMemberChain(br.objectNode);
+      if (base && (this.routers.has(base) || APP_IDENTIFIERS.has(base))) {
+        this.problems.push(`${this.loc(br.node)}: ${br.method}.call/apply on ${base} — borrowed registration methods are not supported by the scanner; call ${base}.${br.method}() directly`);
+      } else if (base) {
+        const bb = this.cleanBinding(base);
+        if (bb && (bb.kind === 'require' || bb.kind === 'requireMember') && bb.module !== null) {
+          this.externalRouterRegs.push({ module: bb.module, name: bb.kind === 'requireMember' ? bb.name : null, method: br.method, loc: this.loc(br.node) });
+        }
+      }
+    }
+    // An appOnly consumer (http.createServer) given an inline FUNCTION would
+    // serve a raw handler instead of the scanned app — sweep-visible.
+    for (const call of fnArgCalls) {
+      const c = call.callee;
+      let entry = null;
+      if (c.type === 'MemberExpression' && !c.computed && c.object.type === 'Identifier' && c.property.type === 'Identifier') {
+        const ob = this.bindings.get(c.object.name);
+        if (ob && ob.kind === 'require') entry = this.scanner.registry.lookupRouterConsumer(ob.module === null ? ob.spec : ob.module, c.property.name);
+      } else if (c.type === 'Identifier') {
+        const b = this.bindings.get(c.name);
+        if (b && b.kind === 'requireMember') entry = this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name);
+      }
+      if (entry && entry.appOnly) {
+        this.pushSweepProblem(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got an inline function — a raw request handler would serve surface the scanner never walks`);
+      }
+    }
+    // Router(<options>) — strict/caseSensitive matching changes which URLs a
+    // path identity covers; the scanner models only Express defaults.
+    for (const fc of factoryOptionCalls) {
+      if (!this.isRouterFactory(fc)) continue;
+      const opt = fc.arguments[0];
+      let bad = null;
+      if (!opt || opt.type !== 'ObjectExpression') bad = 'unresolvable options';
+      else {
+        for (const p of opt.properties) {
+          if (p.type !== 'ObjectProperty' || p.computed || p.key.type !== 'Identifier') { bad = 'unresolvable options'; break; }
+          if (['strict', 'caseSensitive'].includes(p.key.name) && !(p.value.type === 'BooleanLiteral' && p.value.value === false)) {
+            bad = `${p.key.name} routing`;
+            break;
+          }
+        }
+      }
+      if (bad) this.problems.push(`${this.loc(fc)}: Router() with ${bad} — non-default path matching is not modeled by the scanner; path identities assume Express defaults`);
     }
     this.mutatedImportMembers = new Set(this.importMemberWrites.map((w) => `${w.module}#${w.prop}`));
     this.externalRouterRegs = [...this.directExternalRegs]; // registrations on OTHER modules' routers
@@ -868,8 +959,9 @@ class ModuleAnalysis {
         if (entry.appOnly && passed.some((n) => !APP_IDENTIFIERS.has(n))) {
           // The listener/error-handler must keep receiving THE APP — handing
           // it a different router would silently swap the served surface
-          // away from what scan() walks.
-          this.problems.push(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got ${passed.join(', ')} — the scanner walks the app, so the process must serve it`);
+          // away from what scan() walks. A side-effect module can do this
+          // too, so the finding is sweep-visible.
+          this.pushSweepProblem(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got ${passed.join(', ')} — the scanner walks the app, so the process must serve it`);
         }
         return true;
       };
@@ -887,7 +979,13 @@ class ModuleAnalysis {
           && consumerOk(this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name))) continue;
       }
       if (passed.length) {
-        this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`);
+        const msg = `${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`;
+        // A PROVEN express() application handed away can be served on its
+        // own port — that indicts the process, so it surfaces even from
+        // side-effect modules. The bare NAME 'app' proves nothing in an
+        // unmounted service module (any local can be called app).
+        if (passed.some((n) => this.apps.has(n))) this.pushSweepProblem(msg);
+        else this.problems.push(msg);
       } else {
         for (const ia of importedArgs) this.externalRouterPasses.push({ ...ia, loc: this.loc(call) });
       }
@@ -1281,11 +1379,18 @@ class ModuleAnalysis {
    * and apps are policed by the listener/consumer checks instead.
    */
   routerReferencedIn(fnNode) {
+    const isRouterName = (canon) => this.routers.has(canon) && !this.apps.has(canon) && !APP_IDENTIFIERS.has(canon);
     let found = null;
     walk(fnNode, (n) => {
-      if (found || n.type !== 'Identifier') return;
-      const canon = this.canonName(n.name);
-      if (this.routers.has(canon) && !this.apps.has(canon) && !APP_IDENTIFIERS.has(canon)) found = n.name;
+      if (found) return;
+      if (n.type === 'Identifier') {
+        const canon = this.canonName(n.name);
+        if (isRouterName(canon)) found = n.name;
+      } else if (n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression') {
+        // `holder.api` may BE the router through a modeled object member.
+        const t = this.resolveMemberChain(n);
+        if (t && isRouterName(this.canonName(t))) found = this.src.slice(n.start, n.end);
+      }
     }, { topLevel: false, conds: [], src: this.src });
     return found;
   }

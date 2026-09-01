@@ -151,6 +151,16 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
           && !new RegExp(`${g.name}\\s*:`).test(line));
         expect({ guard: g.name, module: g.module, reassignedLines })
           .toEqual({ guard: g.name, module: g.module, reassignedLines: [] });
+        // ...including DESTRUCTURING reassignments (`[name] = [noop]`,
+        // `({ name } = source)`) — assignment-pattern targets rebind without
+        // a bare `name =` spelling. Declarations create new bindings and are
+        // exempt; any other line putting the name inside a bracketed target
+        // followed by `=` fails.
+        const destructuredReassigned = src.split('\n').filter((line) =>
+          !/^\s*(const|let|var)\b/.test(line)
+          && new RegExp(`[\\[{][^\\]}]*\\b${g.name}\\b[^\\]}]*[\\]}]\\s*=[^=]`).test(line));
+        expect({ guard: g.name, module: g.module, destructuredReassigned })
+          .toEqual({ guard: g.name, module: g.module, destructuredReassigned: [] });
       }
     }
   });
@@ -1818,6 +1828,106 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
       ].join('\n'),
     });
     expect(res.problems.some((p) => p.includes('dynamic code (eval)'))).toBe(true);
+  });
+
+  test('a WRAPPED side-app listener (http.createServer(live).listen) propagates from the sweep', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app("require('./services/side');"),
+        'server/services/side.js': [
+          "const http = require('http');",
+          "const express2 = require('express');",
+          'const live = express2();',
+          "live.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(live).listen(3000);',
+        ].join('\n'),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
+  });
+
+  test('a helper returning a MODELED router member (return holder.api) is rejected', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        'const holder = { api: router };',
+        'function current() { return holder.api; }',
+        "current().get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('on the return value of current()'))).toBe(true);
+  });
+
+  test('an appOnly consumer given an INLINE FUNCTION (raw handler) is a problem', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          "http.createServer((req, res) => { res.end('leak'); }).listen(3000);",
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('got an inline function'))).toBe(true);
+  });
+
+  test('a BORROWED registration (get.call) on an imported router is caught by the sweep', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': "require('../routes/x').get.call(require('../routes/x'), '/leak', (req, res) => res.json({}));",
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a BORROWED registration on a LOCAL router is rejected outright', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get.call(router, '/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('borrowed registration methods are not supported'))).toBe(true);
+  });
+
+  test('a DESCRIPTOR rewrite of module.exports makes the export untrusted', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const safe = require('express').Router();",
+        "const leak = require('express').Router();",
+        "leak.get('/leak', (req, res) => res.json({}));",
+        'module.exports = safe;',
+        "Object.defineProperty(module, 'exports', { get() { return leak; } });",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('descriptor rewrite of module.exports'))).toBe(true);
+  });
+
+  test('STRICT routing options on Router() are rejected — path identities assume defaults', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router({ strict: true });",
+        "router.get('/leak/', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('strict routing'))).toBe(true);
   });
 
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
