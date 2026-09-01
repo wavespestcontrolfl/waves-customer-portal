@@ -474,63 +474,6 @@ const PAY_BOX = {
   borderRadius: RADIUS.input,
 };
 
-// Surcharge explainer, collapsed behind a details toggle (owner
-// 2026-08-31: dropdown like the consent box).
-function SurchargeInfoBox({ pct }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'flex-start',
-      gap: SP.sm,
-      padding: SP.md,
-      ...PAY_BOX,
-      fontSize: FS.body,
-      lineHeight: LH.body,
-      color: DOC.ink,
-    }}>
-      <span data-glass="soft" style={{
-        width: 32,
-        height: 32,
-        borderRadius: RADIUS.input,
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-        background: DOC.surface,
-        color: '#065A8C',
-        border: '1px solid #BFE4F8',
-      }}>
-        <Icon name="card" size={17} strokeWidth={2} />
-      </span>
-      <span style={{ minWidth: 0 }}>
-        <span style={{ display: 'block' }}>Credit cards may add up to {pct}%.</span>
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            marginTop: 4, padding: 0,
-            background: 'none', border: 'none', cursor: 'pointer',
-            fontSize: FS.body, color: DOC.muted,
-            textDecoration: 'underline', fontFamily: 'inherit',
-          }}
-        >
-          {open ? 'Hide details' : 'View details'}
-          <Icon name="chevronDown" size={12} strokeWidth={2.5} style={{ transition: 'transform 150ms ease', transform: open ? 'rotate(180deg)' : 'none' }} />
-        </button>
-        {open && (
-          <span style={{ display: 'block', marginTop: 4, color: DOC.muted }}>
-            You will see the exact total before payment. Debit cards, prepaid cards,
-            and bank transfers have no added card surcharge.
-          </span>
-        )}
-      </span>
-    </div>
-  );
-}
-
 // Gold glass CTA (owner 2026-08-12: #04395E text on the gold accent).
 const goldChipButton = {
   ...docButton('chip'),
@@ -1551,7 +1494,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
   return (
     <div style={{ display: 'grid', gap: SP.md }}>
-      <SurchargeInfoBox pct={pct} />
+      {/* Surcharge info box removed (owner 2026-08-31) — the method tile
+          and the consent's authorization text carry the surcharge terms. */}
 
       <div>
         <div style={{ ...eyebrow, marginBottom: SP.xs }}>
@@ -2732,18 +2676,18 @@ export default function PayPageV2() {
           shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
         />
         <BrandCard padding={28}>
-          {/* Status pill sits left, under the heading (owner 2026-08-31:
-              badges left-aligned, not floated right). */}
+          {/* Status pill sits left, ABOVE the heading (owner 2026-08-31:
+              badges left-aligned, status first). */}
           <div style={{ marginBottom: SP.lg }}>
-            <div style={{ ...eyebrow, marginBottom: SP.xs }}>
-              Invoice · {invoice.invoiceNumber}
-            </div>
-            <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
-            <div style={{ display: 'flex', justifyContent: 'flex-start', marginTop: SP.xs }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: SP.sm }}>
               <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
                 {invoiceStatusLabel}
               </StatusPill>
             </div>
+            <div style={{ ...eyebrow, marginBottom: SP.xs }}>
+              Invoice · {invoice.invoiceNumber}
+            </div>
+            <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
           </div>
 
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
