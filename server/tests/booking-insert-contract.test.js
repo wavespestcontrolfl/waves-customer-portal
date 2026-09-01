@@ -230,7 +230,11 @@ function insertArgument(text) {
 // contains the call somewhere (`cond ? await helper(…) : buildRaw()`) is
 // not rooted, so one bypassing branch keeps the site bare (pre-push Codex
 // r6 P1). An identifier with any helper-free write stays bare: importing
-// the helper elsewhere in the file launders nothing. A payload MUTATED
+// the helper elsewhere in the file launders nothing, and the identifier
+// must be ONE binding file-wide — exactly one declaration and never a
+// function parameter — since this scan is textual, not lexical: a
+// compliant `data` in one function must not vouch for an unrelated `data`
+// parameter in another (pre-push Codex r6 P1). A payload MUTATED
 // after completion (`data.x = …`, `data[k] = …`, `Object.assign(data, …)`,
 // `delete data.x`) is bare too — the final payload never passed validation
 // (pre-push Codex r6 P1); an adopter shapes the payload BEFORE the helper.
@@ -253,10 +257,47 @@ function rootedInHelper(value) {
   return !!arrow && wholeCall(arrow[1].trim().replace(/^await\s+/, ''), 'completeScheduledServiceInsert') !== null;
 }
 
+// Whether the identifier at `i` sits in a function PARAMETER position:
+// `id => …`, `(…, id, …) => …`, `function f(…id…) {`, or a method
+// `m(…id…) {` (control-flow keywords before the paren are not functions).
+const NOT_A_FUNCTION = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'return', 'await', 'typeof']);
+function isParameterAt(source, i, id) {
+  if (source.startsWith('=>', skipTrivia(source, i + id.length))) return true;
+  let depth = 0;
+  let j = i;
+  while (j > 0) {
+    const ch = source[j - 1];
+    if (ch === ')') depth += 1;
+    else if (ch === '(') { if (depth === 0) break; depth -= 1; }
+    else if ((ch === ';' || ch === '{' || ch === '}') && depth === 0) return false;
+    j -= 1;
+  }
+  if (j === 0) return false;
+  const open = j - 1;
+  const next = skipTrivia(source, balancedParens(source, open));
+  if (source.startsWith('=>', next)) return true;
+  if (source[next] !== '{') return false;
+  const word = /([A-Za-z_$][\w$]*)\s*$/.exec(source.slice(Math.max(0, open - 80), open));
+  return !!word && !NOT_A_FUNCTION.has(word[1]);
+}
+
+function isSingleBinding(source, id) {
+  // A plain declaration, or a destructuring one (`const { id } = …`).
+  const decl = new RegExp(`\\b(?:const|let|var)\\s+(?:[{\\[][^=;\\n]*?[{\\[,\\s])?${id}\\b`, 'g');
+  if ((source.match(decl) || []).length !== 1) return false;
+  const occ = new RegExp(`(?<![.\\w$])${id}\\b`, 'g');
+  let m;
+  while ((m = occ.exec(source)) !== null) {
+    if (isParameterAt(source, m.index, id)) return false;
+  }
+  return true;
+}
+
 function isContractCompleted(source, arg) {
   const text = String(arg || '').trim();
   if (rootedInHelper(text)) return true;
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) return false;
+  if (!isSingleBinding(source, text)) return false;
   const writes = new RegExp(`(?:\\b(?:const|let|var)\\s+)?\\b${text}\\b\\s*(?:=(?![=>])|\\.\\s*push\\s*\\()`, 'g');
   let completed = 0;
   let w;
@@ -450,6 +491,15 @@ describe('booking insert-site contract', () => {
     expect(collectInsertSites("const data = { ...(await completeScheduledServiceInsert(raw, opts)), extra: 1 };\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
     expect(collectInsertSites("await trx('scheduled_services').insert((await completeScheduledServiceInsert(raw, opts)) || raw);")).toHaveLength(1);
     expect(collectInsertSites("const rows = await Promise.all(raws.map((r) => r.ok ? completeScheduledServiceInsert(r, opts) : r));\nawait trx('scheduled_services').insert(rows);")).toHaveLength(1);
+    // …an identifier that is not ONE binding file-wide stays bare: a
+    // parameter of the same name elsewhere, or a shadowing declaration
+    // (pre-push r6 P1 — the scan is textual, not lexical)…
+    expect(collectInsertSites("async function a(raw) {\n  const data = await completeScheduledServiceInsert(raw, opts);\n  return data;\n}\nasync function b(trx, data) {\n  await trx('scheduled_services').insert(data);\n}")).toHaveLength(1);
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nlist.forEach((data) => trx('scheduled_services').insert(data));")).toHaveLength(1);
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nconst save = data => trx('scheduled_services').insert(data);")).toHaveLength(1);
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\n{\n  const data = raw;\n  await trx('scheduled_services').insert(data);\n}")).toHaveLength(1);
+    // (control-flow parens and call arguments are not parameter positions)
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nif (data) {\n  log(data);\n  await trx('scheduled_services').insert(data);\n}")).toEqual([]);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
     for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;']) {
       expect(collectInsertSites(`const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
