@@ -1111,6 +1111,15 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // above, and every other save prices off freshly synced live config and
   // stamps the resulting server values afterward.
   if (deps.replaySavedPricingKnobs === true) {
+    // Lawn cost floor, lawn program minimum and pest program floor. The public
+    // read path has threaded these since #2827 (savedFloorReplayOverrides);
+    // this branch did not, so an authoritative recompute resolved them from
+    // the LIVE globals and — because callers persist this result — wrote the
+    // live state over the estimate's quote-time pricingMetadata stamps. The
+    // next replay then read the overwritten stamps as the saved evidence.
+    // Same reader, same tri-state: a signal absent here means replay live.
+    Object.assign(v1Input, require('./estimate-floor-signal-replay')
+      .savedFloorReplaySignals(estimateData));
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
