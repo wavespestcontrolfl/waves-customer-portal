@@ -275,6 +275,26 @@ describe('claim ceiling is derived from the provider budgets', () => {
   // trying to size a ceiling that could steal live work. This scans the
   // processor AND the modules it awaits while holding the claim — an earlier
   // version looked only at the processor and missed the CSR coach.
+  // Delegated fetches count too: the pass awaits them while holding the
+  // claim, and the earlier version of this scan looked only for Anthropic
+  // clients — which is how the contact decoder and address recovery stayed
+  // unbounded behind a test written to prevent exactly that.
+  test.each([
+    ['../services/contact-dictation'],
+    ['../services/address-validation/recovery'],
+  ])('%s bounds every outbound fetch', (modulePath) => {
+    const source = require('fs').readFileSync(require.resolve(modulePath), 'utf8');
+    const starts = [];
+    for (let i = source.indexOf('await fetch('); i !== -1; i = source.indexOf('await fetch(', i + 1)) {
+      starts.push(i);
+    }
+    expect(starts.length).toBeGreaterThan(0);
+    starts.forEach((start, idx) => {
+      const end = idx + 1 < starts.length ? starts[idx + 1] : source.length;
+      expect(source.slice(start, end)).toContain('AbortSignal.timeout(');
+    });
+  });
+
   test.each([
     ['../services/call-recording-processor', /timeout: PROVIDER_FETCH_TIMEOUTS_MS/],
     ['../services/csr/csr-coach', /timeout: CSR_SCORE_TIMEOUT_MS/],

@@ -40,6 +40,13 @@ const ENABLED = () => process.env.ADDRESS_RECOVERY_ENABLED !== 'false';
 const RECOVERY_MODEL = () => process.env.GEMINI_RECOVERY_MODEL
   || 'gemini-2.5-pro';
 
+// Bounded: the call-processing pass awaits these while holding a claim whose
+// heartbeat beats on a timer, so an unbounded fetch reads as a hang and
+// leaves the call unreclaimable (codex #3677 P1).
+const RECOVERY_FETCH_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
+  ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
+  : 180000;
+
 // AV statuses where the input street may simply be a mis-hearing worth a
 // second-chance lookup. validated_accept/corrected already resolved;
 // out_of_service_area resolved somewhere real (recovery would fabricate an
@@ -65,7 +72,7 @@ async function fetchAutocompletePredictions(input) {
   try {
     const url = 'https://maps.googleapis.com/maps/api/place/autocomplete/json'
       + `?input=${encodeURIComponent(input)}&types=address&components=country:us&key=${key}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(RECOVERY_FETCH_TIMEOUT_MS) });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') return null;
@@ -95,6 +102,7 @@ Return ONLY JSON: {"candidates": ["...", "..."]}`;
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: { response_mime_type: 'application/json', temperature: 0.2 },
         }),
+        signal: AbortSignal.timeout(RECOVERY_FETCH_TIMEOUT_MS),
       }
     );
     if (!res.ok) return [];
