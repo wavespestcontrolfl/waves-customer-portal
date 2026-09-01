@@ -808,6 +808,25 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
+      // Visit lock + snapshot resolution BEFORE any service_records write
+      // (pre-push P1): /complete and recap take scheduled_services →
+      // service_records; writing the record first here inverts that order
+      // and can deadlock a concurrent completion.
+      let closeoutSnap = null;
+      if (serviceRecordCols.structured_notes
+        && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {
+        const lockedVisit = await trx('scheduled_services')
+          .where({ id: scheduledService.id })
+          .forUpdate()
+          .first('id', 'service_id', 'service_type')
+          .catch(() => null);
+        closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+          trx,
+          serviceId: scheduledService.id,
+          catalogServiceId: (lockedVisit || scheduledService).service_id || null,
+          serviceType: (lockedVisit || scheduledService).service_type || null,
+        });
+      }
       if (Object.keys(update).length) {
         [serviceRecord] = await trx('service_records')
           .where({ id: serviceRecord.id })
@@ -820,19 +839,7 @@ async function completeProjectBackedService({
       // row value — never a serialization of a pre-lock read — so a
       // concurrent /complete freeze wins and is never overwritten
       // (first-freeze-wins; pre-push codex P1).
-      if (serviceRecordCols.structured_notes
-        && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {
-        const lockedVisit = await trx('scheduled_services')
-          .where({ id: scheduledService.id })
-          .forUpdate()
-          .first('id', 'service_id', 'service_type')
-          .catch(() => null);
-        const closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
-          trx,
-          serviceId: scheduledService.id,
-          catalogServiceId: (lockedVisit || scheduledService).service_id || null,
-          serviceType: (lockedVisit || scheduledService).service_type || null,
-        });
+      {
         if (closeoutSnap) {
           const [refreshed] = await trx('service_records')
             .where({ id: serviceRecord.id })
