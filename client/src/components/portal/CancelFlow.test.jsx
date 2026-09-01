@@ -185,6 +185,37 @@ describe('Screen 2 — reason and resolution', () => {
     expect(screen.getByText(/a confirmation text and email are on the way/i)).toBeInTheDocument();
   });
 
+  it('refreshes the auth snapshot when the server reports CHURNED even though the request parked (processed:false) — codex GH r28 P1', async () => {
+    const submitWholeAccount = async () => {
+      await openReview();
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'More reasons' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Billing problem' }));
+      api.cancelResolutionPreview.mockResolvedValue({ kind: 'hard_stop', reasonCode: 'billing_issue', reviewType: 'billing', scope: [], impact: impact() });
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+      await screen.findByRole('heading', { name: 'Confirm cancelling my plan' });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel my plan' }));
+      await waitFor(() => expect(api.createRequest).toHaveBeenCalled());
+    };
+
+    // Churn write succeeded, a later sweep step parked for office review.
+    const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+    api.createRequest.mockResolvedValue({ success: true, cancellation: { processed: false, churned: true, confirmation: null, confirmationChannels: [], effectiveDate: '2026-08-31', scope: [], remaining: [] } });
+    renderFlow({ refreshCustomer });
+    await submitWholeAccount();
+    await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
+    cleanup();
+
+    // Nothing churned (processor never got to the churn write): stay live.
+    vi.clearAllMocks();
+    api.cancelResolutionPreview.mockResolvedValue({ kind: 'none', reasonCode: null, scope: [], impact: impact() });
+    const untouched = vi.fn().mockResolvedValue(undefined);
+    api.createRequest.mockResolvedValue({ success: true, cancellation: { processed: false, churned: false, confirmation: null, confirmationChannels: [], effectiveDate: '2026-08-31', scope: [], remaining: [] } });
+    renderFlow({ refreshCustomer: untouched });
+    await submitWholeAccount();
+    expect(untouched).not.toHaveBeenCalled();
+  });
+
   it('card: Show me expands, Accept shows the receipt and never calls createRequest', async () => {
     renderFlow();
     await openReview();

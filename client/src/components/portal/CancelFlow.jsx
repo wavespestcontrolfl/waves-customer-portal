@@ -264,9 +264,13 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
       // shell keeps rendering the live-plan UI and Billing's active-state
       // loader hits now-blocked routes (codex GH r14 P1). Awaited so the
       // cancelled banner, narrowed tabs, and restart panel appear
-      // immediately; a partial cancellation leaves the account active, so
-      // nothing to refresh there.
-      if (c.processed === true && !(Array.isArray(c.remaining) && c.remaining.length)) {
+      // immediately; a scoped cancellation leaves the account active, so
+      // nothing to refresh there. Keyed on the server's CHURNED flag, not
+      // `processed` (codex GH r28 P1): the churn write runs first, so a
+      // whole-account cancel whose later sweep step parked for office
+      // review reports churned:true with processed:false — the account is
+      // already inactive and the live-plan UI would 401 on its loaders.
+      if ((c.churned === true || c.processed === true) && !(Array.isArray(c.remaining) && c.remaining.length)) {
         try { await refreshCustomer?.(); } catch { /* stale until reload; the server state is already correct */ }
       }
     } catch (err) {

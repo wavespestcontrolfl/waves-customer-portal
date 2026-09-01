@@ -65,6 +65,13 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // visits are pulled AND the remaining plan repriced (codex r1 P2: the
     // portal showed the manual-closeout copy while the scoped SMS said done).
     processed: !!(result && result.ok && (result.churned || result.scopedWoundDown)),
+    // The server's ACTUAL churn state, independent of `processed` (codex GH
+    // #3671 r28 P1): the churn write runs FIRST, so a later best-effort
+    // step failing (an in-progress visit needing manual handling) returns
+    // churned:true, ok:false — the account is already inactive and the
+    // portal must refresh its auth snapshot even though the request is
+    // parked for office review.
+    churned: !!(result && result.churned),
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
