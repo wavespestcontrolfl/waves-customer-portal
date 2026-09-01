@@ -19408,10 +19408,15 @@ export function techTipSubtext(copy) {
   return first.length > TECH_TIP_SUB_CHARS ? `${first.slice(0, TECH_TIP_SUB_CHARS - 1).trimEnd()}…` : first;
 }
 
-function techTipSentLabel(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return `sent ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}`;
+// `lastSent` values are YYYY-MM-DD calendar days (service_date). Never
+// `new Date('YYYY-MM-DD')` — that is UTC midnight, the previous ET evening —
+// so the day is formatted from its components with no zone in play.
+export function techTipSentLabel(day) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(day || ""));
+  if (!m) return null;
+  const at = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  if (Number.isNaN(at.getTime())) return null;
+  return `sent ${at.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
 }
 
 export function rankTechTips(tips, q) {
@@ -19442,7 +19447,11 @@ function TechTipPicker({
     [groups],
   );
   const tipById = useMemo(() => new Map(allTips.map((t) => [t.id, t])), [allTips]);
-  const full = selectedIds.length >= TECH_TIP_MAX;
+  // The custom line takes a slot like a library pick (the server caps the
+  // frozen set the same way), so the count and the cap include it.
+  const customCount = String(customTip || "").trim() ? 1 : 0;
+  const pickedCount = selectedIds.length + customCount;
+  const full = pickedCount >= TECH_TIP_MAX;
   const q = query.trim().toLowerCase();
   const ranked = q ? rankTechTips(allTips, q) : null;
   const lastSent = library?.lastSent || {};
@@ -19632,8 +19641,8 @@ function TechTipPicker({
         </div>
       )}
       <div style={{ fontFamily: theme.font, fontSize: 14, color: theme.mutedText, marginTop: 6, lineHeight: 1.45 }}>
-        {selectedIds.length} of {TECH_TIP_MAX} · goes on the report as a note from you.{" "}
-        {!showCustom && (
+        {pickedCount} of {TECH_TIP_MAX} · goes on the report as a note from you.{" "}
+        {!showCustom && !full && (
           <button
             type="button"
             onClick={() => setShowCustom(true)}
@@ -19656,7 +19665,7 @@ function TechTipPicker({
       {showCustom && (
         <input
           type="text"
-          aria-label="Your own tip"
+          aria-label="Your own tip (counts as one of the three)"
           value={customTip || ""}
           onChange={(e) => onCustomTipChange(e.target.value)}
           maxLength={240}

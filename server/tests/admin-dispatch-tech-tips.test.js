@@ -127,7 +127,9 @@ describe('GET /:serviceId/tech-tips', () => {
     mockDbCurrent = scriptedDb({
       service: SERVICE,
       sentRows: [
-        { service_date: '2026-08-03', tech_tips: [{ id: 'water_bromeliads', copy: 'x', source: 'library' }] },
+        // pg returns DATE columns as a Date at UTC midnight — the payload
+        // carries the calendar day, not that instant
+        { service_date: new Date('2026-08-03T00:00:00.000Z'), tech_tips: [{ id: 'water_bromeliads', copy: 'x', source: 'library' }] },
         { service_date: '2026-07-01', tech_tips: [{ id: 'water_bromeliads' }, { id: 'light_warm_bulbs' }] },
       ],
       prefs: { irrigation_system: true },
@@ -166,6 +168,8 @@ describe('completion freeze contract', () => {
     const block = source.slice(start, source.indexOf("\nrouter.", start + 1));
     expect(block).toContain('freezeTechTips(req.body?.techTips)');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
+    // the kill switch holds on the write path too
+    expect(block).toMatch(/gateEnvValue\('GATE_TECH_TIPS'\)\s*\n?\s*\? freezeTechTips/);
     // ids resolve server-side — the client's copy never reaches the freeze
     expect(block).not.toMatch(/techTips\.copy|body\.techTips\.tips/);
   });

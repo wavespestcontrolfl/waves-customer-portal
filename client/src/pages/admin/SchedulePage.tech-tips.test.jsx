@@ -3,7 +3,7 @@
 // vocabulary they use at the truck lands on the right tip first), and the
 // option subtext is the copy's first sentence, trimmed.
 import { describe, expect, test } from 'vitest';
-import { rankTechTips, techTipSubtext, TECH_TIP_MAX } from './SchedulePage.jsx';
+import { rankTechTips, techTipSubtext, techTipSentLabel, TECH_TIP_MAX } from './SchedulePage.jsx';
 
 const TIPS = [
   { id: 'water_bromeliads', label: 'Flush bromeliads weekly', keywords: ['bromeliad', 'cups', 'water'], copy: 'If you have bromeliads, the cup holds water. Flush weekly.' },
@@ -43,6 +43,19 @@ describe('techTipSubtext', () => {
   });
   test('empty copy is an empty subtext', () => {
     expect(techTipSubtext('')).toBe('');
+  });
+});
+
+describe('techTipSentLabel', () => {
+  test('formats the calendar day itself, never the previous ET evening', () => {
+    expect(techTipSentLabel('2026-08-03')).toBe('sent Aug 3');
+    expect(techTipSentLabel('2026-11-01')).toBe('sent Nov 1');
+    expect(techTipSentLabel('2026-08-03T00:00:00.000Z')).toBe('sent Aug 3');
+  });
+  test('anything else is no label', () => {
+    expect(techTipSentLabel('')).toBeNull();
+    expect(techTipSentLabel(undefined)).toBeNull();
+    expect(techTipSentLabel('Aug 3')).toBeNull();
   });
 });
 

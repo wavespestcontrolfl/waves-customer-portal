@@ -2003,11 +2003,15 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         : null,
     ]);
     // Newest first, so the first date seen per id is the most recent send.
+    // Values are YYYY-MM-DD calendar days (service_date is a DATE column;
+    // pg hands it back as a Date at UTC midnight) — the client formats the
+    // day from its components, never through new Date().
     const lastSent = {};
     for (const row of sentRows) {
+      const day = String(row.service_date instanceof Date ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
       const tips = Array.isArray(row.tech_tips) ? row.tech_tips : [];
       for (const tip of tips) {
-        if (tip?.id && !lastSent[tip.id]) lastSent[tip.id] = row.service_date;
+        if (tip?.id && day && !lastSent[tip.id]) lastSent[tip.id] = day;
       }
     }
     res.json({
@@ -5343,7 +5347,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // the report shows what the customer was told on the day, and a custom
     // line goes through the customer-copy screen like every other verbatim
     // customer string. Ids on the wire, never copy.
-    const techTipsFreeze = freezeTechTips(req.body?.techTips);
+    // Gated at the freeze too: with the kill switch unset a stale or crafted
+    // client cannot keep the feature alive through the completion body.
+    const techTipsFreeze = gateEnvValue('GATE_TECH_TIPS')
+      ? freezeTechTips(req.body?.techTips)
+      : { tips: [], dropped: [] };
     for (const drop of techTipsFreeze.dropped) {
       logger.warn(`[tech-tips] custom tip dropped on ${req.params.serviceId}: ${drop.violations.join(', ')}`);
     }
