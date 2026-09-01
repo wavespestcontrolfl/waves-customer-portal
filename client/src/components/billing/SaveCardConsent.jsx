@@ -42,20 +42,18 @@ export default function SaveCardConsent({
   // text has been on screen.
   const [viewedTerms, setViewedTerms] = useState(false);
   // Card and ACH carry DIFFERENT authorizations (NACHA/Reg E vs card
-  // network) — having read one is not having read the other, and having
-  // CONSENTED to one is not consent to the other. A real method switch
-  // (not first mount) resets the viewed-gate AND withdraws an unlocked
-  // checked state so the new authorization needs its own consent action
-  // (Codex P1 on #3686, rounds 2–3). Locked required-save flows keep
-  // their server-enforced checked state.
+  // network) — having read one is not having read the other. A real method
+  // switch (not first mount) resets the viewed-gate (Codex P1 on #3686,
+  // round 2). Withdrawing a checked opt-in on switch is the PARENT's job,
+  // synchronously in its method-change handler BEFORE it syncs Stripe — an
+  // effect here fires after that sync and races it (Codex P1, round 6).
   const prevMethodRef = useRef(methodType);
   useEffect(() => {
     if (prevMethodRef.current === methodType) return;
     prevMethodRef.current = methodType;
     setViewedTerms(false);
     setExpanded(false);
-    if (!locked && checked) onChange?.(false);
-  }, [methodType, locked, checked, onChange]);
+  }, [methodType]);
   const isAch = methodType === 'us_bank_account' || methodType === 'ach';
   const resolvedHeadline = headline ?? (isAch
     ? 'Save this bank account on file with Waves Pest Control'

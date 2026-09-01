@@ -1197,7 +1197,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     setQuoteData(null);
     selectedMethodRef.current = methodCategory;
     setSelectedMethod(methodCategory);
-    syncAmountForMethod(methodCategory);
+    // Consent to one authorization is not consent to the other (card vs
+    // NACHA/Reg E) — withdraw an unlocked opt-in SYNCHRONOUSLY, in the same
+    // handler that syncs Stripe, so the PI is never updated with the stale
+    // saveCard and a wallet confirm can't ride a flag the customer no
+    // longer sees checked (Codex P1 on #3686, round 6).
+    const nextSaveCard = saveCardLocked ? !!saveCard : false;
+    if (!saveCardLocked && saveCard) onSaveCardChange?.(false);
+    syncAmountForMethod(methodCategory, nextSaveCard);
   };
 
   // Two-step surcharge disclosure: createPaymentMethod → quote → confirm → finalize.
