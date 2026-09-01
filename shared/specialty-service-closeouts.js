@@ -115,11 +115,16 @@ function offPresetSpecialtyAction(spec, actionLabels) {
   return unknown ? `“${unknown}” is not a protocol action for this service.` : null;
 }
 
-function validateSpecialtyClosureCombination(serviceKey, { observations, actions, productCount = 0 } = {}) {
+// `enforcePresetActions` is true only when the completion profile explicitly
+// names the specialty lane. A keyless legacy row matched by display name may
+// still carry the dynamic-protocol actions its older client offered; those
+// stay accepted (and are simply not part of the preset checks) so an open
+// draft can complete (local audit P1 on #3701).
+function validateSpecialtyClosureCombination(serviceKey, { observations, actions, productCount = 0, enforcePresetActions = true } = {}) {
   const spec = SPECIALTY_SERVICE_CLOSEOUTS[specialtyServiceKey({ serviceKey })];
   if (!spec) return null;
   return validateSpecialtyObservationCombination(serviceKey, observations)
-    || offPresetSpecialtyAction(spec, actions)
+    || (enforcePresetActions ? offPresetSpecialtyAction(spec, actions) : null)
     || exclusiveSpecialtyActionConflict(spec, actions, productCount)
     || specialtyFindingActionConflict(spec, observations, actions);
 }

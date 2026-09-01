@@ -130,13 +130,23 @@ describe('specialty service closeout vocabulary', () => {
     expect(specialtyServiceKey({ serviceType: 'General Pest Control' })).toBeNull();
   });
 
-  test('rejects protocol actions the specialty preset does not offer', () => {
+  test('rejects protocol actions the specialty preset does not offer on an explicit lane', () => {
     expect(validateSpecialtyClosureCombination('dethatching', {
       observations: ['Inspection only'], actions: ['Inspection only', 'Checked irrigation heads'],
     })).toBe('“Checked irrigation heads” is not a protocol action for this service.');
     expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
       observations: [], actions: ['Cobweb sweep'],
     })).toBe('“Cobweb sweep” is not a protocol action for this service.');
+  });
+
+  test('a keyless legacy row keeps its dynamic actions while preset rules still apply', () => {
+    expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
+      observations: [], actions: ['Cobweb sweep', 'Exposed nest treated'], enforcePresetActions: false,
+    })).toBeNull();
+    expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
+      observations: [], actions: ['Cobweb sweep', 'Inspection and identification only', 'Exposed nest treated'],
+      enforcePresetActions: false,
+    })).toBe('Clear “Inspection and identification only” or remove the other completed actions before submitting.');
   });
 
   test('rejects nest counts and identified species beside no-evidence findings', () => {

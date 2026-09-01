@@ -5294,6 +5294,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       serviceKey: completionProfile?.serviceKey,
       serviceType: svc.service_type,
     });
+    // Preset-only protocol actions are enforced when the profile names the
+    // lane; a keyless legacy row resolved by display name may still complete
+    // with the dynamic actions its older client offered.
+    const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
     const allowedStructuredObservations = new Set(
       observationsForSpecialtyService(resolvedSpecialtyServiceKey),
     );
@@ -5332,6 +5336,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         productCount: Array.isArray(products)
           ? products.filter((prod) => prod && typeof prod === 'object').length
           : 0,
+        enforcePresetActions: explicitSpecialtyLane,
       },
     );
     if (structuredObservationConflict) {
@@ -5348,7 +5353,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       actions: reportProtocolActions,
       areas: completionAreas,
     });
-    if (derivedSpecialtyScopes) reportProtocolActionScopes = derivedSpecialtyScopes;
+    if (derivedSpecialtyScopes) {
+      // Legacy dynamic actions a keyless row still carries keep their
+      // client-supplied scope entry; every preset label is server-derived.
+      const derivedLabels = new Set(derivedSpecialtyScopes.map((entry) => entry.label));
+      reportProtocolActionScopes = [
+        ...derivedSpecialtyScopes,
+        ...reportProtocolActionScopes.filter((entry) => entry.label
+          && !derivedLabels.has(entry.label)
+          && reportProtocolActions.includes(entry.label)),
+      ];
+    }
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
