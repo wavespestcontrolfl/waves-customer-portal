@@ -14849,6 +14849,16 @@ const CallRecordingProcessor = {
       }
     }
 
+    // The pass did not complete if its final fenced write matched no rows: a
+    // peer reclaimed the token, this attempt's terminal status never landed,
+    // and its zero-triage layers were skipped above for the same reason.
+    // Returning success:true here was the LARGEST instance of the bug this
+    // branch exists to remove — the bulk counters read it as processed and
+    // the admin UI painted it green (pre-push audit P1).
+    if (finalized === 0) {
+      return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
