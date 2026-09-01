@@ -6707,7 +6707,15 @@ const CallRecordingProcessor = {
           processing_token: null,
           updated_at: new Date(),
         });
-      if (!released) logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+      if (!released) {
+        logger.warn(`[call-proc] no_transcription release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
+        // Ownership loss, not a transcription failure — same treatment as the
+        // extraction branch. This pass persisted nothing and the peer that
+        // now owns the row may be mid-transcription and about to succeed, so
+        // reporting a red failure would count against a call that is fine
+        // (codex P1).
+        return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       return { success: false, error: 'No transcription available' };
     }
 
