@@ -1961,6 +1961,16 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// "Irrigation on file" for the portal tip = the customer has entered any of
+// the settings the tip asks for. Empty strings, empty arrays and nulls
+// don't count; the irrigation_system flag never does.
+function irrigationSettingsOnFile(prefs) {
+  if (!prefs) return false;
+  const present = (v) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0);
+  return ['watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones', 'rain_sensor']
+    .some((key) => present(prefs[key]));
+}
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
 // tip-picker payload (tips-from-your-tech PR 2). Gate-off answers
 // { available: false } and the client keeps the free-text Observations /
@@ -2003,8 +2013,12 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
           .catch(() => [])
         : [],
+      // The real settings, never irrigation_system (defaults on since
+      // 20260828000002 — proves nothing about the schedule the tip asks for).
       svc.customer_id
-        ? db('property_preferences').where({ customer_id: svc.customer_id }).first('irrigation_system').catch(() => null)
+        ? db('property_preferences').where({ customer_id: svc.customer_id })
+          .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_zones', 'rain_sensor')
+          .catch(() => null)
         : null,
     ]);
     // Newest first, so the first date seen per id is the most recent send.
@@ -2023,7 +2037,7 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       available: true,
       ...library,
       lastSent,
-      conditions: { irrigation_on_file: prefs?.irrigation_system === true },
+      conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
     });
   } catch (err) { next(err); }
 });

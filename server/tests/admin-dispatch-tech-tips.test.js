@@ -132,7 +132,7 @@ describe('GET /:serviceId/tech-tips', () => {
         { service_date: new Date('2026-08-03T00:00:00.000Z'), tech_tips: [{ id: 'water_bromeliads', copy: 'x', source: 'library' }] },
         { service_date: '2026-07-01', tech_tips: [{ id: 'water_bromeliads' }, { id: 'light_warm_bulbs' }] },
       ],
-      prefs: { irrigation_system: true },
+      prefs: { irrigation_system: true, watering_days: ['mon', 'thu'], irrigation_run_minutes: null },
       calls,
     });
     const res = await invoke({ serviceId: 'svc-1' });
@@ -147,6 +147,24 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.conditions).toEqual({ irrigation_on_file: true });
     // read-only: three reads, no writes
     expect(calls.sort()).toEqual(['property_preferences', 'scheduled_services', 'service_records']);
+  });
+
+  test('gate on: the irrigation flag alone never counts as settings on file', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    for (const prefs of [
+      { irrigation_system: true },
+      { irrigation_system: true, watering_days: [], irrigation_run_minutes: null, irrigation_inches_per_week: '', irrigation_zones: null, rain_sensor: null },
+      null,
+    ]) {
+      mockDbCurrent = scriptedDb({ service: SERVICE, prefs, calls: [] });
+      const res = await invoke({ serviceId: 'svc-1' });
+      expect(res.body.conditions).toEqual({ irrigation_on_file: false });
+    }
+    for (const prefs of [{ rain_sensor: false }, { irrigation_zones: 6 }, { irrigation_inches_per_week: 1 }]) {
+      mockDbCurrent = scriptedDb({ service: SERVICE, prefs, calls: [] });
+      const res = await invoke({ serviceId: 'svc-1' });
+      expect(res.body.conditions).toEqual({ irrigation_on_file: true });
+    }
   });
 
   test('gate on: a service with no customer skips the per-customer reads', async () => {
