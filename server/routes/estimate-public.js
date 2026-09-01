@@ -9803,6 +9803,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? 0
           : converter.frozenRodentBaitSetupAmount(estData);
         const acknowledgedUnifiedSetup = acknowledgedDec === true && !(acknowledgedRodentSetup > 0)
+          && estData?.setupFeeQuote?.kind === 'unified'
           ? converter.unifiedAcceptSetupFeeAmount(estData)
           : 0;
         const base = Math.round((resolved.amount + acknowledgedRodentSetup + acknowledgedUnifiedSetup) * 100) / 100;
@@ -10354,13 +10355,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             nextEstimateData.acceptedSetupFeeAmount = freezeUnifiedDecision === true
               ? EstimateConverter.unifiedAcceptSetupFeeAmount(nextEstimateData)
               : EstimateConverter.frozenSetupFeeAmount(nextEstimateData);
-            if (freezeUnifiedDecision === true && !nextEstimateData.setupFeeQuote) {
-              nextEstimateData.setupFeeQuote = {
-                kind: 'unified',
-                amount: nextEstimateData.acceptedSetupFeeAmount,
-                decided_at: new Date().toISOString(),
-              };
-            }
+            // Deliberately NOT persisted as a kind-'unified' setupFeeQuote
+            // (audit r18 P0): a frozen unified quote is the evidence the
+            // PAGE disclosed the fee as charged — an accept-time verdict on
+            // a no-freeze estimate has no such disclosure, and stamping the
+            // kind here would arm the prepay/invoice-mode unified lines
+            // mid-accept for a page that promised the legacy waiver. The
+            // converter re-decides identically pre-seed under its lock.
           } else if (freezeUnifiedDecision === false && !nextEstimateData.setupFeeQuote
             && frozenRecurring.length > 0) {
             // Freeze the WAIVED verdict too (decide-once made durable): the
@@ -11167,7 +11168,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const invoiceModeRodentLineFee = treatAsOneTime
           ? 0
           : require('../services/estimate-converter').frozenRodentBaitSetupAmount(invoiceModeEstData);
+        // A no-freeze decision adds no invoice-mode line either (audit r18
+        // P0 — legacy invoice-mode never billed the membership fee, so the
+        // page disclosed none): only a FROZEN unified quote rides.
         const invoiceModeUnifiedSetup = invoiceModeUnifiedDecision === true && !(invoiceModeRodentLineFee > 0)
+          && invoiceModeEstData?.setupFeeQuote?.kind === 'unified'
           ? require('../services/estimate-converter').unifiedAcceptSetupFeeAmount(invoiceModeEstData)
           : 0;
         const invoiceDraft = buildEstimateInvoiceModeDraft({

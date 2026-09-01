@@ -2435,11 +2435,18 @@ async function acceptTimeUnifiedSetupFeeDecision(database, { customerId = null, 
   // ruling 2026-08-29) and its setup/manual pricing keeps legacy handling.
   const hasCommercialRecurring = recurringServices.some((svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_'));
   if (hasCommercialRecurring || estimateRodentBaitIsCommercial(data)) return null;
-  // A rodent_bait_setup line on a no-freeze estimate is the fee's
-  // DISCLOSURE VEHICLE, not an exemption (audit r17 P0): the decision
-  // still runs — an existing customer (active rodent-only included) is
-  // waived, and the billing sites stand the rodent line down on a false.
-  // The line's amount already prices at the unified knob gate-on (r13).
+  // DISCLOSURE GUARD for no-freeze estimates (audit r18 P0): a live
+  // decision may only bill what the customer-facing estimate already
+  // SHOWED — the legacy solo pest/mosquito setup card, or a
+  // rodent_bait_setup line (the fee's disclosure vehicle, audit r17 P0;
+  // its amount already prices at the unified knob gate-on, r13). Other
+  // mixes (lawn-only, bundles) disclosed no fee, so their accept charges
+  // none until their creation lanes freeze-and-disclose (next PR); they
+  // fall through to legacy (which also bills nothing) — page and invoice
+  // agree in both directions.
+  const legacyDisclosed = recurringMixHasMembershipFeeService(recurringServices)
+    || frozenRodentBaitSetupAmount(data) > 0;
+  if (!legacyDisclosed) return null;
   const verdict = await decideUnifiedSetupFee(database, { customerId });
   return Number(verdict.amount) > 0;
 }
@@ -6037,8 +6044,13 @@ const EstimateConverter = {
           // amount is frozen-first.
           // When the rodent line carries the fee (no-freeze rodent
           // estimate, decision non-null), the unified line stands down —
-          // one vehicle, never both (audit r17 P0).
-          const prepayUnifiedSetupAmount = acceptUnifiedDecision === true && !rodentLineCarriesFee
+          // one vehicle, never both (audit r17 P0). And a NO-FREEZE
+          // decision never adds a prepay line (audit r18 P0): the legacy
+          // solo-mix card the page showed says "waived with prepay", so
+          // only a FROZEN unified quote (whose page disclosed the fee as
+          // charged) may ride the prepay invoice.
+          const prepayHasFrozenUnified = normalizeEstimateData(estimateData)?.setupFeeQuote?.kind === 'unified';
+          const prepayUnifiedSetupAmount = acceptUnifiedDecision === true && !rodentLineCarriesFee && prepayHasFrozenUnified
             ? unifiedAcceptSetupFeeAmount(estimateData)
             : 0;
           const prepayLineDescription = commercialOnlyRecurring
