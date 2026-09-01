@@ -22,8 +22,13 @@ jest.mock('../models/db', () => {
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-bell-policy', () => {
+  const actual = jest.requireActual('../services/notification-bell-policy');
+  return { ...actual, bellAllowed: jest.fn(async () => false) };
+});
 
 const logger = require('../services/logger');
+const bellPolicy = require('../services/notification-bell-policy');
 const { isEnabled } = require('../config/feature-gates');
 const {
   HOT_VIEW_CATEGORY,
@@ -54,7 +59,12 @@ function fakeDb({ existing = null, throwOnRead = false } = {}) {
   return dbh;
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  // Most cases below model an owner who enabled the category; the
+  // silent-by-default contract has its own tests.
+  bellPolicy.bellAllowed.mockResolvedValue(true);
+});
 
 describe('ordinal / money formatting', () => {
   test('English ordinals incl. the 11-13 exception', () => {
@@ -84,6 +94,39 @@ describe('maybeRaiseHotViewAlert', () => {
     const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh: fakeDb(), notify: jest.fn() });
     expect(isEnabled).toHaveBeenCalledWith('estimateHotViewAlert');
     expect(out.reason).toBe('gate_off');
+  });
+
+  test('category silent (owner has not enabled it) → no DB read, no bell, regardless of the bell-policy gate (pre-push codex P1)', async () => {
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    const dbh = fakeDb();
+    const notify = jest.fn();
+    const out = await maybeRaiseHotViewAlert({ estimate: ESTIMATE, sessions: [session(1), session(2), session(3)], rule: RULE, now: NOW, dbh, notify, gateOn: () => true });
+    expect(out).toEqual({ raised: false, reason: 'category_silent' });
+    expect(bellPolicy.bellAllowed).toHaveBeenCalledWith({ category: HOT_VIEW_CATEGORY });
+    expect(dbh).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('the real policy reader keeps the category silent with no owner override (not on the allowlist)', async () => {
+    // Exercise the ACTUAL bellAllowed against an empty override set: absent
+    // preference row → silent. This is the shipped default.
+    const actual = jest.requireActual('../services/notification-bell-policy');
+    const overrides = jest.spyOn(actual._private, 'loadCategoryOverrides');
+    let allowed;
+    try {
+      // loadCategoryOverrides is called through the module's own binding, so
+      // stub the DB read it wraps instead: an empty preferences table.
+      const db = require('../models/db');
+      db.mockImplementation(() => ({
+        where: jest.fn().mockReturnThis(), whereIn: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(),
+        select: jest.fn(async () => []), then: (res) => Promise.resolve([]).then(res),
+      }));
+      actual.clearOverrideCache();
+      allowed = await actual.bellAllowed({ category: HOT_VIEW_CATEGORY });
+    } finally {
+      overrides.mockRestore();
+    }
+    expect(allowed).toBe(false);
   });
 
   test('below the rule threshold → no bell (live params, not defaults)', async () => {

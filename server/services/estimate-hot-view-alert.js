@@ -16,8 +16,9 @@
  *   job path and shadow accounting in the engine are untouched.
  * - Rule 14 caveat: this IS a bell. It is scoped to one per estimate per
  *   day, durably deduped against the notifications table (never in memory),
- *   and its category is silent by default under the admin bell policy — the
- *   owner turns it on under push settings.
+ *   and its category is silent by default: the owner turns it on under push
+ *   settings (category:estimate_hot_view). That default is enforced HERE,
+ *   not only by the admin bell policy gate, which ships off.
  * - Never throws: a failure here must not break the view hook.
  */
 
@@ -25,6 +26,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const NotificationService = require('./notification-service');
+const bellPolicy = require('./notification-bell-policy');
 
 const HOT_VIEW_CATEGORY = 'estimate_hot_view';
 const HOT_VIEW_DEDUPE_HOURS = 24;
@@ -68,10 +70,20 @@ async function maybeRaiseHotViewAlert({
   dbh = db,
   notify = (...args) => NotificationService.notifyAdmin(...args),
   gateOn = () => isEnabled('estimateHotViewAlert'),
+  categoryAllowed = () => bellPolicy.bellAllowed({ category: HOT_VIEW_CATEGORY }),
 } = {}) {
   try {
     if (!gateOn()) return { raised: false, reason: 'gate_off' };
     if (!estimate || !estimate.id) return { raised: false, reason: 'no_estimate' };
+    // "Silent until the owner enables the category" must hold REGARDLESS of
+    // GATE_ADMIN_BELL_POLICY (pre-push codex P1): notifyAdmin only consults
+    // the category override while that gate is on, and it ships off, so
+    // enabling this feature alone would ring every match. Read the same
+    // owner override the policy reads (category:estimate_hot_view in
+    // notification_preferences; not on the allowlist, so absent = silent)
+    // and stay out of the table entirely until it is true. With the policy
+    // gate on, notifyAdmin applies the identical verdict a second time.
+    if (!(await categoryAllowed())) return { raised: false, reason: 'category_silent' };
     const params = (rule && rule.params) || {};
     const minSessions = Number(params.minSessions) > 0 ? Number(params.minSessions) : DEFAULT_MIN_SESSIONS;
     const windowHours = Number(params.windowHours) > 0 ? Number(params.windowHours) : DEFAULT_WINDOW_HOURS;
