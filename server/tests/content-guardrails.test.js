@@ -805,6 +805,28 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('spread AffiliateLink props; exact post_type; attr-text and stale-example routes (Codex #3646 r19)', () => {
+    withAffiliateEnv(() => {
+      // A spread can override product/placement — rejected outright.
+      const spread = `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec" {...{product: "other"}} />`;
+      expect(affiliateCodes(guardrails.evaluate({ body: spread, frontmatter: fm() }, { targetIsBlog: true }))).toContain('P0:INVALID_AFFILIATELINK_PROPS');
+      // post_type compares EXACT — " Protocol " and "PROTOCOL" are not eligible.
+      for (const pt of [' protocol ', 'PROTOCOL']) {
+        const r = guardrails.evaluate({ body: `Intro.\n\n## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>`, frontmatter: fm({ post_type: pt }) }, { targetIsBlog: true });
+        expect(affiliateCodes(r)).toContain('P0:AFFILIATE_LINK_ON_PROTECTED_PAGE');
+      }
+      // Attr display text never flags a route...
+      const attrText = "Intro.\n\n## Sec\n\n<div title='<InlineCTA ctaHref=\"/example-only/\" />'>x</div>\n\nProse.";
+      expect(guardrails.evaluate({ body: attrText, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }).findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+      // ...and a route living only in a fenced example of the PRIOR body
+      // grants no refresh exemption for a newly rendered occurrence.
+      const prior = 'Old intro.\n\n```mdx\n<a href="/dead-example-route/">x</a>\n```\n\nOld prose.';
+      const refreshed = 'New intro.\n\n[link](/dead-example-route/)\n\nNew prose.';
+      const r2 = guardrails.evaluate({ body: refreshed, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: prior });
+      expect(r2.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    });
+  });
+
   test('nested-brace prop expressions, non-rendered route examples, SpiderIdBoard contract (Codex #3646 r18)', () => {
     const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
     const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;

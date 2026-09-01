@@ -1988,6 +1988,14 @@ function eachJsxAttr(attrs) {
   let i = 0;
   while (i < s.length) {
     while (i < s.length && /[\s/]/.test(s[i])) i += 1;
+    if (s[i] === '{') {
+      // A spread ({...expr}) at attribute position — consume it whole so
+      // attrs AFTER it are still walked (the spread itself is rejected by
+      // each component's hasAttrSpreadAfter check).
+      const e = closeOfExpressionAt(s, i);
+      if (e < 0) break;
+      i = e + 1; continue;
+    }
     const nm = /^[^\s=/>"'{}]+/.exec(s.slice(i));
     if (!nm) break;
     const name = nm[0];
@@ -2169,12 +2177,19 @@ function affiliateComponentFindings(body, editableMeta, frontmatter, { targetIsB
   // injects the LIVE astro registry.json so an astro-only row change is
   // honored before any portal sync/deploy (Codex #3646 r15 P1).
   const index = (targetIsBlog && gateOn) ? affiliateRegistryModule().productIndex(registry ? { registry } : undefined) : new Map();
-  const postType = String(frontmatter?.post_type || '').trim().toLowerCase();
+  // EXACT value (astro parity): the frontmatter enum and the registry
+  // eligibility compare raw — \" Protocol \" is not \"protocol\" (Codex #3646 r19).
+  const postType = typeof frontmatter?.post_type === 'string' ? frontmatter.post_type : '';
 
   for (const tag of tags) {
     // EXACTLY product + placement (the vendored AffiliateLink prop schema)
     // — an unknown prop is rejected by the astro prop validator after
     // owner review, so it blocks before the park exists (Codex #3646 r17).
+    // A JSX spread can override product/placement at render time and the
+    // astro contract rejects it outright (Codex #3646 r19).
+    if (hasAttrSpreadAfter(tag.attrs)) {
+      push('P0', 'INVALID_AFFILIATELINK_PROPS', '{...}', 'Draft contains an <AffiliateLink> carrying a JSX spread ({...}) — a spread can override product/placement at render time; the astro publish gate rejects it.');
+    }
     for (const { name } of eachJsxAttr(tag.attrs)) {
       if (name !== 'product' && name !== 'placement') {
         push('P0', 'INVALID_AFFILIATELINK_PROPS', name, `Draft contains an <AffiliateLink> with unknown prop "${name}" — the component accepts exactly product and placement; the astro publish gate rejects anything else.`);
@@ -4437,8 +4452,16 @@ function collectInternalDestinations(text) {
   const s = String(text || '');
   const dests = [];
   let m;
+  // Quoted attr VALUES are display text (<div title='<InlineCTA
+  // ctaHref="/x/" />'> renders no anchor) — a relative-arm match STARTING
+  // inside one is skipped; real href/src/ctaHref matches anchor at the
+  // attribute NAME, outside any value (Codex #3646 r19 P1).
+  const attrMasked = maskJsxAttrQuotes(s);
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
-  while ((m = rel.exec(s)) !== null) dests.push(m[1] || m[2] || m[3] || m[4]);
+  while ((m = rel.exec(s)) !== null) {
+    if (attrMasked[m.index] !== s[m.index]) continue;
+    dests.push(m[1] || m[2] || m[3] || m[4]);
+  }
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
   while ((m = abs.exec(s)) !== null) {
@@ -5878,7 +5901,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   let refreshExemptRoutes = null;
   if (refreshPriorBody) {
     refreshExemptRoutes = new Map();
-    for (const { norm } of collectInternalDestinations(refreshPriorBody)) {
+    // SAME non-rendered mask as internalRouteFinding's candidate scan — a
+    // route that lived only in a fenced/commented example of the prior
+    // body grants no exemption for a newly RENDERED occurrence (Codex
+    // #3646 r19 P1).
+    for (const { norm } of collectInternalDestinations(blankNonRenderedMarkdown(blankComments(refreshPriorBody)))) {
       refreshExemptRoutes.set(norm, (refreshExemptRoutes.get(norm) || 0) + 1);
     }
   }

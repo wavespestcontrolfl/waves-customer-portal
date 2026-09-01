@@ -678,7 +678,11 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       // extra ">" is text), never the close (CommonMark).
       if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; }
     } else {
-      const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+      let marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+      // CommonMark: an ordered marker interrupts a paragraph only when it
+      // starts at 1 — "Paragraph\n2. ~~~" is paragraph TEXT, and treating
+      // it as an item would open a fence that swallows rendered components.
+      if (marker && /\d/.test(marker[0]) && !/^ *1[.)]/.test(strippedLine) && !prevBlank && listStack.length === 0) marker = null;
       const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
       if (!blank && depth < topDepth()) { while (listStack.length && listStack[listStack.length - 1].depth > depth) listStack.pop(); }
       if (marker && markerIndent <= (depth === topDepth() ? topCol() : 0) + 3) {
@@ -790,7 +794,22 @@ function blankMdxExpressions(src: string, { keepJsx = true }: { keepJsx?: boolea
       if (quote) { if (ch === quote) quote = null; i += 1; continue; }
       if (ch === '"' || ch === "'") { quote = ch; i += 1; continue; }
       if (ch === '>') { inTag = false; i += 1; continue; }
-      if (ch === '{') { const j = closeOfExpression(i); if (j > 0) { blankRange(i, j); i = j + 1; continue; } }
+      if (ch === '{') {
+        const j = closeOfExpression(i);
+        if (j > 0) {
+          // Same keepJsx rule as prose expressions: an attr expression can
+          // carry RENDERED JSX (description={<AffiliateLink …/>}) — in the
+          // counting view its JSX survives (literals blanked); the
+          // structural view (keepJsx=false) blanks it whole.
+          const expr = src.slice(i, j + 1);
+          if (!keepJsx || !/<[A-Z]/.test(expr)) blankRange(i, j);
+          else {
+            const lexed = blankExpressionStrings(expr);
+            for (let k = i; k <= j; k += 1) if (lexed[k - i] !== src[k]) out[k] = lexed[k - i];
+          }
+          i = j + 1; continue;
+        }
+      }
       i += 1; continue;
     }
     if (ch === '<' && /[A-Za-z/!]/.test(src[i + 1] || '')) { inTag = true; i += 1; continue; }
