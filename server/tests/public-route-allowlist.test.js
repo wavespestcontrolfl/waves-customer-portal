@@ -2125,6 +2125,97 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(st.extra).toContain("opts = { dotfiles: 'allow' }");
   });
 
+  test('a DESTRUCTURED write to a registration method ([router.use] = [noop]) is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const { guardA } = require('../middleware/a');",
+        "const router = require('express').Router();",
+        '[router.use] = [() => router];',
+        'router.use(guardA);',
+        "router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('overwriting a router/app registration method'))).toBe(true);
+  });
+
+  test("a COMPUTED listen through a const string (server[method]) is judged like .listen", () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const https = require('https');",
+        "const method = 'listen';",
+        "const server = https.createServer({}, (req, res) => { res.end('leak'); });",
+        'server[method](443);',
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('unreviewed factory'))).toBe(true);
+  });
+
+  test('a static options object MUTATED after its initializer is rejected', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const opts = {};',
+        "opts.dotfiles = 'allow';",
+        "app.use('/files', express.static('public', opts));",
+      ].join('\n')),
+    });
+    expect(res.problems.some((p) => p.includes('mutated after its initializer — inline the final options'))).toBe(true);
+  });
+
+  test("a responder's digest covers REACHABLE local helpers (editing dispatch breaks the key)", () => {
+    const files = (dispatchBody) => ({
+      'server/index.js': app([
+        `function dispatch(req, res, next) { ${dispatchBody} }`,
+        'function responder(req, res, next) { return dispatch(req, res, next); }',
+        "app.use('/a', responder);",
+      ].join('\n')),
+    });
+    const a = scanOf(files('next();')).publicRoutes.find((r) => r.path === '/a');
+    const b = scanOf(files("res.json({ leak: 1 });")).publicRoutes.find((r) => r.path === '/a');
+    expect(a.extra).toMatch(/responder#[0-9a-f]{8}/);
+    expect(a.extra).not.toBe(b.extra);
+  });
+
+  test('a resolvable LITERAL binding in a predicate joins the condition label', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        'const enabled = false;',
+        "if (enabled) { app.get('/debug', (req, res) => res.json({})); }",
+      ].join('\n')),
+    });
+    const r = res.publicRoutes.find((x) => x.path === '/debug');
+    expect(r.cond).toBe('enabled [with enabled=false]');
+  });
+
+  test('a router constructed with NEW (new express.Router()) is tracked', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          'const router = new express.Router();',
+          "router.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(router);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
+  });
+
+  test('a WITH statement in a server module is a problem, never silence', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "with (router) { get('/leak', (req, res) => res.json({})); }",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('with statement'))).toBe(true);
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',

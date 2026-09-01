@@ -376,7 +376,7 @@
       "mount": "/api/public/appointment",
       "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/public/appointment (inline function#16e12cbc)",
+        "USE /api/public/appointment (inline function#43251846)",
         "GET /api/public/appointment/:token",
         "GET /api/public/appointment/:token/calendar.ics",
         "POST /api/public/appointment/:token/confirm"

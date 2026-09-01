@@ -355,6 +355,7 @@ class ModuleAnalysis {
     const borrowedRegCalls = []; // router.get.call(...) — borrowed registrations
     const factoryOptionCalls = []; // Router(<options>) — options need vetting
     const memberMutatorCalls = []; // router.stack.push(...) — internal-state mutation
+    const computedMethodCalls = []; // obj[method](...) — const-string methods resolved post-walk
     walk(this.ast.program, (node, ctx) => {
       if ((node.type === 'CallExpression' || node.type === 'NewExpression')
         && node.arguments.some((a) => a && ['Identifier', 'ArrayExpression', 'MemberExpression'].includes(a.type))) {
@@ -370,6 +371,12 @@ class ModuleAnalysis {
         && memberPropName(node.callee) === 'listen') {
         listenCalls.push(node);
       }
+      if (node.type === 'CallExpression'
+        && node.callee.type === 'MemberExpression' && node.callee.computed
+        && node.callee.property.type === 'Identifier'
+        && node.callee.object.type === 'Identifier') {
+        computedMethodCalls.push(node); // server[method](...) — resolved post-walk
+      }
       if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression',
         'ClassMethod', 'ClassPrivateMethod', 'ObjectMethod'].includes(node.type)) {
         // A parameter sharing a top-level binding's name makes references
@@ -382,6 +389,11 @@ class ModuleAnalysis {
       if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
         && (node.callee.name === 'eval' || node.callee.name === 'Function')) {
         this.pushSweepProblem(`${this.loc(node)}: dynamic code (${node.callee.name}) in a server module — the scanner cannot see what it registers`);
+      }
+      if (node.type === 'WithStatement') {
+        // `with (router) { get('/leak', h) }` resolves names dynamically —
+        // registrations inside can never be attributed. Fail closed.
+        this.pushSweepProblem(`${this.loc(node)}: with statement in a server module — dynamic name resolution can hide registrations from the scanner`);
       }
       if (node.type === 'CallExpression' && node.callee.type === 'Import') {
         // import() hands back the CACHED module — a mounted router mutated
@@ -473,7 +485,7 @@ class ModuleAnalysis {
           memberMutatorCalls.push(node); // judged post-walk against router roots
         }
       }
-      if (node.type === 'CallExpression' && node.arguments.length
+      if ((node.type === 'CallExpression' || node.type === 'NewExpression') && node.arguments.length
         && ((node.callee.type === 'MemberExpression' && memberPropName(node.callee) === 'Router')
           || (node.callee.type === 'Identifier' && node.callee.name === 'Router'))) {
         factoryOptionCalls.push(node);
@@ -579,6 +591,29 @@ class ModuleAnalysis {
         // A compound write to a binding makes its value execution-order
         // dependent — count it so the name is refused like any reassignment.
         this.countWrite(node.left.name);
+      } else if (node.type === 'AssignmentExpression'
+        && (node.left.type === 'ArrayPattern' || node.left.type === 'ObjectPattern')) {
+        // Destructured targets write too: `[router.use] = [noop]` overwrites
+        // a member; a bare identifier element counts as a reassignment.
+        const targets = [];
+        const collectTargets = (t) => {
+          if (!t) return;
+          if (t.type === 'Identifier') targets.push(t);
+          else if (t.type === 'MemberExpression') targets.push(t);
+          else if (t.type === 'AssignmentPattern') collectTargets(t.left);
+          else if (t.type === 'RestElement') collectTargets(t.argument);
+          else if (t.type === 'ArrayPattern') for (const el of t.elements) collectTargets(el);
+          else if (t.type === 'ObjectPattern') for (const pp of t.properties) collectTargets(pp.type === 'ObjectProperty' ? pp.value : pp);
+        };
+        collectTargets(node.left);
+        for (const t of targets) {
+          if (t.type === 'Identifier') this.countWrite(t.name);
+          else if (memberPropName(t) !== null) {
+            memberAssignments.push({ objectNode: t.object, prop: memberPropName(t), right: node.right, compound: true, node });
+          } else if (t.computed) {
+            computedMemberWrites.push({ objectNode: t.object, node });
+          }
+        }
       } else if (node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression'
         && (node.callee.object.type === 'Identifier' || node.callee.object.type === 'CallExpression'
@@ -697,6 +732,7 @@ class ModuleAnalysis {
         const mod = this.resolveModule(a.objectNode.arguments[0].value);
         if (mod) this.importMemberWrites.push({ module: mod, prop: a.prop, loc: this.loc(a.node) });
       }
+      if (b && b.kind === 'object') b.propWritten = true;
       if (a.compound && b && b.kind === 'object') {
         // Which value the prop holds now depends on execution order — poison
         // its resolution (and fall through to the overwrite checks below).
@@ -743,6 +779,28 @@ class ModuleAnalysis {
     }
     // `live.listen(3000)` — an application serving traffic directly IS the
     // runtime surface; only the scanned root may listen.
+    // `server[method](3000)` — a computed method through a CONST string is
+    // the literal spelling in disguise; resolve it, and fail closed when an
+    // unresolvable computed method rides an object constructed by a server
+    // factory the registry reviews.
+    for (const call of computedMethodCalls) {
+      const pb = this.cleanBinding(this.canonName(call.callee.property.name));
+      const resolved = pb && pb.kind === 'string' ? pb.value : null;
+      if (resolved === 'listen') { listenCalls.push(call); continue; }
+      if (resolved !== null) continue;
+      const ob = this.bindings.get(this.canonName(call.callee.object.name));
+      if (ob && ob.kind === 'call' && ob.node) {
+        const c = ob.node.callee;
+        let consumerish = false;
+        if (c && c.type === 'MemberExpression' && !c.computed && c.property.type === 'Identifier' && c.object.type === 'Identifier') {
+          const rb = this.cleanBinding(this.canonName(c.object.name));
+          if (rb && rb.kind === 'require') consumerish = Boolean(this.scanner.registry.lookupRouterConsumer(rb.module === null ? rb.spec : rb.module, c.property.name));
+        }
+        if (consumerish) {
+          this.pushSweepProblem(`${this.loc(call)}: computed method call on a constructed server (${call.callee.object.name}[...]) — the scanner cannot tell what it does; use a literal method`);
+        }
+      }
+    }
     for (const call of listenCalls) {
       const obj = call.callee.object;
       if (obj.type === 'CallExpression' && this.isAppFactory(obj)) {
@@ -886,6 +944,7 @@ class ModuleAnalysis {
     this.mutatedImportMembers = new Set(this.importMemberWrites.map((w) => `${w.module}#${w.prop}`));
     this.externalRouterRegs = [...this.directExternalRegs]; // registrations on OTHER modules' routers
     for (const r of this.registrations) {
+      r.cond = this.enrichCond(r.cond);
       if (r.objectNode) r.object = this.resolveMemberChain(r.objectNode) || '<member>';
       else r.object = this.canonName(r.object);
       if (r.object === '<member>' && r.objectNode
@@ -1120,7 +1179,9 @@ class ModuleAnalysis {
    * trusted — it could return terminal middleware wearing the name.
    */
   isRouterFactory(node) {
-    if (!node || node.type !== 'CallExpression') return false;
+    // `new express.Router()` constructs the same router — Express factories
+    // return their object even under `new`.
+    if (!node || (node.type !== 'CallExpression' && node.type !== 'NewExpression')) return false;
     const c = node.callee;
     if (c.type === 'Identifier') {
       const b = this.cleanCanonBinding(c.name);
@@ -1481,6 +1542,49 @@ class ModuleAnalysis {
   }
 
   /**
+   * A predicate like `if (enabled)` keys on the identifier's NAME; when the
+   * binding resolves to a literal, its value joins the label so flipping
+   * `const enabled = false` to `true` breaks the allowlist key.
+   */
+  enrichCond(cond) {
+    if (!cond) return cond;
+    const tokens = [...new Set(cond.match(/[A-Za-z_$][\w$]*/g) || [])];
+    const facts = [];
+    for (const t of tokens) {
+      const b = this.cleanBinding(this.canonName(t));
+      if (!b) continue;
+      if (b.kind === 'string') facts.push(`${t}='${b.value}'`);
+      else if (b.kind === 'other' && b.node
+        && ['BooleanLiteral', 'NumericLiteral', 'NullLiteral'].includes(b.node.type)) {
+        facts.push(`${t}=${this.src.slice(b.node.start, b.node.end)}`);
+      }
+    }
+    return facts.length ? `${cond} [with ${facts.join(', ')}]` : cond;
+  }
+
+  /**
+   * Digest of a responder's NORMALIZED source plus every reachable local
+   * function it references (cycle-safe) — a stable wrapper cannot hide an
+   * edited helper behind an unchanged identity.
+   */
+  bodyDigest(fnNode) {
+    const seen = new Set();
+    const parts = [];
+    const visitFn = (fn) => {
+      if (!fn || seen.has(fn)) return;
+      seen.add(fn);
+      parts.push(this.src.slice(fn.start, fn.end).replace(/\s+/g, ' '));
+      walk(fn, (n) => {
+        if (n.type !== 'Identifier') return;
+        const b = this.bindings.get(this.canonName(n.name));
+        if (b && b.kind === 'function' && b.node) visitFn(b.node);
+      }, { topLevel: false, conds: [], src: this.src });
+    };
+    visitFn(fnNode);
+    return crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 8);
+  }
+
+  /**
    * listen() is being called on `factoryNode`'s result — only a reviewed
    * routerConsumer (http.createServer) may construct the served server; the
    * consumer checks police its arguments. Anything unreviewed could serve a
@@ -1588,9 +1692,7 @@ class ModuleAnalysis {
         if (delegated) return [{ type: 'opaque', desc: `inline function delegating to router ${delegated}` }];
         // The BODY is identity: editing an approved inline responder to
         // answer new paths must break the allowlist key.
-        const bodyHash = crypto.createHash('sha256')
-          .update(this.src.slice(node.start, node.end).replace(/\s+/g, ' ')).digest('hex').slice(0, 8);
-        return [{ type: 'middleware', desc: `inline function#${bodyHash}` }];
+        return [{ type: 'middleware', desc: `inline function#${this.bodyDigest(node)}` }];
       }
       case 'Identifier': {
         const canon = this.canonName(node.name);
@@ -1647,9 +1749,7 @@ class ModuleAnalysis {
           // Named or not, the BODY is identity — editing an approved
           // responder must break its allowlist key (same rule as inline).
           if (b.node) {
-            const h = crypto.createHash('sha256')
-              .update(this.src.slice(b.node.start, b.node.end).replace(/\s+/g, ' ')).digest('hex').slice(0, 8);
-            return [{ type: 'middleware', desc: `${node.name}#${h}` }];
+            return [{ type: 'middleware', desc: `${node.name}#${this.bodyDigest(b.node)}` }];
           }
           return [{ type: 'middleware', desc: node.name }];
         }
@@ -1696,6 +1796,13 @@ class ModuleAnalysis {
             // object literal would.
             if (opt.type === 'Identifier') {
               const ob = this.cleanBinding(this.canonName(opt.name));
+              if (ob && ob.kind === 'object' && ob.propWritten) {
+                // A later `opts.dotfiles = 'allow'` changes what Express
+                // receives without touching the initializer — reject it.
+                // classify runs after Scanner.module() copied m.problems —
+                // report on the scanner directly so the finding survives.
+                this.scanner.problems.push(`${this.loc(opt)}: static options object ${opt.name} is mutated after its initializer — inline the final options so the identity captures them`);
+              }
               desc += `, ${opt.name} = ${ob && ob.node ? predicateLabel(this.src.slice(ob.node.start, ob.node.end)) : '<unresolved>'}`;
             } else {
               desc += `, ${predicateLabel(this.src.slice(opt.start, opt.end))}`;
