@@ -6,8 +6,8 @@
  *   - gate OFF → no behavioral enrichment; only provenance attribution,
  *     caller values winning
  *   - gate ON → catalog-identity snapshot completion fills ONLY absent
- *     fields, never overrides, never guesses on ambiguity, fails soft on
- *     catalog errors
+ *     fields, never overrides, never guesses on ambiguity; a catalog QUERY
+ *     error propagates (inside a trx the statement already aborted it)
  *   - createScheduledService wrapper: plain insert, and opt-in idempotency
  *     via onConflict('idempotency_key').ignore() with null on replay
  */
@@ -150,13 +150,11 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(out.service_id).toBeUndefined();
   });
 
-  test('catalog read failure fails soft — row stays snapshot-less, insert not blocked', async () => {
+  test('catalog read failure PROPAGATES — inside a trx the statement already aborted it', async () => {
     const broken = () => { throw new Error('conn down'); };
-    const out = await completeScheduledServiceInsert(BASE, {
+    await expect(completeScheduledServiceInsert(BASE, {
       trx: broken, cols: COLS, source: { sourceAction: 'test_lane' },
-    });
-    expect(out.customer_id).toBe('cust-1');
-    expect(out.service_key_snapshot).toBeUndefined();
+    })).rejects.toThrow('conn down');
   });
 });
 
@@ -185,6 +183,28 @@ describe('createScheduledService wrapper', () => {
       trx: replayConn, insertData: { ...BASE }, cols: COLS, source: { sourceAction: 'ai_call_pipeline' }, idempotencyKey: 'idem-1',
     });
     expect(replay).toBeNull();
+  });
+
+  test('a payload carrying a DIFFERENT idempotency key is refused', async () => {
+    await expect(createScheduledService({
+      trx: makeConn(),
+      insertData: { ...BASE, idempotency_key: 'idem-other' },
+      cols: COLS,
+      source: { sourceAction: 'x' },
+      idempotencyKey: 'idem-1',
+    })).rejects.toThrow(/conflicts with insertData.idempotency_key/);
+  });
+
+  test('a payload already carrying the SAME idempotency key is fine', async () => {
+    const conn = makeConn(CATALOG);
+    const row = await createScheduledService({
+      trx: conn,
+      insertData: { ...BASE, idempotency_key: 'idem-1' },
+      cols: COLS,
+      source: { sourceAction: 'x' },
+      idempotencyKey: 'idem-1',
+    });
+    expect(row.idempotency_key).toBe('idem-1');
   });
 
   test('idempotencyKey without the column throws instead of silently double-booking', async () => {

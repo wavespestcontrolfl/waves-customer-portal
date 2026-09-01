@@ -54,24 +54,24 @@ function contractError(message) {
 // identity snapshot. service_id wins; otherwise a UNIQUE active name match
 // on service_type. Ambiguous or missing → null (the caller's row simply
 // stays snapshot-less, exactly as today — enrichment never guesses).
+// A QUERY ERROR propagates: inside a PostgreSQL transaction the failed
+// statement has already aborted the trx, so swallowing it would only trade
+// this error for a "current transaction is aborted" on the insert that
+// follows (pre-push Codex P1).
 async function resolveCatalogIdentity(conn, insertData) {
-  try {
-    if (insertData.service_id) {
-      const row = await conn('services')
-        .where({ id: insertData.service_id })
-        .first('id', 'service_key', 'category');
-      return row || null;
-    }
-    const name = String(insertData.service_type || '').trim();
-    if (!name) return null;
-    const hits = await conn('services')
-      .where({ is_active: true })
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .select('id', 'service_key', 'category');
-    return hits.length === 1 ? hits[0] : null;
-  } catch {
-    return null; // enrichment is best-effort; validation is not
+  if (insertData.service_id) {
+    const row = await conn('services')
+      .where({ id: insertData.service_id })
+      .first('id', 'service_key', 'category');
+    return row || null;
   }
+  const name = String(insertData.service_type || '').trim();
+  if (!name) return null;
+  const hits = await conn('services')
+    .where({ is_active: true })
+    .whereRaw('LOWER(name) = LOWER(?)', [name])
+    .select('id', 'service_key', 'category');
+  return hits.length === 1 ? hits[0] : null;
 }
 
 /**
@@ -154,7 +154,13 @@ async function createScheduledService({ trx, insertData, cols, source, idempoten
   const data = await completeScheduledServiceInsert(insertData, { trx, cols, source, allowNullCustomer });
   if (idempotencyKey) {
     if (!cols.idempotency_key) throw contractError('idempotencyKey passed but scheduled_services has no idempotency_key column');
-    if (data.idempotency_key === undefined) data.idempotency_key = idempotencyKey;
+    // A payload carrying a DIFFERENT key would make the conflict guard
+    // dedupe on the wrong value and let retries under the intended key
+    // double-book (pre-push Codex P1) — refuse the ambiguity.
+    if (data.idempotency_key !== undefined && data.idempotency_key !== idempotencyKey) {
+      throw contractError(`idempotencyKey '${idempotencyKey}' conflicts with insertData.idempotency_key '${data.idempotency_key}'`);
+    }
+    data.idempotency_key = idempotencyKey;
     const [row] = await trx('scheduled_services')
       .insert(data)
       .onConflict('idempotency_key')
