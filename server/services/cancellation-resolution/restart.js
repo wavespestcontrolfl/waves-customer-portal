@@ -98,6 +98,32 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   const current = latest && (!latestRequest
     || String(latest.service_request_id || '') === String(latestRequest.id))
     ? latest : null;
+  // The attempt must belong to the CURRENT churn transition (codex GH r22
+  // P1): staff can churn an account through the admin customer editor
+  // (active=false + pipeline_stage), which creates no request or case — the
+  // newest request/case is then a PRIOR cancellation whose families may
+  // have nothing to do with what the account held when staff churned it,
+  // and both mint and accept would compare against the same stale attempt.
+  // The processor and the admin stage route both stamp customers.churned_at
+  // on the transition (a pg DATE), so an attempt anchored more than a day
+  // before that stamp is stale — FAIL CLOSED (nothing to restart; staff
+  // quote the account through normal tooling). The one-day tolerance
+  // absorbs a request filed just before a midnight churn stamp. No stamp
+  // (legacy) or an unreadable customers row keeps the legacy correlation.
+  const anchorTs = current ? current.created_at : (latestRequest ? latestRequest.created_at : null);
+  if (anchorTs) {
+    try {
+      const { etCalendarDayOf } = require('../../utils/datetime-et');
+      const row = await dbh('customers').where({ id: customerId }).first('churned_at');
+      const churnDay = row && row.churned_at ? etCalendarDayOf(row.churned_at) : null;
+      if (churnDay) {
+        const staleBefore = new Date(Date.parse(`${churnDay}T00:00:00Z`) - 24 * 3600 * 1000).toISOString().slice(0, 10);
+        if (etCalendarDayOf(anchorTs) < staleBefore) {
+          return { families: [], caseId: current ? current.id : null, requestId: latestRequest ? latestRequest.id : null, source: 'none' };
+        }
+      }
+    } catch { /* unreadable — keep the legacy correlation */ }
+  }
   const scope = current && current.status === 'committed' ? parseJson(current.scope, []) : [];
   const scoped = (Array.isArray(scope) ? scope : []).filter((f) => RESTARTABLE_FAMILIES.includes(f));
   if (scoped.length) return { families: scoped, caseId: current.id, requestId: latestRequest ? latestRequest.id : null, source: 'case_scope' };

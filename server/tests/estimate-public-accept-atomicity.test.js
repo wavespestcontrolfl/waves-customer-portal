@@ -1432,9 +1432,8 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(storedEstimate().status).toBe('accepted');
   });
 
-  test('a restart accept carrying option selections 409s frozen — the stored offer is the only acceptable one (pre-push P0 after GH r21)', async () => {
+  test('a restart accept carrying option selections is refused — the stored offer is the only acceptable one (pre-push P0 after GH r21; r22 relaxation keeps the default cadence path open)', async () => {
     for (const body of [
-      { selectedFrequency: 'monthly' },
       { serviceCadences: { pest_control: 'bimonthly' } },
       { serviceMode: 'one_time' },
     ]) {
@@ -1445,5 +1444,14 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
       expect(res.data.code).toBe('restart_quote_frozen');
       expect(storedEstimate().status).toBe('sent');
     }
+    // selectedFrequency is compared against the offer's DEFAULT key (the
+    // page always serializes it): a key that is not the stored default is
+    // refused — 400 unknown-key here (this fixture carries no frequency
+    // ladder), 409 frozen on a ladder-bearing offer — and never accepted.
+    resetStore(restartEstimate({ id: 'est-restart-frozen', token: 'tok-restart-f-x0123456789' }));
+    db.__state.tables.customers = [churnedCustomer()];
+    const res = await putAccept('tok-restart-f-x0123456789', { selectedFrequency: 'monthly' });
+    expect([400, 409]).toContain(res.status);
+    expect(storedEstimate().status).toBe('sent');
   });
 });

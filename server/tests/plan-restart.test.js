@@ -556,6 +556,24 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(1);
   });
 
+  test('an attempt anchored before the CURRENT churn transition is stale — admin re-churn must not resurrect the old cancellation (codex GH r22 P1)', async () => {
+    // Staff reactivated after the portal cancellation, then churned the
+    // account through the admin editor — that transition creates no
+    // request or case, only the churned_at stamp.
+    tables.customers[0].churned_at = '2026-08-30';
+    tables.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-01T12:00:00Z',
+    }];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(found).toEqual({ families: [], caseId: 'case-old', requestId: null, source: 'none' });
+
+    // An attempt inside the transition window (day before the DATE stamp)
+    // stays live — the tolerance absorbs a just-before-midnight request.
+    tables.cancellation_cases[0].created_at = '2026-08-29T23:59:00Z';
+    const live = await actualRestart.cancelledFamiliesFor('cust-1', fakeTrx());
+    expect(live.families).toEqual(['pest_control']);
+  });
+
   test('a failing prepay evidence read only NARROWS — the savepoint keeps the outer transaction usable (codex GH r18 P2)', async () => {
     // The prepay lookup is best-effort, but without a savepoint a pg
     // statement error aborts the OUTER mint transaction — the catch would

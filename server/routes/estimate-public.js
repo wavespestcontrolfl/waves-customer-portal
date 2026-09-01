@@ -8927,12 +8927,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // r21): the mint prices deterministic defaults and the accept-time
     // revalidation compares attempt identity + families, not price mix —
     // honoring body option selections here would let a crafted PUT accept
-    // a cadence, one-time mode, or per-service mix the mint never offered.
-    // The restart page sends none of these fields; same 409 code as the
-    // mutation-route guard so the portal messages it identically.
+    // a one-time mode or per-service mix the mint never offered. Same 409
+    // code as the mutation-route guard so the portal messages it
+    // identically. selectedFrequency is validated further down against
+    // the offer's DEFAULT key instead (GH r22 P1): the estimate page
+    // always serializes it — falling back to the first offered frequency
+    // — so a bare nonempty check bricked every normal restart accept.
     if (String(estimate.source || '') === 'plan_restart'
         && (requestedOneTime
-          || String(req.body?.selectedFrequency || '').trim()
           || (req.body?.serviceCadences && typeof req.body.serviceCadences === 'object'
             && Object.keys(req.body.serviceCadences).length))) {
       return res.status(409).json({
@@ -9415,6 +9417,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+    }
+    // Frozen-restart cadence rule (GH r22 P1, relaxing the r21 guard): the
+    // estimate page ALWAYS serializes selectedFrequency — it falls back to
+    // the first offered frequency — so the submitted key is allowed only
+    // when it IS the stored offer's deterministic default; any other key
+    // would accept a cadence/price the mint never offered.
+    if (String(estimate.source || '') === 'plan_restart' && selectedFrequencyKey
+        && selectedFrequencyKey !== String(defaultFrequencyFromList(pricingFrequencies)?.key || '')) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
     }
     // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
     // entries carry their own annualPrepayEligible (finalizePricingBundle);
