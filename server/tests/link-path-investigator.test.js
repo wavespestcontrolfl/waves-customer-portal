@@ -847,6 +847,21 @@ describe('full run', () => {
     expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected'); // the admin's state stands
   });
 
+  test('a FREE path never persists cents, even with a verified USD quote in sight (Codex r16 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const free = modelPath({
+      acquisition_type: 'self_service_account', payment_required: false, fee_scope: null,
+      renewal_period: null, // price fields still carry the observed quote as evidence
+    });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([free]) }) }));
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.payment_required).toBe(false);
+    expect(p.estimated_cost_cents).toBeNull();
+    expect(p.renewal_cost_cents).toBeNull();
+    expect(JSON.parse(p.investigation).price_text).toBe('USD 95 / year'); // observation kept as evidence only
+  });
+
   test('the claim itself is compare-and-set: a state change between selection and claim abandons the domain unfetched (Codex r4 P1)', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });

@@ -381,11 +381,14 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
 /** Model path + derived fields → the seo_link_acquisition_paths column set. */
 function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
   const currency = deriveCurrency(modelPath);
+  // Cents exist only on paid paths — a free path with a quoted number nearby
+  // (a different tier's price, injected copy) must never persist a cost.
+  const paid = modelPath.payment_required === true;
   return {
     acquisition_type: modelPath.acquisition_type,
     submission_url: modelPath.submission_url || null,
-    estimated_cost_cents: centsFor(currency, modelPath.price_text),
-    renewal_cost_cents: centsFor(currency, modelPath.renewal_price_text),
+    estimated_cost_cents: paid ? centsFor(currency, modelPath.price_text) : null,
+    renewal_cost_cents: paid ? centsFor(currency, modelPath.renewal_price_text) : null,
     renewal_period: modelPath.renewal_period || null,
     currency,
     fee_scope: modelPath.payment_required ? modelPath.fee_scope : null,
