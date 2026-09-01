@@ -303,15 +303,27 @@ async function applyScopedWindDown(customerId, plan, { requestId, actorLabel = '
       }
     }
     if (plan.perApplicationLane) {
-      // CAS per row against the price we planned from; a row invoiced or
-      // repriced in the meantime is skipped, never double-adjusted.
+      // CAS per row against the price we planned from; an INVOICED row is
+      // skipped (it bills at its already-fixed terms, never double-adjusted).
       for (const r of plan.perAppRows || []) {
         const invoiced = await trx('invoices').where({ scheduled_service_id: r.id }).whereNot('status', 'void').first('id');
         if (invoiced) continue;
         const casWhere = { id: r.id, estimated_price: r.before };
         if (r.primarySet) casWhere.primary_line_price = r.priorPrimary;
-        await trx('scheduled_services').where(casWhere)
+        const updated = await trx('scheduled_services').where(casWhere)
           .update({ estimated_price: r.after, ...(r.primarySet ? { primary_line_price: r.after } : {}), updated_at: new Date() });
+        if (!updated) {
+          // Zero rows = the price is no longer what the operator approved
+          // (or the row vanished) — claiming the reprice while the visit
+          // keeps its old charge is silent money drift. The one acceptable
+          // state is an invoice landing after the check above: that visit
+          // bills at its fixed terms. Anything else aborts the transaction
+          // (tier demote included) so the run surfaces scoped_wind_down
+          // and a fresh preview re-approves the live numbers.
+          const nowInvoiced = await trx('invoices').where({ scheduled_service_id: r.id }).whereNot('status', 'void').first('id');
+          if (nowInvoiced) continue;
+          throw new Error(`per-application reprice matched zero rows for visit ${r.id} — price changed since the approved preview`);
+        }
       }
     }
     const update = { updated_at: new Date(), waveguard_tier: plan.tierAfter, waveguard_tier_source: 'cancellation_scoped' };
@@ -1196,6 +1208,6 @@ async function processCancellationRequest({
 
 module.exports = {
   processCancellationRequest, raiseTermiteRetrievalTask, rentedTermiteStationState,
-  planScopedWindDown, familyOfServiceRow,
+  planScopedWindDown, applyScopedWindDown, familyOfServiceRow,
   CHURN_REASON, CANCELLABLE_STATUSES,
 };

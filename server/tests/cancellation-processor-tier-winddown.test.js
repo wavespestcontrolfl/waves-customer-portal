@@ -53,6 +53,8 @@ jest.mock('../models/db', () => {
       whereIn(col, vals) { conds.push((r) => vals.includes(r[col])); return q; },
       whereNull(col) { conds.push((r) => r[col] == null); return q; },
       whereNotNull(col) { conds.push((r) => r[col] != null); return q; },
+      whereNot(col, val) { conds.push((r) => r[col] !== val); return q; },
+      del() { const keep = rows.filter((r) => !matches(r, conds)); const n = rows.length - keep.length; tables[table] = keep; return Promise.resolve(n); },
       whereRaw() { return q; },
       select() { return Promise.resolve(rows.filter((r) => matches(r, conds))); },
       first(...cols) {
@@ -93,7 +95,7 @@ jest.mock('../models/db', () => {
 });
 
 const db = require('../models/db');
-const { processCancellationRequest } = require('../services/cancellation-processor');
+const { processCancellationRequest, applyScopedWindDown } = require('../services/cancellation-processor');
 
 function seedCustomer() {
   db.__tables.customers = [{
@@ -179,4 +181,26 @@ test('gate ON + ledger ADVISORY: a ledger failure still FAILS CLOSED and aborts 
   expect(result.cancelledCount).toBe(0);
   expect(db.__tables.customers[0].waveguard_tier).toBe('Gold');
   expect(db.__tables.customers[0].active).toBe(true);
+});
+
+test('a per-application reprice whose CAS lands on zero rows aborts the wind-down — tier demote rolls back, never a silently kept old price', async () => {
+  db.__tables.invoices = [];
+  // The live price drifted after the preview (plan said 90 → 96).
+  db.__tables.scheduled_services = [{ id: 'v1', customer_id: 'cust-1', estimated_price: 95 }];
+  const plan = {
+    monthlyLane: false, perApplicationLane: true, inScope: ['lawn_care'], remaining: ['pest_control'],
+    remainingRates: [], tierBefore: 'Silver', tierAfter: 'Bronze',
+    perAppRows: [{ id: 'v1', family: 'pest_control', before: 90, after: 96 }],
+  };
+  const tierBeforeRun = db.__tables.customers[0].waveguard_tier;
+  await expect(applyScopedWindDown('cust-1', plan, { requestId: 'req-1' })).rejects.toThrow(/zero rows/);
+  // Rolled back wholesale: no demote claimed for a reprice that did not land.
+  expect(db.__tables.customers[0].waveguard_tier).toBe(tierBeforeRun);
+  expect(db.__tables.scheduled_services[0].estimated_price).toBe(95);
+  // A CONCURRENT invoice is the one acceptable skip — the visit bills at
+  // its already-fixed terms and the rest of the wind-down proceeds.
+  db.__tables.invoices = [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'paid' }];
+  await applyScopedWindDown('cust-1', plan, { requestId: 'req-1' });
+  expect(db.__tables.customers[0].waveguard_tier).toBe('Bronze');
+  expect(db.__tables.scheduled_services[0].estimated_price).toBe(95);
 });
