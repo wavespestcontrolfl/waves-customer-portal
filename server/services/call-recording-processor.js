@@ -11048,6 +11048,11 @@ const CallRecordingProcessor = {
         // failure must never break call processing or the lead that was just
         // created.
         if (voicemailLeadPath && leadId) {
+          // Immediately before an outbound TEXT TO A CUSTOMER: the nearest
+          // gate is thousands of lines and several awaits back, and a
+          // duplicate text is the least recoverable thing this pass can do
+          // (codex #3677 P1).
+          if (!(await stillOwnsClaim())) return abandonToPeer('the voicemail quote-link text');
           try {
             const VoicemailLeadSms = require('./voicemail-lead-sms');
             voicemailSmsResult = await VoicemailLeadSms.sendVoicemailQuoteLink({
@@ -11097,6 +11102,7 @@ const CallRecordingProcessor = {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
               // silent-cold-lead outcome this lane prevents.
+              if (!(await stillOwnsClaim())) return abandonToPeer('the dropped-call address text');
               try {
                 smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({
                   leadId, extracted, call, phone: smsAni, expectedCustomerId: customerId || null,
@@ -14348,10 +14354,12 @@ const CallRecordingProcessor = {
     // /inbound-forward-accept webhook. Resolve that to a CSR name when mapped,
     // and fall back to 'Unknown' so analytics aren't silently booked to one name.
     let csrScoreResult = null;
-    // Re-checked here too: the synopsis above is a provider await, so
-    // ownership can have moved since the last gate. Scoring writes its own
-    // row, so a superseded pass must not start one (codex #3677 P1).
-    if (transcription && transcription.length > 50 && await stillOwnsClaim()) {
+    // Re-checked here: the synopsis above is a provider await, so ownership
+    // can have moved since the last gate. Losing it ABANDONS rather than
+    // skipping scoring and carrying on into the finalization work — a
+    // superseded pass has no business doing either (codex #3677 P1).
+    if (!(await stillOwnsClaim())) return abandonToPeer('CSR scoring and finalization');
+    if (transcription && transcription.length > 50) {
       try {
         const callMeta = typeof call.metadata === 'string'
           ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()

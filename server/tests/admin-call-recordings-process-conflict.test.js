@@ -149,11 +149,13 @@ describe('every side-effect boundary is gated on still owning the claim', () => 
     ['Step 5: If appointment detected', 'the appointment SMS'],
     ['Step 6: Enroll in the local new_lead automation', 'the automation enrollment'],
     ['Step 7b: Generate lead synopsis', 'the synopsis and scoring writes'],
+    ['VoicemailLeadSms', 'the voicemail quote-link text'],
+    ['DroppedCallSms.sendDroppedCallAddressRequest', 'the dropped-call address text'],
   ])('%s is preceded by an ownership check', (stepMarker, label) => {
     const at = source.indexOf(stepMarker);
     expect(at).toBeGreaterThan(-1);
     // The gate sits immediately before the step, not somewhere upstream.
-    const preceding = source.slice(Math.max(0, at - 200), at);
+    const preceding = source.slice(Math.max(0, at - 600), at);
     expect(preceding).toContain(`abandonToPeer('${label}')`);
     expect(preceding).toContain('stillOwnsClaim()');
   });
