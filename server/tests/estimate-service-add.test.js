@@ -83,6 +83,9 @@ describe('serviceOptOutAddableKeys', () => {
     expect(memberEvidenceInEstimateData({ inputs: { recurringCustomer: 'no' } })).toBe(false);
     expect(memberEvidenceInEstimateData({ inputs: { recurringCustomer: 'false' } })).toBe(false);
     expect(memberEvidenceInEstimateData({ inputs: { recurringCustomer: 1 } })).toBe(true);
+    // The singular public-wizard replay carrier counts too.
+    expect(memberEvidenceInEstimateData({ engineInput: { isRecurringCustomer: true } })).toBe(true);
+    expect(memberEvidenceInEstimateData({ engineInput: { priorQualifyingServices: ['pest_control'] } })).toBe(true);
     expect(memberEvidenceInEstimateData(null)).toBe(false);
   });
 

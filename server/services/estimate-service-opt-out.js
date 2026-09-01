@@ -379,7 +379,9 @@ function serviceAddBuildable(estData, serviceKey) {
 function memberEvidenceInEstimateData(estData = {}) {
   if (!isPlainObject(estData)) return false;
   if (estData.membershipSnapshot?.isExistingCustomer === true) return true;
-  const carriers = [estData, estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+  // engineInput (singular) is the public-wizard replay shape the membership
+  // reconciler also recognizes (pre-push codex P0).
+  const carriers = [estData, estData.engineInputs, estData.engineInput, estData.inputs, estData.engineRequest?.options]
     .filter(isPlainObject);
   if (carriers.some((c) => Array.isArray(c.priorQualifyingServices) && c.priorQualifyingServices.length)) return true;
   return carriers.some((c) => {
