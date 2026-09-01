@@ -678,7 +678,11 @@ function fencedCodeIntervals(raw: string): Array<[number, number]> {
       // extra ">" is text), never the close (CommonMark).
       if (close && depth === openDepth && close[2][0] === openCh && close[2].length >= openLen && close[1].length <= openListIndent + 3) { intervals.push([start, pos + line.length]); openCh = null; prevBlank = true; /* a closed fence ends the block — the next line can start any list */ }
     } else {
-      let marker = strippedLine.match(/^ *(?:[-*+]|\d{1,9}[.)])\s+/);
+      // A THEMATIC BREAK (spaced or not: * * *, - - -, ___) outranks a list
+      // marker and ends the ambient list (Codex #504 r26).
+      const themBreak = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(strippedLine);
+      let marker = themBreak ? null : strippedLine.match(/^ *(?:[-*+]|\d{1,9}[.)])\s+/);
+      if (themBreak) { while (listStack.length && listStack[listStack.length - 1].depth === depth) listStack.pop(); }
       // CommonMark: an ordered marker interrupts a paragraph only when it
       // starts at 1 — "Paragraph\n2. ~~~" is paragraph TEXT, and treating
       // it as an item would open a fence that swallows rendered components.
@@ -805,6 +809,11 @@ const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 
 function closeOfExpressionAt(src: string, i: number): number {
   let depth = 0; let q: string | null = null; let prevSig = ''; let word = ''; let wordDot = false;
   const parenCtl: boolean[] = [];
+  // Brace KINDS: a statement block's `}` returns to statement position (a /
+  // after `if (ok) {}` is a regex); an object literal's `}` is an operand
+  // (Codex #504 r26).
+  const braceKind: boolean[] = []; // true = object literal
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
   for (let j = i; j < src.length; j += 1) {
     const c = src[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
@@ -822,8 +831,8 @@ function closeOfExpressionAt(src: string, i: number): number {
       }
       if (closed > 0) { j = closed; prevSig = '/'; continue; }
     }
-    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
-    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
     if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
     if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY, not the keyword — a / after it is division
@@ -916,6 +925,8 @@ function blankExpressionStrings(src: string): string {
   // fail open); in prose only braces matter.
   let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false;
   const parenCtl: boolean[] = [];
+  const braceKind: boolean[] = []; // true = object literal (see closeOfExpressionAt)
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
   for (let i = 0; i < src.length; i += 1) {
     const c = src[i];
     if (c === '\\') { i += 1; continue; }
@@ -934,8 +945,8 @@ function blankExpressionStrings(src: string): string {
       if (c === '{') { depth = 1; prevSig = '{'; continue; }
       continue;
     }
-    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
-    if (c === '}') { depth -= 1; prevSig = '}'; word = ''; continue; }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
     if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
@@ -1261,7 +1272,8 @@ function styleHidesElement(attrs: string): boolean {
     if (m[1].toLowerCase() !== 'style') continue;
     styleValue = m[2] ?? m[3] ?? m[4] ?? m[5] ?? null; // last occurrence wins (JSX)
   }
-  return styleValue !== null && /display\s*['"]?\s*:\s*['"]?\s*none/i.test(styleValue);
+  // visibility:hidden hides just as surely as display:none (Codex #504 r26).
+  return styleValue !== null && /(?:display\s*['"]?\s*:\s*['"]?\s*none|visibility\s*['"]?\s*:\s*['"]?\s*hidden)/i.test(styleValue);
 }
 
 // True when a <details> renders OPEN: bare `open`, a non-empty string
@@ -1308,9 +1320,14 @@ function detailsRendersOpen(attrs: string): boolean {
 // rules; an unterminated tag masks the quoted spans seen up to EOF.
 function maskJsxAttrQuotes(src: string): string {
   const out = src.split('');
+  // Tags are DISCOVERED on the expression-literal-masked view: `<div` text
+  // inside a prose regex literal ({/<div"/.test(x)}) is not a tag whose
+  // quote walk may pair with a real component's prop quote (Codex #504
+  // r26); walking/masking still applies to the source offsets.
+  const discover = blankExpressionStrings(src);
   const re = /<[A-Za-z][\w.]*/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
+  while ((m = re.exec(discover)) !== null) {
     let j = m.index + m[0].length; let q: string | null = null; let qStart = -1;
     for (; j < src.length; j += 1) {
       const c = src[j];
@@ -1777,7 +1794,14 @@ function parseJsxProps(attrs: string): {
     // A STATIC quoted string expression (tel={'not-a-phone'}, title={''})
     // has a real value the schema must see (Codex #3646 r23 P1).
     const sm = body === null ? null : /^\s*'((?:[^'\\]|\\.)*)'\s*$|^\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(body);
-    if (sm) { simple[propName] = (sm[1] ?? sm[2] ?? '').replace(/\\(.)/g, '$1'); continue; }
+    if (sm) {
+      const raw = sm[1] ?? sm[2] ?? '';
+      // JS escape semantics ("\0" is NUL, not "0") are not implemented here
+      // — an escape-bearing string stays UNVALIDATED rather than validating
+      // a different value (Codex #504 r26).
+      if (raw.includes('\\')) { expressions.add(propName); continue; }
+      simple[propName] = raw; continue;
+    }
     const parsed = body === null ? undefined : tryParseStaticJson(body);
     if (parsed !== undefined) {
       simple[propName] = parsed.value;

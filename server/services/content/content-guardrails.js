@@ -1696,6 +1696,8 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
   // Codex #504 r19); in prose only braces matter.
   let inTag = false; let attrQ = null; let word = ''; let wordDot = false;
   const parenCtl = [];
+  const braceKind = []; // true = object literal (see closeOfExpressionAt)
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '\\') { i += 1; continue; }
@@ -1714,8 +1716,8 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
       if (c === '{') { depth = 1; prevSig = '{'; continue; }
       continue;
     }
-    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
-    if (c === '}') { depth -= 1; prevSig = '}'; word = ''; continue; }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
     if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
@@ -1772,6 +1774,10 @@ const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 
 function closeOfExpressionAt(s, i) {
   let depth = 0; let q = null; let prevSig = ''; let word = ''; let wordDot = false;
   const parenCtl = [];
+  // Brace KINDS: a statement block's } returns to statement position (a /
+  // after `if (ok) {}` is a regex); an object literal's } is an operand.
+  const braceKind = [];
+  const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || REGEX_ALLOWING_KEYWORDS.has(word);
   for (let j = i; j < s.length; j += 1) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
@@ -1789,8 +1795,8 @@ function closeOfExpressionAt(s, i) {
       }
       if (closed > 0) { j = closed; prevSig = '/'; continue; }
     }
-    if (c === '{') { depth += 1; prevSig = '{'; word = ''; continue; }
-    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = '}'; word = ''; continue; }
+    if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
+    if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
     if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word)); prevSig = '('; word = ''; continue; }
     if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
@@ -1806,9 +1812,12 @@ function closeOfExpressionAt(s, i) {
 function maskJsxAttrQuotes(src) {
   const s = String(src || '');
   const out = s.split('');
+  // Tags are DISCOVERED on the expression-literal-masked view (astro
+  // parity): `<div` text inside a prose regex literal is not a tag.
+  const discover = blankExpressionStringLiterals(s);
   const re = /<[A-Za-z][\w.]*/g;
   let m;
-  while ((m = re.exec(s)) !== null) {
+  while ((m = re.exec(discover)) !== null) {
     let j = m.index + m[0].length; let q = null; let qStart = -1;
     for (; j < s.length; j += 1) {
       const c = s[j];
@@ -2031,7 +2040,11 @@ const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?[\d\-().\s]{7,20}$/;
 function staticStringOfExpr(expr) {
   const m = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$/.exec(String(expr || ''));
   if (!m) return null;
-  return (m[1] !== undefined ? m[1] : m[2]).replace(/\\(.)/g, '$1');
+  const raw = m[1] !== undefined ? m[1] : m[2];
+  // JS escape semantics (\0 is NUL) are not implemented — escape-bearing
+  // strings stay unvalidated rather than validating a different value.
+  if (raw.includes('\\')) return null;
+  return raw;
 }
 
 // Every attribute name with its quoted-literal value (null when
