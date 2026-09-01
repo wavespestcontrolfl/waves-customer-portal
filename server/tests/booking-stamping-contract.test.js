@@ -39,7 +39,9 @@ function makeConn(rows = []) {
       return chain;
     };
     chain.first = () => Promise.resolve(
-      catalog.find((r) => r.id === chain._where?.id),
+      catalog.find((r) => r.id === chain._where?.id
+        && (chain._where.is_active === undefined || r.is_active === chain._where.is_active)
+        && !(chain._notArchived && r.is_archived === true)),
     );
     chain.select = () => Promise.resolve(catalog.filter((r) => {
       if (chain._where && !Object.entries(chain._where).every(([k, v]) => r[k] === v)) return false;
@@ -234,6 +236,19 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(byName.service_id).toBe('svc-live');
     const byKey = await run({ ...BASE, service_key_snapshot: 'pest_q_old' }, catalog);
     expect(byKey.service_id).toBeUndefined();
+  });
+
+  test('a caller-supplied service_id pointing at a retired row is kept, but derives no snapshot', async () => {
+    // The id is the caller's stamp and is never overridden; the durable
+    // key/category are withheld rather than copied from an archived or
+    // inactive service (pre-push Codex r9 P1).
+    for (const retired of [{ is_archived: true }, { is_active: false }]) {
+      const catalog = [{ id: 'svc-old', name: 'Old Thing', service_key: 'old_thing', category: 'pest', ...retired }];
+      const out = await run({ ...BASE, service_id: 'svc-old' }, catalog);
+      expect(out.service_id).toBe('svc-old');
+      expect(out.service_key_snapshot).toBeUndefined();
+      expect(out.service_category_snapshot).toBeUndefined();
+    }
   });
 
   test('a live row whose archive flag is NULL still links (nullable column, GH Codex r6 P2)', async () => {

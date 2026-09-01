@@ -62,19 +62,21 @@ async function resolveCatalogIdentity(conn, insertData) {
   // uses — so a concurrent deactivate/archive can't retire the service
   // between this read and the insert that references it (GH Codex r4 P2).
   const stable = (q) => (conn.isTransaction && typeof q.forShare === 'function' ? q.forShare() : q);
-  if (insertData.service_id) {
-    const row = await stable(conn('services')
-      .where({ id: insertData.service_id }))
-      .first('id', 'service_key', 'category');
-    return row || null;
-  }
-  // Fallback lookups link only LIVE catalog rows: is_active AND not
-  // archived (archiveService sets both flags together), so an archived row
-  // can neither be newly stamped nor make an otherwise unique name
-  // ambiguous (pre-push Codex r6 P1). The archive flag is nullable and a
+  // Every lookup links only LIVE catalog rows: is_active AND not archived
+  // (archiveService sets both flags together), so a retired row can
+  // neither be newly stamped nor make an otherwise unique name ambiguous
+  // (pre-push Codex r6 P1) — including a caller-SUPPLIED service_id (the
+  // id is preserved as the caller's stamp; only the derived snapshots are
+  // withheld — pre-push Codex r9 P1). The archive flag is nullable and a
   // NULL on an active row reads as live everywhere (20260730160000), so
   // the predicate is IS NOT TRUE, not = false (GH Codex r6 P2).
   const live = (q) => q.where({ is_active: true }).whereRaw('is_archived IS NOT TRUE');
+  if (insertData.service_id) {
+    const row = await stable(live(conn('services')
+      .where({ id: insertData.service_id })))
+      .first('id', 'service_key', 'category');
+    return row || null;
+  }
   const snapshotKey = String(insertData.service_key_snapshot || '').trim();
   if (snapshotKey) {
     const byKey = await stable(live(conn('services')
