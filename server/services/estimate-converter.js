@@ -6530,6 +6530,29 @@ const EstimateConverter = {
           logger.info(`[estimate-converter] Estimate ${estimateId}: prepay billed the rodent setup before any series root exists — claim ledgered anchor-less; the restore resolves the root from the estimate`);
         }
       }
+      // A UNIFIED setup fee that rode THIS accept's invoice — standard or
+      // prepay — is ledgered the same way (audit r12 P0; owner ruling 7:
+      // refund/void auto-restores the obligation): anchored to the
+      // recurring root this accept seeded (family-agnostic), anchor-less
+      // when the operator schedules later. Mutually exclusive with the
+      // rodent claim above by construction (the unified decision is null
+      // whenever a rodent setup line rides), and recordSetupFeeClaimFor-
+      // Invoice is idempotent on the invoice id.
+      if (draftInvoiceId && acceptUnifiedDecision === true) {
+        const { recordSetupFeeClaimForInvoice } = require('./secure-appointment-plans');
+        const unifiedRoots = await database('scheduled_services')
+          .where({ source_estimate_id: estimateId, customer_id: customerId })
+          .whereNull('recurring_parent_id')
+          .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+          .orderBy('created_at', 'asc')
+          .select('id');
+        await recordSetupFeeClaimForInvoice(database, {
+          invoiceId: draftInvoiceId,
+          anchorId: unifiedRoots?.[0]?.id || null,
+          amount: unifiedAcceptSetupFeeAmount(estimateData),
+          estimateId,
+        });
+      }
       if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {
         try {
           const InvoiceService = require('./invoice');

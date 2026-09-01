@@ -879,7 +879,10 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   test('every accept-side mint keys its claim to the estimate; the column ships guarded both ways (codex #3591 r70 P1)', () => {
     const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
-    expect((estimatePublicSrc.match(/await plans\.recordSetupFeeClaimForInvoice\(trx, \{[\s\S]*?estimateId: estimate\.id,\s+\}\);/g) || []).length).toBe(2);
+    // 4 = the two rodent mints (invoice-mode + standard) plus their two
+    // unified-fee twins (GATE_UNIFIED_SETUP_FEE, audit r12 P0) — every one
+    // keys estimateId.
+    expect((estimatePublicSrc.match(/await plans\.recordSetupFeeClaimForInvoice\(trx, \{[\s\S]*?estimateId: estimate\.id,\s+\}\);/g) || []).length).toBe(4);
     expect(converter).toMatch(/await recordSetupFeeClaimForInvoice\(database, \{\s+invoiceId: draftInvoiceId,\s+anchorId: rodentRoot \? rodentRoot\.id : null,\s+amount: frozenRodentBaitSetupAmount\(estimateData\),\s+estimateId,\s+\}\);/);
     const migration = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260831000030_setup_fee_claims_estimate_id.js'), 'utf8');
     expect(migration).toMatch(/hasTable\('setup_fee_claims'\)[\s\S]*?hasColumn\('setup_fee_claims', 'estimate_id'\)[\s\S]*?t\.uuid\('estimate_id'\)\.nullable\(\)/);

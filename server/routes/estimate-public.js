@@ -11111,6 +11111,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           throw estimateAcceptError('invoice-mode acceptance requires a customer record before creating the invoice');
         }
         const InvoiceService = require('../services/invoice');
+        // The unified verdict, decided through the shared accept-time
+        // helper (frozen-positive quotes get its one-fee-per-account
+        // dedupe; this mint runs BEFORE any conversion seeding, so the
+        // probe never reads this accept's own rows). Amount frozen-first.
+        // Hoisted so the claim ledger below records the same figure.
+        const invoiceModeUnifiedSetup = await (async () => {
+          if (treatAsOneTime) return 0;
+          const EstimateConverterMod = require('../services/estimate-converter');
+          const d = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
+          const dec = await EstimateConverterMod.acceptTimeUnifiedSetupFeeDecision(trx, {
+            customerId,
+            recurringServices: recurringSvcList,
+            estimateData: d,
+          });
+          return dec === true ? EstimateConverterMod.unifiedAcceptSetupFeeAmount(d) : 0;
+        })();
         const invoiceDraft = buildEstimateInvoiceModeDraft({
           estimate,
           estData: acceptedEstDataForPricing,
@@ -11134,21 +11150,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           rodentSetupAmount: treatAsOneTime
             ? 0
             : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
-          // The unified verdict, decided through the shared accept-time
-          // helper (frozen-positive quotes get its one-fee-per-account
-          // dedupe; this mint runs BEFORE any conversion seeding, so the
-          // probe never reads this accept's own rows). Amount frozen-first.
-          unifiedSetupAmount: await (async () => {
-            if (treatAsOneTime) return 0;
-            const EstimateConverterMod = require('../services/estimate-converter');
-            const d = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
-            const dec = await EstimateConverterMod.acceptTimeUnifiedSetupFeeDecision(trx, {
-              customerId,
-              recurringServices: recurringSvcList,
-              estimateData: d,
-            });
-            return dec === true ? EstimateConverterMod.unifiedAcceptSetupFeeAmount(d) : 0;
-          })(),
+          unifiedSetupAmount: invoiceModeUnifiedSetup,
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own
@@ -11230,6 +11232,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             invoiceId: inv.id,
             anchorId: invoiceModeRodentRoot ? invoiceModeRodentRoot.id : null,
             amount: invoiceModeRodentSetup,
+            estimateId: estimate.id,
+          });
+        }
+        // The UNIFIED fee on this invoice-mode draft gets the same
+        // immutable ledger row (audit r12 P0; ruling 7: refund/void
+        // auto-restores). Mutually exclusive with the rodent claim above
+        // (the unified decision is null whenever a rodent line rides);
+        // anchor-less — invoice-mode mints before any series is seeded,
+        // and the reversal restore resolves the root from the estimate.
+        if (invoiceModeUnifiedSetup > 0) {
+          const plans = require('../services/secure-appointment-plans');
+          await plans.recordSetupFeeClaimForInvoice(trx, {
+            invoiceId: inv.id,
+            anchorId: null,
+            amount: invoiceModeUnifiedSetup,
             estimateId: estimate.id,
           });
         }
@@ -11708,6 +11725,27 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 invoiceId: inv.id,
                 anchorId: acceptRodentRoot ? acceptRodentRoot.id : null,
                 amount: acceptedRodentSetupAmount,
+                estimateId: estimate.id,
+              });
+            }
+            // The UNIFIED fee on this standard accept invoice gets the same
+            // immutable ledger row (audit r12 P0; ruling 7: refund/void
+            // auto-restores) — anchored to the recurring root this accept
+            // seeded (family-agnostic). Mutually exclusive with the rodent
+            // claim above (the unified decision is null whenever a rodent
+            // line rides).
+            if (acceptUnifiedDecision === true && setupFeeApplies) {
+              const plans = require('../services/secure-appointment-plans');
+              const unifiedAcceptRoots = await trx('scheduled_services')
+                .where({ source_estimate_id: estimate.id, customer_id: customerId })
+                .whereNull('recurring_parent_id')
+                .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+                .orderBy('created_at', 'asc')
+                .select('id');
+              await plans.recordSetupFeeClaimForInvoice(trx, {
+                invoiceId: inv.id,
+                anchorId: unifiedAcceptRoots?.[0]?.id || null,
+                amount: acceptSetupFeeAmount,
                 estimateId: estimate.id,
               });
             }
