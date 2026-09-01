@@ -429,6 +429,12 @@ const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_SOFT = CUSTOMER_SURFACE.soft;
 const ESTIMATE_SOFT_BORDER = CUSTOMER_SURFACE.softBorder;
 
+// WebKit before 15.4 (inside Capacitor's iOS 14 deployment floor) has no
+// dvh unit — an inline declaration using it is DISCARDED, not fallen back
+// from, scroll-locking sheets out of reach. Detect once; vh is the degraded
+// but safe budget on old engines.
+const DVH = (typeof CSS !== 'undefined' && CSS.supports && CSS.supports('height', '100dvh')) ? 'dvh' : 'vh';
+
 const PORTAL_SHELL = {
   page: ESTIMATE_BG,
   surface: '#FFFFFF',
@@ -480,8 +486,9 @@ function ShellCloseButton({ onClick, label = 'Close' }) {
       onClick={onClick}
       aria-label={label}
       style={{
-        width: 36,
-        height: 36,
+        // 44x44 minimum touch target on customer surfaces.
+        width: 44,
+        height: 44,
         borderRadius: 8,
         border: `1px solid ${PORTAL_SHELL.borderStrong}`,
         background: PORTAL_SHELL.surface,
@@ -3024,11 +3031,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           </button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
+        {/* 2-up on phones: four columns squeezed the chips to ~66px on
+            320-390px viewports. */}
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
             <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
-              <div style={{ fontSize: compact ? 12 : 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
+              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
               {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
             </button>
           ))}
@@ -4774,24 +4783,38 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               return (
-                <div key={p.key} style={{
+                <div key={p.key} data-reminder-row="" style={{
+                  // On compact, force the select+switch onto their own row
+                  // (flex: 1 0 100%). A shrink-only text cluster still left
+                  // ~57px for "72-Hour Appointment Reminder" next to ~140px
+                  // of controls at 320px — no overflow, but the labels
+                  // collided. Wide layouts keep the inline row.
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  flexWrap: 'wrap',
                   padding: '12px 0',
                   borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 160px', minWidth: 0 }}>
                     <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
-                    <div>
+                    <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>{p.label}</div>
-                      <div style={{ fontSize: 12, color: muted }}>{p.desc}</div>
+                      <div style={{ fontSize: 12, color: muted, whiteSpace: 'normal' }}>{p.desc}</div>
                       {p.locked && (
                         <div style={{ fontSize: 12, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
+                  {/* Select + switch travel together so a wrap never splits
+                      the controls across lines. */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+                    marginLeft: compact ? 0 : 'auto',
+                    flex: compact ? '1 0 100%' : '0 0 auto',
+                    justifyContent: compact ? 'flex-end' : undefined,
+                  }}>
                   {p.channelKey && (() => {
                     // Email/Both can only be offered once an email is on file —
                     // otherwise the backend silently falls back to SMS and the
@@ -4812,8 +4835,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
                         style={{
-                          fontSize: 12, fontWeight: 800, color: B.glassNavy,
-                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 36,
+                          fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                           background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                           cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                         }}
@@ -4833,23 +4856,32 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       disabled={p.locked}
                       onClick={p.locked ? undefined : () => handleToggle(p.key)}
                       style={{
-                        width: 44, height: 24, borderRadius: 12, border: 'none', padding: 0,
+                        // 44x44 hit target; the gold 44x24 track is the inner
+                        // visual (owner 2026-08-28: keep the gold on/off look).
+                        width: 44, height: 44, border: 'none', padding: 0,
+                        background: 'transparent',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                         cursor: p.locked ? 'default' : 'pointer',
-                        // Gold = on, pale gold = off (owner 2026-08-28)
-                        background: isOn ? B.yellow : `${B.yellow}55`,
-                        position: 'relative', transition: 'background 0.3s',
                         opacity: p.locked ? 0.85 : 1,
                       }}
                     >
-                      <span style={{
-                        position: 'absolute', top: 2, width: 20, height: 20,
-                        borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-                        left: isOn ? 22 : 2, transition: 'left 0.3s',
-                      }} />
+                      <span aria-hidden="true" style={{
+                        width: 44, height: 24, borderRadius: 12, flexShrink: 0,
+                        // Gold = on, pale gold = off (owner 2026-08-28)
+                        background: isOn ? B.yellow : `${B.yellow}55`,
+                        position: 'relative', display: 'inline-block', transition: 'background 0.3s',
+                      }}>
+                        <span style={{
+                          position: 'absolute', top: 2, width: 20, height: 20,
+                          borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+                          left: isOn ? 22 : 2, transition: 'left 0.3s',
+                        }} />
+                      </span>
                     </button>
                     {p.locked && (
                       <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
+                  </div>
                   </div>
                 </div>
               );
@@ -6650,18 +6682,25 @@ function BillingTab({ customer, refreshCustomer }) {
           </div>
         )}
 
-        <div style={{
+        <div data-billing-reminder-row="" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           {/* No on/off toggle (owner ruling 2026-08-01): billing reminders
               are account-operational — every customer gets them, like
               receipts. Only the delivery method is a choice; STOP remains
               the master kill switch. */}
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminders</div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>How you receive reminders for upcoming or overdue billing items.</div>
           </div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+            marginLeft: compact ? 0 : 'auto',
+            flex: compact ? '1 0 100%' : '0 0 auto',
+            justifyContent: compact ? 'flex-end' : undefined,
+          }}>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
             const selectable = hasBillingEmail;
@@ -6672,8 +6711,8 @@ function BillingTab({ customer, refreshCustomer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for billing reminders"
                 style={{
-                  fontSize: 12, fontWeight: 800, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 36,
+                  fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
@@ -6682,13 +6721,15 @@ function BillingTab({ customer, refreshCustomer }) {
               </select>
             );
           })()}
+          </div>
         </div>
 
-        <div style={{
+        <div data-payment-confirm-row="" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
             {/* Channel-aware copy: the dropdown beside this row offers
                 Text / Email / Text & Email, so hardcoded "texts" copy read as
                 false the moment a customer picked Email. */}
@@ -6726,6 +6767,12 @@ function BillingTab({ customer, refreshCustomer }) {
               })()}
             </div>
           </div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+            marginLeft: compact ? 0 : 'auto',
+            flex: compact ? '1 0 100%' : '0 0 auto',
+            justifyContent: compact ? 'flex-end' : undefined,
+          }}>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
             const selectable = hasBillingEmail;
@@ -6736,8 +6783,8 @@ function BillingTab({ customer, refreshCustomer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for payment confirmations"
                 style={{
-                  fontSize: 12, fontWeight: 800, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 36,
+                  fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
@@ -6751,10 +6798,11 @@ function BillingTab({ customer, refreshCustomer }) {
               delivery method is a choice, like billing reminders. A stored
               opt-out shows a one-tap way back on. */}
           {paymentSmsOff && (
-            <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 40, position: 'relative', flexShrink: 0 }}>
+            <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 44, position: 'relative', flexShrink: 0 }}>
               Turn on
             </button>
           )}
+          </div>
         </div>
 
         {billingPrefsStatus === 'error' && (
@@ -9505,7 +9553,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         position: 'relative',
         width: '100%',
         maxWidth: 860,
-        maxHeight: compact ? 'calc(100vh - 10px)' : 'calc(100vh - 40px)',
+        maxHeight: compact ? `calc(100${DVH} - 10px)` : `calc(100${DVH} - 40px)`,
         overflowY: 'auto',
         background: PORTAL_SHELL.page,
         border: `1px solid ${PORTAL_SHELL.border}`,
@@ -14163,15 +14211,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                           onClick={() => removePhoto(i)}
                           aria-label={`Remove photo ${i + 1}`}
                           style={{
+                            // 44x44 hit target; the visible 26x26 chip stays
+                            // small so it doesn't swallow the thumbnail.
                             position: 'absolute',
-                            top: 5,
-                            right: 5,
-                            width: 26,
-                            height: 26,
-                            borderRadius: 8,
-                            background: 'rgba(15,23,42,0.82)',
-                            color: '#fff',
-                            border: '1px solid rgba(255,255,255,0.65)',
+                            top: -4,
+                            right: -4,
+                            width: 44,
+                            height: 44,
+                            background: 'transparent',
+                            border: 'none',
                             cursor: 'pointer',
                             display: 'inline-flex',
                             alignItems: 'center',
@@ -14179,7 +14227,19 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                             padding: 0,
                           }}
                         >
-                          <Icon name="close" size={13} strokeWidth={2.2} />
+                          <span aria-hidden="true" style={{
+                            width: 26,
+                            height: 26,
+                            borderRadius: 8,
+                            background: 'rgba(15,23,42,0.82)',
+                            color: '#fff',
+                            border: '1px solid rgba(255,255,255,0.65)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}>
+                            <Icon name="close" size={13} strokeWidth={2.2} />
+                          </span>
                         </button>
                       </div>
                     ))}
@@ -14423,7 +14483,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
       style={{
-        flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+        flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'center', gap: 4, padding: '7px 2px', border: 'none',
         background: 'transparent', cursor: 'pointer', minHeight: 58,
         color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
@@ -14440,7 +14500,13 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
         background: B.yellow,
       }} />}
       <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
-      <span style={{ fontSize: 10, fontWeight: isActive ? 850 : 700, letterSpacing: 0 }}>{t.label}</span>
+      {/* 12px is the ceiling that keeps "Billing"/"Visits" fitting 5-across
+          on 320px — tab captions only, never body copy. */}
+      <span style={{
+        fontSize: 12, fontWeight: isActive ? 850 : 700, letterSpacing: 0,
+        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap', lineHeight: 1.2,
+      }}>{t.label}</span>
     </button>
   );
   return (
@@ -14524,7 +14590,8 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
-        maxHeight: 'calc(100vh - 16px)',
+        // dvh: 100vh over-measures behind the iOS Safari toolbar.
+        maxHeight: `calc(100${DVH} - 16px)`,
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
@@ -14803,7 +14870,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           boxSizing: 'border-box',
           borderRadius: compact ? '8px 8px 0 0' : 8,
           maxHeight: compact
-            ? (viewportH ? `min(85dvh, ${viewportH}px)` : '85dvh')
+            ? (viewportH ? `min(85${DVH}, ${viewportH}px)` : `85${DVH}`)
             : 'min(760px, calc(100vh - 48px))',
           maxWidth: 640,
           width: '100%',
@@ -15340,7 +15407,7 @@ export default function PortalPage() {
                 overflow: 'hidden',
                 // dvh + safe-area: the menu sits ~60px below the notch, so a
                 // plain 100vh budget pushed the last rows off-screen on iOS.
-                maxHeight: 'calc(100dvh - env(safe-area-inset-top, 0px) - 84px)',
+                maxHeight: `calc(100${DVH} - env(safe-area-inset-top, 0px) - 84px)`,
                 overflowY: 'auto',
                 WebkitOverflowScrolling: 'touch',
                 // Keep the menu's scroll from chaining to the page behind it.
@@ -15675,7 +15742,10 @@ export default function PortalPage() {
       {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
           that are programmatically focusable — without it the skip link
           scrolls but Tab keeps walking the header. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: `24px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
+      {/* Mobile bottom padding budgets the floating nav (minHeight 58 + 8px
+          float) plus the iOS home-indicator inset — a flat 92px left the last
+          card underneath the bar on notched phones. */}
+      <main id="portal-main" tabIndex={-1} style={{ padding: isMobileShell ? '24px 16px calc(108px + env(safe-area-inset-bottom, 0px))' : '24px 16px 32px', maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
         {/* No shell-level h1: every non-dashboard tab renders its own visible
             h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
