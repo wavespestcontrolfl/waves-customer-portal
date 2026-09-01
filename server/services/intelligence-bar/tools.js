@@ -1684,6 +1684,9 @@ async function cancelPlan(input, actionContext = {}) {
       // lanes) — the confirmation card must show the fee-or-waive choice
       // before the money-moving commit; unresolved = fee may apply.
       visit_fees: preview.visitFees,
+      // Per-application repricing of surviving visits (scoped, per-visit
+      // billing lane) — charge changes the confirmation card must show.
+      per_app_changes: Array.isArray(impact.perAppChanges) ? impact.perAppChanges : [],
       waive_late_fee: preview.waiveLateFee,
       send_confirmation: preview.sendConfirmation,
       confirmation_channels: preview.confirmationChannels,

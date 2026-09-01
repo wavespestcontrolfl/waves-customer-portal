@@ -301,6 +301,10 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
     remaining: impact && Array.isArray(impact.remaining)
       ? impact.remaining.map((r) => `${r.key}:${r.monthlyBefore}:${r.monthlyAfter}`)
       : null,
+    // Per-application repricing of surviving visits — approved per row.
+    perApp: impact && Array.isArray(impact.perAppChanges)
+      ? impact.perAppChanges.map((r) => `${r.id}:${r.before}:${r.after}`).sort()
+      : null,
   };
   return crypto.createHash('sha256').update(JSON.stringify(facts)).digest('hex');
 }
@@ -865,6 +869,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // it actually exists; `refund` is computed above from the now-terminal
       // covered rows, so the recorded amount is the post-sweep truth.
       let repairedRefund = priorSnap && priorSnap.refund ? priorSnap.refund : null;
+      let refundRepairedNow = false;
       const repairErrors = [];
       if (prepayPlan.prepayDisposition === 'end_now_refund' && !repairedRefund) {
         // The repaired task must carry facts somebody APPROVED (codex r8
@@ -898,6 +903,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             customer, request: { id: prior.service_request_id }, term, refund, actorLabel,
           });
           repairedRefund = refund;
+          refundRepairedNow = true;
           try {
             const snap = { ...priorSnap, refund };
             delete snap.proposedRefund;
@@ -913,67 +919,87 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           logger.error(`[admin-cancellation] refund task repair failed for case ${prior.id}: ${repairErr.message}`);
         }
       }
-      // Failed confirmation channels REPAIR on retry (codex r14 P2): a
-      // prior run whose term decision and case persisted but whose SMS or
-      // email did not accept left the acceptance open — echoing forever
-      // would leave the customer permanently untold. The send-once probes
-      // (audit-log for SMS, class-keyed idempotency for email) make the
-      // re-call safe: only the missing channel actually sends. On a clean
-      // repair the case outcome is stamped and the acceptance closes.
+      // Failed follow-ups REPAIR on retry, stamp-first (codex r14/r15 P2):
+      // a prior run whose SMS/email did not accept — or whose refund task
+      // was just repaired above — must not echo its stale partial outcome
+      // forever. The send-once probes (audit-log for SMS, class-keyed email
+      // idempotency) make re-sends safe: only what is missing goes out. The
+      // case outcome is STAMPED BEFORE any in-memory state clears or the
+      // acceptance closes — a lost stamp leaves everything retryable.
       const outcome = priorSnap && priorSnap.outcome ? priorSnap.outcome : null;
-      if (outcome && outcome.confirmationRequested === true
-        && Array.isArray(outcome.errors)
-        && outcome.errors.some((e) => String(e).startsWith('confirmation_'))) {
+      const isConfirmErr = (e) => String(e).startsWith('confirmation_');
+      if (outcome && (refundRepairedNow
+        || (Array.isArray(outcome.errors) && outcome.errors.some(isConfirmErr)))) {
         try {
           const reqRow = prior.service_request_id
             ? await db('service_requests').where({ id: prior.service_request_id }).first('id', 'status', 'created_at')
             : null;
           if (reqRow && reqRow.status === 'new') {
-            const verdictClean = prior.status !== 'open'
-              && outcome.errors.every((e) => String(e).startsWith('confirmation_'));
-            const resend = await sendCancellationConfirmations({
-              customer,
-              request: reqRow,
-              result: {
-                scope: Array.isArray(outcome.scope) ? outcome.scope : [],
-                remaining: [],
-                tierAfter: outcome.tierAfter ?? null,
-                lateFeeWaived: outcome.lateFeeWaived === true,
-              },
-              processed: verdictClean,
-              effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
-                ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
-              keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
-              entryPoint: 'admin_cancel_plan',
-              identityTrustLevel: 'admin_operator',
-            });
-            const stillFailed = [];
-            if (customer.phone && !resend.smsSent) stillFailed.push('confirmation_sms_not_sent');
-            if (customer.email && !resend.emailSent) stillFailed.push('confirmation_email_not_sent');
-            outcome.confirmationChannels = [...new Set([...(outcome.confirmationChannels || []), ...resend.channels])];
-            outcome.confirmation = outcome.confirmationChannels.includes('sms')
-              ? 'sms' : (outcome.confirmationChannels.includes('email') ? 'email' : null);
-            outcome.errors = [
-              ...outcome.errors.filter((e) => !String(e).startsWith('confirmation_')),
-              ...stillFailed,
-            ];
-            try {
-              await db('cancellation_cases').where({ id: prior.id })
-                .update({ snapshot: JSON.stringify({ ...priorSnap, outcome }), updated_at: new Date() });
-            } catch (stampErr) {
-              logger.warn(`[admin-cancellation] confirmation-repair stamp failed for case ${prior.id}: ${stampErr.message}`);
+            // A freshly repaired refund task answers the stale disposition
+            // error the lost task recorded.
+            const promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
+              && (e === 'prepay_term_disposition' || e === 'prepay_refund_task')));
+            let channels = Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [];
+            let errorsNext = promotedErrors;
+            if (outcome.confirmationRequested === true
+              && (promotedErrors.some(isConfirmErr) || refundRepairedNow)) {
+              // The verdict the copy carries: clean once only channel
+              // failures remain — a refund repair promotes the manual
+              // "closing out by hand" run to its completed confirmation.
+              const verdictClean = prior.status !== 'open' && promotedErrors.every(isConfirmErr);
+              const resend = await sendCancellationConfirmations({
+                customer,
+                request: reqRow,
+                result: {
+                  scope: Array.isArray(outcome.scope) ? outcome.scope : [],
+                  remaining: [],
+                  tierAfter: outcome.tierAfter ?? null,
+                  lateFeeWaived: outcome.lateFeeWaived === true,
+                },
+                processed: verdictClean,
+                effectiveAt: priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn
+                  ? `${priorSnap.effectiveOn}T12:00:00-04:00` : null,
+                keptThrough: priorSnap.effectiveDate === 'end_of_coverage',
+                entryPoint: 'admin_cancel_plan',
+                identityTrustLevel: 'admin_operator',
+              });
+              const stillFailed = [];
+              if (customer.phone && !resend.smsSent) stillFailed.push('confirmation_sms_not_sent');
+              if (customer.email && !resend.emailSent) stillFailed.push('confirmation_email_not_sent');
+              channels = [...new Set([...channels, ...resend.channels])];
+              errorsNext = [...promotedErrors.filter((e) => !isConfirmErr(e)), ...stillFailed];
             }
-            if (!outcome.errors.length) {
+            const nextOutcome = {
+              ...outcome,
+              confirmationChannels: channels,
+              confirmation: channels.includes('sms') ? 'sms' : (channels.includes('email') ? 'email' : null),
+              errors: errorsNext,
+            };
+            await db('cancellation_cases').where({ id: prior.id })
+              .update({
+                snapshot: JSON.stringify({
+                  ...priorSnap,
+                  ...(repairedRefund ? { refund: repairedRefund, proposedRefund: undefined } : {}),
+                  outcome: nextOutcome,
+                }),
+                updated_at: new Date(),
+              });
+            Object.assign(outcome, nextOutcome);
+            if (!outcome.errors.length && !repairErrors.length) {
               try {
                 await db('service_requests').where({ id: reqRow.id, status: 'new' })
                   .update({ status: 'resolved', updated_at: new Date() });
               } catch (closeErr) {
-                logger.warn(`[admin-cancellation] acceptance close after confirmation repair failed for request ${reqRow.id}: ${closeErr.message}`);
+                // Leaves 'new' — the next retry re-lands here, the resends
+                // dedupe, and the close is re-attempted.
+                logger.warn(`[admin-cancellation] acceptance close after repair failed for request ${reqRow.id}: ${closeErr.message}`);
               }
             }
           }
-        } catch (resendErr) {
-          logger.warn(`[admin-cancellation] confirmation repair failed for case ${prior.id}: ${resendErr.message}`);
+        } catch (repairFlowErr) {
+          // Nothing was cleared in memory before the stamp — the response
+          // echoes the original errors and a later retry repairs again.
+          logger.warn(`[admin-cancellation] follow-up repair failed for case ${prior.id}: ${repairFlowErr.message}`);
         }
       }
       return {

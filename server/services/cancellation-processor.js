@@ -71,12 +71,31 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, { retriev
   }
   const NotificationService = require('./notification-service');
   const count = rented.length;
+  // An ACCELERATED program end (end_at_term later switched to
+  // end_now_refund) SUPERSEDES the earlier dated task — staff must never
+  // hold a wait-until-term-end instruction and a pull-now instruction at
+  // once. Stamp the dated task read and say so in the new body.
+  let supersededDated = false;
+  if (!retrieveAfter) {
+    try {
+      const stamped = await db('notifications')
+        .where({ recipient_type: 'admin' })
+        .whereNull('read_at')
+        .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
+        .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
+        .whereRaw("metadata->>'retrieveAfter' IS NOT NULL")
+        .update({ read_at: new Date() });
+      supersededDated = Number(stamped) > 0;
+    } catch (supersedeErr) {
+      logger.warn(`[cancellation-processor] dated-retrieval supersede failed for ${customerId}: ${supersedeErr.message}`);
+    }
+  }
   // retrieveAfter (C3 end_of_coverage): paid termite visits stay on the
   // calendar through the coverage boundary — pulling the stations now would
   // make those visits undeliverable, so the task is DATED, never "pull now".
   const timing = retrieveAfter
     ? ` Paid coverage runs through ${retrieveAfter} — schedule the retrieval AFTER that date, not before; covered termite visits still deliver until then.`
-    : ' Schedule the retrieval visit.';
+    : ` Schedule the retrieval visit.${supersededDated ? ' This supersedes the earlier dated retrieval task — the program now ends immediately.' : ''}`;
   const result = await NotificationService.notifyAdmin(
     'service',
     retrieveAfter

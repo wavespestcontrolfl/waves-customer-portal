@@ -1017,20 +1017,25 @@ describe('POST /:id/cancel-plan', () => {
       mockState.scheduled_services = [
         { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
       ];
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
         snapshot: JSON.stringify({
           prepayTermId: 'term-1', effectiveDate: 'now', prepayDisposition: 'end_now_refund',
           refund: null,
           proposedRefund: { prepaidAmount: 480, includedVisits: 4, completedVisits: 1, remainingVisits: 3, amount: 360, needsManualCalc: false },
-          outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'] },
+          outcome: { visitsPulled: 3, scope: [], confirmationRequested: true, confirmation: 'sms', confirmationChannels: ['sms'], errors: ['prepay_term_disposition'] },
         }),
       }];
       const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'now' })).json();
       expect(body).toEqual(expect.objectContaining({ duplicate: true, caseId: 'case-9', errors: [] }));
       expect(body.refund).toEqual(expect.objectContaining({ amount: 360, needsManualCalc: false }));
       // The task is raised into the term dedupe (idempotent if it exists).
-      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       const [category, , , opts] = NotificationService.notifyAdmin.mock.calls[0];
       expect(category).toBe('billing');
       expect(opts).toEqual(expect.objectContaining({ dedupeKey: 'prepay_refund:term:term-1' }));
@@ -1039,9 +1044,17 @@ describe('POST /:id/cancel-plan', () => {
       const stamped = JSON.parse(caseUpdate.patch.snapshot);
       expect(stamped.refund).toEqual(expect.objectContaining({ amount: 360 }));
       expect(stamped.proposedRefund).toBeUndefined();
-      // Still a duplicate: no second request, processor run, or customer text.
+      // The repair COMPLETES the outcome (codex r15): the stale disposition
+      // error clears, the now-valid completed confirmation goes out, and the
+      // acceptance closes.
+      expect(sendCancellationConfirmations).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+      const latestSnap = JSON.parse(mockState.cancellation_cases[0].snapshot);
+      expect(latestSnap.outcome.errors).toEqual([]);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+      // Still a duplicate: no second request, no processor run — the ONE
+      // send is the owed completed confirmation (send-once guarded).
       expect(mockProcess).not.toHaveBeenCalled();
-      expect(sendCancellationConfirmations).not.toHaveBeenCalled();
+      expect(sendCancellationConfirmations).toHaveBeenCalledTimes(1);
     }));
 
     test('a repair whose live refund no longer matches the recorded proposal is refused — a fresh approved preview unlocks it', () => withServer(async (baseUrl) => {
@@ -1127,6 +1140,37 @@ describe('POST /:id/cancel-plan', () => {
       expect(JSON.parse(mockState.cancellation_cases[0].snapshot).outcome.errors).toEqual([]);
       expect(mockState.service_requests[0].status).toBe('resolved');
       expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('a repair whose case stamp FAILS clears nothing and keeps the acceptance open — retryable, never stale-resolved', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({
+          prepayTermId: 'term-1', effectiveDate: 'end_of_coverage', effectiveOn: '2027-02-28', prepayDisposition: 'end_at_term',
+          outcome: {
+            visitsPulled: 2, scope: [], confirmationRequested: true, confirmation: null, confirmationChannels: [],
+            errors: ['confirmation_sms_not_sent', 'confirmation_email_not_sent'],
+          },
+        }),
+      }];
+      db.mockImplementation((table) => {
+        const b = builderFor(table);
+        if (table === 'cancellation_cases') { b.update = async () => { throw new Error('case table down'); }; }
+        return b;
+      });
+      const body = await (await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).json();
+      // Nothing cleared, nothing closed — the next retry repairs again
+      // (the send-once probes make the resends idempotent).
+      expect(body.errors).toEqual(['confirmation_sms_not_sent', 'confirmation_email_not_sent']);
+      expect(mockState.service_requests[0].status).toBe('new');
     }));
 
     test('a failed repair reports the missing task instead of a clean duplicate; a recorded refund is never re-raised', () => withServer(async (baseUrl) => {

@@ -531,6 +531,12 @@ function confirmationDisplayParams(toolName, params, preview) {
           ? `ends at term ${prepay.termEnd}; no renewal`
           : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
       } : {}),
+      // Per-application repricing of surviving visits (scoped cancels on the
+      // per-visit billing lane) — real charge changes the operator approves.
+      ...(Array.isArray(preview.per_app_changes) && preview.per_app_changes.length ? {
+        visit_prices: preview.per_app_changes
+          .map((r) => `${r.label || r.family} $${r.before} → $${r.after}`).join(', '),
+      } : {}),
       // Outstanding balance stays payable through the cancel — a money fact
       // the card must show (the dialog shows the same line).
       ...(Number(preview.open_balance) > 0 ? {

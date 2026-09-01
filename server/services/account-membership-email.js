@@ -400,6 +400,13 @@ async function sendCancellationReceived({
     try {
       const legacy = await db('email_messages')
         .where({ idempotency_key: `account.cancellation_received:${request.id}` })
+        // Only a provider-ACCEPTED legacy send counts — the library also
+        // persists blocked/failed rows under the key, and honoring one of
+        // those would mark the channel successful while no email reached
+        // the customer.
+        .where(function accepted() {
+          this.whereNotNull('sent_at').orWhereIn('status', ['sent', 'delivered']);
+        })
         .first('id');
       if (legacy) return { ok: true, deduped: true, legacyKey: true };
     } catch (probeErr) {

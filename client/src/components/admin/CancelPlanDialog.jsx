@@ -348,6 +348,9 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                   {impact.remaining?.length > 0 && (
                     <Fact label="Stays">{impact.remaining.map((r) => `${r.label} ${money(r.monthlyBefore)} → ${money(r.monthlyAfter)}`).join(", ")}</Fact>
                   )}
+                  {impact.perAppChanges?.length > 0 && (
+                    <Fact label="Visit prices">{impact.perAppChanges.map((r) => `${r.label} ${money(r.before)} → ${money(r.after)}`).join(", ")}</Fact>
+                  )}
                   {impact.openBalance != null && impact.openBalance > 0 && (
                     <Fact label="Open balance">{money(impact.openBalance)} (still payable)</Fact>
                   )}
@@ -372,7 +375,11 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                   when a follow-up step (case write, prepay decision, refund
                   task) failed and reports it in errors — that run still needs
                   the office. */}
-              {result.processed && !(result.errors?.length) ? "Done." : "Partially done — the office review alert has the details."}
+              {result.processed && !(result.errors?.length)
+                ? "Done."
+                : result.errors?.includes("review_alert_failed")
+                  ? "Partially done — and the office review alert could NOT be raised. Arrange the follow-up manually."
+                  : "Partially done — the office review alert has the details."}
             </div>
             <div>
               <Fact label="Cancelled">{result.scope?.length ? result.scope.join(", ") : "whole account"}</Fact>

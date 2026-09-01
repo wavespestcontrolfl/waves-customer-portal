@@ -182,6 +182,12 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     accountMonthlyBefore: monthly,
     accountMonthlyAfter: wholeAccount ? (monthly == null ? null : 0) : (plan ? plan.scalarAfter : null),
     remaining: wholeAccount ? [] : (plan ? plan.remainingRates.map((r) => ({ key: r.family, label: labelOf(r.family), monthlyBefore: r.before, monthlyAfter: r.after })) : []),
+    // Per-application lane (scoped): the wind-down repricess every surviving
+    // uninvoiced visit — real customer charge changes the operator must see
+    // and approve (they ride the fingerprint like every displayed number).
+    perAppChanges: !wholeAccount && plan && Array.isArray(plan.perAppRows)
+      ? plan.perAppRows.map((r) => ({ id: r.id, family: r.family, label: labelOf(r.family), before: r.before, after: r.after }))
+      : [],
     visitsCancelled,
     nextVisitCancelled,
     pulledVisitKeys,
