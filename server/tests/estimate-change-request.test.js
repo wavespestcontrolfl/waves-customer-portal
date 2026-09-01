@@ -71,6 +71,7 @@ describe('normalizeTopics', () => {
   test('keeps only known keys, deduped, in order', () => {
     expect(normalizeTopics(['price', 'nope', 'price', 'schedule', null])).toEqual(['price', 'schedule']);
     expect(normalizeTopics('price')).toEqual([]);
+    expect(normalizeTopics(['constructor', '__proto__', 'toString'])).toEqual([]);
   });
   test('every topic has a label the office reads', () => {
     for (const key of Object.keys(CHANGE_REQUEST_TOPICS)) expect(CHANGE_REQUEST_TOPICS[key]).toBeTruthy();

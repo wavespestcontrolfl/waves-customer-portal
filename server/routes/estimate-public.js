@@ -24935,7 +24935,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // write 404s a draft). Absent otherwise so gate-off responses stay
       // byte-identical.
       ...(featureGates.isEnabled('estimateSoftExit') && !adminDraftPreview && isEstimateAcceptActive(estimate)
-        ? { softExit: true } : {}),
+        ? {
+          softExit: true,
+          // The change branch needs a customer the resolver can attach or
+          // create (linked id, or a phone to create from); an unlinked
+          // email-only estimate would 400 on submit, so the page withholds
+          // the branch instead (GH codex P2). Include-when-true.
+          ...(estimate.customer_id || String(estimate.customer_phone || '').trim() ? { softExitChange: true } : {}),
+        } : {}),
       // Services this customer has opted out of. Present only when there is
       // something to report, so a gate-off (or never-used) response stays
       // byte-identical to today. The page renders the "Add it back" row from

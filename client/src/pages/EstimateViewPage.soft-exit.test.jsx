@@ -101,4 +101,31 @@ describe('SoftExitSheet', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/little more/));
     expect(screen.getByRole('button', { name: 'Close this estimate' })).toBeInTheDocument();
   });
+
+  it('text typed in one branch never crosses into the other', () => {
+    render(<SoftExitSheet token="tok" onClose={vi.fn()} onDeclined={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /change something/i }));
+    fireEvent.change(screen.getByLabelText('What should be different?'), { target: { value: 'drop mosquito' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByRole('button', { name: /isn’t for me/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Something else' }));
+    expect(screen.getByLabelText('Tell us a little more')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Close this estimate' })).toBeDisabled();
+  });
+
+  it('withholds the change branch when the server says the estimate cannot park one', () => {
+    render(<SoftExitSheet token="tok" changeEligible={false} onClose={vi.fn()} onDeclined={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /change something/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /still deciding/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /isn’t for me/i })).toBeInTheDocument();
+  });
+
+  it('moves focus into the sheet and closes on Escape through the shared focus manager', () => {
+    const onClose = vi.fn();
+    render(<SoftExitSheet token="tok" onClose={onClose} onDeclined={vi.fn()} />);
+    const dialog = screen.getByRole('dialog', { name: 'Not what you expected?' });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

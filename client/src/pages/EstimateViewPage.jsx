@@ -2870,7 +2870,7 @@ const softExitInputStyle = {
   padding: '10px 12px', fontSize: 14, fontFamily: 'inherit', color: COLORS.glassNavy,
 };
 
-export function SoftExitSheet({ token, expiresAt = null, onClose, onDeclined }) {
+export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, onClose, onDeclined }) {
   const [step, setStep] = useState('choose'); // choose | change | decline | done
   const [doneKind, setDoneKind] = useState(null); // change | still_deciding | decline
   const [topics, setTopics] = useState(() => new Set());
@@ -2941,6 +2941,21 @@ export function SoftExitSheet({ token, expiresAt = null, onClose, onDeclined }) 
     if (step === 'done' && doneKind === 'decline') onDeclined?.();
     onClose();
   };
+  // Shared modal focus manager: initial focus, Tab trapping, restoration to
+  // the opener, document-level Escape (GH codex P1 — the partial onKeyDown
+  // only saw Escape once focus happened to enter the sheet).
+  const dialogRef = useModalFocus(true, close);
+  // Branch-specific fields never cross branches: a decline explanation must
+  // not become a change request, and vice versa (GH codex P2).
+  const goTo = (next) => {
+    setNote('');
+    setReason(null);
+    setTopics(new Set());
+    setCompetitorName('');
+    setCompetitorPrice('');
+    setError('');
+    setStep(next);
+  };
 
   const heading = step === 'change' ? 'What would you like changed?'
     : step === 'decline' ? 'What made this a no?'
@@ -2954,11 +2969,10 @@ export function SoftExitSheet({ token, expiresAt = null, onClose, onDeclined }) 
       role="dialog"
       aria-modal="true"
       aria-label={heading}
-      onKeyDown={(e) => { if (e.key === 'Escape') close(); }}
       data-glass-scrim=""
       style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
-      <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+      <div ref={dialogRef} data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>{heading}</div>
 
         {step === 'choose' ? (
@@ -2967,13 +2981,19 @@ export function SoftExitSheet({ token, expiresAt = null, onClose, onDeclined }) 
               Tell us where this landed. Nothing here sends you a message &mdash; it just helps us get it right.
             </div>
             <div style={{ display: 'grid', gap: 10 }}>
-              <button type="button" onClick={() => setStep('change')} style={softExitOptionStyle}>
-                I&rsquo;d like to change something
-              </button>
+              {/* A change request needs a customer the office can answer; an
+                  unlinked email-only estimate cannot park one (the server
+                  says so via softExitChange), so the branch is withheld
+                  rather than failing on submit (GH codex P2). */}
+              {changeEligible ? (
+                <button type="button" onClick={() => goTo('change')} style={softExitOptionStyle}>
+                  I&rsquo;d like to change something
+                </button>
+              ) : null}
               <button type="button" onClick={submitStillDeciding} disabled={submitting} style={softExitOptionStyle}>
                 {submitting ? 'One moment…' : 'I’m still deciding'}
               </button>
-              <button type="button" onClick={() => setStep('decline')} style={softExitOptionStyle}>
+              <button type="button" onClick={() => goTo('decline')} style={softExitOptionStyle}>
                 This isn&rsquo;t for me
               </button>
             </div>
@@ -3080,7 +3100,7 @@ export function SoftExitSheet({ token, expiresAt = null, onClose, onDeclined }) 
             <button type="button" data-glass-accent="" onClick={close} style={softExitPrimaryStyle(true)}>Done</button>
           ) : null}
           {step === 'change' || step === 'decline' ? (
-            <button type="button" onClick={() => { setStep('choose'); setError(''); }} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
+            <button type="button" onClick={() => goTo('choose')} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
               Back
             </button>
           ) : null}
@@ -7055,6 +7075,7 @@ function EstimateViewPageInner() {
         <SoftExitSheet
           token={token}
           expiresAt={estimate.expiresAt || null}
+          changeEligible={data?.softExitChange === true}
           onClose={() => setSoftExitOpen(false)}
           // A decline is terminal: reload so the server's terminal state
           // (declined card, no CTAs) paints from truth, not local state.

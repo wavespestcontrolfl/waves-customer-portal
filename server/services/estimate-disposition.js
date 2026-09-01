@@ -245,7 +245,9 @@ const CUSTOMER_DECLINE_REASONS = {
 function customerDispositionUpdates(body = {}) {
   const reasonKey = typeof body.reason === 'string' ? body.reason.trim() : '';
   if (!reasonKey) return { updates: null };
-  const code = CUSTOMER_DECLINE_REASONS[reasonKey];
+  // Own keys only — inherited names (constructor, __proto__) must take the
+  // invalid branch, not resolve to a prototype member (GH codex P2).
+  const code = Object.hasOwn(CUSTOMER_DECLINE_REASONS, reasonKey) ? CUSTOMER_DECLINE_REASONS[reasonKey] : null;
   if (!code) {
     return { error: `Invalid reason '${reasonKey}'. Must be one of: ${Object.keys(CUSTOMER_DECLINE_REASONS).join(', ')}.` };
   }

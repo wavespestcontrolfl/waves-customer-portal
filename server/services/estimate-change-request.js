@@ -66,7 +66,7 @@ function normalizeTopics(topics) {
   const keys = [];
   for (const raw of topics) {
     const key = String(raw || '').trim();
-    if (CHANGE_REQUEST_TOPICS[key] && !seen.has(key)) {
+    if (Object.hasOwn(CHANGE_REQUEST_TOPICS, key) && !seen.has(key)) {
       seen.add(key);
       keys.push(key);
     }

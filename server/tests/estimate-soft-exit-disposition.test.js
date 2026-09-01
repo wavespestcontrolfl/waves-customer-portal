@@ -27,9 +27,12 @@ describe('customerDispositionUpdates', () => {
     expect(customerDispositionUpdates({ reason: '' })).toEqual({ updates: null });
   });
 
-  test('unknown reason keys are a 400, never a silent default', () => {
+  test('unknown reason keys are a 400, never a silent default — inherited object names included', () => {
     expect(customerDispositionUpdates({ reason: 'declined_price' }).error).toMatch(/Invalid reason/);
     expect(customerDispositionUpdates({ reason: 'still_deciding' }).error).toMatch(/Invalid reason/);
+    for (const key of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      expect(customerDispositionUpdates({ reason: key }).error).toMatch(/Invalid reason/);
+    }
   });
 
   test('price → declined_price, customer-sourced, label populated', () => {
