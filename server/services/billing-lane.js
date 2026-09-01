@@ -219,8 +219,48 @@ function predictCompletionBilling({
   completionAutopayChargeEnabled = false,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
-  const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
-  if (payerBilled) return { kind: 'payer', amount: hasVisitPrice ? Number(estimatedPrice) : null, conflictStampedPrice: false };
+  // no_charge is two different worlds and the office must be able to tell
+  // them apart. A callback / always-free type / renewal-owned visit is
+  // SUPPOSED to bill nothing. An unpriced self-pay visit bills nothing only
+  // because nobody put a number on the account — that one is a money gap
+  // (2026-08-31: a hand-booked customer took four recurring visits at
+  // monthly_rate 0 and the sheet said only "nothing bills"). Same kind, same
+  // amount, different `reason` — see UNBILLED_MONEY_GAP_REASONS.
+  const noCharge = (reason) => ({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason });
+  if (payerBilled) {
+    // A payer says WHO owes, not HOW MUCH — the amount still comes from the
+    // canonical precedence, never from estimatedPrice alone. Reading only the
+    // stamp made a payer visit that bills a monthly rate or an acceptance fee
+    // look amountless (Codex P1, round 5).
+    const payerFreeReason = isCallback
+      ? 'callback'
+      : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
+    const payerAmount = completionInvoiceAmount({
+      estimatedPrice,
+      isCallback,
+      perApplicationBilling: lane === 'per_application' || billingMode === 'per_application',
+      perApplicationFee,
+      monthlyRate,
+      billingMode,
+    });
+    const resolvedPayerAmount = payerAmount > 0
+      ? payerAmount
+      : (hasVisitPrice ? Number(estimatedPrice) : null);
+    // Free-by-design payer work with NO amount bills nobody, so it reads as
+    // the ordinary "nothing bills" line instead of promising an AP invoice
+    // (Codex P1, round 13). A PRICED one is different: completion's mint gate
+    // takes the create_invoice_on_complete stamp BEFORE its callback /
+    // always-free exclusions (admin-dispatch.js:16155-16157), so that visit
+    // really does invoice the payer. Calling it free was a regression this
+    // branch introduced (Codex P1, round 17) — origin/main predicted
+    // 'payer' with the amount here, and was right.
+    if (payerFreeReason && !(Number(resolvedPayerAmount) > 0)) return noCharge(payerFreeReason);
+    return {
+      kind: 'payer',
+      amount: resolvedPayerAmount,
+      conflictStampedPrice: false,
+    };
+  }
   // Completion's numeric prepaid fallback covers ONLY out-of-band methods
   // (cash/Zelle) — an annual_prepay_invoice stamp is governed exclusively
   // by the term-validated gate, so a STALE annual stamp's amount must not
@@ -236,7 +276,7 @@ function predictCompletionBilling({
   // promises an invoice completion will not cut (Codex r7).
   if ((billingMode === 'per_visit' || billingMode === 'one_time')
     && (isCallback || isAlwaysFreeServiceType(serviceType))) {
-    return none;
+    return noCharge(isCallback ? 'callback' : 'always_free_service_type');
   }
   if (lane === 'annual_prepay') {
     // Coverage is the TERM-VALIDATED per-visit stamp (prepaid_method
@@ -256,7 +296,8 @@ function predictCompletionBilling({
     if (stampCovered) {
       return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
     }
-    if (!hasVisitPrice) return none;
+    // Owned by the renewal flow, not a data gap — bills nothing BY DESIGN.
+    if (!hasVisitPrice) return noCharge('annual_renewal_owned');
     const amount = Number(estimatedPrice);
     if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
     return {
@@ -273,11 +314,22 @@ function predictCompletionBilling({
     // applications only — never a callback or an always-free type
     // (estimate / re-service / follow-up), even when a fee is on file
     // (Codex r1).
-    if (isCallback || isAlwaysFreeServiceType(serviceType)) return none;
+    if (isCallback || isAlwaysFreeServiceType(serviceType)) {
+      return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+    }
     const amount = completionInvoiceAmount({
       estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
     });
-    if (!(amount > 0)) return none;
+    // Per-application lane with no fee on file — the acceptance fee never
+    // got stamped. A money gap, not a free visit.
+    if (!(amount > 0)) {
+      // A POSITIVE out-of-band prepayment (cash/Zelle stamped through
+      // /:id/prepaid) on an unpriced visit is what completion calls covered
+      // — prepaid_amount > 0 AND >= the $0 amount — so it is paid, not a
+      // money gap (Codex P2). Same ordering as the self-pay lane below.
+      if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+      return noCharge('no_amount_on_file');
+    }
     // Completion only suppresses when the prepayment covers the WHOLE
     // amount; a partial prepay is applied as credit and the remainder
     // still collects (Codex r1).
@@ -303,7 +355,21 @@ function predictCompletionBilling({
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
   });
-  if (!(amount > 0)) return none;
+  // The 2026-08-31 shape: self-pay lane, visit performed, and NO number
+  // anywhere — no stamped visit price, no monthly rate. Nothing bills, and
+  // nothing about the visit says it should be free.
+  if (!(amount > 0)) {
+    if (isCallback || isAlwaysFreeServiceType(serviceType)) {
+      return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+    }
+    // Mirrors completion's prepaidCovered (prepaid_amount > 0 AND >= the
+    // amount): a positive cash/Zelle prepayment stamped on an unpriced visit
+    // covers its $0 amount, so completion mints nothing BECAUSE it is paid.
+    // Asked before the money-gap verdict, or the sheet warns — and offers a
+    // card link — on a visit the office already collected for (Codex P2).
+    if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    return noCharge('no_amount_on_file');
+  }
   if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
   return {
     // Same no-cost exclusion as the annual branch (manual-audit P1).
@@ -586,8 +652,87 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
   return !!row;
 }
 
+// Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
+// free visit: nothing bills only because no number is on the account.
+// 'callback' / 'always_free_service_type' / 'annual_renewal_owned' are the
+// by-design half and never appear here.
+const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file', 'no_invoice_will_mint']);
+
+/**
+ * Does completing this visit leave money on the table? Reads the SAME
+ * prediction the sheet renders and the completion path mirrors — no second
+ * classifier (the 2026-07 double-billing incident came from exactly that).
+ *
+ * `hasChargeableMethod` is advisory context, NOT part of the gap test: a
+ * per-visit customer with a real price and no card still gets a payable
+ * invoice, which is normal and must not warn (that case is already the
+ * no_card_on_file alert's job). The wallet only sharpens the message when
+ * the visit is billing nothing anyway. Same vocabulary as
+ * noCardOnFileAlert — a non-expired card, or usable bank method — not a
+ * bare payment_methods row.
+ *
+ * Returns null when there is no gap, else { reason, noPaymentMethod }.
+ */
+function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMint = null }) {
+  if (!prediction) return null;
+  // A prediction of 'invoice' answers "what would this bill", not "will an
+  // invoice exist". They diverge: a priced visit with
+  // create_invoice_on_complete false, a null billing mode, no membership
+  // tier and GATE_AUTOINVOICE_PRICED_VISITS off predicts an invoice that
+  // shouldAutoInvoiceCompletion then declines to mint
+  // (admin-dispatch.js:16155-16157). The booking gate already asks the real
+  // decision; the warning must too, or the sheet stays silent on the one
+  // shape it exists to surface. `willMint` null = the caller could not ask —
+  // never treated as a gap.
+  // A PRICED payer prediction is judged the same way: it can carry an amount
+  // and still lack every mint trigger, in which case completion creates no AP
+  // invoice at all and the warning must not stay silent (Codex P1). The
+  // service customer's wallet is irrelevant to it, so no wallet verdict is
+  // reported — offering to text THIS customer a card link would be wrong.
+  const payerWithAmount = prediction.kind === 'payer' && Number(prediction.amount) > 0;
+  if (willMint === false && (['invoice', 'auto_charge'].includes(prediction.kind) || payerWithAmount)) {
+    return {
+      reason: 'no_invoice_will_mint',
+      noPaymentMethod: payerWithAmount || hasChargeableMethod == null
+        ? null
+        : hasChargeableMethod === false,
+      ...(payerWithAmount ? { payerBilled: true } : {}),
+    };
+  }
+  // A payer says WHO owes, never HOW MUCH. Completion still derives the
+  // amount from the visit price / rate alone and categorically refuses to
+  // mint at <= 0, so an UNPRICED payer-billed visit bills nobody — the
+  // customer or the payer (Codex P0). A priced one carries its amount here
+  // and is not a gap.
+  // Free-by-design payer work (callback / always-free type) carries a reason
+  // and is never a gap — only a payer visit with no amount from ANY source is
+  // (Codex P1).
+  const payerWithoutAmount = prediction.kind === 'payer'
+    && !(Number(prediction.amount) > 0)
+    && !prediction.reason;
+  if (!payerWithoutAmount) {
+    if (prediction.kind !== 'no_charge') return null;
+    if (!UNBILLED_MONEY_GAP_REASONS.has(prediction.reason)) return null;
+  }
+  return {
+    reason: payerWithoutAmount ? 'no_amount_on_file' : prediction.reason,
+    // Whose wallet the visit is: a third-party payer owns the invoice, so the
+    // SERVICE customer's saved cards say nothing about it and must never be
+    // reported as "no card on file" — the sheet turns that into an offer to
+    // text THIS customer a card link for someone else's bill (Codex P1).
+    ...(payerWithoutAmount ? { payerBilled: true } : {}),
+    // null = unknown (caller could not read the wallet); only `true` asserts
+    // it, so an unreadable wallet never invents "no card on file".
+    noPaymentMethod: payerWithoutAmount || hasChargeableMethod == null
+      ? null
+      : hasChargeableMethod === false,
+  };
+}
+
 module.exports = {
   BILLING_MODES,
+  UNBILLED_MONEY_GAP_REASONS,
+  unbilledCompletionGap,
   MONTHLY_LANE_SQL,
   MEMBERSHIP_TIER_SQL,
   isMembershipTier,

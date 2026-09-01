@@ -1150,4 +1150,20 @@ describe('Ask Waves fallback — label-verified safety facts', () => {
     expect(answer).not.toContain('watering-in');
     expect(answer).not.toContain('rainfast in about 60 minutes');
   });
+
+  // The estimate page's quick-question chips no longer promise safety
+  // ("Are pets and kids safe?"); they ask for precautions. The chip text
+  // itself must still land on the label-direction branch — a chip that
+  // fell through to the generic "I can answer questions about…" reply
+  // would be a dead button on every chemical-service estimate.
+  test.each([
+    'What precautions should I follow for pets and children?',
+    'What precautions should I follow for this application?',
+    'Is it pet safe?',
+  ])('precaution-worded chip "%s" reaches the label-direction answer', (chip) => {
+    expect(FORCE_FALLBACK_QUESTION_PATTERN.test(chip)).toBe(true);
+    const answer = answerEstimateQuestionFallback(chip, verifiedContext);
+    expect(answer).toContain('Keep people and pets off treated areas until dry');
+    expect(answer).not.toMatch(/^I can answer questions about this estimate/);
+  });
 });

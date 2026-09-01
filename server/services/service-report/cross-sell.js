@@ -1197,6 +1197,10 @@ module.exports = {
   // The mint re-runs this proof under its transaction lock for reports the
   // fallback branch admitted (GitHub #3391 round — see premisesProof stamp).
   customerHasOnlyPrimaryPremises,
+  // The accepted-estimate property seed for a street — the plan-restart
+  // mint (C4) prices under the same seed discipline as the offer surfaces,
+  // so it is a real export (it stays in _private for the existing tests).
+  loadEstimateSeed,
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,

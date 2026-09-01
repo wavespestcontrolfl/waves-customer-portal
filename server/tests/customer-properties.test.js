@@ -126,3 +126,22 @@ describe('defaultOccupancyForContactRole (lazy primary backfill default)', () =>
     }
   });
 });
+
+describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group stamp)', () => {
+  const { soleActivePropertyId } = require('../services/customer-properties');
+  const connWith = (rows) => () => ({
+    where: () => ({ limit: () => ({ select: async () => rows }) }),
+  });
+
+  test('exactly one active property is unambiguous', async () => {
+    expect(await soleActivePropertyId('c1', connWith([{ id: 'p1' }]))).toBe('p1');
+  });
+  test('two or more active properties → null (office places those)', async () => {
+    expect(await soleActivePropertyId('c1', connWith([{ id: 'p1' }, { id: 'p2' }]))).toBeNull();
+  });
+  test('none, no customer, or a read error → null (best-effort)', async () => {
+    expect(await soleActivePropertyId('c1', connWith([]))).toBeNull();
+    expect(await soleActivePropertyId(null, connWith([{ id: 'p1' }]))).toBeNull();
+    expect(await soleActivePropertyId('c1', () => { throw new Error('down'); })).toBeNull();
+  });
+});

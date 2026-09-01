@@ -41,7 +41,7 @@ async function buildCancellationImpact(customerId, requestedFamilies = []) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
 
   const perFamily = new Map();
   for (const row of rows) {

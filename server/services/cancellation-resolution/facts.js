@@ -102,7 +102,7 @@ async function loadFamilies(customerId, today, dbh = db) {
             });
         });
     })
-    .select('s.*', 'sv.service_key', 'sv.service_name');
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const keys = [];
   for (const row of rows) {
     if (!rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource })) continue;
@@ -125,7 +125,7 @@ async function loadFamilies(customerId, today, dbh = db) {
         const anchor = await dbh('scheduled_services as s')
           .leftJoin('services as sv', 's.service_id', 'sv.id')
           .where('s.id', term.last_scheduled_service_id)
-          .first('s.*', 'sv.service_key', 'sv.service_name');
+          .first('s.*', 'sv.service_key', 'sv.name as service_name');
         if (anchor && !isCommercialServiceRow(anchor) && !isRodentLedServiceRow(anchor)) {
           anchorKeys = detectWaveGuardPlanKeys(anchor);
         }

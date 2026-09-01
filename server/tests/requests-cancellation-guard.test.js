@@ -30,6 +30,7 @@ jest.mock('../services/cancellation-processor', () => ({
     ok: true, cancelledCount: 1, recurrenceStopped: 1, churned: true, errors: [],
   }),
   CHURN_REASON: 'Customer cancellation request',
+  PORTAL_CANCEL_REASON_PREFIX: 'Portal cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
 jest.mock('../models/db', () => jest.fn());

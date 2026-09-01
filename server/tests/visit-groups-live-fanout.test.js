@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
       whereNotIn() { chain._ops.push(['whereNotIn', ...arguments]); return chain; },
       whereNull() { chain._ops.push(['whereNull', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
+      forNoKeyUpdate() { chain._ops.push(['forNoKeyUpdate']); return chain; },
       first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops) : null); },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
@@ -25,7 +26,11 @@ jest.mock('../models/db', () => {
       modify(fn) { fn(chain); return chain; },
       merge(values) { chain._merge = values; log.push({ table, op: 'merge', values }); return chain; },
       ignore() { return chain; },
-      returning() { log.push({ table, op: 'returning', values: chain._insert }); return Promise.resolve(script[table] && script[table].returning ? script[table].returning() : []); },
+      // visit_effects returning defaults to one row: on a real DB the
+      // finalize merge normally affects the claimed row, and finalize now
+      // reports ok:false on zero rows (ownership changed) — tests script
+      // `returning: () => []` to exercise that contract explicitly.
+      returning() { log.push({ table, op: 'returning', values: chain._insert }); return Promise.resolve(script[table] && script[table].returning ? script[table].returning() : (table === 'visit_effects' ? [{ id: 'effect-row' }] : [])); },
       then(res, rej) { return Promise.resolve([]).then(res, rej); },
     };
     return chain;
@@ -386,6 +391,19 @@ describe('finalizeVisitNotification', () => {
     expect(await finalizeVisitNotification('v1', 'en_route', 'already_handled')).toMatchObject({ ok: true, skipped: true });
     expect(db.__calls.length).toBe(0);
   });
+  test('zero rows finalized: already-sent is a no-op success, ownership change is ok:false (the caller runs its durable fallback)', async () => {
+    // The token/status-qualified merge matched nothing and the row is
+    // durably sent (a double finalize) — success, nothing to do.
+    db.__script = { visit_effects: { returning: () => [], first: () => ({ status: 'sent' }) } };
+    expect(await finalizeVisitNotification('v1', 'reminder_24h', 'sent', new Date(), 'tok-1', { dedupeKey: 'v1:reminder_24h:2026-08-30' }))
+      .toMatchObject({ ok: true, status: 'sent', alreadyFinal: true });
+    // Matched nothing and the row is NOT sent — a reclaim replaced our
+    // token; the ledger did not advance and the caller must not assume it.
+    db.__script = { visit_effects: { returning: () => [], first: () => ({ status: 'claimed' }) } };
+    const fin = await finalizeVisitNotification('v1', 'reminder_24h', 'sent', new Date(), 'tok-stale', { dedupeKey: 'v1:reminder_24h:2026-08-30' });
+    expect(fin.ok).toBe(false);
+    expect(fin.reason).toContain('not finalized');
+  });
   test('a finalize failure is reported (the row stays claimed for the office)', async () => {
     const origDb = db.getMockImplementation();
     db.mockImplementation((table) => { if (table === 'visit_effects') throw new Error('ledger down'); return origDb(table); });
@@ -432,5 +450,33 @@ describe('notificationLeaseLive (token-keyed)', () => {
     await finalizeVisitNotification('v1', 'en_route', 'sent', new Date(), 'tok-a');
     const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
     expect(merge).toBeTruthy();
+  });
+});
+
+describe('createOrJoinVisit autopay exclusion — authoritative in-transaction check (pre-push P0 TOCTOU)', () => {
+  const { createOrJoinVisit } = require('../services/visit-groups');
+  const stopRows = () => [
+    { id: 's1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', status: 'confirmed', technician_id: 't1', visit_id: null, groupable: true, group_family: 'recurring_property_service' },
+    { id: 's2', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:30', window_end: '10:30', status: 'confirmed', technician_id: 't1', visit_id: null, groupable: true, group_family: 'recurring_property_service' },
+  ];
+
+  test('an enrolled (even paused) customer is refused INSIDE the grouping transaction, under the customer row lock', async () => {
+    db.__script = {
+      'scheduled_services as ss': { select: () => stopRows() },
+      customers: { first: () => ({ id: 'c1', autopay_enabled: true, autopay_paused_until: '2099-01-01' }) },
+    };
+    await expect(createOrJoinVisit({ rows: [{ id: 's1' }, { id: 's2' }], createdBy: 'test' }))
+      .rejects.toThrow(/not mutually groupable: autopay_enrolled/);
+    // The customer row was locked (FOR NO KEY UPDATE read) before the
+    // refusal — serialized against the enrollment UPDATE, not a peek, and
+    // NOT FOR UPDATE: that conflicts with the caller's FK KEY SHARE from
+    // its own booking insert and deadlocks two concurrent same-customer
+    // bookings (pre-push codex r9 P1).
+    const custRead = db.__calls.find((c) => c.table === 'customers' && c.op === 'first');
+    expect(custRead).toBeTruthy();
+    expect(custRead.ops.some((o) => o[0] === 'forNoKeyUpdate')).toBe(true);
+    expect(custRead.ops.some((o) => o[0] === 'forUpdate')).toBe(false);
+    // Refused before any visit write.
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'insert')).toBe(false);
   });
 });

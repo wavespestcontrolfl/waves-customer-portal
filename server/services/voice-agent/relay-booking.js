@@ -377,6 +377,10 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
+      // Visit groups: deliberately NOT stamped here — this row is a
+      // pending office-review booking (voice_agent source_action), which
+      // maybeGroupRow refuses; its grouping moment is office confirm via
+      // the transitionJobStatus pending→confirmed seam (job-status.js).
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only

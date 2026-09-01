@@ -4,6 +4,7 @@ const Sentry = require('@sentry/node');
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const CustomerCredit = require('../services/customer-credit');
 const TwilioService = require('../services/twilio');
 const {
@@ -80,16 +81,32 @@ const UNIFORM_SEND_RESPONSE = {
   message: 'If an account exists for that number, a verification code has been sent.',
 };
 
-function activeCustomerByPhone(phone) {
+// Login identity for a phone number: the active profile first; a CANCELLED
+// profile only under the C4 read-only allowance (sessionCustomerAdmitted —
+// GATE_CANCEL_FLOW_V2 + churned stage), so a churned customer can still sign
+// in to see reports and pay a balance. Any other inactive row never logs in.
+// Lazy require: the middleware module is mocked wholesale in route tests
+// that never exercise login.
+async function activeCustomerByPhone(phone) {
+  const { sessionCustomerAdmitted } = require('../middleware/auth');
   const digits = String(phone || '').replace(/\D/g, '');
   const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
-  return db('customers')
-    .where({ active: true })
+  const rows = await db('customers')
     .whereNull('deleted_at')
+    // Admissibility in SQL, BEFORE the limit: on a phone shared by many
+    // inactive profiles, a deactivated pile must not push the one eligible
+    // row past the cut. The gate-aware check below still decides.
+    .where(function admissible() {
+      this.where('active', true).orWhere(function churned() {
+        this.where('active', false).where('pipeline_stage', 'churned');
+      });
+    })
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${last10}`])
+    .orderBy('active', 'desc')
     .orderBy('is_primary_profile', 'desc')
     .orderBy('created_at', 'asc')
-    .first();
+    .limit(10);
+  return rows.find((row) => sessionCustomerAdmitted(row)) || null;
 }
 
 function authCustomerPayload(customer) {
@@ -158,6 +175,16 @@ async function accountPropertiesForCustomer(customer) {
     query.where({ account_id: customer.account_id });
   } else {
     query.where({ id: customer.id });
+  }
+
+  // C4: a cancelled session lists ONLY the signed-in profile. Active
+  // siblings would render a property switcher that cannot work —
+  // /auth/select-property is not a cancelled read — and sibling churned
+  // profiles are equally unreachable from this session; an account with an
+  // active profile logs in AS that profile (activeCustomerByPhone prefers
+  // it). A richer multi-property cancelled view is deliberately out of C4.
+  if (customer.active !== true) {
+    return [propertyPayload(customer)];
   }
 
   const rows = await query;
@@ -375,6 +402,9 @@ router.post('/logout', refreshLimiter, async (req, res, next) => {
 // =========================================================================
 // GET /api/auth/me — Get current authenticated customer
 // =========================================================================
+// C4: a cancelled customer reaches this read (CANCELLED_READ_ROUTES in the
+// middleware) — `cancelled` + `cancelledAt` are what the portal renders the
+// cancelled banner and plan state from.
 router.get('/me', authenticate, async (req, res, next) => {
   try {
   const customer = req.customer;
@@ -424,6 +454,17 @@ router.get('/me', authenticate, async (req, res, next) => {
     autoApplyAccountCredit: customer.auto_apply_account_credit === true,
     credits,
     annualPrepay,
+    // C4: the cancelled state the portal renders read-only. cancelledAt is
+    // the calendar date the processor stamped (customers.churned_at) — a pg
+    // DATE column (the 0401 CRM migration creates it first; 0414's
+    // timestamp variant is skipped on hasColumn), which deserializes as a
+    // UTC-midnight Date that etDateString would shift to the PREVIOUS ET
+    // day (codex GH r13 P1). etCalendarDayOf reads date-only shapes
+    // literally and only converts real timestamps through the ET clock.
+    cancelled: req.customerInactive === true,
+    cancelledAt: req.customerInactive === true && customer.churned_at
+      ? etCalendarDayOf(customer.churned_at)
+      : null,
     notificationPrefs: prefs ? {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,

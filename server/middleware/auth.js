@@ -22,6 +22,82 @@ function accountIdForCustomer(customer) {
   return customer?.account_id || customer?.id || null;
 }
 
+// C4 (GATE_CANCEL_FLOW_V2): a CANCELLED customer — active=false AND
+// pipeline_stage 'churned', the pair the cancellation processor stamps —
+// keeps READ-ONLY portal access: login, session refresh, and the explicit
+// read routes that opt in through allowCancelledRead below (history, reports,
+// open balance + the tokenized pay page). Any other inactive row (staff
+// deactivation, NULL active) stays out exactly as before, and every route
+// that does not opt in keeps the strict active=true contract. Call-time gate
+// read so a Railway flip needs no restart; gate off = today's behavior.
+function cancelledReadAllowed() {
+  try {
+    return require('../services/cancellation-resolution').cancelFlowV2Enabled();
+  } catch {
+    return false;
+  }
+}
+
+function isCancelledCustomerRow(customer) {
+  // Exactly the processor's stamp: active EXPLICITLY false. An active=NULL
+  // legacy/partially-populated churned row is not a processed cancellation
+  // and gains nothing from the allowance.
+  return !!customer && customer.active === false && customer.pipeline_stage === 'churned';
+}
+
+function sessionCustomerAdmitted(customer) {
+  if (!customer) return false;
+  if (customer.active === true) return true;
+  return cancelledReadAllowed() && isCancelledCustomerRow(customer);
+}
+
+// The ONLY portal routes a cancelled customer may reach (method + mounted
+// path, matched exactly — a pattern only where a path carries an id). Every
+// one is a read the Billing / Documents / Visits / Plan tabs render from,
+// plus the tokenized-pay hand-off (/balance mints the /pay link) and the
+// customer-initiated restart. Anything not listed — bookings, schedule
+// changes, card management, preference writes, referrals, AI chat — keeps
+// the strict active=true contract. Extend this list deliberately.
+const CANCELLED_READ_ROUTES = [
+  ['GET', '/api/auth/me'],
+  ['GET', '/api/auth/properties'],
+  ['GET', '/api/billing'],
+  ['GET', '/api/billing/balance'],
+  // NOT /api/billing/cards: the cancelled tab hides Payment Methods, so
+  // saved-method details (brand, last four, expiry, bank) stay unreadable
+  // from a long-lived cancelled session.
+  ['GET', '/api/billing/autopay'],
+  ['GET', '/api/schedule'],
+  ['GET', '/api/schedule/next'],
+  ['GET', '/api/services'],
+  ['GET', '/api/services/stats/summary'],
+  ['GET', '/api/documents'],
+  ['GET', /^\/api\/documents\/service-report\/[^/]+$/],
+  ['GET', /^\/api\/documents\/[^/]+\/download$/],
+  ['GET', '/api/property/termite-bond'],
+  // NOT the notification-preference reads: the cancelled Visits tab hides
+  // every preference control (their writes are blocked), so nothing renders
+  // from those reads.
+  ['POST', '/api/requests/restart-plan'],
+  // The one write besides restart: in-app account deletion (App Store
+  // Guideline 5.1.1(v)) must stay reachable after cancellation — the route
+  // soft-deletes every profile and revokes all sessions itself (codex GH r5
+  // P1: the strict contract 401'd a cancelled customer AFTER the confirm).
+  ['DELETE', '/api/auth/account'],
+  // Native sign-out's device-token deactivation (codex GH r12 P1): the app
+  // posts this BEFORE clearing credentials and swallows failures, so a
+  // 401 here left the push_subscriptions row active and billing/service
+  // notifications kept reaching a signed-out device. Narrow write: it only
+  // deactivates the caller's own token.
+  ['POST', '/api/push/native-unsubscribe'],
+];
+
+function cancelledReadRoute(req) {
+  const full = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '') || '/';
+  return CANCELLED_READ_ROUTES.some(([method, path]) => method === req.method
+    && (path instanceof RegExp ? path.test(full) : path === full));
+}
+
 function refreshExpiryDate(token) {
   const decoded = jwt.decode(token);
   return decoded?.exp ? new Date(decoded.exp * 1000) : null;
@@ -131,11 +207,14 @@ async function rotateRefreshSession(refreshToken, options = {}) {
   const suppliedHash = hashRefreshToken(refreshToken);
 
   const result = await db.transaction(async (trx) => {
+    // A cancelled customer's saved session keeps refreshing under the C4
+    // read-only allowance (sessionCustomerAdmitted); every other inactive
+    // row is rejected exactly as before.
     const customer = await trx('customers')
-      .where({ id: decoded.customerId, active: true })
+      .where({ id: decoded.customerId })
       .whereNull('deleted_at')
       .first();
-    if (!customer) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
+    if (!sessionCustomerAdmitted(customer)) return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
 
     const accountId = decoded.accountId || accountIdForCustomer(customer);
     if (decoded.accountId && String(decoded.accountId) !== String(accountIdForCustomer(customer))) {
@@ -308,11 +387,14 @@ async function revokeRefreshSession(refreshToken, reason = 'logout') {
         // Validate the current customer/account exactly as rotation does
         // before inserting anything; arbitrary, access, deleted-customer, or
         // account-mismatched credentials never reach the session table.
+        // Same admission rule as rotation (C4): a cancelled customer CAN
+        // rotate, so their logout must tombstone too — otherwise a retained
+        // legacy token outlives the logout and migrates into a live family.
         const customer = await trx('customers')
-          .where({ id: decoded.customerId, active: true })
+          .where({ id: decoded.customerId })
           .whereNull('deleted_at')
           .first();
-        if (!customer) return { revoked: false };
+        if (!sessionCustomerAdmitted(customer)) return { revoked: false };
 
         const accountId = decoded.accountId || accountIdForCustomer(customer);
         if (!accountId
@@ -370,7 +452,7 @@ async function revokeCustomerRefreshSessions(customerId, accountId = null, reaso
 /**
  * Verify JWT token and attach customer to request
  */
-async function authenticateCore(req, res, next, { allowInactive = false } = {}) {
+async function authenticateCore(req, res, next, { allowInactive = false, allowCancelledRead = false } = {}) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -392,10 +474,18 @@ async function authenticateCore(req, res, next, { allowInactive = false } = {}) 
     const query = db('customers')
       .where({ id: decoded.customerId })
       .whereNull('deleted_at');
-    if (!allowInactive) query.where({ active: true });
+    if (!allowInactive && !allowCancelledRead) query.where({ active: true });
     const customer = await query.first();
 
-    if (!customer) {
+    // Fail closed: an inactive row passes only through the allowance the
+    // route asked for — any inactive (allowInactive) or a gated cancelled
+    // read (allowCancelledRead + GATE_CANCEL_FLOW_V2 + churned stage).
+    const admitted = !!customer && (
+      customer.active === true
+      || allowInactive
+      || (allowCancelledRead && sessionCustomerAdmitted(customer))
+    );
+    if (!admitted) {
       return res.status(401).json({ error: 'Customer not found or inactive' });
     }
 
@@ -422,7 +512,10 @@ async function authenticateCore(req, res, next, { allowInactive = false } = {}) 
 }
 
 function authenticate(req, res, next) {
-  return authenticateCore(req, res, next, { allowInactive: false });
+  // C4: a cancelled customer is admitted ONLY on the enumerated read routes
+  // (CANCELLED_READ_ROUTES) and only while GATE_CANCEL_FLOW_V2 is on; the
+  // handler sees req.customerInactive = true.
+  return authenticateCore(req, res, next, { allowInactive: false, allowCancelledRead: cancelledReadRoute(req) });
 }
 
 /**
@@ -498,6 +591,8 @@ async function resolveBearerCustomer(req) {
 module.exports = {
   authenticate,
   authenticateAllowInactive,
+  isCancelledCustomerRow,
+  sessionCustomerAdmitted,
   resolveBearerCustomer,
   createRefreshSession,
   generateToken,
@@ -507,5 +602,5 @@ module.exports = {
   revokeRefreshSession,
   rotateRefreshSession,
   verifyRefreshCredential,
-  _test: { CONCURRENT_ROTATION_GRACE_MS },
+  _test: { CONCURRENT_ROTATION_GRACE_MS, CANCELLED_READ_ROUTES, cancelledReadRoute },
 };

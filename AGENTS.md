@@ -424,6 +424,20 @@ finding and warns on P1. Reviewers must return JSON matching
     the cent or the mint refuses; the estimate is published with ZERO
     delivery — no send, no follow-up automation, no customer comms.
     "Never auto-send" stands everywhere else.
+  - OWNER-APPROVED EXCEPTION (ruling 2026-08-31, cancel-flow C4 GO —
+    "Restart = existing estimate machinery, card-first accept, current
+    price only"): a CANCELLED customer's "Restart my plan" tap
+    (`GATE_CANCEL_FLOW_V2`, `plan_restart` mint) publishes a
+    customer-viewable estimate for the tapping customer. Bounds that keep
+    the rule's intent: the account must be churned (`active=false` +
+    `pipeline_stage='churned'`, re-verified under the mint's row lock) and
+    any family with residual live recurring rows is excluded from the
+    quote — no live rate is ever re-priced; deterministic default options
+    only, no LLM in the loop; the server recompute is the sole dollar
+    authority and the send snapshot must freeze and match the minted
+    totals or the mint refuses; published with ZERO delivery — no send,
+    no follow-up automation, no customer comms; acceptance runs the
+    normal card-first public accept flow.
 - **Lawn-diagnostic lockstep.** The four artifacts (CONDITION_LABELS /
   SUMMARY_CAUSE_RE / CONFIRMABLE_CONDITION / the GOVERNED_CAUSE test) must
   stay mirrored, plural-aware; customer-facing egress is
