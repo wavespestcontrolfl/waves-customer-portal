@@ -11906,12 +11906,16 @@ export function CompletionPanel({
         ? savedDraft.recommendationsText
         : "",
     );
+    // The custom line takes a slot, so a restored draft keeps room for it.
+    const restoredCustom = typeof savedDraft.customTip === "string" ? savedDraft.customTip : "";
     setSelectedTipIds(
       Array.isArray(savedDraft.selectedTipIds)
-        ? savedDraft.selectedTipIds.filter((id) => typeof id === "string").slice(0, TECH_TIP_MAX)
+        ? savedDraft.selectedTipIds
+          .filter((id) => typeof id === "string")
+          .slice(0, TECH_TIP_MAX - (restoredCustom.trim() ? 1 : 0))
         : [],
     );
-    setCustomTip(typeof savedDraft.customTip === "string" ? savedDraft.customTip : "");
+    setCustomTip(restoredCustom);
     // Drafts saved before the detached-selection model lack the field → false,
     // which matches their notes still carrying the chip-marker lines.
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
@@ -19452,6 +19456,10 @@ function TechTipPicker({
   const customCount = String(customTip || "").trim() ? 1 : 0;
   const pickedCount = selectedIds.length + customCount;
   const full = pickedCount >= TECH_TIP_MAX;
+  // An open-but-empty custom field has no slot once three library tips
+  // are picked — it locks rather than accepting a fourth line the server
+  // would drop over cap.
+  const customLocked = !customCount && selectedIds.length >= TECH_TIP_MAX;
   const q = query.trim().toLowerCase();
   const ranked = q ? rankTechTips(allTips, q) : null;
   const lastSent = library?.lastSent || {};
@@ -19669,8 +19677,10 @@ function TechTipPicker({
           value={customTip || ""}
           onChange={(e) => onCustomTipChange(e.target.value)}
           maxLength={240}
-          disabled={disabled}
-          placeholder="One sentence, in your words — it prints in the same note"
+          disabled={disabled || customLocked}
+          placeholder={customLocked
+            ? "Remove a tip to write your own — three is the limit"
+            : "One sentence, in your words — it prints in the same note"}
           style={{ ...theme.inputStyle, marginTop: 8 }}
         />
       )}
