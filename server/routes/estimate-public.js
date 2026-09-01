@@ -15341,8 +15341,12 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
   if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
     return res.status(404).json({ error: 'Estimate not found' });
   }
+  // Log identity: the estimate id once resolved, NEVER the token — legacy
+  // slug tokens carry part of the customer's name (pre-push codex P1).
+  let estimateId = null;
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    estimateId = estimate?.id || null;
     if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -15361,7 +15365,7 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
   } catch (err) {
     // err.code only, never err.message: PG constraint violations quote the
     // conflicting phone number (AGENTS.md PII-in-logs rule).
-    logger.warn(`[estimate-public] referral-link failed (code=${err?.code || 'none'}, token=${String(req.params.token).slice(0, 8)}…)`);
+    logger.warn(`[estimate-public] referral-link failed (code=${err?.code || 'none'}, estimate=${estimateId || 'unresolved'})`);
     return res.status(503).json({ error: 'Referral link unavailable — please try again' });
   }
 });
