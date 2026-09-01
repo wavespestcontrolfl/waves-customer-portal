@@ -798,15 +798,16 @@ async function investigatePaths(db, {
         for (const url of urls) {
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
           const probeIdx = probeIndexByKey.get(registry.normalizeSubmissionUrl(url));
-          if (probeIdx !== undefined) passProbeMask |= 1 << probeIdx;
           out.fetches += 1;
           const page = await fetcher(url);
           const finalUrl = (page && page.finalUrl) || url;
+          let probeDefinitive = false; // set per outcome below
           if (page && page.html && !page.blocked && !page.error && !TEXTUAL_MIME_RE.test(String(page.contentType || ''))) {
             // a binary 2xx body (PDF, image) decodes into `html` but is not
             // page text: it must never become model input, coverage, or
             // disproof — same textual-MIME rule the terms branch enforces
             fetchErrors.push({ url, reason: 'non_text_body' });
+            probeDefinitive = true; // the route exists and will never be readable text
           } else if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
             const text = canonicalizeTerms(page.html);
             redirectMap.set(registry.normalizeSubmissionUrl(url), registry.normalizeSubmissionUrl(finalUrl));
@@ -818,13 +819,22 @@ async function investigatePaths(db, {
             // (http→https, slash) covers BOTH aliases — the original path's
             // URL must not stay "never covered" and re-select forever
             pages.push({ url: finalUrl, requestedUrl: url, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html, truncated: !!page.truncated });
+            probeDefinitive = true; // the route was actually inspected
           } else if (page && page.html && !page.blocked && !page.error) {
             // the request was host-bound but a redirect left the domain —
             // an off-site page must never become model input or evidence
             fetchErrors.push({ url, reason: 'offsite_redirect' });
+            probeDefinitive = true; // the route definitively leads off-site
           } else {
-            fetchErrors.push({ url, reason: (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}` });
+            const reason = (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}`;
+            fetchErrors.push({ url, reason });
+            probeDefinitive = /^status_(404|410)$/.test(reason); // gone is a verdict; timeouts/blocks/5xx retry
           }
+          // Coverage records only DEFINITIVE probe outcomes — a transient
+          // failure leaves the bit unset so the uncovered-first ordering
+          // retries the route before any terminal close (a permanently
+          // failing probe still closes via the no-progress valve).
+          if (probeIdx !== undefined && probeDefinitive) passProbeMask |= 1 << probeIdx;
         }
 
         // An evidence-less pass proves nothing: when every candidate fetch
@@ -930,6 +940,10 @@ async function investigatePaths(db, {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
           const key = registry.normalizeSubmissionUrl(p.submission_url);
           if (fetchedKeys.has(key)) continue;
+          // the candidate phase already got a deterministic 404/410 for this
+          // URL — that IS the verdict; no probe spend, no transient retry
+          const goneReason = fetchErrors.find((f) => registry.normalizeSubmissionUrl(f.url) === key && /^status_(404|410)$/.test(String(f.reason)));
+          if (goneReason) { p.submissionUnverified = goneReason.reason; continue; }
           if (verifyAttempts >= SUBMISSION_VERIFY_BUDGET) { p.submissionUnverified = 'verify_budget_exhausted'; continue; }
           verifyAttempts += 1;
           out.fetches += 1;
@@ -1119,12 +1133,17 @@ async function investigatePaths(db, {
             }
             if (p.submissionUnverified) {
               row.confidence = 0; // exists only as a claim until a pass observes the URL
-              // A TRANSIENT verification failure (probe error/status, budget
-              // exhausted) is not a verdict on the claim: leave the row
-              // unstamped so a later pass retries instead of hiding it for
-              // 90 days. Deterministic rejections (off-host, missing URL for
-              // a site-executed type) ARE verdicts and stamp normally.
-              if (!['offhost_submission_url', 'missing_submission_url'].includes(p.submissionUnverified)) {
+              // A TRANSIENT verification failure (probe error, 5xx, block,
+              // budget exhausted) is not a verdict on the claim: leave the
+              // row unstamped so a later pass retries instead of hiding it
+              // for 90 days. Deterministic rejections — off-host, missing
+              // URL for a site-executed type, and a 404/410 on the claimed
+              // URL itself — ARE verdicts and stamp normally (an echoed
+              // dead URL must not re-select the domain every backoff
+              // forever).
+              const deterministicReject = ['offhost_submission_url', 'missing_submission_url'].includes(p.submissionUnverified)
+                || /^status_(404|410)$/.test(String(p.submissionUnverified));
+              if (!deterministicReject) {
                 row.last_investigated_at = null;
                 p.unstamped = true;
               }

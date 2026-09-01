@@ -1676,6 +1676,47 @@ describe('full run', () => {
     expect(Number(seventh.confidence)).toBe(0.7); // omission at the cap proves nothing
   });
 
+  test('a transient probe failure is not coverage — the route retries before any terminal close (Codex PR r13 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const submitAttempts = [];
+    const fetcher = async (url) => {
+      if (url === 'https://example.com/submit') { submitAttempts.push(url); return { status: null, finalUrl: null, html: null, blocked: false, error: 'timeout' }; }
+      return okFetch(url);
+    };
+    const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    let passes = 0;
+    while (db._tables.seo_link_domains[0].agent_state !== 'not_reproducible' && passes < 12) {
+      const dom = db._tables.seo_link_domains[0];
+      dom.watch_recheck_at = new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000);
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000), domainIds: [dom.id] });
+      passes += 1;
+    }
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // still bounded (no-progress valve)
+    expect(submitAttempts.length).toBeGreaterThan(1); // the timeout was RETRIED, never counted as coverage
+  });
+
+  test('an echoed path whose URL is definitively gone retires stamped — no six-hour model-call loop (Codex PR r13 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating' });
+    const dead = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [dead] });
+    const fetcher = async (url) => (url.includes('/join')
+      ? { status: 404, finalUrl: url, html: null, blocked: false }
+      : okFetch(url));
+    // the model keeps ECHOING the dead path (it rides the prompt's identity list)
+    const echoed = modelPath({ submission_url: 'https://example.com/join', price_page_url: 'https://example.com/join', renewal_price_page_url: 'https://example.com/join' });
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([echoed]) }) }));
+    const p = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === dead.id);
+    expect(Number(p.confidence)).toBe(0); // 404 on the URL is a verdict, echo or not
+    expect(p.last_investigated_at).not.toBeNull(); // stamped — never re-selects every backoff
+    expect(JSON.parse(p.investigation).disproven_reason).toBe('submission URL returned 404/410');
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {
