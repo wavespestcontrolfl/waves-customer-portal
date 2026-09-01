@@ -128,10 +128,30 @@ function lexBlank(code, { keepStrings = false } = {}) {
   let out = '';
   const blank = (c) => { out += c === '\n' ? '\n' : ' '; };
   const emitStr = (c) => { if (keepStrings) out += c; else blank(c); };
+  // Last significant (non-whitespace) code character — a `/` after one of
+  // these starts a REGEX LITERAL, not division. Its content (quotes
+  // included) is data and blanks out, so `db(/'/.test(kind) ? t : f)` does
+  // not derail the string lexer.
+  let lastSig = '';
+  const REGEX_PRECEDERS = '(,=:[!&|?{};+-*%~^<>';
   let i = 0;
   while (i < n) {
     const c = code[i];
     const d = code[i + 1];
+    if (c === '/' && d !== '/' && d !== '*' && (lastSig === '' || REGEX_PRECEDERS.includes(lastSig))) {
+      blank(c); i += 1;
+      let inClass = false;
+      while (i < n && code[i] !== '\n') {
+        const ch = code[i];
+        if (ch === '\\') { blank(ch); i += 1; if (i < n) { blank(code[i]); i += 1; } continue; }
+        if (ch === '[') inClass = true;
+        else if (ch === ']') inClass = false;
+        blank(ch); i += 1;
+        if (ch === '/' && !inClass) break;
+      }
+      lastSig = '/';
+      continue;
+    }
     if (c === '/' && d === '/') {
       while (i < n && code[i] !== '\n') { blank(code[i]); i += 1; }
       continue;
@@ -149,6 +169,7 @@ function lexBlank(code, { keepStrings = false } = {}) {
         if (i < n) { emitStr(code[i]); i += 1; }
       }
       if (i < n) { emitStr(code[i]); i += 1; }
+      lastSig = c; // after a string, `/` is division
       continue;
     }
     if (c === '`') {
@@ -169,9 +190,11 @@ function lexBlank(code, { keepStrings = false } = {}) {
         }
         emitStr(code[i]); i += 1;
       }
+      lastSig = '`';
       continue;
     }
     out += c;
+    if (!/\s/.test(c)) lastSig = c;
     i += 1;
   }
   return out;
@@ -216,7 +239,13 @@ function scanSourceForDynamicTableInserts(src) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(root)) return false; // shadowable name
     // The declaration must TERMINATE right after the literal — a computed
     // initializer (`const TABLE = 'lead' + suffix`) proves nothing.
-    return new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}\s*;?\s*$`, 'm').test(src);
+    if (!new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}\s*;?\s*$`, 'm').test(src)) return false;
+    // …and the name must not be REBOUND anywhere else in the file — an
+    // indented declaration or a parameter shadowing the module const means
+    // the insert may read a different binding, so it stays dynamic.
+    const indentedDecl = new RegExp(String.raw`^[\t ]+(?:const|let|var)\s+(?:\{[^{}\n]*)?\b${escapeRe(root)}\b`, 'm');
+    const paramBinding = new RegExp(String.raw`[(,]\s*(?:\{[^{}]*)?\b${escapeRe(root)}\b[^()]*\)\s*(?:=>|\{)`);
+    return !indentedDecl.test(code) && !paramBinding.test(code);
   };
   const record = (index, matchLen, expr) => {
     if (!expr.trim()) return; // pure string literal, blanked — the literal scan owns it
@@ -503,6 +532,17 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(rawLiteralTable).toEqual([]);
   });
 
+  test('dynamic-table scan: a quote inside a regex literal does not derail the lexer; uppercase consts shadowed elsewhere stay dynamic', () => {
+    const regexArg = scanSourceForDynamicTableInserts(
+      "await db(/'/.test(kind) ? table : fallback).insert(row);"
+    );
+    expect(regexArg).toHaveLength(1);
+    const shadowedUpper = scanSourceForDynamicTableInserts(
+      "const TABLE = 'audit';\nasync function f(TABLE, row) {\n  await db(TABLE).insert(row);\n}"
+    );
+    expect(shadowedUpper).toHaveLength(1);
+  });
+
   test('dynamic-table scan: two dynamic inserts on one line surface as TWO sites', () => {
     const sites = scanSourceForDynamicTableInserts('await db(a).insert(x); await db(b).insert(y);');
     expect(sites).toHaveLength(1);
@@ -672,6 +712,13 @@ describe('lead-writer registry (#3137 groundwork)', () => {
               if (ch === '}') { d2 -= 1; top += d2 === 0 ? ch : ' '; continue; }
               top += d2 === 1 ? ch : ' ';
             }
+            // A top-level spread could overwrite the binding after the
+            // fact, and a duplicate binding means the LAST one wins — both
+            // make the matched value unreliable, so both are rejected.
+            expect({ caller: `${rel}@${m.index}`, topSpreads: (top.match(/\.\.\./g) || []).length })
+              .toEqual({ caller: `${rel}@${m.index}`, topSpreads: 0 });
+            const bindCount = (top.match(new RegExp(String.raw`\b${escapeRe(cc.prop)}\s*:`, 'g')) || []).length;
+            expect({ caller: `${rel}@${m.index}`, bindCount }).toEqual({ caller: `${rel}@${m.index}`, bindCount: 1 });
             const bindRe = new RegExp(
               String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}` : ''})`
             );
@@ -695,11 +742,14 @@ describe('lead-writer registry (#3137 groundwork)', () => {
             const lineStart = code.lastIndexOf('\n', r.index) + 1;
             const lineEnd = code.indexOf('\n', r.index);
             const lineText = code.slice(lineStart, lineEnd === -1 ? code.length : lineEnd);
-            // require / module.exports lines are allowed ONLY without a
-            // rename: `{ helper: alias }` or `{ alias: helper }` re-routes
-            // calls around the name scan and is rejected.
+            // require / module.exports lines are allowed ONLY in canonical
+            // shorthand form: a rename (`{ helper: alias }` / `{ alias:
+            // helper }`) or a property-access pull-out
+            // (`require(...).helper`) re-routes calls around the name scan
+            // and is rejected.
             const renamed = new RegExp(String.raw`\b${escapeRe(cc.helper)}\s*:|:\s*${escapeRe(cc.helper)}\b`).test(lineText);
-            const allowed = /\brequire\s*\(|\bmodule\.exports\b/.test(lineText) && !renamed;
+            const propertyAccess = code[r.index - 1] === '.';
+            const allowed = /\brequire\s*\(|\bmodule\.exports\b/.test(lineText) && !renamed && !propertyAccess;
             expect({ ref: `${rel}: ${lineText.trim()}`, allowed })
               .toEqual({ ref: `${rel}: ${lineText.trim()}`, allowed: true });
           }
