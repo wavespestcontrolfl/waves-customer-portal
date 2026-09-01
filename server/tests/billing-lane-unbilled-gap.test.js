@@ -153,10 +153,9 @@ describe('payer-billed visits', () => {
     expect(unbilledCompletionGap({ prediction: priced })).toBeNull();
   });
 
-  test('free-by-design payer work predicts no_charge, not a payer invoice (Codex P1)', () => {
-    // Completion suppresses callbacks and always-free types before the payer
-    // matters, so a 'payer' verdict made the sheet promise an AP invoice that
-    // completion will never cut.
+  test('UNPRICED free-by-design payer work predicts no_charge (Codex P1, r13)', () => {
+    // Nothing to bill and nobody to bill it to — the sheet must not promise
+    // an AP invoice completion will never cut.
     const cb = predictCompletionBilling({ ...payer, isCallback: true });
     expect(cb).toMatchObject({ kind: 'no_charge', reason: 'callback' });
     expect(unbilledCompletionGap({ prediction: cb })).toBeNull();
@@ -164,6 +163,19 @@ describe('payer-billed visits', () => {
     const free = predictCompletionBilling({ ...payer, serviceType: 'Pest Control Re-Service' });
     expect(free).toMatchObject({ kind: 'no_charge', reason: 'always_free_service_type' });
     expect(unbilledCompletionGap({ prediction: free })).toBeNull();
+  });
+
+  test('a PRICED payer callback DOES invoice the payer (Codex P1, r17)', () => {
+    // shouldAutoInvoiceCompletion takes create_invoice_on_complete BEFORE its
+    // callback / always-free exclusions (admin-dispatch.js:16155-16157), so a
+    // priced callback really does mint an AP invoice. Calling it free was a
+    // regression — origin/main predicted 'payer' with the amount, correctly.
+    const pricedCb = predictCompletionBilling({ ...payer, isCallback: true, estimatedPrice: 129 });
+    expect(pricedCb).toMatchObject({ kind: 'payer', amount: 129 });
+    expect(unbilledCompletionGap({ prediction: pricedCb })).toBeNull();
+
+    const pricedFree = predictCompletionBilling({ ...payer, serviceType: 'Pest Control Re-Service', estimatedPrice: 129 });
+    expect(pricedFree).toMatchObject({ kind: 'payer', amount: 129 });
   });
 });
 

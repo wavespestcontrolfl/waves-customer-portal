@@ -216,19 +216,13 @@ function predictCompletionBilling({
   // amount, different `reason` — see UNBILLED_MONEY_GAP_REASONS.
   const noCharge = (reason) => ({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason });
   if (payerBilled) {
-    // A payer says WHO owes, not HOW MUCH — so the amount still has to come
-    // from the canonical precedence, not from estimatedPrice alone. Reading
-    // only the stamped price made a payer visit that bills a monthly rate or
-    // an acceptance fee look amountless (Codex P1). Free-by-design payer work
-    // keeps its reason so it is never mistaken for a money gap either.
-    // Free-by-design payer work bills NOBODY: shouldAutoInvoiceCompletion
-    // suppresses callbacks and always-free service types before the payer
-    // ever matters, so a 'payer' verdict here made the sheet promise "this
-    // invoices the third-party billing party" for a visit completion will not
-    // invoice at all (Codex P1). Same reasoned no_charge every other lane
-    // returns for the same work.
-    if (isCallback) return noCharge('callback');
-    if (isAlwaysFreeServiceType(serviceType)) return noCharge('always_free_service_type');
+    // A payer says WHO owes, not HOW MUCH — the amount still comes from the
+    // canonical precedence, never from estimatedPrice alone. Reading only the
+    // stamp made a payer visit that bills a monthly rate or an acceptance fee
+    // look amountless (Codex P1, round 5).
+    const payerFreeReason = isCallback
+      ? 'callback'
+      : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
     const payerAmount = completionInvoiceAmount({
       estimatedPrice,
       isCallback,
@@ -237,9 +231,21 @@ function predictCompletionBilling({
       monthlyRate,
       billingMode,
     });
+    const resolvedPayerAmount = payerAmount > 0
+      ? payerAmount
+      : (hasVisitPrice ? Number(estimatedPrice) : null);
+    // Free-by-design payer work with NO amount bills nobody, so it reads as
+    // the ordinary "nothing bills" line instead of promising an AP invoice
+    // (Codex P1, round 13). A PRICED one is different: completion's mint gate
+    // takes the create_invoice_on_complete stamp BEFORE its callback /
+    // always-free exclusions (admin-dispatch.js:16155-16157), so that visit
+    // really does invoice the payer. Calling it free was a regression this
+    // branch introduced (Codex P1, round 17) — origin/main predicted
+    // 'payer' with the amount here, and was right.
+    if (payerFreeReason && !(Number(resolvedPayerAmount) > 0)) return noCharge(payerFreeReason);
     return {
       kind: 'payer',
-      amount: payerAmount > 0 ? payerAmount : (hasVisitPrice ? Number(estimatedPrice) : null),
+      amount: resolvedPayerAmount,
       conflictStampedPrice: false,
     };
   }
