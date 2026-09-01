@@ -75,6 +75,18 @@ const ALLOWLIST = [
     reason: 'OR-widened needs-review triage (fail-safe hold-back), not a lane selection',
   },
   {
+    file: 'routes/admin-automations.js',
+    match: 'coalesce(monthly_rate, 0) > 0',
+    context: 'ELSE',
+    count: 1,
+    // MEMBERSHIP_SQL's tierless-fallback arm: the tier-FIRST membership
+    // mirror (sentinel tiers excluded outright, real tiers included) falls
+    // back to rate-only ONLY for tierless rows — a deliberate, documented
+    // audience definition kept in lockstep with billing-lane's
+    // NON_MEMBERSHIP_TIER_KEYS, not a monthly-lane query.
+    reason: 'MEMBERSHIP_SQL definition: tier-first audience mirror; rate arm is the tierless fallback only',
+  },
+  {
     file: 'scripts/audit-churned-accounts-live-state.js',
     match: 'Number(c.monthly_rate) > 0',
     context: 'flags.push',
@@ -159,6 +171,10 @@ const KNEX_PREDICATE = /\.(?:where|andWhere|orWhere|having|andHaving|orHaving)\(
 // bare JS comparisons). `Number(x.monthly_rate || 0) > 0` does not match:
 // the `|| 0)` sits between the column and the operator.
 const RAW_PREDICATE = /\b(?:\w+\.)?monthly_rate(?:::numeric)?\s*>=?\s*'?0(?:\.0+)?'?\b/g;
+// COALESCE-wrapped SQL spelling: COALESCE(monthly_rate, 0) > 0 (Codex #3669
+// r10 — the wrap moves the operator away from the column token, so the raw
+// regex alone would silently pass it).
+const COALESCE_PREDICATE = /\bcoalesce\(\s*(?:\w+\.)?monthly_rate\s*,\s*0\s*\)(?:::numeric)?\s*>=?\s*'?0(?:\.0+)?'?\b/gi;
 // row-level JS lane classifier: monthly_rate positivity (any of the
 // `Number(x.monthly_rate) > 0` / `(x.monthly_rate || 0) > 0` wrappings)
 // with LANE/MEMBERSHIP vocabulary in the SAME STATEMENT — a hand-rolled
@@ -242,8 +258,9 @@ function findOffenders() {
     lines.forEach((line, idx) => {
       KNEX_PREDICATE.lastIndex = 0;
       RAW_PREDICATE.lastIndex = 0;
+      COALESCE_PREDICATE.lastIndex = 0;
       const jsClassifier = isJsLaneClassifier(lines, idx);
-      if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line)) return;
+      if (!jsClassifier && !KNEX_PREDICATE.test(line) && !RAW_PREDICATE.test(line) && !COALESCE_PREDICATE.test(line)) return;
       if (seen.has(idx)) return;
       seen.add(idx);
       // A JS classifier's "chain" is its statement window, so an ALLOWLIST
@@ -322,10 +339,12 @@ describe('monthly-lane source guard (#3140)', () => {
       'AND monthly_rate::numeric > 0',
       "AND monthly_rate > '0'",
       'if (c.monthly_rate > 0) {',
+      'AND COALESCE(monthly_rate, 0) > 0',
+      "ELSE coalesce(cu.monthly_rate, 0) > '0'",
     ];
     for (const s of shapes) {
-      KNEX_PREDICATE.lastIndex = 0; RAW_PREDICATE.lastIndex = 0;
-      expect(KNEX_PREDICATE.test(s) || RAW_PREDICATE.test(s)).toBe(true);
+      KNEX_PREDICATE.lastIndex = 0; RAW_PREDICATE.lastIndex = 0; COALESCE_PREDICATE.lastIndex = 0;
+      expect(KNEX_PREDICATE.test(s) || RAW_PREDICATE.test(s) || COALESCE_PREDICATE.test(s)).toBe(true);
     }
     const nonShapes = [
       'Number(customer?.monthly_rate || 0) > 0',

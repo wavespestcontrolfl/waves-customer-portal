@@ -177,13 +177,32 @@ describe('buildBridgeMonths — lane-definition boundary (#3669: history preserv
         ['2026-10-01', snap({ a: 100 })],
       ]),
       conversionMonthById: new Map(),
-      laneSwitchedIds: new Set(['switcher']), // live on annual_prepay now
+      // live on annual_prepay now, and the switch explains THIS exit month
+      laneSwitchedIdsByMonth: new Map([['2026-10-01', new Set(['switcher'])]]),
     });
     expect(out[0].degraded).toBe(false);
     expect(out[0].contraction).toEqual({ mrr: 80, count: 1 }); // dues → 0, customer kept
     expect(out[0].churned).toEqual({ mrr: 50, count: 1 }); // genuinely gone
     // Additivity holds either way: start + Σbuckets = end.
     expect(out[0].startMrr - out[0].contraction.mrr - out[0].churned.mrr).toBe(out[0].endMrr);
+  });
+
+  test('the switch set is PER EXIT MONTH: an earlier real churn is not retroactively relabeled (r10 follow-up)', () => {
+    // reactivator churned in Oct (real churn), came back later on prepay:
+    // the caller resolves the Oct exit as NOT a switch, so no entry for
+    // Oct — the churn stands even though the customer is live now.
+    const out = buildBridgeMonths({
+      monthKeys: ['2026-10-01', '2026-11-01'],
+      snapshotsByMonth: new Map([
+        ['2026-09-01', snap({ a: 100, reactivator: 60 })],
+        ['2026-10-01', snap({ a: 100 })],
+        ['2026-11-01', snap({ a: 100 })],
+      ]),
+      conversionMonthById: new Map(),
+      laneSwitchedIdsByMonth: new Map([['2026-11-01', new Set(['reactivator'])]]),
+    });
+    expect(out[0].churned).toEqual({ mrr: 60, count: 1 }); // Oct churn stands
+    expect(out[0].contraction).toEqual({ mrr: 0, count: 0 });
   });
 
   test('laneBoundaryKey: null disables the boundary (pure-core callers can opt out)', () => {

@@ -56,12 +56,15 @@ function monthLabelOf(monthKey) {
  * @param {Map<string, {newMrr:number,newCount:number,churnedMrr:number,churnedCount:number}>} degradedByMonth
  *   customers-table approximation for months that can't diff snapshots
  * @param {string} currentMonthKey 'YYYY-MM-01' of the in-progress ET month
- * @param {Set<string>} laneSwitchedIds customers who LEFT the per-customer
- *   population but are still live on a non-monthly lane (a monthly member
- *   who bought an annual prepay, was moved to per-application, …). Their
- *   dues stream ended but the CUSTOMER was retained, so the prior-only
- *   branch books them as CONTRACTION (dues → 0), never churn (Codex #3669
- *   r10). Current-state approximation, resolved by the caller.
+ * @param {Map<string, Set<string>>} laneSwitchedIdsByMonth monthKey → ids
+ *   that LEFT the population in that month's diff while the customer stayed
+ *   live on a non-monthly lane (a monthly member who bought an annual
+ *   prepay, was moved to per-application, …). Their dues stream ended but
+ *   the CUSTOMER was retained, so the prior-only branch books them as
+ *   CONTRACTION (dues → 0), never churn (Codex #3669 r10). Resolved PER
+ *   EXIT MONTH by the caller — a customer who genuinely churned in an
+ *   earlier displayed month and only later reactivated on a non-monthly
+ *   lane keeps that earlier churn.
  */
 function buildBridgeMonths({
   monthKeys = [],
@@ -70,7 +73,7 @@ function buildBridgeMonths({
   degradedByMonth = new Map(),
   currentMonthKey = null,
   laneBoundaryKey = LANE_DEFINITION_BOUNDARY,
-  laneSwitchedIds = new Set(),
+  laneSwitchedIdsByMonth = new Map(),
 } = {}) {
   return monthKeys.map((key, i) => {
     const prevKey = i > 0 ? monthKeys[i - 1] : prevMonthKey(key);
@@ -123,7 +126,8 @@ function buildBridgeMonths({
       if (currRate == null) {
         // Still a live customer on a non-monthly lane = a lane SWITCH, not
         // a lost customer: the dues stream contracted to zero.
-        const b = laneSwitchedIds.has(String(id)) ? buckets.contraction : buckets.churned;
+        const switched = laneSwitchedIdsByMonth.get(key);
+        const b = switched && switched.has(String(id)) ? buckets.contraction : buckets.churned;
         b.mrr += prevRate;
         b.count += 1;
       } else if (currRate > prevRate) {
@@ -254,29 +258,50 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   // non-monthly lane — a monthly member who converted to annual prepay /
   // per-application (payment stamps the new billing_mode and the narrowed
   // population drops the row). Booked as CONTRACTION, not churn (Codex
-  // #3669 r10); current-state approximation, fail-soft to "churned" on a
-  // read failure. One query over just the exited ids.
-  const exitedIds = new Set();
+  // #3669 r10). Classified PER EXIT MONTH: the lane switch only explains
+  // an exit if no churn EVENT dates in-or-after that month — a customer
+  // who genuinely churned in June and reactivated on prepay in August
+  // keeps the June churn (churned_at is sticky through reactivation, which
+  // is exactly the evidence needed here; a churn its sparse stamp missed
+  // degrades to the lane-switch read — bounded, the customer is live on a
+  // recurring lane either way). Fail-soft to "churned" on a read failure.
+  // One query over just the exited ids.
+  const exitedIdsByMonth = new Map(); // monthKey -> Set(ids exiting that diff)
+  const allExitedIds = new Set();
   for (let i = 0; i < monthKeys.length; i++) {
     const key = monthKeys[i];
     const prev = snapshotsByMonth.get(i > 0 ? monthKeys[i - 1] : prevMonthKey(key));
     const curr = snapshotsByMonth.get(key);
     if (!prev || !curr) continue;
-    for (const id of prev.keys()) if (!curr.has(id)) exitedIds.add(id);
+    for (const id of prev.keys()) {
+      if (curr.has(id)) continue;
+      if (!exitedIdsByMonth.has(key)) exitedIdsByMonth.set(key, new Set());
+      exitedIdsByMonth.get(key).add(String(id));
+      allExitedIds.add(id);
+    }
   }
-  const laneSwitchedIds = new Set();
-  if (exitedIds.size) {
+  const laneSwitchedIdsByMonth = new Map();
+  if (allExitedIds.size) {
     try {
       const { resolveBillingLane } = require('./billing-lane');
       const { CUSTOMER_STAGES: liveStages } = require('./customer-stages');
       const rows = await db('customers')
-        .whereIn('id', [...exitedIds])
+        .whereIn('id', [...allExitedIds])
         .where('active', true)
         .whereNull('deleted_at')
         .whereIn('pipeline_stage', liveStages)
-        .select('id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
-      for (const r of rows) {
-        if (resolveBillingLane(r).mode !== 'monthly_membership') laneSwitchedIds.add(String(r.id));
+        .select('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"));
+      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      for (const [key, ids] of exitedIdsByMonth) {
+        const exitYm = ymOf(key);
+        for (const id of ids) {
+          const r = byId.get(id);
+          if (!r) continue; // not live now → churn stands
+          if (resolveBillingLane(r).mode === 'monthly_membership') continue; // back on dues → not a switch exit
+          if (r.churned_month && r.churned_month >= exitYm) continue; // a real churn event explains this exit
+          if (!laneSwitchedIdsByMonth.has(key)) laneSwitchedIdsByMonth.set(key, new Set());
+          laneSwitchedIdsByMonth.get(key).add(id);
+        }
       }
     } catch { /* unresolvable — exits stay classified as churn */ }
   }
@@ -352,7 +377,7 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     conversionMonthById,
     degradedByMonth,
     currentMonthKey,
-    laneSwitchedIds,
+    laneSwitchedIdsByMonth,
   });
 
   return {
