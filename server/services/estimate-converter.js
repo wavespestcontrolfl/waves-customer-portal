@@ -2402,8 +2402,13 @@ async function acceptTimeUnifiedSetupFeeDecision(database, { customerId = null, 
   const {
     unifiedSetupFeeEnabled, decideUnifiedSetupFee, hasActiveRecurringService, hasConsumableSetupClaim,
   } = require('./unified-setup-fee');
-  if (!unifiedSetupFeeEnabled()) return null;
   const data = normalizeEstimateData(estimateData);
+  // A FROZEN quote is inspected BEFORE the gate (audit r11 P0): the kill
+  // switch stops NEW decisions, never an already-DISCLOSED one — a
+  // customer whose estimate froze a positive unified fee must be billed
+  // exactly what the page showed even if the gate is flipped off between
+  // freeze and accept.
+  if (!data?.setupFeeQuote && !unifiedSetupFeeEnabled()) return null;
   if (data?.setupFeeQuote) {
     const q = data.setupFeeQuote;
     // A frozen ZERO (waived) or a legacy-kind freeze governs untouched.

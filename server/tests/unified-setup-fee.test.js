@@ -198,6 +198,30 @@ describe('decide-once enforcement on the billing/handoff paths (pre-push audit P
   const fs = require('fs');
   const path = require('path');
 
+  test('a frozen unified decision survives a gate flip — the kill switch stops NEW decisions, never a disclosed one', async () => {
+    const { acceptTimeUnifiedSetupFeeDecision } = require('../services/estimate-converter');
+    mockGateOn = false;
+    // Frozen positive, gate off → still billed (dedupe permitting).
+    expect(await acceptTimeUnifiedSetupFeeDecision(fakeDb([]), {
+      customerId: 'c1',
+      recurringServices: [{ service: 'pest_control' }],
+      estimateData: { setupFeeQuote: { kind: 'unified', amount: 99 } },
+    })).toBe(true);
+    // …and the accept-time dedupe still waives when the account already
+    // gained a live series (one setup per account).
+    expect(await acceptTimeUnifiedSetupFeeDecision(fakeDb([{ id: 'v1' }]), {
+      customerId: 'c1',
+      recurringServices: [{ service: 'pest_control' }],
+      estimateData: { setupFeeQuote: { kind: 'unified', amount: 99 } },
+    })).toBe(false);
+    // No freeze + gate off → null (legacy rules).
+    expect(await acceptTimeUnifiedSetupFeeDecision(fakeDb([]), {
+      customerId: 'c1',
+      recurringServices: [{ service: 'pest_control' }],
+      estimateData: {},
+    })).toBe(null);
+  });
+
   test('prepay accepts CHARGE a frozen positive unified fee — its line rides the prepay invoice, and the "setup fee waived" copy never fires beside it', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
     // The fee line rides the SAME InvoiceService.create lineItems array as
