@@ -298,7 +298,12 @@ async function getStopDetails(input, techId = null) {
         let stillOwned = true;
         if (techId) {
           stillOwned = !!(await db('scheduled_services')
-            .where({ id: todayService.id, technician_id: techId })
+            .where({
+              id: todayService.id,
+              technician_id: techId,
+              customer_id: customer.id,
+              scheduled_date: today,
+            })
             .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
             .first('id'));
         }

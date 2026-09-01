@@ -148,6 +148,17 @@ describe('get_stop_details access-facts gate', () => {
     },
   );
 
+  test('date-move race: a live row moved off today mid-read withholds the codes', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-1';
+    mockDeterministicVisitFacts.mockImplementation(async () => {
+      state.scheduled_services[0].scheduled_date = etDateString(addETDays(new Date(), 3)); // moved, still live
+      return { access: ACCESS_BLOCK, last_visit: null };
+    });
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.property).toBeNull();
+  });
+
   test('reassignment race: a row going dead mid-read also withholds the codes', async () => {
     mockVisitFactsGateEnabled.mockReturnValue(true);
     state.scheduled_services[0].technician_id = 'tech-1';
