@@ -1103,13 +1103,18 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
  * row, no claim, no duplicate. Each close is appointment_time-guarded like
  * every other flag write, so a concurrent move's re-arm is never stomped.
  */
-async function closeVisitTierRows(visitId, tierCol, tierAtCol) {
+async function closeVisitTierRows(visitId, tierCol, tierAtCol, { occurrenceDate = null } = {}) {
   try {
     const rows = await db('appointment_reminders as ar')
       .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
       .where('ss.visit_id', visitId)
       .where(`ar.${tierCol}`, false)
       .where('ar.cancelled', false)
+      // Scope to the OCCURRENCE the claim covered (its date rides in the
+      // dedupe key): a visit moved while the send was in flight re-arms
+      // rows for the NEW date, and those must stay armed — this fallback
+      // closes only the occurrence that was actually texted (codex P1).
+      .modify((q) => { if (occurrenceDate) q.whereRaw('ss.scheduled_date::text = ?', [occurrenceDate]); })
       .select('ar.id', 'ar.appointment_time');
     for (const row of rows) {
       await db('appointment_reminders')
@@ -2924,7 +2929,7 @@ const AppointmentReminders = {
             if (ownsVisit72) {
               const fin72 = await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', reached72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
               if (reached72 && fin72 && fin72.ok === false) {
-                await closeVisitTierRows(svcVisitId, 'reminder_72h_sent', 'reminder_72h_sent_at');
+                await closeVisitTierRows(svcVisitId, 'reminder_72h_sent', 'reminder_72h_sent_at', { occurrenceDate: claim72.dedupeKey.slice(claim72.dedupeKey.lastIndexOf(':') + 1) });
               }
             }
 
@@ -3039,7 +3044,7 @@ const AppointmentReminders = {
                 if (ownsNight) {
                   const finNight = await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
                   if (emailRes?.ok && finNight && finNight.ok === false) {
-                    await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at');
+                    await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: nightClaim.dedupeKey.slice(nightClaim.dedupeKey.lastIndexOf(':') + 1) });
                   }
                 }
                 logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
@@ -3146,7 +3151,7 @@ const AppointmentReminders = {
             if (ownsVisit24) {
               const fin24 = await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', reached24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
               if (reached24 && fin24 && fin24.ok === false) {
-                await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at');
+                await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: claim24.dedupeKey.slice(claim24.dedupeKey.lastIndexOf(':') + 1) });
               }
             }
 

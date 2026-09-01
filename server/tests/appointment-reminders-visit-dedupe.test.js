@@ -72,6 +72,8 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null }) {
       orderBy: jest.fn().mockReturnThis(),
       join: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
+      modify: jest.fn((fn) => { fn(c); return c; }),
+      whereRaw: jest.fn().mockReturnThis(),
       select: jest.fn().mockResolvedValue([]),
       pluck: jest.fn().mockResolvedValue([]),
       first: jest.fn().mockResolvedValue(firstValue),
