@@ -127,6 +127,17 @@ describe('buildReturnVisitPayload', () => {
     expect(out.changes[0].label).toMatch(/^Mosquito/);
   });
 
+  test('a between-visits change reversed during the CURRENT sitting is not announced as reflected in the price (GH codex r3 P2)', () => {
+    const out = buildReturnVisitPayload({
+      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z')],
+      estimateData: { serviceOptOut: { events: [
+        { serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-31T09:00:00Z' },
+        { serviceKey: 'mosquito', label: 'Mosquito', included: true, at: '2026-09-01T12:03:00Z' },
+      ] } },
+    });
+    expect(out.changes).toEqual([]);
+  });
+
   test('malformed sessions and events are dropped, not thrown', () => {
     const out = buildReturnVisitPayload({
       sessions: [s('2026-08-30T10:00:00Z'), null, { endedAt: 'garbage' }, s('2026-09-01T12:00:00Z')],

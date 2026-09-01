@@ -6,6 +6,11 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+const nativeShare = { can: false, share: vi.fn(async () => true) };
+vi.mock('../native/nativeFile', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, canShareNative: () => nativeShare.can, shareUrlNative: (...a) => nativeShare.share(...a) };
+});
 import { ReturnVisitStrip } from './EstimateViewPage';
 
 afterEach(() => cleanup());
@@ -66,5 +71,17 @@ describe('ReturnVisitStrip', () => {
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} onAsk={onAsk} />);
     fireEvent.click(screen.getByRole('button', { name: 'Ask a question' }));
     expect(onAsk).toHaveBeenCalledTimes(1);
+  });
+
+  it('in the Capacitor shell the native share sheet runs before any Web Share or sms fallback (GH codex r3 P1)', () => {
+    nativeShare.can = true;
+    const webShare = vi.fn();
+    vi.stubGlobal('navigator', { ...navigator, share: webShare });
+    render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
+    fireEvent.click(screen.getByRole('link', { name: 'Text this to someone' }));
+    expect(nativeShare.share).toHaveBeenCalledWith(window.location.href, 'My Waves estimate');
+    expect(webShare).not.toHaveBeenCalled();
+    nativeShare.can = false;
+    vi.unstubAllGlobals();
   });
 });

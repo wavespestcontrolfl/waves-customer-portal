@@ -32,19 +32,22 @@ function serviceOptOutChanges(estimateData, since, until = null) {
   try {
     ({ serviceOptOutLabel } = require('./estimate-service-opt-out'));
   } catch (_) { /* label fallback is the key */ }
+  // Final state per service is decided by EVERY event after the boundary —
+  // current-sitting events included — so a between-visits change that the
+  // customer has since reversed during this sitting is never announced as
+  // still reflected in the price. Then: a service whose latest event fell in
+  // the current sitting is not announced at all (the page re-fetched after
+  // that click; the reader just saw it) — pre-push codex P1 + GH codex r3 P2.
   const latestByKey = new Map();
   for (const e of events) {
     const at = toDate(e?.at);
     if (!at || !e?.serviceKey || at <= since) continue;
-    // Upper bound: a click made during the CURRENT sitting (the page then
-    // re-fetches with refresh=1) is not "since your last visit" either
-    // (pre-push codex P1).
-    if (until && at >= until) continue;
     const prev = latestByKey.get(e.serviceKey);
     if (!prev || at > prev.at) latestByKey.set(e.serviceKey, { event: e, at });
   }
   const out = [];
   for (const [serviceKey, { event, at }] of latestByKey) {
+    if (until && at >= until) continue;
     const label = event.label || serviceOptOutLabel(serviceKey);
     out.push({
       kind: event.included === false ? 'service_removed' : 'service_restored',

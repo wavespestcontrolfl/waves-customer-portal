@@ -78,6 +78,7 @@ import {
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
+import { canShareNative, shareUrlNative } from '../native/nativeFile';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatETDate, formatETDateTime } from '../lib/timezone';
@@ -1131,7 +1132,16 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
   const changes = Array.isArray(returnVisit.changes) ? returnVisit.changes.filter((c) => c && c.label) : [];
   const since = lastDisplay ? ` since ${lastDisplay}` : '';
   const pageUrl = typeof window !== 'undefined' ? window.location.href : '';
+  // Capacitor shell first (Web Share is unreliable in the webview and a
+  // swallowed rejection would make the tap do nothing), then Web Share, else
+  // the sms: href proceeds untouched (GH codex r3 P1). Mirrors
+  // DocumentActionBar.
   const share = async (e) => {
+    if (canShareNative()) {
+      e.preventDefault();
+      await shareUrlNative(pageUrl, 'My Waves estimate').catch(() => {});
+      return;
+    }
     if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
       e.preventDefault();
       try { await navigator.share({ title: 'My Waves estimate', url: pageUrl }); } catch { /* user dismissed */ }
