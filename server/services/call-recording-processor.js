@@ -6424,6 +6424,28 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Ownership gate for the side-effect boundaries below.
+    //
+    // Fencing individual writes stops a stale write; it does not stop a stale
+    // PASS. Between the transcript checkpoint and the terminal write this
+    // function creates customers, mints leads, books appointments and SENDS
+    // SMS — none of which a token fence on a later UPDATE can take back. So
+    // ownership is re-checked at each of those boundaries and a superseded
+    // pass leaves before it acts, which is what makes the operator takeover
+    // safe rather than merely bounded.
+    const stillOwnsClaim = async () => {
+      const row = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .first('id')
+        .catch(() => null);
+      return !!row;
+    };
+    const abandonToPeer = (boundary) => {
+      logger.warn(`[call-proc] ownership lost before ${boundary} for ${maskSid(callSid)} — abandoning this pass`);
+      return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
+    };
+
     // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
     let transcriptionProvenance = null;
@@ -8206,6 +8228,7 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the customer write');
     // Step 3: Create or update customer
     let customerId = call.customer_id;
     const phone = resolveCallContactPhone(call, extracted.phone);
@@ -9306,6 +9329,7 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the lead write');
     // Step 4b: Create lead in leads table for pipeline tracking
     // Note: we create the lead DIRECTLY here instead of going through lead-attribution,
     // because Step 3 already created the customer — attribution would find the customer
@@ -11518,6 +11542,7 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the appointment SMS');
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
     // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
@@ -14096,6 +14121,7 @@ const CallRecordingProcessor = {
       }
     }
 
+    if (!(await stillOwnsClaim())) return abandonToPeer('the automation enrollment');
     // Step 6: Enroll in the local new_lead automation sequence.
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.

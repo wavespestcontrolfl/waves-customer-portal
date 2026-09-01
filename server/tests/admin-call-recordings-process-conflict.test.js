@@ -136,6 +136,35 @@ describe('processAllPending counters', () => {
 // spend, or it reclaims a slow-but-working run out from under itself. The
 // derivation mirrors the processor's own timeout map — pinned here so the two
 // cannot drift apart silently.
+// Fencing a write stops a stale WRITE; it does not stop a stale PASS. Between
+// the transcript checkpoint and the terminal write the processor creates
+// customers, mints leads, books appointments and SENDS SMS — none of which a
+// token fence on a later UPDATE can take back.
+describe('every side-effect boundary is gated on still owning the claim', () => {
+  const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test.each([
+    ['Step 3: Create or update customer', 'the customer write'],
+    ['Step 4b: Create lead', 'the lead write'],
+    ['Step 5: If appointment detected', 'the appointment SMS'],
+    ['Step 6: Enroll in the local new_lead automation', 'the automation enrollment'],
+  ])('%s is preceded by an ownership check', (stepMarker, label) => {
+    const at = source.indexOf(stepMarker);
+    expect(at).toBeGreaterThan(-1);
+    // The gate sits immediately before the step, not somewhere upstream.
+    const preceding = source.slice(Math.max(0, at - 200), at);
+    expect(preceding).toContain(`abandonToPeer('${label}')`);
+    expect(preceding).toContain('stillOwnsClaim()');
+  });
+
+  test('abandoning reports an ownership loss, not a failure', () => {
+    const helper = source.match(/const abandonToPeer = [\s\S]*?\n    \};/)[0];
+    expect(helper).toContain("reason: 'terminal_write_ownership_lost'");
+    expect(helper).toContain('success: false');
+    expect(helper).toContain('skipped: true');
+  });
+});
+
 describe('claim ceiling is derived from the provider budgets', () => {
   const { alertCeilingMinutes, providerBudgetMs } = require('../utils/claim-ceiling');
   const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
