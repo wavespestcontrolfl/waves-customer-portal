@@ -82,6 +82,12 @@ describe('parkTaggedNoteLines', () => {
       .toBe('Trim the hedge\nReservice the lanai in two weeks');
   });
 
+  test('an elaborated line that contains a chip label is the tech\'s detail, not the marker — it parks', () => {
+    const elaborated = '[Found] Ant activity at the kitchen sink\n[Found] Ant activity\n[Found]  ant   ACTIVITY  ';
+    expect(parkTaggedNoteLines({ notes: elaborated, tag: 'found', labels: ['Ant activity'] }))
+      .toBe('Ant activity at the kitchen sink');
+  });
+
   test('nothing to park is null, so state is left untouched', () => {
     expect(parkTaggedNoteLines({ notes: 'Plain prose only.', tag: 'found', current: 'keep me' })).toBeNull();
     expect(parkTaggedNoteLines({ notes, tag: 'found', labels: ['Ant trail at the slider track', 'moisture under the kitchen sink', 'German roach activity'] })).toBeNull();

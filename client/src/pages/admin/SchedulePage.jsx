@@ -19438,16 +19438,20 @@ export function techTipSentLabel(day) {
 // next-steps channel once the textareas are gone. They have no label array
 // to survive an AI draft in (chip lines do — labelsStillInNotes), so before
 // Generate replaces the notes with prose they are parked in the observation
-// / recommendation text state, which every reader already merges. Lines
-// that carry a still-selected chip label are the chip's own marker line and
-// stay with the chip. Returns the new text, or null when nothing to park.
+// / recommendation text state, which every reader already merges. A line
+// that IS a still-selected chip label (exact, normalised) is the chip's own
+// marker and stays with the chip; a line that merely contains a label
+// ("Ant activity at the kitchen sink" beside chip "Ant activity") is the
+// tech's elaboration and is parked. Returns the new text, or null when
+// nothing to park.
 export function parkTaggedNoteLines({ notes, tag, labels = [], current = "" }) {
   const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
-  const chipLabels = labels.map((l) => String(l || "").trim().toLowerCase()).filter(Boolean);
+  const norm = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const chipLabels = new Set(labels.map(norm).filter(Boolean));
   const typed = String(notes || "")
     .split("\n")
     .map((line) => line.trim().match(rx)?.[1]?.trim() || "")
-    .filter((line) => line && !chipLabels.some((label) => line.toLowerCase().includes(label)));
+    .filter((line) => line && !chipLabels.has(norm(line)));
   if (!typed.length) return null;
   const seen = new Set();
   const merged = [...String(current || "").split("\n").map((l) => l.trim()), ...typed]
