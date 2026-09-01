@@ -1545,6 +1545,59 @@ describe('full run', () => {
     expect(claim(mk('Listings cost USD 95 / year')).price_text).toBe('USD 95 / year'); // the plain quote still verifies
   });
 
+  test('the terms rotation start avalanches — a 6h-stride retry cannot pin the same two of three URLs (Codex PR r10 P1)', async () => {
+    const termsFetches = [];
+    const agreement = `<html><body>Membership agreement. ${'By joining you agree to the listing terms and renewal policy. '.repeat(8)}</body></html>`;
+    const fetcher = async (url) => {
+      if (url.includes('/terms-')) { termsFetches.push(url); return { status: 200, finalUrl: url, contentType: 'text/html', html: agreement, blocked: false, truncated: false }; }
+      return okFetch(url);
+    };
+    const legal = (n) => modelPath({ submission_url: `https://example.com/join-${n}`, legal_attestation: true, legal_terms_url: `https://example.com/terms-${n}` });
+    const verdict = async () => ({ ok: true, json: verdictOf([legal('a'), legal('b'), legal('c')]) });
+    // 8 passes exactly six hours apart — the failure-backoff stride
+    for (let i = 0; i < 8; i++) {
+      const d = domainRow();
+      const db = makeDb({ seo_link_domains: [d] });
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: verdict }), now: new Date(NOW.getTime() + i * 6 * 60 * 60 * 1000) });
+    }
+    const attempted = new Set(termsFetches.map((u) => u.slice(-1)));
+    expect([...attempted].sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  test('an invalid host defers with backoff BEFORE any claim — no hourly re-selection (Codex PR r10 P1)', async () => {
+    const d = domainRow({ domain: '' });
+    const db = makeDb({ seo_link_domains: [d] });
+    const llm = jest.fn();
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    expect(r.failed).toEqual([expect.objectContaining({ reason: 'invalid_host' })]);
+    expect(llm).not.toHaveBeenCalled();
+    const dom = db._tables.seo_link_domains[0];
+    expect(Number(dom.investigate_failures)).toBe(1); // the pre-claim defer actually landed
+    expect(dom.investigate_after).toBeTruthy();
+  });
+
+  test('a deterministic 404 on a path URL is disproof — the dead path retires and stamps (Codex PR r10 P1)', async () => {
+    const d = domainRow({ agent_state: 'qualified', score_reasons: 'downgraded: terminal verdict deferred: unfetched candidate URLs remain' });
+    const dead = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [dead] });
+    d.best_path_id = dead.id;
+    const fetcher = async (url) => (url.includes('/join')
+      ? { status: 404, finalUrl: url, html: null, blocked: false }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const p = db._tables.seo_link_acquisition_paths.find((p2) => p2.id === dead.id);
+    expect(Number(p.confidence)).toBe(0);
+    expect(JSON.parse(p.investigation).disproven_reason).toBe('submission URL returned 404/410');
+    expect(p.last_investigated_at).not.toBeNull(); // stamped — no eternal re-selection
+    expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // closes instead of a 30-day watching park
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {

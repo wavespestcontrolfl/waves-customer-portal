@@ -289,10 +289,15 @@ const REGISTRY_JOBS = Object.freeze({
   // session lock serializes runs (a second click reports the held lease via
   // the next run's `skipped`), and the summary lands in the server log.
   // dryRun and the gated case are fast and stay synchronous.
-  investigate: (opts) => {
+  investigate: async (opts) => {
     const svc = require('../services/seo/link-path-investigator');
     const args = { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) };
     if (opts.dryRun || !isEnabled('linkInvestigator')) return svc.investigatePaths(db, args);
+    // Probe the lease BEFORE reporting startup: a held lease means no work
+    // will run, and the operator must not read "started" off a no-op. (The
+    // probe races the background acquire by design — a lease taken in the
+    // gap still lands as a logged skip, never a false failure.)
+    if (await require('../utils/cron-lock').isLocked(svc.LOCK_KEY)) return { started: false, skipped: 'lease_held' };
     void svc.investigatePaths(db, args)
       .then((r) => logger.info(`[link-investigator] admin run: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} investigated ${r.investigated} (qualified ${r.qualified} watching ${r.watching} not_reproducible ${r.notReproducible} refreshes ${r.pathRefreshes}) paths ${r.pathsWritten} failed ${r.failed.length} fetches ${r.fetches} llm ${r.llmCalls}`))
       .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));

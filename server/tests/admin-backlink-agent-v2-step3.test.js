@@ -50,11 +50,14 @@ jest.mock('../services/seo/link-registry-intake', () => ({ intake: jest.fn(), re
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/seo/link-path-investigator', () => ({
   investigatePaths: jest.fn(async () => ({ gated: true, selected: 7, investigated: 0 })),
+  LOCK_KEY: 'link-path-investigator',
 }));
+jest.mock('../utils/cron-lock', () => ({ isLocked: jest.fn(async () => false) }));
 
 const router = require('../routes/admin-backlink-agent-v2');
 const { investigatePaths } = require('../services/seo/link-path-investigator');
 const { isEnabled } = require('../config/feature-gates');
+const { isLocked } = require('../utils/cron-lock');
 
 function handler(method, routePath) {
   const layer = router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -82,6 +85,14 @@ describe('POST /registry/jobs/investigate', () => {
     // no explicit limit ⇒ the service's own LINK_INVESTIGATOR_BATCH default
     await call(post, { params: { job: 'investigate' }, body: {} });
     expect(investigatePaths).toHaveBeenLastCalledWith(expect.anything(), { dryRun: false });
+  });
+  test('a held lease is reported, never a false "started" (Codex PR r10 P2)', async () => {
+    isEnabled.mockReturnValue(true);
+    isLocked.mockResolvedValueOnce(true);
+    const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'investigate' }, body: {} });
+    expect(r.body).toEqual({ job: 'investigate', started: false, skipped: 'lease_held' });
+    expect(investigatePaths).not.toHaveBeenCalled();
+    isEnabled.mockReturnValue(false);
   });
   test('the 404 names investigate among the valid jobs', async () => {
     const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'nuke' } });

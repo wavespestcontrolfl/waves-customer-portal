@@ -3114,6 +3114,8 @@ function BacklinkRegistryCard() {
               ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
               : runResult.dryRun
                 ? `Preview: ${runResult.selected} selected, up to ${runResult.wouldFetch ?? 0} fetches and ${runResult.wouldCall ?? 0} model calls`
+                : runResult.skipped === "lease_held"
+                  ? "Another investigator run already holds the lease — nothing new was started."
                 : runResult.started
                   ? "Investigator started in the background — runs are serialized; refresh the table to see results."
                   : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}

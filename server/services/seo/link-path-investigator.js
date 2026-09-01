@@ -652,7 +652,7 @@ function canonicalizeTerms(html) {
  * failure ceiling parks it as `watching` on the normal recheck cadence.
  * Best-effort — a defer that itself fails only costs backoff, never data.
  */
-async function deferFailedDomain(db, domain, now, { claim = true } = {}) {
+async function deferFailedDomain(db, domain, now, { claim = true, observedState = null } = {}) {
   try {
     const failures = (Number(domain.investigate_failures) || 0) + 1;
     const patch = { investigate_failures: failures, updated_at: now };
@@ -667,9 +667,11 @@ async function deferFailedDomain(db, domain, now, { claim = true } = {}) {
       patch.investigate_after = new Date(now.getTime() + Math.min(INVESTIGATE_BACKOFF_BASE_MS * 2 ** (failures - 1), INVESTIGATE_BACKOFF_MAX_MS));
     }
     // Compare-and-set on the state this run observed — a claim defers only
-    // while `investigating` stands; a refresh defers only while the domain
-    // still holds its lane-owned state. Never overwrite a newer state.
-    await db('seo_link_domains').where({ id: domain.id, agent_state: claim ? 'investigating' : domain.agent_state }).update(patch);
+    // while `investigating` stands (or, for a failure BEFORE the claim CAS,
+    // the still-unclaimed selected state via observedState); a refresh
+    // defers only while the domain still holds its lane-owned state. Never
+    // overwrite a newer state.
+    await db('seo_link_domains').where({ id: domain.id, agent_state: observedState || (claim ? 'investigating' : domain.agent_state) }).update(patch);
   } catch (err) {
     logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
   }
@@ -722,7 +724,9 @@ async function investigatePaths(db, {
           // name must not re-select every hourly sweep forever (the failure
           // ceiling eventually parks it watching)
           out.failed.push({ id: domain.id, domain: domain.domain, reason: 'invalid_host' });
-          await deferFailedDomain(db, domain, now, { claim: claimState });
+          // this failure happens BEFORE the claim CAS: the row still holds
+          // its selected state, so the defer must compare against that
+          await deferFailedDomain(db, domain, now, { claim: claimState, observedState: domain.agent_state });
           continue;
         }
 
@@ -879,6 +883,13 @@ async function investigatePaths(db, {
         const coverageKeys = new Set(pages
           .filter((pg) => !pg.truncated && pg.text.length >= MIN_COVERAGE_TEXT_CHARS && pg.text.length <= PAGE_EXCERPT_CHARS)
           .flatMap(pageKeys));
+        // A DETERMINISTIC 404/410 on a path's own URL is disproof of that
+        // path (transient errors, blocks, and timeouts are not): the dead
+        // path must retire and stamp instead of holding best_path_id and
+        // re-selecting the domain every sweep.
+        const goneKeys = new Set(fetchErrors
+          .filter((f) => /^status_(404|410)$/.test(String(f.reason)))
+          .map((f) => registry.normalizeSubmissionUrl(f.url)));
         let verifyAttempts = 0;
         for (const p of writable) {
           if (!p.submission_url) continue; // outreach-shaped paths have no URL to verify
@@ -913,11 +924,22 @@ async function investigatePaths(db, {
         // with the hourly pass offset — a third legal path is not stuck
         // behind the same two on every retry.
         const hashOnFile = (p) => existingPaths.some((e) => e.path_key === registry.pathKey(p.acquisition_type, p.submission_url) && e.legal_terms_hash);
+        // The rotation start comes from a MIXED hour value, never the raw
+        // hour: retries advance by the 6-hour backoff, and a linear offset
+        // modulo a path count that divides 6 (2, 3, 6) would land on the
+        // same start forever — the avalanche makes successive passes hit
+        // every start regardless of the count.
+        const mix32 = (h) => {
+          let x = h >>> 0;
+          x = (((x >>> 16) ^ x) * 0x45d9f3b) >>> 0;
+          x = (((x >>> 16) ^ x) * 0x45d9f3b) >>> 0;
+          return ((x >>> 16) ^ x) >>> 0;
+        };
         const legalOrder = (() => {
           const legal = writable.filter((p) => p.legal_attestation && p.legal_terms_url);
           const unhashed = legal.filter((p) => !hashOnFile(p));
           const hashed = legal.filter(hashOnFile);
-          const start = unhashed.length ? Math.floor(now.getTime() / (60 * 60 * 1000)) % unhashed.length : 0;
+          const start = unhashed.length ? mix32(Math.floor(now.getTime() / (60 * 60 * 1000))) % unhashed.length : 0;
           return [...unhashed.slice(start), ...unhashed.slice(0, start), ...hashed];
         })();
         for (const p of legalOrder) {
@@ -1091,7 +1113,8 @@ async function investigatePaths(db, {
           const stampIds = new Set(writtenIds.filter((id) => !unstampedIds.has(id)));
           for (const ap of activeAll) {
             if (unstampedIds.has(ap.id)) continue; // transient verification failure — retryable next pass
-            if (!ap.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(ap.submission_url))) stampIds.add(ap.id);
+            const k = ap.submission_url ? registry.normalizeSubmissionUrl(ap.submission_url) : null;
+            if (!k || coverageKeys.has(k) || goneKeys.has(k)) stampIds.add(ap.id); // a 404/410 page IS a verdict on its path
           }
           if (stampIds.size) {
             await trx('seo_link_acquisition_paths').whereIn('id', [...stampIds]).update({ last_investigated_at: now, updated_at: now });
@@ -1117,12 +1140,13 @@ async function investigatePaths(db, {
               .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
               .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
               .select('id', 'investigation', 'submission_url'))
-              .filter((s) => !s.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
+              .filter((s) => !s.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(s.submission_url)) || goneKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
             for (const s of stale) {
               const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
+              const urlGone = !!s.submission_url && goneKeys.has(registry.normalizeSubmissionUrl(s.submission_url));
               await trx('seo_link_acquisition_paths').where({ id: s.id }).update({
                 confidence: 0,
-                investigation: JSON.stringify({ ...prior, disproven_at: now.toISOString(), disproven_reason: `re-investigation verdict '${verdict.verdict}' did not reproduce this path` }),
+                investigation: JSON.stringify({ ...prior, disproven_at: now.toISOString(), disproven_reason: urlGone ? 'submission URL returned 404/410' : `re-investigation verdict '${verdict.verdict}' did not reproduce this path` }),
                 updated_at: now,
               });
             }
