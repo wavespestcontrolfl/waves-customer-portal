@@ -253,7 +253,7 @@ const termCoverageResolvable = (term) => !!(term
 // commit. Unverifiable = fee-may-apply, never a silent "no fee" (a thrown
 // preview matches the helpers' own posture); only fee-applying visits are
 // listed. Rides the approved-facts fingerprint.
-async function previewVisitFees(pulledVisitKeys) {
+async function previewVisitFees(pulledVisitKeys, now = new Date()) {
   const ids = (Array.isArray(pulledVisitKeys) ? pulledVisitKeys : [])
     .map((k) => String(k).split(':')[0]).filter(Boolean);
   const visits = [];
@@ -264,12 +264,12 @@ async function previewVisitFees(pulledVisitKeys) {
     let fee = null;
     try {
       const CardHolds = require('./estimate-card-holds');
-      const hold = await CardHolds.cardHoldCancelPreview(id);
+      const hold = await CardHolds.cardHoldCancelPreview(id, now);
       if (hold.held) {
         fee = { id, lane: 'card_hold', feeApplies: hold.feeApplies === true, feeAmount: hold.feeAmount ?? null, unresolved: hold.unresolved === true };
       } else {
         const ApptCards = require('./appointment-card-request');
-        const appt = await ApptCards.appointmentCardCancelPreview(id);
+        const appt = await ApptCards.appointmentCardCancelPreview(id, now);
         if (appt.secured) fee = { id, lane: 'appointment_card', feeApplies: appt.feeApplies === true, feeAmount: appt.feeAmount ?? null, unresolved: appt.unresolved === true };
       }
     } catch (err) {
@@ -992,9 +992,9 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // shared by the pre-write preview_changed check and the duplicate latch's
   // refund-task repair, which must never mint a task from numbers nobody
   // approved.
-  const liveApprovedFacts = async () => {
+  const liveApprovedFacts = async ({ feeNow = new Date() } = {}) => {
     const liveImpact = await buildCancellationImpact(customerId, wholeAccount ? [] : scope, { after: prepayPlan.keepThrough, keepVisitIds });
-    const liveVisitFees = await previewVisitFees(liveImpact ? liveImpact.pulledVisitKeys : null);
+    const liveVisitFees = await previewVisitFees(liveImpact ? liveImpact.pulledVisitKeys : null, feeNow);
     return {
       liveImpact,
       fingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact: liveImpact, visitFees: liveVisitFees, scope, wholeAccount }),
@@ -1328,7 +1328,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       'This commit must carry the previewFingerprint from a current preview — re-open the preview and confirm from it.');
   }
   if (suppliedFingerprint) {
-    const { liveImpact, fingerprint } = await liveApprovedFacts();
+    // ONE clock for the whole approval: the validation previews judge the
+    // fee windows at THIS instant, and the processor's rails reuse it —
+    // a visit crossing into its fee window between the preview calls and
+    // a later Date.now() could otherwise charge a fee the matching
+    // fingerprint approved as absent.
+    feeEvaluationAt = new Date();
+    const { liveImpact, fingerprint } = await liveApprovedFacts({ feeNow: feeEvaluationAt });
     if (fingerprint !== suppliedFingerprint) {
       throw new CancelPlanError(409, 'preview_changed',
         'The cancellation facts changed since this preview (a visit completed or appeared, or the prepay term was edited). Re-open the preview and approve the current numbers.');
@@ -1338,7 +1344,6 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       approvedPulledIds = new Set(liveImpact.pulledVisitKeys.map((k) => String(k).split(':')[0]));
       approvedPulledKeysForMeta = liveImpact.pulledVisitKeys.map(String);
     }
-    feeEvaluationAt = new Date();
     if (!wholeAccount && liveImpact) {
       approvedScopedPricing = [
         `tier=${liveImpact.tierAfter ?? ''}`,

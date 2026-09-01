@@ -479,7 +479,7 @@ describe('POST /:id/cancel-plan', () => {
       applies: true, unresolved: false, total: 35,
       visits: [{ id: 'v1', lane: 'card_hold', feeApplies: true, feeAmount: 35, unresolved: false }],
     });
-    expect(mockApptPreview).toHaveBeenCalledWith('v2');
+    expect(mockApptPreview).toHaveBeenCalledWith('v2', expect.anything());
 
     // The fee window lapsing between preview and commit changes the
     // approved facts — the fingerprint refuses.
