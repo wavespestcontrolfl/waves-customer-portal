@@ -201,3 +201,12 @@ test('a pre-commit failure is still swallowed (nothing was parked)', async () =>
   expect(await applyLeadServiceForSend(row, { leadShapeRef })).toEqual({ estimate: row, parkedKey: null });
   expect(leadShapeRef.parkedKey).toBeNull();
 });
+
+test('a row that became grouped or non-residential between the read and the claim is left alone', async () => {
+  for (const patch of [{ estimate_group_id: 'g-late' }, { category: 'COMMERCIAL' }]) {
+    const row = newCustomerRow();
+    mockRows.queue = [{ ...claimedRowFor(row), ...patch }, parkedRow];
+    expect(await applyLeadServiceForSend(row)).toEqual({ estimate: row, parkedKey: null });
+  }
+  expect(mockMixCalls).toHaveLength(0);
+});

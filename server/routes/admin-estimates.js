@@ -898,6 +898,11 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
     // Work from the row as it is NOW; keep only the caller's in-flight status.
     const claimedRow = await db('estimates').where({ id: estimate.id }).first();
     if (!claimedRow || claimedRow.archived_at || claimedRow.price_locked_at) return untouched;
+    // Scope re-applied to the row as it is NOW: a grouping or category change
+    // between the route's read and the claim must not park one member of a
+    // multi-property group (pre-push codex P1).
+    if (claimedRow.estimate_group_id) return untouched;
+    if (String(claimedRow.category || '').toUpperCase() !== 'RESIDENTIAL') return untouched;
     let current = { ...claimedRow, status: estimate.status };
     let estData = {};
     try { estData = typeof current.estimate_data === 'string' ? JSON.parse(current.estimate_data) : (current.estimate_data || {}); }
