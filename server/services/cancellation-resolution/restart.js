@@ -296,6 +296,14 @@ async function ownedResidualFamilies(dbh, customerId) {
     detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
   } = require('../self-booking-plan-sync');
   const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
+  // TERMINAL_STATUSES is a COVERAGE view: it lists 'rescheduled' because a
+  // phantom reschedule row must not count toward tier/coverage. For
+  // OWNERSHIP it's the opposite — 'rescheduled' is an open rebook
+  // obligation (cancellation-eligibility's CANCELLABLE_STATUSES includes
+  // it; the processor sweeps it regardless of date), so a family whose
+  // only live row is awaiting SmartRebooker is still owned, not
+  // restartable (codex GH r13 P1). Exclude only never-rewritten history.
+  const TERMINAL_HISTORY_STATUSES = TERMINAL_STATUSES.filter((s) => s !== 'rescheduled');
   const residualBase = () => dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
@@ -307,7 +315,7 @@ async function ownedResidualFamilies(dbh, customerId) {
     // status/flag predicates below and scoped to one customer.
     .select('s.*', 'sv.service_key', 'sv.name as service_name');
   const [nonTerminalRows, ongoingAnchorRows] = await Promise.all([
-    residualBase().whereNotIn('s.status', TERMINAL_STATUSES).where('s.is_recurring', true),
+    residualBase().whereNotIn('s.status', TERMINAL_HISTORY_STATUSES).where('s.is_recurring', true),
     residualBase().where('s.recurring_ongoing', true),
   ]);
   const residualKeys = [];

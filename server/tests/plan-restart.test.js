@@ -681,6 +681,20 @@ describe('mintRestartEstimate', () => {
     await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() })).rejects.toMatchObject({ code: 'nothing_to_restart' });
   });
 
+  test('a RESCHEDULED recurring row is residual ownership — an open rebook obligation must not be re-sold (codex GH r13 P1)', async () => {
+    // 'rescheduled' sits in the coverage view's TERMINAL_STATUSES (phantom
+    // row until SmartRebooker actions it) but is an open obligation the
+    // processor sweeps — ownership must keep it.
+    tables.scheduled_services = [
+      { id: 'resched-1', customer_id: 'cust-1', status: 'rescheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
+    ];
+    tables.estimates = [];
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
+    const [estimateData, recomputeDeps] = recompute.mock.calls[recompute.mock.calls.length - 1];
+    expect(Object.keys(estimateData.engineInputs.services)).toEqual(['lawn']);
+    expect(recomputeDeps.priorQualifyingServices).toEqual(['pest_control']);
+  });
+
   test('a STORED commercial property never gets an online restart price — refused before reuse or mint (codex pre-push P0)', async () => {
     tables.customers[0].property_type = 'commercial';
     // Even a LIVE reusable restart estimate must not be handed back.

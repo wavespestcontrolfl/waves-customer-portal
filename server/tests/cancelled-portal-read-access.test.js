@@ -254,6 +254,15 @@ describe('cancelled customer — read allowance (gate on)', () => {
     expect(me.body.cancelledAt).toBe('2026-08-22');
   });
 
+  test('a DATE-column churn stamp (UTC-midnight Date) reads literally — not shifted to the previous ET day (codex GH r13 P1)', async () => {
+    // churned_at is a pg DATE; the driver deserializes it as a UTC-midnight
+    // Date, which the ET wall-clock conversion would push back to Aug 21.
+    tables.customers.find((c) => c.id === 'cust-churned').churned_at = new Date('2026-08-22T00:00:00Z');
+    const me = await call('GET', '/api/auth/me', bearer('cust-churned'));
+    expect(me.status).toBe(200);
+    expect(me.body.cancelledAt).toBe('2026-08-22');
+  });
+
   // In-app account deletion (App Store 5.1.1(v)) is the one write besides
   // restart a cancelled customer keeps — the confirm dialog must not land on
   // a 401 (codex GH r5 P1).
