@@ -3749,9 +3749,14 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
 // (GATE_ESTIMATE_SUCCESS_REFERRAL). The render payload carries only the
 // headline + CTA; the tap POSTs /:token/referral-link, which enrolls the
 // promoter — so a render never does. Same shared card as the service report.
-export function EstimateReferralCard({ referral, token }) {
+// `staffView` — a staff preview of a PUBLISHED accepted estimate
+// (?adminPreview=1) must never enroll the customer as a promoter: the card
+// renders its staff state and never fetches, and the fetch it would make
+// carries the same marker so the route refuses it too (GH codex P1 on #3710).
+export function EstimateReferralCard({ referral, token, staffView = false }) {
   const fetchLink = async () => {
-    const response = await fetch(`${API_BASE}/estimates/${token}/referral-link`, { method: 'POST' });
+    const url = `${API_BASE}/estimates/${token}/referral-link${staffView ? '?adminPreview=1' : ''}`;
+    const response = await fetch(url, { method: 'POST' });
     if (!response.ok) throw new Error(`referral link ${response.status}`);
     return response.json();
   };
@@ -3759,6 +3764,7 @@ export function EstimateReferralCard({ referral, token }) {
     <ReferralShareCard
       referral={referral}
       fetchLink={fetchLink}
+      staffView={staffView}
       className="estimate-referral-card"
       style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), marginTop: 16 }}
       // The estimate page has no report stylesheet — the card's class hooks
@@ -6679,7 +6685,7 @@ function EstimateViewPageInner() {
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
-          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} /> : null}
+          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={adminPreviewRequested} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
             offer={addServiceOffer}
@@ -6779,7 +6785,7 @@ function EstimateViewPageInner() {
         />
         {/* The success screen renders from the accept response without a
             /data refetch, so the referral card rides acceptResult.referral. */}
-        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} /> : null}
+        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={adminPreviewRequested} /> : null}
       </Page>
     );
   }

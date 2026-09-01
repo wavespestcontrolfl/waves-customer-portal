@@ -15338,6 +15338,12 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
   if (!featureGates.isEnabled('estimateSuccessReferral')) {
     return res.status(404).json({ error: 'Estimate not found' });
   }
+  // A staff preview tap (the SPA's ?adminPreview=1 marker) must never enroll
+  // the customer as a promoter — the card is inert in staff view, and this
+  // is the server-side half of that contract (GH codex P1 on #3710).
+  if (req.query.adminPreview === '1') {
+    return res.status(404).json({ error: 'Estimate not found' });
+  }
   if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
     return res.status(404).json({ error: 'Estimate not found' });
   }
