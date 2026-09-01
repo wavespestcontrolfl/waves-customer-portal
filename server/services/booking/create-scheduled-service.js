@@ -191,7 +191,15 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   const wantsServiceId = cols.service_id && data.service_id === undefined;
   if (wantsKey || wantsCategory || wantsServiceId) {
     const identity = await resolveCatalogIdentity(trx, data);
-    if (identity) {
+    // Conflicting evidence → no fill at all: a caller-stamped key or
+    // category that disagrees with the resolved row would otherwise be
+    // combined with that row's other field into a mixed identity that
+    // mis-scopes discounts and completion (pre-push Codex r9 P1).
+    // Enrichment never guesses; the caller's stamps stand as given.
+    const agrees = (stamped, resolved) => blank(stamped) || String(stamped).trim() === String(resolved ?? '');
+    if (identity
+      && agrees(data.service_key_snapshot, identity.service_key)
+      && agrees(data.service_category_snapshot, identity.category)) {
       if (wantsServiceId) data.service_id = identity.id;
       if (wantsKey) data.service_key_snapshot = identity.service_key || null;
       if (wantsCategory) data.service_category_snapshot = identity.category || null;

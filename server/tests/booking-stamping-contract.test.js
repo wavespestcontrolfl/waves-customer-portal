@@ -200,6 +200,21 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(out.service_category_snapshot).toBe('pest');
   });
 
+  test('a caller stamp that DISAGREES with the resolved row blocks every fill (no mixed identity)', async () => {
+    // service_id → Lawn, but the caller stamped a pest key: filling the
+    // category from Lawn would make a pest/lawn hybrid (pre-push Codex r9 P1).
+    const out = await run({ ...BASE, service_id: 'svc-2', service_key_snapshot: 'pest_quarterly' });
+    expect(out.service_id).toBe('svc-2');
+    expect(out.service_key_snapshot).toBe('pest_quarterly');
+    expect(out.service_category_snapshot).toBeUndefined();
+    // Same for a disagreeing category with an absent key.
+    const byCat = await run({ ...BASE, service_id: 'svc-2', service_category_snapshot: 'pest' });
+    expect(byCat.service_key_snapshot).toBeUndefined();
+    // An AGREEING stamp still lets the other field fill.
+    const ok = await run({ ...BASE, service_id: 'svc-2', service_key_snapshot: 'lawn_care' });
+    expect(ok.service_category_snapshot).toBe('lawn');
+  });
+
   test('caller-stamped snapshot fields are never overridden', async () => {
     const out = await run({ ...BASE, service_key_snapshot: 'termite_bond_1yr', service_category_snapshot: null });
     expect(out.service_key_snapshot).toBe('termite_bond_1yr');
