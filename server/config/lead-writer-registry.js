@@ -186,24 +186,37 @@ const LEAD_WRITERS = [
 // its table set can NEVER contain 'leads'. Writing leads through a
 // dynamic-table helper is prohibited — use a literal insert + a LEAD_WRITERS
 // entry instead.
+// Every entry MUST also declare a `callerContract` the contract test can
+// machine-check — the reason string alone is prose. Supported kinds
+// (tests/lead-writer-registry.test.js):
+//   config-literals  — the expr reads in-file config literals; every listed
+//                      prop's literal values are validated non-leads.
+//   positional-call  — in-file helper; every call passes a LITERAL non-leads
+//                      table at argIndex.
+//   object-call      — exported helper taking { [prop]: table }; every call
+//                      site under server/ must bind prop to a non-leads
+//                      literal (or the declared allowIndirect expression).
 const DYNAMIC_TABLE_INSERTS = [
   {
     file: 'routes/admin-photo-assessments.js',
     anchor: 'const [row] = await db(config.table).insert({',
     expr: 'config.table',
     reason: "FUNNEL_CONFIGS tables only — 'lawn_diagnostics' / 'pest_identifications' (routes/admin-photo-assessments.js), never leads",
+    callerContract: { kind: 'config-literals', props: ['table', 'photoTable'], minValues: 4 },
   },
   {
     file: 'services/property-lookup/manatee-permit-sync.js',
     anchor: 'await trx(table).insert(chunk).onConflict(conflictCol).merge(mergeCols);',
     expr: 'table',
     reason: 'permit-sync upsert over the county permit dataset tables, never leads',
+    callerContract: { kind: 'positional-call', helper: 'upsertChunked', argIndex: 1, minCallers: 3 },
   },
   {
     file: 'utils/funnel-photos.js',
     anchor: 'await db(table).insert({',
     expr: 'table',
     reason: 'caller-supplied funnel PHOTO table (lawn/pest assessment photo tables), never leads',
+    callerContract: { kind: 'object-call', helper: 'storeFunnelPhotos', prop: 'table', allowIndirect: 'config.photoTable', minCallers: 3 },
   },
 ];
 

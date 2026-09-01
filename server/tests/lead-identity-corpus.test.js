@@ -245,11 +245,12 @@ describe('lead identity corpus — shape and PII hygiene', () => {
             .toEqual({ id: c.id, last_name: rec.last_name, ok: true });
         }
         if (rec.address != null) {
-          // FULL reserved shape: house number, then a street name that
-          // literally starts with Fictional/Imaginary, a suffix, and
-          // optionally a unit tail. Position matters — a real street with an
-          // appended marker ('123 Main St (fictional)') fails.
-          const ok = /^\d{1,5} (?:Fictional|Imaginary)(?: [A-Z][a-z]+){1,2} (?:Way|Blvd|St|Ave|Ln|Dr|Ct|Ter)(?:,? (?:Unit|Apt|Ste) ?\w+| ?#\w+)?$/
+          // FULL reserved shape built from an EXPLICIT street vocabulary
+          // (add a fixture street by adding it here — same ceremony as the
+          // name vocabulary) plus a numeric-only unit tail, so neither the
+          // street words nor the unit can smuggle a name. Position matters —
+          // a real street with an appended marker fails.
+          const ok = /^\d{1,5} (?:Fictional Palm Way|Imaginary Cove Blvd)(?:,? (?:Unit|Apt|Ste) ?\d{1,4}| ?#\d{1,4})?$/
             .test(String(rec.address));
           expect({ id: c.id, address: rec.address, ok })
             .toEqual({ id: c.id, address: rec.address, ok: true });

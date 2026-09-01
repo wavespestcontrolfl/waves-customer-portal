@@ -217,10 +217,11 @@ function scanSourceForDynamicTableInserts(src) {
     /\binsert\s+into\s+(?:only\s+)?["'`]?\$\{([^}]+)\}/gi,
     /\binsert\s+into\s+(?:only\s+)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
     // Knex identifier bindings at the table position — positional (??) or
-    // named (:table:) — the bound value is runtime data, so it is dynamic
-    // by definition (never resolvable).
-    /\binsert\s+into\s+(?:only\s+)?(\?\?)/gi,
-    /\binsert\s+into\s+(?:only\s+)?(:[\w$]+:)/gi,
+    // named (:table:), with an optional literal schema qualifier
+    // (`public.??`) — the bound value is runtime data, so it is dynamic by
+    // definition (never resolvable).
+    /\binsert\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(\?\?)/gi,
+    /\binsert\s+into\s+(?:only\s+)?(?:["'`]?[\w$]+["'`]?\s*\.\s*)?(:[\w$]+:)/gi,
   ];
   for (const re of RAW_DYNAMIC_RES) {
     re.lastIndex = 0;
@@ -426,6 +427,11 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     );
     expect(rawNamedBound).toHaveLength(1);
     expect(rawNamedBound[0].expr).toBe(':table:');
+    const rawSchemaBound = scanSourceForDynamicTableInserts(
+      "await db.raw('INSERT INTO public.?? (a) VALUES (?)', [table, a]);"
+    );
+    expect(rawSchemaBound).toHaveLength(1);
+    expect(rawSchemaBound[0].expr).toBe('??');
     const nestedComputed = scanSourceForDynamicTableInserts(
       "await db(resolveTable(config.get('kind'))).insert(row);"
     );
@@ -468,6 +474,11 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     // Same rule as the literal scan: two dynamic inserts on one line cannot
     // get distinguishable allowlist keys.
     expect(dynamic.filter((s) => s.siteCount > 1).map(key)).toEqual([]);
+    // And two dynamic sites may not share one key at all — a second insert
+    // with an identical trimmed line + expression elsewhere in the file
+    // would silently ride the first site's allowlist entry.
+    const dynKeys = dynamic.map(key);
+    expect(dynKeys.filter((k, i) => dynKeys.indexOf(k) !== i)).toEqual([]);
     // The allowlist entry is bound to the TABLE EXPRESSION, not just the
     // anchor — swapping `db(photoTable)` for `db(req.body.table)` behind an
     // unchanged insert line changes the expr and forces a re-review of the
@@ -488,54 +499,66 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     }
   });
 
-  test("dynamic-table helpers: every CALLER supplies a table from a finite non-leads set (the allowlist reason isn't just prose)", () => {
+  test("dynamic-table helpers: every allowlist entry declares a caller contract, and every CALLER satisfies it (the never-leads reason isn't just prose)", () => {
     const files = walk(SERVER_ROOT).map((abs) => ({
       rel: path.relative(SERVER_ROOT, abs).split(path.sep).join('/'),
       src: fs.readFileSync(abs, 'utf8'),
     }));
     const leadsShaped = (t) => /^(?:[\w$]+\.)?leads$/i.test(t);
+    const assertNotLeads = (where, t) => {
+      expect({ where, table: t, leads: leadsShaped(t) }).toEqual({ where, table: t, leads: false });
+    };
 
-    // utils/funnel-photos storeFunnelPhotos({ table }) — the param crosses
-    // file boundaries, so every call site anywhere under server/ must bind
-    // `table:` to a string literal or to config.photoTable (whose values are
-    // proven literal below). An unbindable caller fails.
-    let funnelCallers = 0;
-    for (const { rel, src } of files) {
-      const re = /(?<!function )storeFunnelPhotos\s*\(\s*\{/g;
-      let m;
-      while ((m = re.exec(src))) {
-        funnelCallers += 1;
-        const win = src.slice(m.index, m.index + 400);
-        const bound = win.match(/\btable\s*:\s*(?:'([\w]+)'|config\.photoTable)/);
-        expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
-          .toEqual({ caller: `${rel}@${m.index}`, bound: true });
-        if (bound[1]) {
-          expect({ caller: rel, table: bound[1], leads: leadsShaped(bound[1]) })
-            .toEqual({ caller: rel, table: bound[1], leads: false });
+    for (const w of DYNAMIC_TABLE_INSERTS) {
+      const cc = w.callerContract;
+      // A new dynamic helper cannot ride in on prose alone — it must declare
+      // a contract of a kind this test knows how to enforce.
+      expect({ site: key(w), kind: cc && cc.kind }).toEqual({ site: key(w), kind: expect.any(String) });
+
+      if (cc.kind === 'config-literals') {
+        // Every listed prop's literal values in the entry's own file.
+        const src = files.find((f) => f.rel === w.file).src;
+        const propAlt = cc.props.map(escapeRe).join('|');
+        const values = [...src.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*'([\w.]+)'`, 'g'))]
+          .map((m) => m[1]);
+        expect(values.length).toBeGreaterThanOrEqual(cc.minValues);
+        for (const t of values) assertNotLeads(`${w.file} config`, t);
+      } else if (cc.kind === 'positional-call') {
+        // In-file helper: every call passes a LITERAL table at argIndex.
+        const src = files.find((f) => f.rel === w.file).src;
+        const argSkip = String.raw`[\w$]+\s*,\s*`.repeat(cc.argIndex);
+        const calls = [...src.matchAll(new RegExp(String.raw`(?<!function )${escapeRe(cc.helper)}\s*\(\s*${argSkip}('[\w.]+'|[^,)]+)`, 'g'))];
+        expect(calls.length).toBeGreaterThanOrEqual(cc.minCallers);
+        for (const c of calls) {
+          const lit = c[1].match(/^'([\w.]+)'$/);
+          expect({ call: c[0], literal: Boolean(lit) }).toEqual({ call: c[0], literal: true });
+          assertNotLeads(`${w.file} ${cc.helper}`, lit[1]);
         }
+      } else if (cc.kind === 'object-call') {
+        // Exported helper: every call site anywhere under server/ must bind
+        // the prop to a literal (or the declared indirect expression, whose
+        // own values another entry's contract validates).
+        let callers = 0;
+        for (const { rel, src } of files) {
+          const re = new RegExp(String.raw`(?<!function )${escapeRe(cc.helper)}\s*\(\s*\{`, 'g');
+          let m;
+          while ((m = re.exec(src))) {
+            callers += 1;
+            const win = src.slice(m.index, m.index + 400);
+            const bindRe = new RegExp(
+              String.raw`\b${escapeRe(cc.prop)}\s*:\s*(?:'([\w.]+)'${cc.allowIndirect ? `|${escapeRe(cc.allowIndirect)}` : ''})`
+            );
+            const bound = win.match(bindRe);
+            expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
+              .toEqual({ caller: `${rel}@${m.index}`, bound: true });
+            if (bound[1]) assertNotLeads(rel, bound[1]);
+          }
+        }
+        expect(callers).toBeGreaterThanOrEqual(cc.minCallers);
+      } else {
+        // Unknown kind — extend this test before inventing one.
+        expect({ site: key(w), kind: cc.kind, supported: false }).toEqual({ site: key(w), kind: cc.kind, supported: true });
       }
-    }
-    expect(funnelCallers).toBeGreaterThanOrEqual(3);
-
-    // routes/admin-photo-assessments — config.table / config.photoTable come
-    // from the in-file FUNNEL_CONFIGS literals; every such literal is
-    // non-leads.
-    const apa = files.find((f) => f.rel === 'routes/admin-photo-assessments.js').src;
-    const configTables = [...apa.matchAll(/\b(?:photoTable|table)\s*:\s*'([\w]+)'/g)].map((m) => m[1]);
-    expect(configTables.length).toBeGreaterThanOrEqual(4);
-    for (const t of configTables) {
-      expect({ table: t, leads: leadsShaped(t) }).toEqual({ table: t, leads: false });
-    }
-
-    // services/property-lookup/manatee-permit-sync upsertChunked(trx, table)
-    // — module-internal; every call must pass a literal, non-leads table.
-    const mps = files.find((f) => f.rel === 'services/property-lookup/manatee-permit-sync.js').src;
-    const upserts = [...mps.matchAll(/(?<!function )upsertChunked\s*\(\s*[\w$]+\s*,\s*('[\w]+'|[^,]+),/g)];
-    expect(upserts.length).toBeGreaterThanOrEqual(3);
-    for (const c of upserts) {
-      const lit = c[1].match(/^'([\w]+)'$/);
-      expect({ call: c[0], literal: Boolean(lit), leads: lit ? leadsShaped(lit[1]) : null })
-        .toEqual({ call: c[0], literal: true, leads: false });
     }
   });
 
