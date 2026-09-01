@@ -53,10 +53,14 @@ async function lockCustomerComms(trx, customerId) {
   // write in a booking, scheduling or estimate transaction and would widen a
   // stricter one a caller had already chosen (codex #3677 P1). Read the
   // value in force, bound only the acquisition, put it back either way.
+  // set_config(..., true) is the LOCAL form that accepts bind parameters —
+  // plain `SET LOCAL x = ?` does not, so a parameterized restore would throw,
+  // and a swallowed throw would leave this timeout imposed on the rest of the
+  // caller's transaction: the very bug being fixed (codex #3677 P1).
   const previous = await trx.raw('SHOW lock_timeout')
     .then((res) => res?.rows?.[0]?.lock_timeout)
     .catch(() => null);
-  await trx.raw(`SET LOCAL lock_timeout = '${LOCK_WAIT_TIMEOUT}'`);
+  await trx.raw("SELECT set_config('lock_timeout', ?, true)", [LOCK_WAIT_TIMEOUT]);
   try {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
@@ -64,9 +68,14 @@ async function lockCustomerComms(trx, customerId) {
     );
   } finally {
     // Restoring inside finally matters: on a lock timeout the caller's catch
-    // may still run more statements in this transaction.
-    if (previous) await trx.raw('SET LOCAL lock_timeout = ?', [previous]).catch(() => {});
-    else await trx.raw('RESET lock_timeout').catch(() => {});
+    // may still run more statements in this transaction. '0' — no timeout —
+    // is a value to preserve like any other, so the check is for a READ, not
+    // for truthiness.
+    if (previous != null) {
+      await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(previous)]).catch(() => {});
+    } else {
+      await trx.raw('RESET lock_timeout').catch(() => {});
+    }
   }
 }
 

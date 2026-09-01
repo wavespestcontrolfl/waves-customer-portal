@@ -248,3 +248,63 @@ describe('claim ceiling is derived from the provider budgets', () => {
 
 
 });
+
+// The comms lock bounds only its own acquisition. SET LOCAL lasts to the end
+// of the transaction, so a bare set would hand this timeout to every later
+// write in a booking or estimate transaction — and `SET LOCAL x = ?` cannot
+// bind a parameter at all, so a parameterized restore silently fails and
+// leaves the imposed timeout in force.
+describe('customer comms lock timeout is scoped and restorable', () => {
+  const { lockCustomerComms } = require('../utils/customer-comms-lock');
+
+  const trxSpy = (showValue) => {
+    const calls = [];
+    return {
+      calls,
+      raw: jest.fn((sql, bindings) => {
+        calls.push({ sql, bindings });
+        if (String(sql).includes('SHOW lock_timeout')) {
+          return Promise.resolve({ rows: [{ lock_timeout: showValue }] });
+        }
+        return Promise.resolve({});
+      }),
+    };
+  };
+
+  test('restores through set_config, which can bind — SET LOCAL cannot', async () => {
+    const trx = trxSpy('5s');
+    await lockCustomerComms(trx, 'cust-1');
+    const setters = trx.calls.filter((c) => String(c.sql).includes('lock_timeout'));
+    for (const call of setters) {
+      // No bare parameterized SET anywhere: postgres rejects it.
+      expect(String(call.sql)).not.toMatch(/SET LOCAL lock_timeout = \?/);
+    }
+    const restore = trx.calls[trx.calls.length - 1];
+    expect(String(restore.sql)).toContain("set_config('lock_timeout'");
+    expect(restore.bindings).toEqual(['5s']);
+  });
+
+  test("preserves '0' — no timeout is a value, not an absence", async () => {
+    const trx = trxSpy('0');
+    await lockCustomerComms(trx, 'cust-1');
+    const restore = trx.calls[trx.calls.length - 1];
+    expect(restore.bindings).toEqual(['0']);
+  });
+
+  test('restores even when the acquisition times out', async () => {
+    const trx = trxSpy('5s');
+    trx.raw.mockImplementation((sql, bindings) => {
+      trx.calls.push({ sql, bindings });
+      if (String(sql).includes('SHOW lock_timeout')) {
+        return Promise.resolve({ rows: [{ lock_timeout: '5s' }] });
+      }
+      if (String(sql).includes('pg_advisory_xact_lock')) {
+        return Promise.reject(new Error('canceling statement due to lock timeout'));
+      }
+      return Promise.resolve({});
+    });
+    await expect(lockCustomerComms(trx, 'cust-1')).rejects.toThrow(/lock timeout/);
+    const restore = trx.calls[trx.calls.length - 1];
+    expect(String(restore.sql)).toContain("set_config('lock_timeout'");
+  });
+});
