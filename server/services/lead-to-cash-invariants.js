@@ -318,7 +318,11 @@ const DETECTORS = Object.freeze([
         const gap = unbilledCompletionGap({ prediction });
         if (gap) {
           ids.push(`${v.id} [${gap.reason}]`);
-        } else if (['invoice', 'auto_charge'].includes(prediction.kind)) {
+        } else if (['invoice', 'auto_charge'].includes(prediction.kind)
+          || (prediction.kind === 'payer' && Number(prediction.amount) > 0)) {
+          // A PRICED payer visit owes an AP invoice at completion exactly as a
+          // self-pay one owes a customer invoice; omitting it here let real
+          // lost AR go unreported (Codex P1).
           ids.push(`${v.id} [no_invoice_minted:${prediction.kind}]`);
         }
       }

@@ -139,6 +139,18 @@ describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', 
     expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
   });
 
+  test('an annual-prepay customer with a STALE tier + rate cannot infer coverage (Codex P0)', () => {
+    // Nulling the mode let resolveBillingLane infer monthly_membership from a
+    // retained tier + positive rate. Completion sees billing_mode
+    // 'annual_prepay', ignores the monthly rate, and bills nothing — so the
+    // gate must force an explicit non-membership lane, not merely clear it.
+    const stale = withCustomer({ billing_mode: 'annual_prepay', monthly_rate: 46.33, waveguard_tier: 'Bronze' });
+    expect(recurringWithoutBillableAmount(stale)).toBeTruthy();
+    expect(recurringWithoutBillableAmount({ ...stale, recurringFloorPrice: 89 })).toBeNull();
+    // A genuine member (no annual mode) with the same rate is still covered.
+    expect(recurringWithoutBillableAmount(withCustomer({ monthly_rate: 46.33 }))).toBeNull();
+  });
+
   test('the annual-prepay LANE is no exemption either — priced or refused (Codex P0)', () => {
     // The prepay invoice + term are created post-commit and may never exist,
     // so neither a requested prepay term nor an inherited prepay lane can

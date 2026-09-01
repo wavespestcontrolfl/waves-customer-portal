@@ -3305,8 +3305,14 @@ function recurringWithoutBillableAmount({
   //
   // A genuine prepay booking carries its quoted price, so this refuses
   // nothing legitimate — only a prepay booking with no amount at all.
+  // Forced to an EXPLICIT non-membership lane, not to null. Nulling the mode
+  // lets resolveBillingLane INFER monthly_membership from a retained
+  // WaveGuard tier + positive monthly_rate — a supported production shape for
+  // an annual-prepay customer — and the prediction would then treat that
+  // stale rate as billable. Completion sees billing_mode='annual_prepay',
+  // ignores the monthly rate entirely, and bills nothing (Codex P0).
   const customerForLane = customer?.billing_mode === 'annual_prepay'
-    ? { ...customer, billing_mode: null }
+    ? { ...customer, billing_mode: 'per_visit' }
     : customer;
   const lane = resolveBillingLane(customerForLane);
   const prediction = predictCompletionBilling({

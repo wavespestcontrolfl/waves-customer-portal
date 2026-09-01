@@ -415,18 +415,18 @@ describe('detector adapters', () => {
     expect(out.count).toBe(1);
   });
 
-  test('unbilled_completed_visits: a PRICED visit on an inherited ACTIVE default payer is not a gap (Codex P1)', async () => {
+  test('unbilled_completed_visits: payer resolution gets BOTH ids for every evaluated visit (Codex P1)', async () => {
+    // Gating the call on ss.payer_id skipped visits inheriting an active
+    // customers.payer_id default; passing customerId is also what makes
+    // self_pay_override resolve the way completion resolves it. (A payer no
+    // longer EXEMPTS anything — it only classifies who the AR belongs to.)
     mockTables.scheduled_services = mockChain({ select: [
-      { id: 'v1', estimated_price: 183, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
+      { id: 'v1', estimated_price: null, is_callback: false, is_recurring: true, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: null },
     ] });
     mockTables.invoices = mockChain({ select: [] });
-    // No ss.payer_id on the row — the payer comes from customers.payer_id,
-    // which only resolveForInvoice knows about. Both ids must reach it or the
-    // default-payer and self_pay_override semantics diverge from completion.
-    resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
-    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    mockTables.service_records = mockChain({ select: [] });
+    await byKey('unbilled_completed_visits').run({ now: NOW });
     expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'v1', customerId: 'c1' }));
-    expect(out.count).toBe(0);
   });
 
   test('unbilled_completed_visits: an UNPRICED payer-billed visit IS reported — a payer is not an amount', async () => {
@@ -492,5 +492,21 @@ describe('unbilled_completed_visits — ET calendar discipline', () => {
     // Mar 7 here — skipping Mar 8 entirely.
     const out = await byKey('unbilled_completed_visits').run({ now: new Date('2026-03-09T04:30:00Z') });
     expect(out.detail.date).toBe('2026-03-08');
+  });
+});
+
+describe('unbilled_completed_visits — payer AR', () => {
+  const byKey = (k) => DETECTORS.find((d) => d.key === k);
+
+  test('a PRICED payer visit with no invoice is reported (Codex P1)', async () => {
+    mockTables.scheduled_services = mockChain({ select: [
+      { id: 'v1', estimated_price: 183, is_callback: false, is_recurring: false, service_type: 'Monthly Pest Control Service', billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', customer_id: 'c1', payer_id: 42 },
+    ] });
+    mockTables.invoices = mockChain({ select: [] });
+    mockTables.service_records = mockChain({ select: [] });
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 42 });
+    const out = await byKey('unbilled_completed_visits').run({ now: NOW });
+    // The AP invoice is owed exactly as a customer invoice would be.
+    expect(out.ids).toEqual(['v1 [no_invoice_minted:payer]']);
   });
 });
