@@ -67,10 +67,20 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
 
   // path_key of every currently linked path, one query — a board edit
   // (link_type / target_url) must relink, not keep a stale path forever.
+  // …but ONLY while the linked path is still a legacy-shaped placeholder:
+  // once the investigator has stamped it (registry-owned truth) or retired
+  // it into a successor (its repoint moves the placement — deferred only
+  // while the placement is leased), target_url is no longer the identity
+  // and a relink here would resurrect the superseded path's key as a new
+  // active row and re-execute through its obsolete URL.
   const linkedIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
   const pathKeys = new Map();
+  const registryOwned = new Set();
   if (linkedIds.length) {
-    for (const p of await q('seo_link_acquisition_paths').whereIn('id', linkedIds).select('id', 'path_key')) pathKeys.set(p.id, p.path_key);
+    for (const p of await q('seo_link_acquisition_paths').whereIn('id', linkedIds).select('id', 'path_key', 'superseded_by', 'last_investigated_at')) {
+      pathKeys.set(p.id, p.path_key);
+      if (p.superseded_by || p.last_investigated_at) registryOwned.add(p.id);
+    }
   }
 
   const groups = new Map();
@@ -111,8 +121,8 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
       // linked and unchanged → nothing to do; an unknown key (path row not
       // loaded) is trusted as-is (the FK is SET NULL, so a dangling id cannot exist)
       const linkedKey = r.path_id ? pathKeys.get(r.path_id) : null;
-      if (r.domain_id && r.path_id && (linkedKey === undefined || linkedKey === path.path_key)) continue;
-      const relink = !!(r.path_id && linkedKey !== undefined && linkedKey !== path.path_key);
+      if (r.domain_id && r.path_id && (linkedKey === undefined || linkedKey === path.path_key || registryOwned.has(r.path_id))) continue;
+      const relink = !!(r.path_id && linkedKey !== undefined && linkedKey !== path.path_key && !registryOwned.has(r.path_id));
 
       let existing = await findActivePath(q, dom.id, path.path_key);
       if (!existing) {

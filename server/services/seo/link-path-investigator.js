@@ -604,7 +604,15 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
       retired.push(...frontier);
     }
     if (retired.length) {
-      await trx('seo_link_prospects').whereIn('path_id', retired).whereNull('claimed_at').update({ path_id: id, updated_at: now });
+      // The placement's EXECUTION URL moves with it: the runner submits at
+      // target_url, and the board catch-up treats target_url as the
+      // placement's identity — left on the predecessor's URL, the next
+      // runner invocation would resurrect the retired path and submit
+      // through its obsolete route. A URL-less successor (outreach) leaves
+      // target_url alone.
+      const patch = { path_id: id, updated_at: now };
+      if (row.submission_url) patch.target_url = row.submission_url;
+      await trx('seo_link_prospects').whereIn('path_id', retired).whereNull('claimed_at').update(patch);
     }
   }
   return id;
@@ -664,10 +672,16 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     // …and a quote continued by MINIMUM-price syntax is a truncated lower
     // bound the same way: "USD 95+" / "USD 95 and up" never verify "USD 95"
     const minimumNext = /^\s*(?:\+|and up\b|or more\b|and above\b|and over\b|or higher\b|and higher\b|minimum\b|min\.)/.test(t.slice(idx + q.length));
+    // …and the UPPER bound of a range is the same truncation from the
+    // other side: "USD 95–USD 150" / "USD 95 to 150" / "USD 95/year – USD
+    // 150/year" never verify "USD 150" — a lower amount (with an optional
+    // unit suffix) followed by the separator (and an optional repeated
+    // currency marker) directly precedes the match
+    const rangeBefore = /\d(?:\s*\/\s*[a-z]+)?\s*(?:[-–—]|to\b)\s*(?:(?:usd|us\$|ca\$|au\$|nz\$|r\$|[$€£¥₹₱₽₺₪฿])\s*)?$/.test(t.slice(Math.max(0, idx - 32), idx));
     // …and a quote directly preceded by a pricing qualifier is a starting/
     // promo/minimum price, not the price — the same tokens the price parser rejects
     const qualifierBefore = /\b(from|starting(?: at)?|up to|as low as|at least|minimum|min\.?|save|was|off|discount)\s*:?\s*$/.test(t.slice(Math.max(0, idx - 24), idx));
-    if (!contBefore && !contAfter && !multiplierNext && !rangeNext && !minimumNext && !qualifierBefore) return true;
+    if (!contBefore && !contAfter && !multiplierNext && !rangeNext && !rangeBefore && !minimumNext && !qualifierBefore) return true;
     idx = t.indexOf(q, idx + 1);
   }
   return false;
@@ -933,6 +947,24 @@ async function investigatePaths(db, {
         // evidence keys (coverage, disproof, redirects) stay on the ORIGINAL
         // URL, which is the identity every path row and hint carries
         const rebasedFrom = new Map();
+        // Origin fallbacks are inserted at fetch time, AFTER candidateUrls
+        // reserved the last pre-cap slots for uncovered probes — each one
+        // spends a slot the reservation never saw. Re-apply the reservation
+        // over the REMAINING queue against the REMAINING budget whenever the
+        // queue changes shape, so hints can never push every probe past the
+        // cap on a www-only domain (zero probe progress would park it on
+        // routes nothing ever fetched).
+        const reserveRemaining = (from) => {
+          const rest = urlQueue.slice(from);
+          const budget = MAX_FETCHES_PER_DOMAIN - (pages.length + fetchErrors.length);
+          const coveredMask = priorProbeMask | passProbeMask;
+          const uncoveredProbe = (u) => { const i = probeIdxFor(u); return i !== undefined && !((coveredMask >> i) & 1); };
+          const probes = rest.filter(uncoveredProbe);
+          if (!probes.length) return;
+          const others = rest.filter((u) => !uncoveredProbe(u));
+          const head = Math.max(0, budget - PROBE_SLOT_RESERVE);
+          urlQueue.splice(from, rest.length, ...others.slice(0, head), ...probes, ...others.slice(head));
+        };
         for (let qi = 0; qi < urlQueue.length; qi++) {
           const url = urlQueue[qi];
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
@@ -966,6 +998,9 @@ async function investigatePaths(db, {
             // route (/get-listed) would otherwise fail on every generation
             // and stay due forever while the probes moved on.
             if (url === `https://www.${host}` || url === `http://${host}`) {
+              // a working origin makes the remaining fallback pointless —
+              // drop it rather than spend a slot on a second homepage
+              if (urlQueue[qi + 1] === `http://${host}`) urlQueue.splice(qi + 1, 1);
               for (let j = qi + 1; j < urlQueue.length; j++) {
                 if (urlQueue[j].startsWith(`https://${host}/`)) {
                   const u = new URL(urlQueue[j]);
@@ -974,6 +1009,7 @@ async function investigatePaths(db, {
                   urlQueue[j] = moved;
                 }
               }
+              reserveRemaining(qi + 1);
             }
           } else if (page && page.html && !page.blocked && !page.error) {
             // the request was host-bound but a redirect left the domain —
@@ -989,7 +1025,10 @@ async function investigatePaths(db, {
             // canonical https apex and park a domain with a valid route —
             // when the apex homepage itself fails, try its two origin
             // variants next (same cap, same host-bound rules).
-            if (url === `https://${host}`) urlQueue.splice(qi + 1, 0, `https://www.${host}`, `http://${host}`);
+            if (url === `https://${host}`) {
+              urlQueue.splice(qi + 1, 0, `https://www.${host}`, `http://${host}`);
+              reserveRemaining(qi + 1); // the fallbacks spend slots the reservation never saw
+            }
           }
           // Coverage records only DEFINITIVE probe outcomes — a transient
           // failure leaves the bit unset so the uncovered-first ordering
@@ -1448,7 +1487,9 @@ async function investigatePaths(db, {
             effectiveVerdict = verdict.verdict;
             let downgradeNote = null;
             if (verdict.verdict === 'qualified' && !best) { effectiveVerdict = 'watching'; downgradeNote = 'qualified verdict carried no executable path'; }
-            if (verdict.verdict === 'not_reproducible' && best) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered active path remains'; }
+            // (near-term: that path leads the next fetch rotation, so the
+            // recheck must be on the backoff horizon, never 30 days out)
+            if (verdict.verdict === 'not_reproducible' && best) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered active path remains'; tailDeferred = true; }
             // A TERMINAL close is also deferred while probe routes the
             // domain has NEVER been offered remain: the route may live on a
             // page no pass has requested yet, and the uncovered-first probe

@@ -2059,4 +2059,86 @@ describe('full run', () => {
     const all = await selectTargets(db, { limit: 10, now: NOW });
     expect(all.map((t) => t.domain.domain).sort()).toEqual(['newer.com', 'older.com']); // stamped.com's failure predates its stamp
   });
+
+  // ---- Codex PR round 17 -------------------------------------------------
+
+  test('a URL-changing supersession moves the placement EXECUTION URL with it; a URL-less successor leaves it (Codex PR r17 P1)', async () => {
+    const d = domainRow();
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
+      path_key: 'paid_listing:https://example.com/old-join', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect', claimed_at: null, target_url: 'https://example.com/old-join' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath], seo_link_prospects: [placement] });
+    const goneFetch = async (url) => (url.includes('/old-join') ? { status: 404, finalUrl: url, html: null, blocked: false } : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ replaces_path_id: oldPath.id })]) }) }));
+    const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
+    expect(db._tables.seo_link_prospects[0]).toMatchObject({ path_id: fresh.id, target_url: 'https://example.com/join' }); // the runner submits at target_url
+    // a URL-less successor (outreach) repoints the path but never blanks the execution URL
+    const d2 = domainRow();
+    const old2 = { // built fresh: the first run mutated oldPath in place (the harness stores rows by reference)
+      id: uid(), domain_id: d2.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
+      path_key: 'paid_listing:https://example.com/old-join', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement2 = { id: uid(), domain_id: d2.id, path_id: old2.id, status: 'prospect', claimed_at: null, target_url: 'https://example.com/old-join' };
+    const db2 = makeDb({ seo_link_domains: [d2], seo_link_acquisition_paths: [old2], seo_link_prospects: [placement2] });
+    const outreach = modelPath({ acquisition_type: 'editorial_outreach', link_type: 'editorial', submission_url: null, payment_required: false, price_text: null, renewal_price_text: null, price_page_url: null, renewal_price_page_url: null, currency_evidence: null, fee_scope: null, renewal_period: null, replaces_path_id: old2.id });
+    await investigatePaths(db2, runOpts(db2, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([outreach]) }) }));
+    const fresh2 = db2._tables.seo_link_acquisition_paths.find((p) => p.id !== old2.id);
+    expect(db2._tables.seo_link_prospects[0]).toMatchObject({ path_id: fresh2.id, target_url: 'https://example.com/old-join' });
+  });
+
+  test('origin fallbacks never consume the reserved probe slots — a hint-rich www-only domain still probes (Codex PR r17 P1)', async () => {
+    const d = domainRow();
+    const touches = [1, 2, 3, 4, 5].map((i) => ({ domain_id: d.id, source: 'competitor_gap', source_detail: `https://example.com/hint-${i}`, source_ref: null }));
+    const db = makeDb({ seo_link_domains: [d], seo_link_domain_sources: touches });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url.startsWith('https://www.example.com')) return okFetch(url);
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' }; // apex dead, http dead
+    };
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    expect(r.fetches).toBeLessThanOrEqual(MAX_FETCHES_PER_DOMAIN); // the cap holds
+    expect(fetched).not.toContain('http://example.com'); // the unused fallback was dropped once www answered
+    const probePaths = new Set(investigator.PROBE_PATHS);
+    const probesFetched = fetched.filter((u) => u.startsWith('https://www.example.com/') && probePaths.has(new URL(u).pathname));
+    expect(probesFetched.length).toBeGreaterThanOrEqual(2); // PROBE_SLOT_RESERVE survived the apex failure + www fallback
+    expect(Number(db._tables.seo_link_domains[0].probe_coverage_mask)).toBeGreaterThan(0); // real probe progress, so no false park
+  });
+
+  test('the UPPER bound of a price range never verifies as an exact price (Codex PR r17 P1)', () => {
+    const { verifyPriceEvidence } = _internals;
+    const claim = (price_text) => modelPath({ price_text, renewal_price_text: null, renewal_price_page_url: null, quotes: [price_text] });
+    const pageOf = (text) => ({ url: 'https://example.com/join', excerpt: text, text, html: '' });
+    const lead = 'Directory listing page with membership details. ';
+    expect(verifyPriceEvidence([pageOf(`${lead}Sponsor packages: USD 95–USD 150 per year.`)], claim('USD 150')).price_text).toBeNull();
+    expect(verifyPriceEvidence([pageOf(`${lead}Sponsor packages: USD 95 to USD 150 per year.`)], claim('USD 150')).price_text).toBeNull();
+    expect(verifyPriceEvidence([pageOf(`${lead}Sponsor packages: USD 95 to 150 per year.`)], claim('150')).price_text).toBeNull();
+    expect(verifyPriceEvidence([pageOf(`${lead}Sponsor packages: USD 95/year – USD 150/year.`)], claim('USD 150/year')).price_text).toBeNull();
+    // a genuine exact price after unrelated copy still verifies
+    expect(verifyPriceEvidence([pageOf(`${lead}Listing fee: USD 150 per year.`)], claim('USD 150')).price_text).toBe('USD 150');
+  });
+
+  test('a terminal verdict deferred by an UNCOVERED active path rechecks near-term, not in 30 days (Codex PR r17 P1)', async () => {
+    const d = domainRow();
+    const live = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [live] });
+    const fetcher = async (url) => (url.includes('/join')
+      ? { status: null, finalUrl: null, html: null, blocked: false, error: 'timeout' } // transient — the path is neither covered nor disproven
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    expect(dom.score_reasons).toContain('an uncovered active path remains');
+    expect(dom.watch_recheck_at.getTime() - NOW.getTime()).toBe(_internals.INVESTIGATE_BACKOFF_BASE_MS); // the due path leads the next rotation soon
+    expect(db._tables.seo_link_acquisition_paths[0].confidence).toBe(0.7); // never disproven by omission
+  });
 });

@@ -157,6 +157,24 @@ describe('backfillLegacyBoard (plan §4 legacy board backfill)', () => {
     expect(db._store.prospectPatches[0].patch).not.toHaveProperty('domain_id');
   });
 
+  test('a placement on a SUPERSEDED or INVESTIGATED path is registry-owned — target_url never resurrects the retired key (Codex PR #3687 r17 P1)', async () => {
+    const db = fakeDb({ prospects: [
+      // leased placement still on the retired predecessor (the investigator repoints it once the lease settles)
+      { id: 's1', target_domain: 'sup.example', target_url: 'https://sup.example/old-join', link_type: 'directory', source: 'manual', created_at: t0, domain_id: 'd1', path_id: 'pathOld' },
+      // placement on an investigator-stamped path whose key differs from the legacy mapping
+      { id: 's2', target_domain: 'sup.example', target_url: 'https://sup.example/join', link_type: 'directory', source: 'manual', created_at: t1, domain_id: 'd1', path_id: 'pathNew' },
+    ] });
+    db._store.domains.push({ id: 'd1', domain: 'sup.example', source: 'owner_seed', discovery_priority: 'owner_seed' });
+    db._store.paths.push(
+      { id: 'pathOld', domain_id: 'd1', path_key: 'self_service_account:https://sup.example/old-join', acquisition_type: 'self_service_account', superseded_by: 'pathNew', last_investigated_at: t1 },
+      { id: 'pathNew', domain_id: 'd1', path_key: 'paid_listing:https://sup.example/join', acquisition_type: 'paid_listing', superseded_by: null, last_investigated_at: t1 },
+    );
+    const out = await backfillLegacyBoard(db);
+    expect(out).toMatchObject({ relinked: 0, linked: 0, paths: 0 });
+    expect(db._store.paths.map((p) => p.id)).toEqual(['pathOld', 'pathNew']); // nothing resurrected
+    expect(db._store.prospectPatches).toEqual([]);
+  });
+
   test('re-running against the linked board is a no-op (fixed point)', async () => {
     const db = fakeDb({ prospects });
     await backfillLegacyBoard(db);
