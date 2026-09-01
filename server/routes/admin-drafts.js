@@ -97,33 +97,20 @@ async function resolveDraftRecipient(draft) {
 }
 
 // The From number the send path will END UP using for a draft with no
-// inbound sms_log anchor, mirrored LANE-EXACTLY (Codex #3700 r2+r3 P1):
-// only CAMPAIGN approvals pass customerLocationId (nearest_location_id)
-// to TwilioService; every other anchorless draft sends with customerId
-// alone, so Twilio derives the office from resolveLocation(customer.city)
-// — and with no resolved customer it falls to Bradenton. The list mirrors
-// exactly that per-lane chain so the Communications deep link pins the
-// SAME number the send path would pick — without it the composer submits
-// its hardcoded default as an explicit override and out-of-market
-// customers get the wrong line. Display-only: the approve/revise send
-// path is untouched and still derives at send time.
+// inbound sms_log anchor, resolved by the CANONICAL derivation
+// (TwilioService.deriveOutboundNumber — the same code sendSMS runs), fed
+// lane-exact inputs: only campaign approvals pass customerLocationId
+// (nearest_location_id); every other anchorless draft sends with
+// customerId alone (Codex #3700 r2-r5 P1s). Display-only: the deep link
+// pins the number so the composer's hardcoded default cannot override
+// routing; the send path itself is untouched.
 async function derivedOfficeNumber(row, recipientCustomerId) {
   try {
-    const { resolveLocation } = require('../config/locations');
-    // The joined row carries message_drafts.customer_id's city — but the
-    // RESOLVED recipient can come from sms_log when the draft row itself
-    // has no customer (Codex r4 P1). The send path routes from THAT
-    // customer's city, so load it when it isn't the joined one.
-    let city = row.city;
-    let nearest = row.nearest_location_id;
-    if (recipientCustomerId && String(recipientCustomerId) !== String(row.customer_id || '')) {
-      const c = await db('customers').where({ id: recipientCustomerId }).first('city', 'nearest_location_id');
-      city = c?.city ?? null;
-      nearest = c?.nearest_location_id ?? null;
-    }
-    const cityLocation = recipientCustomerId && city ? resolveLocation(city)?.id : null;
-    const locationId = (row.campaign_type ? nearest : null) || cityLocation;
-    return TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton') || null;
+    const TwilioService = require('../services/twilio');
+    return await TwilioService.deriveOutboundNumber({
+      customerLocationId: row.campaign_type ? row.nearest_location_id : undefined,
+      customerId: recipientCustomerId || undefined,
+    }) || null;
   } catch {
     return null;
   }
@@ -655,7 +642,7 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
-        'customers.nearest_location_id', 'customers.city')
+        'customers.nearest_location_id')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -1087,8 +1074,7 @@ router.get('/:id', async (req, res, next) => {
         'customers.phone',
         'customers.waveguard_tier',
         'customers.pipeline_stage',
-        'customers.nearest_location_id',
-        'customers.city'
+        'customers.nearest_location_id'
       )
       .first();
     if (!d) return res.status(404).json({ error: 'Draft not found' });

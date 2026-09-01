@@ -15,7 +15,7 @@
  * Tier 2 styling (inline + light D palette) to match the sibling
  * AgentShadowDraftsPage; the hub shell stays Tier 1.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminFetch } from "../../utils/admin-fetch";
 
 const D = {
@@ -241,17 +241,24 @@ export default function PendingDraftsTab({ embedded = false }) {
   const [notice, setNotice] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [laneFilter, setLaneFilter] = useState("all");
+  // Monotonic load sequence: a mutation bumps it, and a GET that started
+  // before the bump throws its response away — otherwise a Refresh in
+  // flight across an approve could resolve late and restore the actioned
+  // card (already sent/rejected) to the list.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
       const data = await adminFetch("/admin/drafts?status=pending");
+      if (seq !== loadSeq.current) return; // superseded by a mutation
       setDrafts(Array.isArray(data?.drafts) ? data.drafts : []);
       setPendingCount(Number(data?.pendingCount) || 0);
       setNextCursor(data?.nextCursor || null);
     } catch (err) {
-      setError(err.message || "Failed to load drafts");
+      if (seq === loadSeq.current) setError(err.message || "Failed to load drafts");
     } finally {
       setLoading(false);
     }
@@ -263,9 +270,11 @@ export default function PendingDraftsTab({ embedded = false }) {
   // Without paging, older drafts past the first page silently starve.
   const loadOlder = useCallback(async () => {
     if (!nextCursor) return;
+    const seq = loadSeq.current;
     setLoadingMore(true);
     try {
       const data = await adminFetch(`/admin/drafts?status=pending&before=${encodeURIComponent(nextCursor)}`);
+      if (seq !== loadSeq.current) return; // superseded by a mutation
       const older = Array.isArray(data?.drafts) ? data.drafts : [];
       setPendingCount(Number(data?.pendingCount) || 0);
       setNextCursor(data?.nextCursor || null);
@@ -307,6 +316,7 @@ export default function PendingDraftsTab({ embedded = false }) {
   // 503 = the pre-send gate was unreachable and the draft was left
   // pending; the card stays for a retry.
   const runAction = useCallback(async (draft, label, fn) => {
+    loadSeq.current += 1; // invalidate any in-flight list read
     setBusyId(draft.id);
     setNotice(null);
     try {
@@ -324,7 +334,13 @@ export default function PendingDraftsTab({ embedded = false }) {
 
   const approve = useCallback((draft) => {
     const to = draft.recipientPhone || draft.customerPhone || "the customer";
-    const ok = window.confirm(`Send this draft to ${to} as-is?`);
+    // Clarify drafts may be narrowed at dispatch: if the customer already
+    // answered some questions, the lane's deterministic composer trims the
+    // copy to what's STILL missing before sending (designed behavior —
+    // estimate-clarify-asks.js claimClarifyDispatch).
+    const ok = window.confirm(draft.intent === "estimate_clarify"
+      ? `Send this clarify ask to ${to}? If the customer already answered part of it, only the still-missing questions are sent.`
+      : `Send this draft to ${to} as-is?`);
     if (!ok) return;
     runAction(draft, "Sent", () => adminFetch(`/admin/drafts/${encodeURIComponent(draft.id)}/approve`, { method: "PUT" }));
   }, [runAction]);
@@ -395,9 +411,13 @@ export default function PendingDraftsTab({ embedded = false }) {
 
       {visible.map((draft) => (
         <DraftCard
-          key={draft.id}
+          // draftResponse participates in the key: a server-side clarify
+          // rewrite (409 -> reload) must REMOUNT the card so stale
+          // revising/revisedText state can't send the old multi-question
+          // copy against the narrowed missing set.
+          key={`${draft.id}:${draft.draftResponse || ""}`}
           draft={draft}
-          busy={busyId === draft.id}
+          busy={busyId === draft.id || loading || loadingMore}
           onApprove={approve}
           onRevise={revise}
           onReject={reject}

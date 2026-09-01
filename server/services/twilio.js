@@ -357,6 +357,29 @@ const TwilioService = {
    * Send a single SMS message — routes through the customer's location number
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
+  // The canonical outbound From-number derivation for a send with no
+  // explicit fromNumber: customerLocationId → the customer's city →
+  // Bradenton. Exported so display surfaces (the Pending Drafts queue's
+  // Communications deep link) can show the SAME number the send path will
+  // pick instead of maintaining a parallel derivation (Codex #3700 r5 P1).
+  async deriveOutboundNumber({ customerLocationId, customerId } = {}) {
+    const TWILIO_NUMBERS = require("../config/twilio-numbers");
+    const { resolveLocation } = require("../config/locations");
+    let locationId = customerLocationId;
+    if (!locationId && customerId) {
+      try {
+        const customer = await db("customers")
+          .where({ id: customerId })
+          .first();
+        if (customer) {
+          const loc = resolveLocation(customer.city);
+          locationId = loc.id;
+        }
+      } catch {}
+    }
+    return TWILIO_NUMBERS.getOutboundNumber(locationId || "bradenton");
+  },
+
   async sendSMS(to, body, options = {}) {
     // Re-anchored immediately before messages.create below; the entry-time
     // value only covers early-exit throws. The sync-21610 recorder orders a
@@ -482,30 +505,14 @@ const TwilioService = {
         }
       }
 
-      const TWILIO_NUMBERS = require("../config/twilio-numbers");
-      const { resolveLocation } = require("../config/locations");
-
       // Determine FROM number — always the customer's location number
       let fromNumber = options.fromNumber;
 
       if (!fromNumber) {
-        let locationId = options.customerLocationId;
-
-        if (!locationId && options.customerId) {
-          try {
-            const customer = await db("customers")
-              .where({ id: options.customerId })
-              .first();
-            if (customer) {
-              const loc = resolveLocation(customer.city);
-              locationId = loc.id;
-            }
-          } catch {}
-        }
-
-        fromNumber = TWILIO_NUMBERS.getOutboundNumber(
-          locationId || "bradenton",
-        );
+        fromNumber = await TwilioService.deriveOutboundNumber({
+          customerLocationId: options.customerLocationId,
+          customerId: options.customerId,
+        });
       }
       attemptedFrom = fromNumber;
 

@@ -573,7 +573,8 @@ describe('list — send-path recipient resolution + paging', () => {
     // derives from the customer's CITY — nearest_location_id must NOT win.
     TWILIO_NUMBERS.getOutboundNumber.mockClear();
     enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: null, nearest_location_id: 'venice', city: 'Sarasota' })] });
-    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } }); // recipient resolution
+    enqueue('customers', { first: { id: 'cust-1', city: 'Sarasota' } });      // canonical resolver's own city read
     enqueue('message_drafts', { first: { count: '1' } });
     await withServer(async (base) => (await fetch(`${base}/admin/drafts?status=pending`)).json());
     expect(TWILIO_NUMBERS.getOutboundNumber).toHaveBeenCalledWith('sarasota');
