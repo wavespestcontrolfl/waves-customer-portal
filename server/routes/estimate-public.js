@@ -14721,6 +14721,16 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       if (!addable.has(serviceKey)) {
         return { status: 400, body: ({ error: 'service_not_addable' }) };
       }
+      // LIVE member check, fail closed: stored evidence can be absent or
+      // stale for a linked active member (reconcileFrozenMembershipSnapshot
+      // returns before its lookup when nothing is frozen), and this branch
+      // would price a fresh-quote default onto a member plan (pre-push codex
+      // P0). A lookup error refuses too.
+      if (estimate.customer_id) {
+        let activeMember = true;
+        try { activeMember = await isActivePlanCustomer(db, estimate.customer_id); } catch (_) { activeMember = true; }
+        if (activeMember) return { status: 400, body: ({ error: 'service_not_addable' }) };
+      }
       mode = 'add';
     } else if (OptOut.latestOptOutEventIsStaff(parsedData, serviceKey) && !serviceAddGateOn()) {
       // A staff-parked offer (lead-service send) re-enters the plan only
@@ -24793,6 +24803,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
+    // Priced-add stamp (GATE_ESTIMATE_SERVICE_ADD): a LIVE member check that
+    // fails closed, mirroring the rail's own — stored evidence can be absent
+    // for a linked active member, and the page must never advertise an add
+    // the write refuses (pre-push codex P0). Computed once, ahead of the
+    // payload literal; a lookup error withholds the stamp.
+    let addStampBlockedByMembership = false;
+    if (serviceAddGateOn() && !adminDraftPreview && estimate.customer_id) {
+      try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id)); }
+      catch (_) { addStampBlockedByMembership = true; }
+    }
+
     // Acceptance record for the document: an accepted estimate whose
     // terms_version proves a record was committed. Deliberately NOT gated —
     // the gate controls what is shown and written from now on; evidence
@@ -24864,7 +24885,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           .filter((k) => serviceAddGateOn() || !staffParked.includes(k));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
-        const addableKeys = serviceAddGateOn() && !adminDraftPreview && isEstimateAcceptActive(estimate)
+        const addableKeys = serviceAddGateOn() && !adminDraftPreview && !addStampBlockedByMembership
+          && isEstimateAcceptActive(estimate)
           ? Array.from(serviceOptOutAddableKeys(
             projected, Array.isArray(pricingBundle?.services) ? pricingBundle.services : [], estimate.waveguard_tier,
             { category: estimate.category },

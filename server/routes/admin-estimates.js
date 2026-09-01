@@ -1217,21 +1217,31 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // MUST be released on every exit — success, partial failure, or throw —
   // or legitimate linkage corrections stay blocked until the TTL expires.
   const deliveryClaimToken = crypto.randomUUID();
+  // Send-time lead service (GATE_ESTIMATE_LEAD_SERVICE_SEND) parks a line
+  // BEFORE delivery; the inner send records the parked key HERE (not only in
+  // its return value) so a throw after the park — the invalidation verdict,
+  // a provider error — still reaches the compensation below (pre-push codex
+  // P1).
+  const leadShapeRef = { parkedKey: null };
   let result;
+  let thrown = null;
   try {
-    result = await sendEstimateNowInner(estimate, sendMethod, options, deliveryClaimToken);
+    result = await sendEstimateNowInner(estimate, sendMethod, { ...options, leadShapeRef }, deliveryClaimToken);
+  } catch (err) {
+    thrown = err;
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
   }
-  // Send-time lead service (GATE_ESTIMATE_LEAD_SERVICE_SEND) parks a line
-  // BEFORE delivery. When NO channel delivered, the customer never saw the
-  // single-service shape, so the park is compensated — the line is restored
-  // through the same rail — after the delivery claim is released (the rail's
-  // write refuses while a claim is live). Best-effort: a failed revert is
-  // logged and the row keeps the offer shape a resend would carry anyway.
-  if (result && result.sent === false && result.leadServiceParkedKey) {
-    await revertLeadServiceForSend(estimate?.id, result.leadServiceParkedKey);
+  // When NO channel delivered (sent:false, or the send threw), the customer
+  // never saw the single-service shape, so the park is compensated — the
+  // line is restored through the same rail — after the delivery claim is
+  // released (the rail's write refuses while a claim is live). Best-effort:
+  // a failed revert is logged and the row keeps the offer shape a resend
+  // would carry anyway.
+  if (leadShapeRef.parkedKey && (thrown || (result && result.sent === false))) {
+    await revertLeadServiceForSend(estimate?.id, leadShapeRef.parkedKey);
   }
+  if (thrown) throw thrown;
   return result;
 }
 
@@ -1258,6 +1268,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // the delivery claim below see the parked totals.
   const leadShape = await applyLeadServiceForSend(estimate);
   estimate = leadShape.estimate;
+  if (options.leadShapeRef) options.leadShapeRef.parkedKey = leadShape.parkedKey;
 
   // Group pre-flight runs before ANY channel delivery (see helper above).
   let claimedGroupSiblings = [];
@@ -1561,8 +1572,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       channels,
       sentChannels,
       failedChannels,
-      // The wrapper compensates the send-time park once the claim clears.
-      ...(leadShape.parkedKey ? { leadServiceParkedKey: leadShape.parkedKey } : {}),
     };
   }
 

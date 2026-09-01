@@ -1649,11 +1649,14 @@ violations at the severity noted.
   confirm rail and canonical recompute (mode 'add'). Eligibility is ONE
   resolver shared with the `/data` `serviceOptOut.addable` stamp
   (`serviceOptOutAddableKeys`: `estimates.category` RESIDENTIAL fail-closed
-  — never the rendered keys alone — no member evidence (snapshot flag or
-  priors: a member's seasonal / member ladder is a different program than
-  the fresh-quote default this rail plants, so members keep the office
-  inquiry), replayable carrier, turf basis for lawn, same proposal /
-  tier-selection refusals); the synthetic inputs
+  — never the rendered keys alone — no member evidence via the ONE shared
+  reader `memberEvidenceInEstimateData` (snapshot flag, priors in any
+  carrier, recurring flag in any replay shape) PLUS a LIVE
+  `isActivePlanCustomer` check on the linked customer that fails closed on
+  both the `/data` stamp and the write (a member's seasonal / member ladder
+  is a different program than the fresh-quote default this rail plants, so
+  members keep the office inquiry), replayable carrier, turf basis for
+  lawn, same proposal / tier-selection refusals); the synthetic inputs
   an add plants are the selectedServices token (engineRequest) or the
   add-service flow's default block (engineInputs), so a customer add and an
   office add price identically; an add whose recompute yields no new
@@ -1670,8 +1673,10 @@ violations at the severity noted.
   the full bundle, so a park can never leave a partial mix; `/data` ships those keys as
   `serviceOptOut.staffOfferedKeys` and the page words them as an offer.
   Best-effort by design — any refusal sends the full bundle as today, never
-  a blocked send — and a row that already carries `serviceOptOut` is never
-  re-shaped on resend. Members (snapshot flag or priors in any carrier) are
+  a blocked send — a row that already carries `serviceOptOut` is never
+  re-shaped on resend, and a send that delivers on NO channel (sent:false
+  OR a throw after the park) restores the parked line through the same rail
+  after the delivery claim is released (`revertLeadServiceForSend`). Members (snapshot flag or priors in any carrier) are
   never parked. Treat the two gates, the customer-only add branch
   (`actor !== 'customer'` → 400), the fail-closed no-new-row check and the
   member exclusion as security-critical.
