@@ -126,24 +126,41 @@ function buildCloseoutRequirementsSnapshot(requirements, { now = new Date() } = 
 // A frozen source of 'fallback_inference'/'inferred_v1' IS honored — "frozen
 // as inferred" is what the tooling showed at completion, distinct from "not
 // frozen".
+const FROZEN_BOOLEAN_FIELDS = Object.freeze([
+  'requiresServiceReport',
+  'requiresApplicationLog',
+  'requiresCustomerSignature',
+  'requiresCustomerNotice',
+  'requiresLicense',
+]);
+
 function frozenCloseoutRequirements(structuredNotes) {
   const snap = parseJsonObject(structuredNotes).closeoutRequirements;
   if (!snap || typeof snap !== 'object' || Array.isArray(snap)) return null;
-  if (typeof snap.requiresServiceReport !== 'boolean') return null;
-  const photoCount = Number(snap.requiredPhotoCount);
-  if (!Number.isFinite(photoCount)) return null;
+  // STRICT validation (pre-push codex P1): every field must be present and
+  // well-typed, or the snapshot is not frozen and the live catalog decides.
+  // A permissive reader that defaults a missing flag to false would let a
+  // partial/corrupt snapshot SUPPRESS required closeout work.
+  if (snap.v !== 1) return null;
+  for (const field of FROZEN_BOOLEAN_FIELDS) {
+    if (typeof snap[field] !== 'boolean') return null;
+  }
+  if (typeof snap.requiredPhotoCount !== 'number'
+    || !Number.isFinite(snap.requiredPhotoCount)
+    || snap.requiredPhotoCount < 0) return null;
+  if (typeof snap.source !== 'string' || !snap.source) return null;
   return {
     serviceId: snap.serviceId || null,
     serviceName: snap.serviceName || null,
     category: snap.category || null,
-    requiresServiceReport: snap.requiresServiceReport === true,
-    requiresApplicationLog: snap.requiresApplicationLog === true,
-    requiredPhotoCount: Math.max(0, photoCount),
-    requiresCustomerSignature: snap.requiresCustomerSignature === true,
-    requiresCustomerNotice: snap.requiresCustomerNotice === true,
-    requiresLicense: snap.requiresLicense === true,
+    requiresServiceReport: snap.requiresServiceReport,
+    requiresApplicationLog: snap.requiresApplicationLog,
+    requiredPhotoCount: snap.requiredPhotoCount,
+    requiresCustomerSignature: snap.requiresCustomerSignature,
+    requiresCustomerNotice: snap.requiresCustomerNotice,
+    requiresLicense: snap.requiresLicense,
     licenseCategory: snap.licenseCategory || null,
-    source: snap.source || 'fallback_inference',
+    source: snap.source,
     frozen: true,
     frozenAt: snap.frozenAt || null,
   };

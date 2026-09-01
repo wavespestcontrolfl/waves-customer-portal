@@ -177,14 +177,23 @@ describe('closeout requirements freeze', () => {
     expect(frozenCloseoutRequirements('not json')).toBeNull();
     expect(frozenCloseoutRequirements(JSON.stringify({}))).toBeNull();
     expect(frozenCloseoutRequirements(JSON.stringify({ closeoutRequirements: [] }))).toBeNull();
-    // Wrong type on the anchor boolean.
-    expect(frozenCloseoutRequirements(JSON.stringify({
-      closeoutRequirements: { requiresServiceReport: 'yes', requiredPhotoCount: 2 },
-    }))).toBeNull();
-    // Non-finite photo count.
-    expect(frozenCloseoutRequirements(JSON.stringify({
-      closeoutRequirements: { requiresServiceReport: true, requiredPhotoCount: 'many' },
-    }))).toBeNull();
+    // A COMPLETE valid snapshot to perturb per-field below.
+    const valid = buildCloseoutRequirementsSnapshot(normalizeRequirements(CATALOG_ROW, null));
+    expect(frozenCloseoutRequirements({ closeoutRequirements: valid })).not.toBeNull();
+    // A PARTIAL snapshot must never freeze — a permissive reader defaulting
+    // a missing flag to false would suppress required closeout work
+    // (pre-push codex P1).
+    for (const field of ['v', 'source', 'requiresServiceReport', 'requiresApplicationLog',
+      'requiresCustomerSignature', 'requiresCustomerNotice', 'requiresLicense', 'requiredPhotoCount']) {
+      const { [field]: dropped, ...partial } = valid;
+      expect(frozenCloseoutRequirements({ closeoutRequirements: partial })).toBeNull();
+    }
+    // Wrong types and out-of-range values.
+    expect(frozenCloseoutRequirements({ closeoutRequirements: { ...valid, requiresServiceReport: 'yes' } })).toBeNull();
+    expect(frozenCloseoutRequirements({ closeoutRequirements: { ...valid, requiredPhotoCount: 'many' } })).toBeNull();
+    expect(frozenCloseoutRequirements({ closeoutRequirements: { ...valid, requiredPhotoCount: null } })).toBeNull();
+    expect(frozenCloseoutRequirements({ closeoutRequirements: { ...valid, requiredPhotoCount: -1 } })).toBeNull();
+    expect(frozenCloseoutRequirements({ closeoutRequirements: { ...valid, v: 2 } })).toBeNull();
   });
 
   test('a frozen "as inferred" snapshot IS honored', () => {
