@@ -1586,7 +1586,8 @@ function groupApplicationsByPurpose(applications = [], data = {}) {
   return Array.from(groups.values());
 }
 
-function conditionInterpretation(conditions = {}) {
+function conditionInterpretation(conditions = {}, { applicationMade = true } = {}) {
+  if (!applicationMade) return 'Weather conditions were documented for this service visit.';
   const wind = Number(conditions.wind_mph ?? conditions.wind);
   const rain = Number(conditions.rain_24h_in);
   const hasWind = Number.isFinite(wind);
@@ -2493,6 +2494,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+          applicationMade={(data.applications || []).some(isProductApplication)}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn'
             // Legacy lawn payloads (no reportV2) still carry the weekly
@@ -2667,19 +2669,22 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
+function HeroConditions({ conditions, weatherCall, applicationMade = true, live = false, weeklyRainIn = null }) {
   const rows = conditionRows(conditions, { weeklyRainIn });
-  const copy = weatherCall
-    ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
-    : conditionInterpretation(conditions);
-  const { label, kind } = weatherIconInfo(conditions, weatherCall);
+  const effectiveWeatherCall = applicationMade ? weatherCall : null;
+  const copy = effectiveWeatherCall
+    ? [effectiveWeatherCall.headline, effectiveWeatherCall.body].filter(Boolean).join(' ')
+    : conditionInterpretation(conditions, { applicationMade });
+  const weatherInfo = weatherIconInfo(conditions, effectiveWeatherCall);
+  const label = applicationMade ? weatherInfo.label : 'Visit weather';
+  const { kind } = weatherInfo;
   return (
     <div className="hero-conditions">
       <div className="hero-conditions-copy">
         <div className="weather-call-title">
           <span className="weather-call-icon weather-call-icon-animated" aria-hidden="true"><AnimatedWeatherIcon kind={kind} live={live} /></span>
           <div>
-            <div className="section-eyebrow">{weatherCall ? 'Weather call' : 'Conditions at application'}</div>
+            <div className="section-eyebrow">{effectiveWeatherCall ? 'Weather call' : applicationMade ? 'Conditions at application' : 'Conditions at visit'}</div>
             <div className="weather-call-icon-label">{label}</div>
           </div>
         </div>

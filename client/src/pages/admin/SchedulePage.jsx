@@ -46,6 +46,11 @@ import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
 } from "../../lib/pest-default-mix";
+import {
+  reconcileExclusiveProtocolSelections,
+  replaceFindingGroupSelection,
+  specialtyCompletionFor,
+} from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
@@ -211,7 +216,15 @@ const AREAS_BY_SERVICE = {
     "Garage",
     "Kitchen",
     "Bathrooms",
+    "Bedrooms",
+    "Living areas",
+    "Laundry / utility room",
+    "Pantry",
     "Entry points",
+    "Eaves / soffits",
+    "Attic",
+    "Crawlspace",
+    "Lanai / pool cage",
     "Yard",
     "Fence line",
     "Trash area",
@@ -240,6 +253,11 @@ const AREAS_BY_SERVICE = {
     "Front yard",
     "Back yard",
     "Side yards",
+    "Landscape beds",
+    "Thin / stressed turf areas",
+    "Bare / damaged turf areas",
+    "Along driveway / sidewalk",
+    "Slope / drainage area",
   ],
   // Termite and mosquito previously fell back to the pest room list
   // (Kitchen/Bathrooms/Trash area on a bait-station visit). Vocabularies
@@ -254,6 +272,12 @@ const AREAS_BY_SERVICE = {
     "Exterior walls",
     "Wood contact points",
     "Interior slab penetrations",
+    "Plumbing penetrations",
+    "Expansion joints",
+    "Wall void",
+    "Localized activity area",
+    "Attic framing",
+    "Exposed wood framing",
   ],
   mosquito: [
     "Yard vegetation",
@@ -263,6 +287,10 @@ const AREAS_BY_SERVICE = {
     "Standing water areas",
     "Property perimeter",
     "Screened enclosure",
+    "Pool deck / seating area",
+    "Gutters / drains",
+    "Planters / bromeliads",
+    "Mosquito station location",
   ],
 };
 // Per-product treatment areas are multi-select but stored as ONE
@@ -10779,10 +10807,12 @@ export function CompletionPanel({
   // Real treated areas only — the generic status chips ("No issues found" /
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
+  const specialtyCompletion = specialtyCompletionFor(service);
   const areaOptions = [
-    ...(isBedBugVisit
-      ? AREAS_BY_SERVICE.bed_bug
-      : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest)),
+    ...(specialtyCompletion?.areas
+      || (isBedBugVisit
+        ? AREAS_BY_SERVICE.bed_bug
+        : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest))),
   ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
@@ -11240,7 +11270,7 @@ export function CompletionPanel({
     setProtocolActionMeta(null);
     setProtocolActionError("");
     // Typed jobs hide the protocol-actions section entirely — skip the fetch.
-    if (!service.serviceType || isTypedFindings)
+    if (!service.serviceType || isTypedFindings || specialtyCompletion)
       return () => {
         cancelled = true;
       };
@@ -11301,6 +11331,7 @@ export function CompletionPanel({
     service.date,
     isLawn,
     isTypedFindings,
+    specialtyCompletion,
   ]);
 
   useEffect(() => {
@@ -13871,13 +13902,21 @@ export function CompletionPanel({
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
   // (a scout-only or unmatched-catalog visit must not surface "Cobweb sweep"),
   // and an empty list hides the field instead of exposing the fallback.
+  const specialtyProtocolActions = (specialtyCompletion?.protocols || []).map((action, index) => ({
+    ...action,
+    id: `specialty-${index}`,
+    note: action.label,
+  }));
+  const effectiveProtocolActions = specialtyProtocolActions.length
+    ? specialtyProtocolActions
+    : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   const hideProtocolActionsField =
     isLawn &&
     !protocolActionsLoading &&
     !protocolActionError &&
     protocolActions.length === 0;
-  const protocolActionSelectOptions = protocolActions.map((action, index) => ({
+  const protocolActionSelectOptions = effectiveProtocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
     selected: isProtocolActionSelected(action),
@@ -13915,7 +13954,7 @@ export function CompletionPanel({
     // would rebuild the structured fields from the overwritten text. (The select
     // is value="" so it stays on the placeholder; nothing to reset.)
     if (generating) return;
-    if (!protocolActions.length) {
+    if (!effectiveProtocolActions.length) {
       // Legacy label path never reaches applyProtocolAction — same
       // invalidation contract applies (codex r39).
       invalidateGeneratedReportOnTypedEdit();
@@ -13928,7 +13967,65 @@ export function CompletionPanel({
     const option = protocolActionSelectOptions.find(
       (opt) => opt.value === value,
     );
-    if (option?.action) applyProtocolAction(option.action);
+    if (option?.action) {
+      // Specialty lanes allow several performed steps (for example treatment
+      // followed by nest removal), but an inspection/deferred choice cannot
+      // coexist with performed work. Remove only the conflicting specialty
+      // tags; generic pest and every other completion lane keep their existing
+      // multi-action behavior.
+      if (specialtyCompletion) {
+        const reconciled = reconcileExclusiveProtocolSelections(
+          selectedProtocolActionLabels,
+          specialtyProtocolActions,
+          option.action.label,
+        );
+        const reconciledSet = new Set(reconciled);
+        const conflicts = selectedProtocolActionLabels.filter(
+          (label) => !reconciledSet.has(label),
+        );
+        if (conflicts.length) {
+          const conflictSet = new Set(conflicts);
+          setSelectedProtocolActionLabels((current) =>
+            current.filter((label) => !conflictSet.has(label)),
+          );
+          setActionScopeByLabel((current) => {
+            const next = { ...current };
+            conflicts.forEach((label) => delete next[label]);
+            return next;
+          });
+          if (!chipLinesDetached) {
+            setNotes((current) => current
+              .split("\n")
+              .filter((line) => {
+                const match = line.match(/^\s*\[Protocol(?: optional)?\]\s+(.+)$/i);
+                return !match || !conflictSet.has(match[1].trim());
+              })
+              .join("\n")
+              .trim());
+          }
+        }
+      }
+      applyProtocolAction(option.action);
+    }
+  }
+  function handleSpecialtyFindingChange(group, value) {
+    if (generating || photoAnalyzing) return;
+    invalidateGeneratedReportOnTypedEdit();
+    const groupValues = new Set((group?.options || []).map((item) => item.value));
+    if (!chipLinesDetached) {
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[Found\]\s+(.+)$/i);
+          return !match || !groupValues.has(match[1].trim());
+        })
+        .join("\n")
+        .trim());
+    }
+    setSelectedObservationLabels((current) =>
+      replaceFindingGroupSelection(current, group, value),
+    );
+    if (value) addChipNote("Found", value);
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
@@ -14987,15 +15084,32 @@ export function CompletionPanel({
                 ))}
               </div>
             )}
+            {!isTypedFindings && specialtyCompletion?.findingGroups?.map((group) => {
+              const selected = group.options.find((item) =>
+                selectedObservationLabels.includes(item.value),
+              )?.value || "";
+              return (
+                <Field key={group.key} label={group.label}>
+                  <ProjectFindingFieldInput
+                    field={{ ...group, type: "select" }}
+                    id={`cp-${group.key}-mobile`}
+                    name={group.key}
+                    value={selected}
+                    onChange={(value) => handleSpecialtyFindingChange(group, value)}
+                    inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                  />
+                </Field>
+              );
+            })}
             {!isTypedFindings && !hideProtocolActionsField && (
               <Field label="Protocol actions">
-                {protocolActionsLoading ? (
+                {!specialtyCompletion && protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
                     Loading protocol actions...
                   </div>
                 ) : (
                   <>
-                    {protocolActionError && !protocolActions.length && (
+                    {!specialtyCompletion && protocolActionError && !protocolActions.length && (
                       <div
                         style={{
                           fontFamily: font,
@@ -15014,7 +15128,7 @@ export function CompletionPanel({
                       style={mSelect}
                     >
                       <option value="">Add protocol action...</option>
-                      {protocolActions.length > 0
+                      {effectiveProtocolActions.length > 0
                         ? protocolActionSelectOptions.map((opt) => (
                             <option key={opt.value} value={opt.value}>
                               {opt.selected ? "(applied) " : ""}
@@ -17263,12 +17377,32 @@ export function CompletionPanel({
           )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
+            {!isTypedFindings && specialtyCompletion?.findingGroups?.map((group) => {
+              const selected = group.options.find((item) =>
+                selectedObservationLabels.includes(item.value),
+              )?.value || "";
+              return (
+                <div key={group.key} style={{ marginBottom: 12 }}>
+                  <label htmlFor={`cp-${group.key}`} style={{ ...labelStyle, color: D.blue }}>
+                    {group.label}
+                  </label>
+                  <ProjectFindingFieldInput
+                    field={{ ...group, type: "select" }}
+                    id={`cp-${group.key}`}
+                    name={group.key}
+                    value={selected}
+                    onChange={(value) => handleSpecialtyFindingChange(group, value)}
+                    inputStyle={inputStyle}
+                  />
+                </div>
+              );
+            })}
             {!isTypedFindings && !hideProtocolActionsField && (
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
               </label>
-              {protocolActionMeta?.programName && (
+              {!specialtyCompletion && protocolActionMeta?.programName && (
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>
                   {protocolActionMeta.programName}
                   {protocolActionMeta.visit?.month
@@ -17276,13 +17410,13 @@ export function CompletionPanel({
                     : ""}
                 </div>
               )}
-              {protocolActionsLoading ? (
+              {!specialtyCompletion && protocolActionsLoading ? (
                 <span style={{ fontSize: 12, color: D.muted }}>
                   Loading protocol actions...
                 </span>
               ) : (
                 <>
-                  {protocolActionError && !protocolActions.length && (
+                  {!specialtyCompletion && protocolActionError && !protocolActions.length && (
                     <div
                       style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}
                     >
@@ -17296,7 +17430,7 @@ export function CompletionPanel({
                     style={inputStyle}
                   >
                     <option value="">Add protocol action...</option>
-                    {protocolActions.length > 0
+                    {effectiveProtocolActions.length > 0
                       ? protocolActionSelectOptions.map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.selected ? "(applied) " : ""}
