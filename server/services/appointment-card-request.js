@@ -556,25 +556,32 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       } catch (err) {
         logger.warn(`[appt-card-request] stamp probe failed for commercial bait visit ${visit.id} — paging as manual billing: ${err.message}`);
       }
-      try {
-        if (stamped > 0) {
-          logger.info(`[appt-card-request] visit ${visit.id}: the COMMERCIAL bait-station setup ($${stamped}) is stamped on the series — first completion bills it; staff disclose only`);
-          await require('./notification-service').notifyAdmin(
-            'billing',
-            'Commercial rodent setup — disclose to customer',
-            `A direct commercial rodent bait booking carries a $${stamped} bait-station setup that bills automatically at its first completion. Tell the customer — do NOT create a separate setup invoice (visit ${visit.id}).`,
-            { icon: '🐀', link: '/admin/schedule' },
-          );
-        } else {
-          logger.error(`[appt-card-request] FIX: visit ${visit.id} owes the COMMERCIAL bait-station setup ($${setupFee}) — the /secure page cannot disclose commercial billing; collect it manually`);
-          await require('./notification-service').notifyAdmin(
-            'billing',
-            'Commercial rodent setup needs manual billing',
-            `A direct commercial rodent bait booking owes its bait-station setup — the secure page cannot disclose commercial billing. Handle it from the schedule (visit ${visit.id}).`,
-            { icon: '🐀', link: '/admin/schedule' },
-          );
+      // This alert is the ONLY staff signal before the setup bills at
+      // completion (codex #3591 r82 P1): notifyAdmin swallows insert
+      // errors and resolves null, so verify the return, retry once, and
+      // log a loud FIX on a double failure instead of treating the
+      // handoff as complete.
+      const pageBilling = async (title, body) => {
+        const send = () => require('./notification-service')
+          .notifyAdmin('billing', title, body, { icon: '🐀', link: '/admin/schedule' })
+          .catch(() => null);
+        if (!(await send()) && !(await send())) {
+          logger.error(`[appt-card-request] FIX: commercial rodent setup alert could NOT be persisted for visit ${visit.id} ("${title}") — the disclosure/manual-billing handoff has no notification; reconcile from this log`);
         }
-      } catch { /* best-effort page */ }
+      };
+      if (stamped > 0) {
+        logger.info(`[appt-card-request] visit ${visit.id}: the COMMERCIAL bait-station setup ($${stamped}) is stamped on the series — first completion bills it; staff disclose only`);
+        await pageBilling(
+          'Commercial rodent setup — disclose to customer',
+          `A direct commercial rodent bait booking carries a $${stamped} bait-station setup that bills automatically at its first completion. Tell the customer — do NOT create a separate setup invoice (visit ${visit.id}).`,
+        );
+      } else {
+        logger.error(`[appt-card-request] FIX: visit ${visit.id} owes the COMMERCIAL bait-station setup ($${setupFee}) — the /secure page cannot disclose commercial billing; collect it manually`);
+        await pageBilling(
+          'Commercial rodent setup needs manual billing',
+          `A direct commercial rodent bait booking owes its bait-station setup — the secure page cannot disclose commercial billing. Handle it from the schedule (visit ${visit.id}).`,
+        );
+      }
       return skip('commercial_rodent_setup_staff_review');
     };
     // 'commercial' | 'residential' | 'unknown' — an indeterminate catalog

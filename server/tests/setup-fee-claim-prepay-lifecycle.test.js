@@ -54,7 +54,7 @@ const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePr
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null, invoice = null, claimsByEstimate = [], prepayTermsList = null } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null, invoice = null, claimsByEstimate = [], prepayTermsList = null, customerRow = null } = {}) {
   if (liveVisitProbe === undefined) liveVisitProbe = scheduledService;
   const writes = [];
   const trx = (table) => {
@@ -72,6 +72,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
       if (table === 'annual_prepay_terms') return prepayTerm;
       if (table === 'invoices') return invoice;
       if (table === 'services') return catalog;
+      if (table === 'customers') return customerRow;
       // The realignment rollout instant — every root fixture below was
       // created AFTER it (post-rollout direct series owe the live fee).
       if (table === 'knex_migrations') return { migration_time: '2026-08-29T18:30:00.000Z' };
@@ -684,6 +685,14 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(await plans.authoritativeServiceKey(c, { service_id: 'svc-1', service_type: 'Rodent Bait Stations' })).toBe('rodent_bait');
     // A stale non-bait label still cannot re-family the linked bait row.
     expect(await plans.authoritativeServiceKey(c, { service_id: 'svc-1', service_type: 'Rodent Trapping' })).toBe('rodent_bait');
+    // The channel also comes from the AUTHORITATIVE customer property_type
+    // (codex #3591 r82 P1): the Schedule editor persists GENERIC labels, so
+    // a commercial customer's bait row must resolve commercial without the
+    // word appearing in the label.
+    const commercialOwner = conn({ catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' }, customerRow: { property_type: 'commercial' } });
+    expect(await plans.authoritativeServiceKey(commercialOwner, { service_id: 'svc-1', customer_id: 'cust-1', service_type: 'Rodent Bait Station Service' })).toBe('commercial_rodent_bait');
+    const residentialOwner = conn({ catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' }, customerRow: { property_type: 'residential' } });
+    expect(await plans.authoritativeServiceKey(residentialOwner, { service_id: 'svc-1', customer_id: 'cust-1', service_type: 'Rodent Bait Station Service' })).toBe('rodent_bait');
   });
 
   test('the lapse branch skips an operator-disabled fee and retries the page once (codex #3591 r81 P1)', () => {

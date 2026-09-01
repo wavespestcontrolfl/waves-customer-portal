@@ -201,17 +201,28 @@ async function authoritativeServiceKey(database, row = {}) {
     const catalog = await database('services').where({ id: row.service_id }).first('service_key', 'name');
     if (catalog && (catalog.service_key || catalog.name)) {
       const catalogKey = recurringServiceKey({ service_key: catalog.service_key || undefined, name: catalog.name || undefined });
-      // Commercial identity lives on the ROW (codex #3591 r81 P1): a
-      // commercial bait series linked to the shared residential bait
-      // catalog row would otherwise resolve 'rodent_bait' and take the
-      // residential family-waiver branch — but commercial setup is never
-      // family-waived (owner 2026-08-29). The catalog still decides the
-      // FAMILY (a stale non-bait label cannot re-family a linked row);
-      // only the commercial channel marker is read from the row's label,
-      // and only within the same bait family.
-      if (catalogKey === 'rodent_bait'
-        && recurringServiceKey({ name: row.service_type }) === 'commercial_rodent_bait') {
-        return 'commercial_rodent_bait';
+      // Commercial identity is a CHANNEL, not a catalog family (codex
+      // #3591 r81/r82 P1): the shared bait catalog row resolves
+      // 'rodent_bait', but a commercial customer's bait series must keep
+      // the commercial key — its setup is never family-waived (owner
+      // 2026-08-29) and it never takes the residential /secure rail. The
+      // catalog still decides the FAMILY (a stale non-bait label cannot
+      // re-family a linked row); the channel comes from the row's label
+      // when it carries one, else from the AUTHORITATIVE customer
+      // property_type (the Schedule editor persists generic labels, so
+      // the label alone cannot be required to say "commercial").
+      if (catalogKey === 'rodent_bait') {
+        if (recurringServiceKey({ name: row.service_type }) === 'commercial_rodent_bait') {
+          return 'commercial_rodent_bait';
+        }
+        let ownerId = row.customer_id;
+        if (!ownerId && row.id) {
+          ownerId = (await database('scheduled_services').where({ id: row.id }).first('customer_id'))?.customer_id;
+        }
+        if (ownerId) {
+          const owner = await database('customers').where({ id: ownerId }).first('property_type');
+          if (String(owner?.property_type || '').toLowerCase() === 'commercial') return 'commercial_rodent_bait';
+        }
       }
       return catalogKey;
     }
