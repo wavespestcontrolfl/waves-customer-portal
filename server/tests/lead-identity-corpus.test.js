@@ -321,7 +321,9 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     // Strings only — an object here would flatten to '[object Object]' and
     // hide its nested values from every pattern below.
     expect({ where, type: typeof text }).toEqual({ where, type: 'string' });
-    for (const email of String(text).match(/[\w.+%-]+@[\w.-]+/g) || []) {
+    // Unicode-aware: an internationalized address (josé@example.net) is an
+    // email-shaped token too, and must pass the same synthetic rules.
+    for (const email of String(text).match(/[\p{L}\p{N}_.+%-]+@[\p{L}\p{N}_.-]+/gu) || []) {
       const ok = /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email)
         && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
       expect({ where, email, ok }).toEqual({ where, email, ok: true });

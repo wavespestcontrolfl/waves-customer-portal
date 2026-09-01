@@ -36,13 +36,16 @@ const CHAIN = String.raw`(?:\s*\??\.\s*(?!insert\b)[\w$]+\s*\((?:[^()]|\((?:[^()
 const Q = '[\'"`]'; // quote class incl. backtick
 // `.insert(` in either spelling — dot access or literal bracket access
 // (`db('leads')['insert'](row)`).
-const INSERT_CALL = String.raw`(?:\??\.\s*insert|(?:\?\.)?\[\s*['"\x60]insert['"\x60]\s*\])\s*\(`;
+const INSERT_CALL = String.raw`(?:\??\.\s*insert|(?:\?\.)?\[\s*['"\x60]insert['"\x60]\s*\])\s*(?:\?\.\s*)?\(`;
 // `.table(` / `.from(` in either spelling too — `db['table']('leads')`.
 const TABLE_SEL = String.raw`(?:\??\.\s*table|(?:\?\.)?\[\s*['"\x60]table['"\x60]\s*\])`;
 const FROM_SEL = String.raw`(?:\??\.\s*from|\bfrom|(?:\?\.)?\[\s*['"\x60]from['"\x60]\s*\])`;
 // Optional schema qualifier INSIDE the literal too — knex accepts
 // `db('public.leads')` as a schema-qualified table name.
-const LITERAL_LEADS = String.raw`${Q}(?:[\w$]+\.)?leads${Q}`;
+// Optional schema prefix (`public.leads`) and Knex table alias suffix
+// (`leads as l`) around the exact table name.
+const LITERAL_LEADS = String.raw`${Q}(?:[\w$]+\.)?leads(?:\s+[aA][sS]\s+[\w$]+)?${Q}`;
+const isLeadsTable = (value) => /^(?:[\w$]+\.)?leads(?:\s+as\s+[\w$]+)?$/i.test(value.trim());
 // Knex's optional second TABLE-OPTIONS argument — `db('leads', { only:
 // true })` — after any table token or dynamic expression.
 const TABLE_OPTS = String.raw`\s*(?:,\s*\{[^{}]*\}\s*)?`;
@@ -144,7 +147,7 @@ function simpleAssignPairs(src) {
 // The executable-SQL CALLEE exactly — knex `.raw(` / `?.raw(` / `['raw'](`
 // / a bare destructured `raw(`, or a native pg `.query(` (`client.query`,
 // `pool.query`) — never a substring (`draw(`, `withdraw(`).
-const RAW_CALLEE = String.raw`(?:\??\.\s*(?:raw|query)|(?:\?\.)?\[\s*['"\x60](?:raw|query)['"\x60]\s*\]|(?<![.\w$])raw)\s*\(`;
+const RAW_CALLEE = String.raw`(?:\??\.\s*(?:raw|query)|(?:\?\.)?\[\s*['"\x60](?:raw|query)['"\x60]\s*\]|(?<![.\w$])raw)\s*(?:\?\.\s*)?\(`;
 // The declaration that holds the SQL literal at `idx`: `{ name, member }`,
 // where `member` is the regex tail required after the name at the callee
 // (empty for a plain constant; the property access for SQL held in an
@@ -498,6 +501,28 @@ function insertingHelperNames(src) {
     const params = (a[2] ?? a[3] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
     if (paramInserts(params, a[4])) names.add(a[1]);
   }
+  // PROPERTY-assigned helpers — `exports.save = (builder, row) => …`,
+  // `module.exports.save = function (qb, rows) {…}`, and object-literal
+  // properties `{ save: (builder, row) => … }` — named by the property.
+  const bare = blankCommentsAndStrings(src);
+  const propFnRe = /(?:(?:module\s*\.\s*)?exports\s*\.\s*([A-Za-z_$][\w$]*)\s*=|([A-Za-z_$][\w$]*)\s*:)\s*(?:async\s*)?(?:function\b[^(]*\(([^()]*)\)\s*\{|(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*(\{)?)/g;
+  let pf;
+  while ((pf = propFnRe.exec(src))) {
+    const params = (pf[3] ?? pf[4] ?? pf[5] ?? '').split(',').map((x) => x.trim().replace(/^\.\.\./, '').split(/[=\s]/)[0]).filter((x) => /^[A-Za-z_$][\w$]*$/.test(x));
+    let body;
+    if (pf[3] !== undefined || pf[6]) {
+      let depth = 1;
+      let j = propFnRe.lastIndex;
+      for (; j < bare.length && depth > 0; j += 1) {
+        if (bare[j] === '{') depth += 1;
+        else if (bare[j] === '}') depth -= 1;
+      }
+      body = src.slice(propFnRe.lastIndex, j);
+    } else {
+      body = src.slice(propFnRe.lastIndex).match(/^[^;\n]*/)[0];
+    }
+    if (paramInserts(params, body)) names.add(pf[1] || pf[2]);
+  }
   return names;
 }
 
@@ -584,7 +609,7 @@ function nearestDeclBindsLeads(code, name, idx) {
   while ((d = declRe.exec(code)) && d.index < idx) {
     if (declVisibleAt(bare, d.index, idx, d[1] === 'var')) value = d[3];
   }
-  return value === null || value === 'leads';
+  return value === null || isLeadsTable(value);
 }
 
 // Aliased-builder form: a `leads` query builder stored in a variable first
@@ -931,7 +956,12 @@ function scanSourceForDynamicTableInserts(src, filePath, imports = 'all') {
     // …and the name must not be REBOUND anywhere else in the file — an
     // indented declaration or a parameter shadowing the module const means
     // the insert may read a different binding, so it stays dynamic.
-    const indentedDecl = new RegExp(String.raw`^[\t ]+(?:const|let|var)\s+(?:\{[^{}\n]*)?\b${escapeRe(root)}\b`, 'm');
+    // Any declaration of the name other than the single column-0 module
+    // const — indented, or inline after a function head on the same line
+    // (`function write(row) { const TABLE = requestedTable; …`) — is a
+    // possible shadow.
+    const declsOfRoot = [...code.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(?:\{[^{}\n]*)?\b${escapeRe(root)}\b`, 'g'))];
+    const indentedDecl = { test: () => declsOfRoot.length > 1 || declsOfRoot.some((d) => d.index !== 0 && code[d.index - 1] !== '\n') };
     // A parameter list may hold DEFAULT expressions with their own parens
     // (`TABLE = resolveTable(kind), row`) — two nesting levels allowed.
     const paramBinding = new RegExp(String.raw`[(,]\s*(?:\{[^{}]*)?\b${escapeRe(root)}\b(?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\s*(?:=>|\{)`);
@@ -1286,6 +1316,13 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['triple-nested chain arguments', "await db('leads').modify(qb => qb.whereIn('id', ids.map(id => normalize(id)))).insert(row);"],
     ['deeply nested insert payload before .into', "await db.insert(rows.map(row => normalize(row, opts.get('k')))).into('leads');"],
     ['insert payload before .table', "await db.insert(rows.map(row => normalize(row))).table('leads');"],
+    ['optional raw invocation', "await client.query?.('INSERT INTO leads (a) VALUES ($1)', [a]);"],
+    ['optional raw invocation of a stored constant', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nawait db.raw?.(SQL, [a]);"],
+    ['optional insert invocation', "await db('leads').insert?.(row);"],
+    ['table alias literal', "await db('leads as l').insert(row);"],
+    ['table alias in insert-first into', "await db.insert(row).into('leads as l');"],
+    ['aliased table constant', "const TABLE = 'leads as l';\nawait db(TABLE).insert(row);"],
+    ['schema-qualified table constant', "const TABLE = 'public.leads';\nawait db(TABLE).insert(row);"],
     ['expression-bodied named arrow helper', "const writeRow = (builder, row) => builder.insert(row);\nawait writeRow(db('leads'), row);"],
     ['SQL constant as the text of an inline pg query config', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nawait client.query({ text: SQL, values: [a] });"],
     ['SQL constant wrapped into a declared pg query config', "const SQL = 'INSERT INTO leads (a) VALUES ($1)';\nconst cfg = { text: SQL, values: [a] };\nawait client.query(cfg);"],
@@ -1324,6 +1361,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['select-into read is not a writer', "await db.select('*').into('leads');"],
     ['other property of an SQL object executed, not the leads one', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)', other: 'SELECT 1' };\nawait db.raw(SQL.other);"],
     ['SQL object property never executed is not a writer', "const SQL = { create: 'INSERT INTO leads (a) VALUES (?)' };\nmodule.exports = { SQL };"],
+    ['alias of another table is not leads', "await db('leads_archive as l').insert(row);"],
     ['raw substring callee is not knex raw', "await draw('INSERT INTO leads (a) VALUES (?)', [a]);"],
     ['constant bound to another table', "const TABLE = 'lead_activities';\nawait db(TABLE).insert({ a: 1 });"],
     ['builder passed into a read-only helper', "function scoped(qb) { return qb.where('active', true); }\nawait scoped(db('leads'));"],
@@ -1402,6 +1440,14 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(dynArrow).toHaveLength(1);
     const dynExprArrow = scanSourceForDynamicTableInserts("const writeRow = (builder, row) => builder.insert(row);\nawait writeRow(db(table), row);");
     expect(dynExprArrow).toHaveLength(1);
+    // Property-assigned CommonJS helpers and object-literal helper properties.
+    fs.writeFileSync(path.join(dir, 'exports-helpers.js'), "exports.save = (builder, row) => builder.insert(row);\nmodule.exports.saveMany = function (qb, rows) {\n  return qb.insert(rows);\n};\nexports.scopedOnly = (qb) => qb.where('active', true);\n");
+    fs.writeFileSync(path.join(dir, 'object-helpers.js'), "module.exports = {\n  save: async (builder, row) => {\n    return builder.insert(row);\n  },\n};\n");
+    expect(found("const { save } = require('./exports-helpers');\nawait save(db('leads'), row);", route)).toEqual(["await save(db('leads'), row);"]);
+    expect(found("const { scopedOnly } = require('./exports-helpers');\nawait scopedOnly(db('leads'));", route)).toEqual([]);
+    expect(found("const { save } = require('./object-helpers');\nawait save(db('leads'), row);", route)).toEqual(["await save(db('leads'), row);"]);
+    const dynSaveMany = scanSourceForDynamicTableInserts("const writers = require('./exports-helpers');\nawait writers.saveMany(db(table), rows);", route);
+    expect(dynSaveMany).toHaveLength(1);
   });
 
   test('var is function-scoped: a block-nested var shadows through its block, not past its function', () => {
@@ -1468,6 +1514,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     expect(deepPayload[0].expr).toBe('table');
     const defaultParam = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(TABLE = resolveTable(kind), row) {\n  return db(TABLE).insert(row);\n}");
     expect(defaultParam).toHaveLength(1);
+    const inlineShadow = scanSourceForDynamicTableInserts("const TABLE = 'audit';\nfunction write(row) { const TABLE = requestedTable; return db(TABLE).insert(row); }");
+    expect(inlineShadow).toHaveLength(1);
     const commentedConst = scanSourceForDynamicTableInserts("/* e.g. const TARGET_TABLE = 'audit'; */\nconst TARGET_TABLE = getConfiguredTable();\nawait db(TARGET_TABLE).insert(row);");
     expect(commentedConst).toHaveLength(1);
     expect(commentedConst[0].expr).toBe('TARGET_TABLE');
