@@ -79,6 +79,10 @@ const MAX_INVESTIGATE_FAILURES = 6;
 const LLM_TIMEOUT_MS = 60000;
 
 // §5 fixed probe list, tried in order after the evidence-bearing candidates.
+// Only explicitly textual bodies are page text — for the model prompt,
+// coverage/disproof, AND the legal-terms hash (fail-closed on no header).
+const TEXTUAL_MIME_RE = /^\s*(text\/|application\/(xhtml\+xml|xml)\b)/i;
+
 const PROBE_PATHS = Object.freeze([
   '/submit', '/add-listing', '/join', '/membership', '/members', '/vendors',
   '/sponsors', '/advertise', '/directory', '/resources', '/contact', '/signup', '/register',
@@ -125,9 +129,13 @@ function deriveCurrency(path) {
   const evidenceForeign = !!evidenceMarker && !evidenceUsd && isForeignMarker(evidenceMarker);
   const quoteUsd = USD_MARKER_RE.test(quotes);
   const quoteForeign = isForeignMarker(quotes);
-  if (evidenceForeign || (quoteForeign && !evidenceUsd && !quoteUsd)) return 'foreign';
-  if ((evidenceUsd || quoteUsd) && !quoteForeign && !evidenceForeign) return 'USD';
-  if ((evidenceUsd || quoteUsd) && (quoteForeign || evidenceForeign)) return 'unknown'; // conflicting — fail closed
+  // ANY USD/foreign conflict fails closed FIRST — a foreign evidence marker
+  // beside a USD-marked quote (or vice versa) must never pick a side.
+  const anyUsd = evidenceUsd || quoteUsd;
+  const anyForeign = evidenceForeign || quoteForeign;
+  if (anyUsd && anyForeign) return 'unknown'; // conflicting — fail closed
+  if (anyForeign) return 'foreign';
+  if (anyUsd) return 'USD';
   return 'unknown';
 }
 
@@ -159,7 +167,7 @@ function hostBound(host, url) {
 }
 
 /** URLs worth fetching for a domain, own-host only, deduped, uncapped (the fetch loop caps). */
-function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [] } = {}) {
+function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [], probeOffset = 0 } = {}) {
   const seen = new Set();
   const out = [];
   const push = (raw) => {
@@ -185,7 +193,12 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   for (const t of touches) {
     for (const m of String(t.source_detail || '').match(/https?:\/\/[^\s"'<>]+/g) || []) push(m);
   }
-  for (const p of PROBE_PATHS) push(`https://${host}${p}`);
+  // The probe list is longer than what the fetch cap leaves after the
+  // homepage and hints, so it ROTATES by pass (the hourly sweep advances
+  // the offset): the capped tail of one pass leads a later one instead of
+  // the same prefix repeating forever.
+  const n = PROBE_PATHS.length;
+  for (let i = 0; i < n; i++) push(`https://${host}${PROBE_PATHS[(i + (probeOffset % n) + n) % n]}`);
   return out;
 }
 
@@ -242,7 +255,7 @@ async function investigateWithModel(llmDispatch, prompt) {
 
 const PAYMENT_INPUTS = Object.freeze(['estimated_cost_cents', 'renewal_cost_cents', 'renewal_period', 'currency', 'fee_scope', 'payment_required', 'legal_attestation', 'legal_terms_hash', 'merchant_binding']);
 const COMMUNICATION_INPUTS = Object.freeze(['link_type', 'expected_rel', 'legal_attestation', 'legal_terms_hash', 'terms_accepted_by_send', 'execution_after_send']);
-const EXECUTION_INPUTS = Object.freeze(['account_required', 'email_verification', 'agent_completable', 'legal_attestation', 'legal_terms_hash', 'execution_after_send']);
+const EXECUTION_INPUTS = Object.freeze(['submission_url', 'account_required', 'email_verification', 'agent_completable', 'legal_attestation', 'legal_terms_hash', 'execution_after_send']);
 
 // Key-order-stable stringify so a pg jsonb round trip never fakes a change.
 const stableStringify = (v) => {
@@ -510,11 +523,16 @@ const quoteOnPage = (pages, pageUrl, quote) => {
     const beforePrev = idx > 1 ? t[idx - 2] : '';
     const after = t[idx + q.length] || '';
     const afterNext = t[idx + q.length + 1] || '';
-    // a separator flanked by a digit continues the number on EITHER side:
+    // ALPHANUMERIC continuation on either side rejects the match — "USD 95k"
+    // must not verify a claimed "USD 95" (the k multiplies) — and a
+    // separator flanked by a digit continues the number the same way:
     // "USD 1,950" must not verify a claimed "950", nor "USD 95" a "USD 95.50"
-    const digitBefore = /\d/.test(before) || (/[.,]/.test(before) && /\d/.test(beforePrev));
-    const digitAfter = /\d/.test(after) || (/[.,]/.test(after) && /\d/.test(afterNext));
-    if (!digitBefore && !digitAfter) return true;
+    const contBefore = /[a-z0-9]/.test(before) || (/[.,]/.test(before) && /\d/.test(beforePrev));
+    const contAfter = /[a-z0-9]/.test(after) || (/[.,]/.test(after) && /\d/.test(afterNext));
+    // …and a digit-final quote followed by a spelled-out multiplier is the
+    // same truncation: "USD 95 million" never verifies "USD 95"
+    const multiplierNext = /\d$/.test(q) && /^\s+(k|m|mm|bn|hundred|thousand|million|billion)\b/.test(t.slice(idx + q.length));
+    if (!contBefore && !contAfter && !multiplierNext) return true;
     idx = t.indexOf(q, idx + 1);
   }
   return false;
@@ -711,16 +729,22 @@ async function investigatePaths(db, {
           const t = (x) => (x.last_investigated_at ? new Date(x.last_investigated_at).getTime() : 0);
           return t(a) - t(b);
         });
-        const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths });
+        const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths: orderedPaths, probeOffset: Math.floor(now.getTime() / (60 * 60 * 1000)) });
         const pages = [];
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
+        let cappedTail = false;
         for (const url of urls) {
-          if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
+          if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
           out.fetches += 1;
           const page = await fetcher(url);
           const finalUrl = (page && page.finalUrl) || url;
-          if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
+          if (page && page.html && !page.blocked && !page.error && !TEXTUAL_MIME_RE.test(String(page.contentType || ''))) {
+            // a binary 2xx body (PDF, image) decodes into `html` but is not
+            // page text: it must never become model input, coverage, or
+            // disproof — same textual-MIME rule the terms branch enforces
+            fetchErrors.push({ url, reason: 'non_text_body' });
+          } else if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
             const text = canonicalizeTerms(page.html);
             redirectMap.set(registry.normalizeSubmissionUrl(url), registry.normalizeSubmissionUrl(finalUrl));
             // html/text stay only for THIS domain's evidence verification —
@@ -876,7 +900,7 @@ async function investigatePaths(db, {
           // MIME types may bind acceptance (fail-closed on a missing header).
           const termsFinal = (t && t.finalUrl) || p.legal_terms_url;
           const schemelessTerms = (u) => registry.normalizeSubmissionUrl(u).replace(/^https?:\/\//, '');
-          const textualTerms = /^\s*(text\/|application\/(xhtml\+xml|xml)\b)/i.test(String((t && t.contentType) || ''));
+          const textualTerms = TEXTUAL_MIME_RE.test(String((t && t.contentType) || ''));
           if (t && t.html && !t.blocked && !t.error && !t.truncated && textualTerms
               && hostBound(host, termsFinal) && schemelessTerms(termsFinal) === schemelessTerms(p.legal_terms_url)) {
             const termsText = canonicalizeTerms(t.html);
@@ -893,6 +917,12 @@ async function investigatePaths(db, {
         let staleClaim = false;
         let effectiveVerdict = verdict.verdict;
         const unstampedIds = new Set();
+        let uncoveredEcho = false; // an existing path echoed without coverage was skipped
+        let tailDeferred = false;
+        // Counters stay TRANSACTION-LOCAL until commit — a rollback must not
+        // report paths written or superseded that do not exist.
+        let txWritten = 0;
+        let txSuperseded = 0;
         await db.transaction(async (trx) => {
           const fresh = await trx('seo_link_domains').where({ id: domain.id }).forUpdate()
             .first('agent_state', 'domain_rating', 'spam_score', 'organic_traffic', 'competitors_linked');
@@ -950,8 +980,15 @@ async function investigatePaths(db, {
             // on the agreement: the previously hashed text stands and the
             // path stays unstamped for a rotated retry. A hash is REPLACED
             // only by a successfully observed agreement's new hash.
-            const termsInconclusive = !!(p.legal_attestation && p.legal_terms_url && !termsHashByUrl.has(p.legal_terms_url));
-            if (termsInconclusive) evidence.terms_verification = p.termsBudgetExhausted ? 'terms_budget_exhausted' : 'terms_fetch_inconclusive';
+            // …including a legal path whose terms URL the model OMITTED (or
+            // that was stripped as off-host): no URL means no observation of
+            // the agreement, never a mandate to erase the hash a prior pass
+            // verified and re-stamp the path on nothing.
+            const termsInconclusive = !!(p.legal_attestation && (!p.legal_terms_url || !termsHashByUrl.has(p.legal_terms_url)));
+            if (termsInconclusive) {
+              evidence.terms_verification = !p.legal_terms_url ? 'missing_terms_url'
+                : p.termsBudgetExhausted ? 'terms_budget_exhausted' : 'terms_fetch_inconclusive';
+            }
             const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
             if (termsInconclusive) {
               row.last_investigated_at = null;
@@ -967,7 +1004,7 @@ async function investigatePaths(db, {
             const contentCovered = !p.submission_url || coverageKeys.has(registry.normalizeSubmissionUrl(p.submission_url));
             if (!contentCovered) {
               const echoKey = registry.pathKey(p.acquisition_type, p.submission_url);
-              if (!replaces && existingPaths.some((e) => e.path_key === echoKey)) continue;
+              if (!replaces && existingPaths.some((e) => e.path_key === echoKey)) { uncoveredEcho = true; continue; }
               row.last_investigated_at = null;
               p.unstamped = true;
             }
@@ -987,8 +1024,8 @@ async function investigatePaths(db, {
             if (id) {
               writtenIds.push(id);
               if (p.unstamped) unstampedIds.add(id);
-              out.pathsWritten += 1;
-              if (replaces) out.superseded += 1;
+              txWritten += 1;
+              if (replaces) txSuperseded += 1;
             }
           }
           // Stamp last_investigated_at ONLY on paths this pass actually
@@ -1055,7 +1092,13 @@ async function investigatePaths(db, {
           // watch/reject) stay lane-/owner-owned.
           const decideState = claimState || ['qualified', 'not_reproducible'].includes(domain.agent_state);
           const watchNote = decideState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
-          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: null };
+          // A pass that left paths unverified (unstamped writes, or an
+          // uncovered echo it skipped) succeeded but did NOT settle the
+          // domain: back its re-selection off instead of letting the
+          // never-stamped path re-select it on every hourly sweep and
+          // re-spend a model call each time.
+          const unsettled = unstampedIds.size > 0 || uncoveredEcho;
+          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null };
           if (decideState) {
             // Defensive downgrades, both directions: a qualified verdict with
             // no executable best path parks `watching` (never a qualified
@@ -1068,12 +1111,20 @@ async function investigatePaths(db, {
             let downgradeNote = null;
             if (verdict.verdict === 'qualified' && !best) { effectiveVerdict = 'watching'; downgradeNote = 'qualified verdict carried no executable path'; }
             if (verdict.verdict === 'not_reproducible' && best) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered active path remains'; }
+            // A TERMINAL close is also deferred — ONCE — while the fetch cap
+            // left candidate URLs unfetched: the route may live on a page
+            // this pass never requested, and the rotated probe offset covers
+            // the tail on the deferred re-pass. The stored downgrade note is
+            // the bound: a domain already deferred for its tail closes on
+            // the next terminal verdict instead of parking forever.
+            const alreadyTailDeferred = /unfetched candidate URLs remain/.test(String(domain.score_reasons || ''));
+            if (verdict.verdict === 'not_reproducible' && !best && cappedTail && !alreadyTailDeferred) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: unfetched candidate URLs remain'; tailDeferred = true; }
             patch.agent_state = effectiveVerdict === 'qualified' ? 'qualified' : effectiveVerdict === 'watching' ? 'watching' : 'not_reproducible';
             // A downgrade caused by TRANSIENT verification (an unstamped
             // path — failed probe, inconclusive terms, exhausted budget)
             // rechecks on the failure-backoff horizon, not the 30-day watch
             // cadence: the advertised rotated retry must actually be near.
-            const transientDowngrade = downgradeNote && unstampedIds.size > 0;
+            const transientDowngrade = downgradeNote && (unstampedIds.size > 0 || tailDeferred);
             patch.watch_recheck_at = effectiveVerdict === 'watching'
               ? new Date(now.getTime() + (transientDowngrade ? INVESTIGATE_BACKOFF_BASE_MS : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))
               : null;
@@ -1085,6 +1136,8 @@ async function investigatePaths(db, {
           out.staleClaims += 1;
           continue;
         }
+        out.pathsWritten += txWritten;
+        out.superseded += txSuperseded;
 
         out.investigated += 1;
         if (!claimState) out.pathRefreshes += 1;

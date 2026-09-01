@@ -2943,6 +2943,10 @@ function BacklinkRegistryCard() {
   const [expandedId, setExpandedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const expandedRef = useRef(null);
+  // current controls, readable from async continuations whose closure is
+  // stale (an action started before the operator changed filter/page)
+  const controlsRef = useRef({ stateFilter, search, page });
+  controlsRef.current = { stateFilter, search, page };
   const [busyId, setBusyId] = useState(null);
   const [runBusy, setRunBusy] = useState(false);
   const [runResult, setRunResult] = useState(null);
@@ -3005,7 +3009,10 @@ function BacklinkRegistryCard() {
         method: "PATCH",
         body: { action },
       });
-      await load();
+      // refresh with the CURRENT controls — this closure's stateFilter/
+      // search/page are from the render the action started on
+      const c = controlsRef.current;
+      await load(c.stateFilter, c.search, c.page);
     } catch (e) {
       setError(e?.message || `${action} failed`);
     } finally {
@@ -3019,7 +3026,7 @@ function BacklinkRegistryCard() {
     try {
       const r = await adminPost("/admin/backlink-agent/registry/jobs/investigate", { dryRun });
       setRunResult(r);
-      if (!dryRun) load();
+      if (!dryRun) { const c = controlsRef.current; load(c.stateFilter, c.search, c.page); } // same stale-closure rule as doAction
     } catch (e) {
       setRunResult({ error: e?.message || "Investigator run failed" });
     } finally {
