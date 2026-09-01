@@ -360,8 +360,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       appointment_reminders: [chain({ first: ownerRow }), chain({})], // owner row + email-handoff move-hold recheck (no hold)
       scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
       service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-22' } })],
-      'scheduled_services as ss': [membersChain],
-      'appointment_reminders as ar': [labelChain],
+      'scheduled_services as ss': [membersChain, labelChain],
       'scheduled_services as s': [chain({ first: null }), chain({ first: null })],
       scheduled_service_addons: [chain({}), chain({})],
     });
@@ -407,8 +406,7 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       appointment_reminders: [chain({ first: { cancelled: false, customer_id: 'c9', scheduled_service_id: 'ss-owner', appointment_time: '2026-06-25T14:00:00.000Z', service_type: 'Quarterly Pest Control' } }), chain({})],
       scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
       service_visits: [chain({ first: { id: 'visit-9', scheduled_date: '2026-06-25' } })], // moved: 22nd → 25th
-      'scheduled_services as ss': [movedMembers],
-      'appointment_reminders as ar': [movedLabel],
+      'scheduled_services as ss': [movedMembers, movedLabel],
       'scheduled_services as s': [chain({ first: null })],
       scheduled_service_addons: [chain({})],
     });

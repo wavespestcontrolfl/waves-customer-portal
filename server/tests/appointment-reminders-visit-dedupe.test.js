@@ -328,8 +328,8 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     // is EARLIER than the owner.
     const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
     state.visitMemberRows = [
-      { scheduled_service_id: 'svc-1', scheduled_date: '2026-05-07', window_start: '09:00:00', appointment_time: new Date('2026-05-07T13:00:00.000Z') },
-      { scheduled_service_id: 'svc-2', scheduled_date: '2026-05-07', window_start: '08:00:00', appointment_time: null },
+      { scheduled_service_id: 'svc-1', scheduled_date: '2026-05-07', window_start: '09:00:00', appointment_time: new Date('2026-05-07T13:00:00.000Z'), label: 'Quarterly Pest Control' },
+      { scheduled_service_id: 'svc-2', scheduled_date: '2026-05-07', window_start: '08:00:00', appointment_time: null, label: 'Mosquito Treatment' },
     ];
     const { cardHoldReminderLine } = require('../services/estimate-card-holds');
     cardHoldReminderLine.mockImplementation(async (id) => (id === 'svc-2' ? 'Unregistered sibling hold clause.' : ''));
@@ -340,7 +340,9 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(smsTemplatesRouter.getTemplate).toHaveBeenCalledWith(
       'reminder_24h',
-      expect.objectContaining({ time: '8:00 AM', card_hold_policy_line: 'Unregistered sibling hold clause.' }),
+      // The label lists the unregistered sibling too (pre-push codex r8 P1:
+      // the grouped label is sourced from visit membership, not reminder rows).
+      expect.objectContaining({ time: '8:00 AM', card_hold_policy_line: 'Unregistered sibling hold clause.', service_type: 'Quarterly Pest Control & Mosquito Treatment' }),
       expect.anything(),
     );
     cardHoldReminderLine.mockImplementation(async () => '');

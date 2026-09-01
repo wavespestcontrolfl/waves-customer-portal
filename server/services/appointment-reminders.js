@@ -1039,23 +1039,32 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
   // services only share the 08:00 slot by convention, not by clock time, so
   // an 8 AM owner's texts must never advertise them.
   // Legacy rows with no linked service keep their fallback label.
-  const rows = await conn('appointment_reminders as ar')
-    .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-    .where({ 'ar.customer_id': customerId, 'ar.cancelled': false, 'ar.windows_preclosed': false })
-    // Visit present ⇒ MEMBERS ONLY (GH codex r4 P2): a same-timestamp
-    // non-member (another property, a non-groupable service) must not ride
-    // the grouped notice — it keeps its own reminder, unprotected by the
-    // visit effect, and advertising it here would double-speak. No visit ⇒
-    // the historical exact-slot merge, unchanged.
-    .andWhere(function slotOrVisit() {
-      if (visitId) this.where('ss.visit_id', visitId);
-      else this.where('ar.appointment_time', apptTime);
-    })
-    .andWhere(function liveServiceSendableOrLegacy() {
-      this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
-    })
-    .orderBy('ar.created_at', 'asc')
-    .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
+  // Visit present ⇒ MEMBERS ONLY (GH codex r4 P2), sourced from the
+  // visit's own membership on scheduled_services (pre-push codex r8 P1):
+  // a live sibling whose reminder registration failed must still be
+  // advertised by the one grouped notice — the visit effect suppresses
+  // its own reminder. A same-timestamp non-member (another property, a
+  // non-groupable service) never rides the grouped notice: it keeps its
+  // own reminder, unprotected by the visit effect. Sendable + windowed,
+  // the same member predicate visitReminderCopyInputs uses. No visit ⇒
+  // the historical exact-slot merge over reminder rows, unchanged.
+  const rows = visitId
+    ? await conn('scheduled_services as ss')
+      .where('ss.visit_id', visitId)
+      .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .whereNotNull('ss.window_start')
+      .orderBy('ss.window_start', 'asc')
+      .orderBy('ss.id', 'asc')
+      .select('ss.id as scheduled_service_id', 'ss.service_type as label')
+    : await conn('appointment_reminders as ar')
+      .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+      .where({ 'ar.customer_id': customerId, 'ar.cancelled': false, 'ar.windows_preclosed': false })
+      .where('ar.appointment_time', apptTime)
+      .andWhere(function liveServiceSendableOrLegacy() {
+        this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+      })
+      .orderBy('ar.created_at', 'asc')
+      .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
   // Each part must be the same customer-facing label registration stored:
   // parent + add-ons + smsServiceLabel cleanup (buildServiceLabel semantics,
