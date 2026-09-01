@@ -71,9 +71,31 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     .where({ customer_id: customerId })
     .orderBy('created_at', 'desc')
     .first('id', 'scope', 'status', 'created_at', 'service_request_id');
-  const scope = latest && latest.status === 'committed' ? parseJson(latest.scope, []) : [];
+  // The newest cancellation REQUEST outranks the newest case: the case
+  // insert is best-effort (requests.js swallows the failure after the churn
+  // already ran), so an older case can sit newest in cancellation_cases
+  // while the request that just cancelled the account has no case at all
+  // (codex GH r8 P1). A case that is not the latest request's record
+  // contributes neither scope nor correlation — the request itself does.
+  let latestRequest = null;
+  try {
+    latestRequest = await dbh('service_requests')
+      .where({ customer_id: customerId, category: 'cancellation' })
+      .orderBy('created_at', 'desc')
+      .first('id', 'created_at');
+  } catch { /* unreadable — fall back to case-only correlation */ }
+  const current = latest && (!latestRequest
+    || String(latest.service_request_id || '') === String(latestRequest.id))
+    ? latest : null;
+  const scope = current && current.status === 'committed' ? parseJson(current.scope, []) : [];
   const scoped = (Array.isArray(scope) ? scope : []).filter((f) => RESTARTABLE_FAMILIES.includes(f));
-  if (scoped.length) return { families: scoped, caseId: latest.id, source: 'case_scope' };
+  if (scoped.length) return { families: scoped, caseId: current.id, source: 'case_scope' };
+  // This attempt's correlation key and time anchor — the current case's when
+  // it exists, else the latest request's own.
+  const attemptRequestId = (current && current.service_request_id)
+    || (latestRequest && latestRequest.id) || null;
+  const attemptAnchor = current ? current.created_at
+    : (latestRequest ? latestRequest.created_at : null);
 
   // Whole account ([]), uncommitted latest case, or no case row: the
   // recurring rows the processor cancelled name the prior plan. Cancelled
@@ -89,40 +111,40 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   let rowsQuery = dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
-    .where('s.status', 'cancelled')
     .where('s.is_recurring', true)
     .where(function notCallback() { this.whereNull('s.is_callback').orWhere('s.is_callback', false); })
     .orderBy('s.cancelled_at', 'desc')
     // No LIMIT: this is family EVIDENCE run through the JS classifier — a
     // big attempt's newest rows could all belong to one family and starve
-    // the rest out of the quote (codex GH r7 P2). Narrowed by status +
-    // recurring + reason + one customer_id.
+    // the rest out of the quote (codex GH r7 P2). Narrowed by recurring +
+    // reason + one customer_id.
     .select('s.*', 'sv.service_key', 'sv.name as service_name');
-  if (latest && latest.service_request_id) {
-    // Exact correlation: the processor stamps every row THIS request pulls
-    // with "Portal cancellation request <id>" verbatim, and the case row
-    // records that id — so when the linkage exists, only those rows are
-    // this attempt's evidence. A prefix/time-window match would also accept
-    // a prior cancellation inside the slack hour after a reactivation
-    // (codex GH r7 P1). The window fallback below stays for legacy cases
-    // without the linkage.
-    rowsQuery = rowsQuery.where('s.cancellation_reason', `${PORTAL_CANCEL_REASON_PREFIX} ${latest.service_request_id}`);
+  if (attemptRequestId) {
+    // Exact correlation: the processor stamps THIS request's verbatim
+    // "Portal cancellation request <id>" reason on every row it pulls AND
+    // on every anchor whose recurring_ongoing it clears — so the reason
+    // alone ties a row to this attempt. No status filter: when the plan's
+    // only footprint was a COMPLETED series anchor, the stop leaves it
+    // completed with no cancelled_at, and requiring status/window here
+    // erased the whole plan from recovery (codex GH r8 P1). A prefix or
+    // time-window match would also accept a prior cancellation inside the
+    // slack hour after a reactivation (codex GH r7 P1).
+    rowsQuery = rowsQuery.where('s.cancellation_reason', `${PORTAL_CANCEL_REASON_PREFIX} ${attemptRequestId}`);
   } else {
-    // A customer-driven cancellation's reason is either the bare default or
-    // the request-scoped "Portal cancellation request <id>" every
-    // requests.js path passes (codex GH r5 P1: matching only the default
-    // made every ordinary whole-account restart find zero rows).
-    rowsQuery = rowsQuery.where(function customerCancelReason() {
-      this.where('s.cancellation_reason', CHURN_REASON)
-        .orWhere('s.cancellation_reason', 'like', `${PORTAL_CANCEL_REASON_PREFIX}%`);
-    });
-  }
-  if (latest && latest.created_at) {
-    // Slack window: the H0 request path runs the processor BEFORE it writes
-    // the case row, so this attempt's rows carry cancelled_at slightly
-    // EARLIER than the case's created_at. An hour of slack keeps them in
-    // while still excluding a genuinely earlier cancellation's families.
-    rowsQuery = rowsQuery.where('s.cancelled_at', '>=', attemptBoundFor(latest.created_at));
+    // Legacy attempts without a request linkage: cancelled rows whose
+    // reason is the bare default or the request-scoped prefix (codex GH r5
+    // P1: matching only the default made every ordinary whole-account
+    // restart find zero rows), bounded to the attempt's hour-slack window
+    // (the H0 path stamps rows BEFORE the case row lands).
+    rowsQuery = rowsQuery
+      .where('s.status', 'cancelled')
+      .where(function customerCancelReason() {
+        this.where('s.cancellation_reason', CHURN_REASON)
+          .orWhere('s.cancellation_reason', 'like', `${PORTAL_CANCEL_REASON_PREFIX}%`);
+      });
+    if (attemptAnchor) {
+      rowsQuery = rowsQuery.where('s.cancelled_at', '>=', attemptBoundFor(attemptAnchor));
+    }
   }
   const rows = await rowsQuery;
   const keys = [];
@@ -131,7 +153,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     for (const key of detectWaveGuardPlanKeys(row)) if (!keys.includes(key)) keys.push(key);
   }
   const fromRows = uniqueServiceFamilies(keys).filter((f) => RESTARTABLE_FAMILIES.includes(f));
-  if (fromRows.length) return { families: fromRows, caseId: latest ? latest.id : null, source: 'cancelled_rows' };
+  if (fromRows.length) return { families: fromRows, caseId: current ? current.id : null, source: 'cancelled_rows' };
 
   // Last resort: the scoped-cancel audit note ("Cancelled Pest Control, Lawn
   // Care — plan continues with …") names families by label — again bounded
@@ -140,7 +162,7 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
     .where({ customer_id: customerId, interaction_type: 'note' })
     .where('subject', 'like', 'Cancelled %')
     .orderBy('created_at', 'desc');
-  if (latest && latest.created_at) noteQuery = noteQuery.where('created_at', '>=', attemptBoundFor(latest.created_at));
+  if (attemptAnchor) noteQuery = noteQuery.where('created_at', '>=', attemptBoundFor(attemptAnchor));
   const note = await noteQuery.first('subject');
   if (note && note.subject) {
     const named = String(note.subject).split(' — ')[0].replace(/^Cancelled\s+/, '');
@@ -148,9 +170,9 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
       .filter(([, label]) => named.includes(label))
       .map(([key]) => key)
       .filter((f) => RESTARTABLE_FAMILIES.includes(f));
-    if (fromNote.length) return { families: fromNote, caseId: latest ? latest.id : null, source: 'churn_note' };
+    if (fromNote.length) return { families: fromNote, caseId: current ? current.id : null, source: 'churn_note' };
   }
-  return { families: [], caseId: latest ? latest.id : null, source: 'none' };
+  return { families: [], caseId: current ? current.id : null, source: 'none' };
 }
 
 // The families with residual LIVE recurring obligations on this account —
@@ -465,6 +487,12 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     // today's list; a family they somehow still hold prices the restart at
     // the combined tier instead of standalone. Already family-canonical.
     const priorQualifyingServices = [...ownedFamilies];
+    // Persist the qualifiers WITH the inputs (click-mint pattern, codex GH
+    // r8 P1): buildEstimateSendSnapshot replays engineInputs through
+    // extractEngineInputs, which restores combined-tier context only from
+    // estimate_data.priorQualifyingServices — omitting them recomputes the
+    // partial-residual case standalone and fails the totals-match check.
+    if (priorQualifyingServices.length) estimateData.priorQualifyingServices = priorQualifyingServices;
     const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
       priorQualifyingServices,
       recurringCustomer: priorQualifyingServices.length > 0,
@@ -590,6 +618,7 @@ async function assertRestartAcceptEligible(trx, estimate) {
   let quoted;
   let fresh;
   let ownedFamilies;
+  let latestFamilies;
   try {
     // Fresh in-transaction read: the accept path locked this row FOR UPDATE
     // just above, so this sees the committed truth, not the handler's
@@ -616,6 +645,12 @@ async function assertRestartAcceptEligible(trx, estimate) {
       ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'active', 'pipeline_stage')
       : null;
     ownedFamilies = fresh ? await ownedResidualFamilies(trx, fresh.id) : [];
+    // The LATEST attempt's families, under the same locks: a
+    // reactivate-then-recancel with a different scope leaves an unexpired
+    // older token whose families still pass the churn + residual checks
+    // (codex GH r8 P1) — the quote must describe the cancellation the
+    // account is actually in.
+    latestFamilies = fresh ? (await cancelledFamiliesFor(fresh.id, trx)).families : [];
   } catch (err) {
     logger.warn(`[plan-restart] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
     throw refuse('We could not re-verify this restart just now — please try again in a moment.');
@@ -630,6 +665,11 @@ async function assertRestartAcceptEligible(trx, estimate) {
   // accept would re-price — refuse; the customer re-taps for a fresh quote.
   const owned = new Set(ownedFamilies.map(pricingKeyFor));
   if (quoted.some((f) => owned.has(pricingKeyFor(f)))) throw changed();
+  // Every quoted family must belong to the latest cancellation attempt —
+  // an older quote surviving a re-cancellation with a different scope must
+  // not restart a service outside the plan the customer just cancelled.
+  const latestSet = new Set((latestFamilies || []).map(pricingKeyFor));
+  if (quoted.some((f) => !latestSet.has(pricingKeyFor(f)))) throw changed();
 }
 
 module.exports = {

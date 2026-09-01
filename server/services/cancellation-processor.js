@@ -509,7 +509,14 @@ async function processCancellationRequest({ customerId, reason, requestId, famil
   try {
     let stopQuery = db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
     if (scopedIds) stopQuery = stopQuery.whereIn('id', [...scopedIds]);
-    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, updated_at: new Date() });
+    // Stamp the attempt's reason on every row whose recurrence this stop
+    // clears (codex GH r8 P1): when the plan's only footprint was a
+    // COMPLETED series anchor riding recurring_ongoing=true, the flag
+    // itself is gone after this update and the row never turns
+    // 'cancelled' — the reason is the surviving request-correlated
+    // evidence restart's family recovery reads. Status is untouched; the
+    // tracker renders reasons only on cancelled-status rows.
+    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, cancellation_reason: cancelReason, updated_at: new Date() });
   } catch (err) {
     errors.push('stop_recurrence');
     logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);

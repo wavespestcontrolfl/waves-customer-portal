@@ -1409,6 +1409,11 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
   test('a still-churned customer passes the revalidation and the accept commits', async () => {
     resetStore(restartEstimate({ id: 'est-restart-3', token: 'tok-restart-3-x0123456789' }));
     db.__state.tables.customers = [churnedCustomer()];
+    // The revalidation now also re-derives the LATEST attempt's families
+    // (codex GH r8 P1) — the committed case is that evidence.
+    db.__state.tables.cancellation_cases = [{
+      id: 'case-9', customer_id: 'cust-9', status: 'committed', scope: JSON.stringify(['pest_control']), created_at: '2026-08-29T00:00:00Z',
+    }];
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-9',
       tier: 'Bronze',

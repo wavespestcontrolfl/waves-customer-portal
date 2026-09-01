@@ -48,7 +48,8 @@ describe('composeUnworkedCommsDigest', () => {
       require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
     );
     const block = src.split('fe.customer_id = t.customer_id')[1].slice(0, 900);
-    expect(block).toMatch(/COALESCE\(fe\.source, ''\) <> 'service_report_cta'/);
+    // plan_restart joined the publish-without-delivery set (C4, #3671 r8).
+    expect(block).toMatch(/COALESCE\(fe\.source, ''\) NOT IN \('service_report_cta', 'plan_restart'\)/);
     // …but a mint an operator LATER actually delivered fulfills the task
     // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
     // — stamped only for REAL deliveries, durable across resends, merged

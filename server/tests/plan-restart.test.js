@@ -435,6 +435,38 @@ describe('mintRestartEstimate', () => {
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-2', source: 'cancelled_rows' });
   });
 
+  test('a plan whose only footprint was a completed series anchor recovers from the reason the recurrence-stop stamped', async () => {
+    // The processor clears recurring_ongoing without cancelling the anchor
+    // (no upcoming rows existed) — the stamped reason is the surviving
+    // evidence (codex GH r8 P1).
+    tables.cancellation_cases = [{
+      id: 'case-3', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23', service_request_id: 'req-5',
+    }];
+    tables.scheduled_services = [
+      { id: 'anchor-1', customer_id: 'cust-1', status: 'completed', is_recurring: true, recurring_ongoing: false, cancellation_reason: 'Portal cancellation request req-5', service_type: 'Quarterly Pest Control', cancelled_at: null },
+    ];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-3', source: 'cancelled_rows' });
+  });
+
+  test('a stale case (newest request has no case row) contributes neither scope nor correlation — the request itself does', async () => {
+    // The best-effort case insert failed for req-new (requests.js swallows
+    // it); the older committed case must not answer (codex GH r8 P1).
+    tables.service_requests = [
+      { id: 'req-new', customer_id: 'cust-1', category: 'cancellation', created_at: '2026-08-25' },
+      { id: 'req-old', customer_id: 'cust-1', category: 'cancellation', created_at: '2026-07-01' },
+    ];
+    tables.cancellation_cases = [{
+      id: 'case-old', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['tree_shrub']), created_at: '2026-07-01', service_request_id: 'req-old',
+    }];
+    tables.scheduled_services = [
+      { id: 's1', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-new', service_type: 'Quarterly Pest Control', cancelled_at: '2026-08-25' },
+      { id: 's2', customer_id: 'cust-1', status: 'cancelled', is_recurring: true, cancellation_reason: 'Portal cancellation request req-old', service_type: 'Tree & Shrub Program', cancelled_at: '2026-07-01' },
+    ];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: null, source: 'cancelled_rows' });
+  });
+
   test('rows cancelled with the request-scoped portal reason are this plan\'s evidence too', async () => {
     // Every requests.js path passes "Portal cancellation request <id>" as
     // the reason, and it lands verbatim on the rows — matching only the
@@ -671,6 +703,17 @@ describe('assertRestartAcceptEligible', () => {
       { id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, service_type: 'Quarterly Pest Control' },
     ];
     await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test('a quote from an EARLIER cancellation refuses once a re-cancellation changed the scope (codex GH r8 P1)', async () => {
+    // The account is churned again and pest has no residual rows, but the
+    // latest attempt cancelled only lawn — the old pest+lawn token must not
+    // restart pest.
+    tables.cancellation_cases = [{
+      id: 'case-2', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['lawn_care']), created_at: '2026-08-25',
+    }];
+    await expect(actualRestart.assertRestartAcceptEligible(trx, RESTART_ESTIMATE))
+      .rejects.toMatchObject({ status: 409, code: 'RESTART_STATE_CHANGED' });
   });
 
   test('a reactivated (or drifted) account refuses: only the exact churn stamp accepts', async () => {

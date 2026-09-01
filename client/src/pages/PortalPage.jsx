@@ -5802,11 +5802,19 @@ function BillingTab({ customer, refreshCustomer }) {
       bg: subtle, border: '#E7E2D7', icon: 'card',
       badge: 'Auto Pay off', titleColor: B.glassNavy, subtitleColor: B.grayDark,
       title: 'Auto Pay is off',
-      detail: balance?.currentBalance > 0
-        ? (primaryOpenInvoice
-          ? `Balance due: ${money(balance.currentBalance)} — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above. Auto Pay covers future charges automatically once enabled; it does not pay existing balances.`
-          : `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`)
-        : 'Charges will not run automatically unless you enable Auto Pay below.',
+      // Cancelled accounts have no Auto Pay controls to point at — the
+      // copy must not instruct "enable below" when everything below is
+      // hidden (codex GH r8 P2). Read-only status instead; the tokenized
+      // Pay now path stays for any open balance.
+      detail: cancelledAccount
+        ? (balance?.currentBalance > 0
+          ? `Balance due: ${money(balance.currentBalance)}${primaryOpenInvoice ? ` — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above` : ''}. Your plan is cancelled, so nothing runs automatically.`
+          : 'Your plan is cancelled — nothing is billed automatically.')
+        : balance?.currentBalance > 0
+          ? (primaryOpenInvoice
+            ? `Balance due: ${money(balance.currentBalance)} — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above. Auto Pay covers future charges automatically once enabled; it does not pay existing balances.`
+            : `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`)
+          : 'Charges will not run automatically unless you enable Auto Pay below.',
     },
     unknown: {
       bg: subtle, border: '#E7E2D7', icon: 'alert',
@@ -6041,7 +6049,7 @@ function BillingTab({ customer, refreshCustomer }) {
           {[
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : cancelledAccount ? 'Plan cancelled' : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
@@ -15095,10 +15103,15 @@ export default function PortalPage() {
       // so the URL and the rendered sub-tab can never disagree on refresh.
       if (urlTab === 'visits') setVisitsSubTab('upcoming');
     }
+    // Cancelled: clamp WHILE adopting the URL, not a commit later — without
+    // this a disallowed deep link (?tab=property, ?tab=refer) mounts the
+    // blocked tab and fires its 401'ing reads before the redirect effect
+    // catches up (codex GH r8 P2).
+    if (cancelledAccount && !CANCELLED_TABS.includes(urlTab)) urlTab = 'plan';
     const svc = params.get('service');
     setPlanFocusService(urlTab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null);
     setActiveTab(prev => (prev === urlTab ? prev : urlTab));
-  }, [location.search]);
+  }, [location.search, cancelledAccount]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.

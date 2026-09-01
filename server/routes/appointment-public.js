@@ -737,7 +737,10 @@ router.get('/:token', async (req, res, next) => {
       // P1 follow-up): visitServicesFor returns {} for it, but
       // reschedule-public's groupedVisit — the CTA's destination — refuses
       // it via the shared frozen verdict; the link would be dead on arrival.
-      rescheduleToken: (dispatchOwnedUnreviewed(svc) || visitInfo.visit
+      // An inactive/cancelled account also suppresses the token (codex GH
+      // r8 P2): the CTA's destination refuses with account_inactive, so
+      // the page must render call/text guidance instead of a dead link.
+      rescheduleToken: (svc.customer_active !== true || dispatchOwnedUnreviewed(svc) || visitInfo.visit
         || (svc.visit_id && !visitInfo.visitUnknown
           && (await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id)).frozen))
         ? null : svc.reschedule_token,
