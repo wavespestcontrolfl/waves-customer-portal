@@ -218,7 +218,18 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
 //     cancel-then-refund flow CANCELS the term and refunds its invoice, so
 //     the live classifier erases exactly the plan this customer just
 //     cancelled (codex GH r11 P1); status/refund churn AFTER the attempt
-//     must not erase what they had. Only a never-paid pending is excluded.
+//     must not erase what they had. Only a NEVER-PAID term is excluded —
+//     and "never paid" can't key on t.status alone: invoiceTermStatus maps
+//     a VOIDED pending invoice to term 'cancelled' (offboarding voids the
+//     unpaid prepay invoice), so a bare whereNot(payment_pending) admits a
+//     term nobody ever paid for (codex pre-push r18 P1). Purchase evidence
+//     is invoice-side: still-paid, ever-paid (paid_at), a recorded manual
+//     payment, or invoice status 'refunded' itself — refunds only exist
+//     for collected money (the full-refund webhook nulls paid_at as it
+//     flips status, so 'refunded' is the surviving marker for the r11
+//     shape); never-paid invoices get VOIDED, not refunded. Legacy terms
+//     with no invoice linkage keep their historical semantics, same as
+//     coveredTermsAsOf's live and decided arms.
 async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = false } = {}) {
   const {
     detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow,
@@ -230,9 +241,23 @@ async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = fal
       .where('t.term_start', '<=', dateStr)
       .where('t.term_end', '>=', dateStr)
       .where(function reallyBought() {
-        this.whereNot('t.status', 'payment_pending')
+        this.where(function liveOrDecided() {
+          // Non-pending, non-terminal statuses (active / renewal_pending /
+          // renewed / switch_plan) carry no invoice condition — legacy
+          // born-active terms may predate invoice linkage entirely.
+          this.whereNot('t.status', 'payment_pending')
+            .whereNot('t.status', 'cancelled')
+            .whereNot('t.status', 'canceled')
+            .whereNot('t.status', 'refunded');
+        })
           .orWhere('i.status', 'paid')
-          .orWhereNotNull('i.paid_at');
+          .orWhereNotNull('i.paid_at')
+          .orWhereNotNull('i.payment_recorded_at')
+          .orWhere('i.status', 'refunded')
+          .orWhere(function legacyTerminalNoInvoice() {
+            this.whereNot('t.status', 'payment_pending')
+              .whereNull('t.prepay_invoice_id');
+          });
       })
     : coveredTermsAsOf(dbh, dateStr);
   const terms = await base

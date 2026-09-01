@@ -514,6 +514,40 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(1);
   });
 
+  test('a NEVER-PAID pending term whose voided invoice cancelled it is NOT purchase evidence (codex pre-push r18 P1)', async () => {
+    // invoiceTermStatus maps a voided pending invoice to term 'cancelled' —
+    // same terminal status as the r11 refund shape, but no money ever
+    // moved. The linked invoice carries no paid marker, so reallyBought
+    // must exclude it (a bare whereNot(payment_pending) admitted it).
+    tables.cancellation_cases = [{
+      id: 'case-9', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-15',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-5', customer_id: 'cust-1', status: 'cancelled', term_start: '2026-01-01', term_end: '2026-12-31',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: 'inv-void-1',
+    }];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: [], caseId: 'case-9', source: 'none' });
+  });
+
+  test('a cancelled term with a linked EVER-PAID invoice keeps its r11 evidence (non-legacy shape)', async () => {
+    // The invoice join is a stub no-op with prefixes stripped, so joined
+    // invoice columns are emulated as fields on the term row: paid_at here
+    // is i.paid_at — payment evidence that survives the status flip.
+    tables.cancellation_cases = [{
+      id: 'case-10', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-16',
+    }];
+    tables.scheduled_services = [];
+    tables.annual_prepay_terms = [{
+      id: 'term-6', customer_id: 'cust-1', status: 'cancelled', term_start: '2026-01-01', term_end: '2026-12-31',
+      plan_label: 'Quarterly Pest Control', last_scheduled_service_id: null, prepay_invoice_id: 'inv-paid-1',
+      paid_at: '2026-01-02T00:00:00Z',
+    }];
+    const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
+    expect(found).toEqual({ families: ['pest_control'], caseId: 'case-10', source: 'cancelled_rows' });
+  });
+
   test('a prepay term still covering TODAY is owned coverage — the mint refuses rather than re-sell it (codex pre-push P0)', async () => {
     tables.cancellation_cases = [{
       id: 'case-6', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-12',
