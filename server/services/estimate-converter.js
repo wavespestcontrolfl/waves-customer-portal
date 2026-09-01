@@ -2422,6 +2422,10 @@ async function acceptTimeUnifiedSetupFeeDecision(database, { customerId = null, 
     // eligibility re-derivation — it can only WAIVE, never re-add.
     if (customerId && (await hasActiveRecurringService(database, customerId))) return false;
     if (customerId && (await hasConsumableSetupClaim(database, customerId))) return false;
+    {
+      const { customerHasLiveSetupFeeClaim } = require('./secure-appointment-plans');
+      if (customerId && (await customerHasLiveSetupFeeClaim(database, customerId))) return false;
+    }
     return true;
   }
   if (!(Array.isArray(recurringServices) && recurringServices.length > 0)) return false;

@@ -412,6 +412,22 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
 // estimateId (codex #3591 r70 P1): the accepted estimate an accept-side mint
 // billed the setup for — the key a later booking from that estimate uses to
 // see the claim when it is still anchor-less (migration 20260831000030).
+// Account-level "a setup fee already exists" probe for the unified
+// accept-time dedupe (owner ruling 2026-09-01; audit r14 P0): any claim
+// row whose invoice is live (not void/cancelled/refunded) means the
+// account's one setup fee is already minted somewhere — an invoice-mode
+// accept seeds no series and stamps nothing, so the claims ledger is the
+// only evidence a concurrent/second accept can see.
+async function customerHasLiveSetupFeeClaim(database, customerId) {
+  if (!customerId) return false;
+  const row = await database('setup_fee_claims as sfc')
+    .join('invoices as i', 'i.id', 'sfc.invoice_id')
+    .where('i.customer_id', customerId)
+    .whereNotIn('i.status', ['void', 'cancelled', 'canceled', 'refunded'])
+    .first('sfc.id');
+  return !!row;
+}
+
 async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount, estimateId = null }) {
   const fee = cents(Math.max(0, Number(amount) || 0));
   if (!invoiceId || !(fee > 0)) return false;
@@ -1498,6 +1514,7 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 
 module.exports = {
   recordSetupFeeClaimForInvoice,
+  customerHasLiveSetupFeeClaim,
   settledSetupClaimForInvoice,
   settledSetupClaimForEstimate,
   estimateSetupCarriedElsewhere,

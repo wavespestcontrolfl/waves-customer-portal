@@ -11120,6 +11120,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (treatAsOneTime) return 0;
           const EstimateConverterMod = require('../services/estimate-converter');
           const d = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
+          // A decision is only possible gate-on or for an already-frozen
+          // positive unified quote — otherwise return 0 WITHOUT locking,
+          // keeping gate-off accepts byte-identical.
+          const frozenPositiveUnified = d?.setupFeeQuote?.kind === 'unified' && Number(d?.setupFeeQuote?.amount) > 0;
+          if (!frozenPositiveUnified && !require('../services/unified-setup-fee').unifiedSetupFeeEnabled()) return 0;
+          // Serialize with every other setup-fee decision for this customer
+          // (audit r14 P0): same lock ORDER as convertEstimate — the
+          // property-preferences advisory key FIRST, then the customer row
+          // — so two concurrent accepts decide one at a time and the
+          // second sees the first's claim/series.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['property-preferences', String(customerId)],
+          );
+          await trx('customers').where({ id: customerId }).forUpdate().first('id');
           const dec = await EstimateConverterMod.acceptTimeUnifiedSetupFeeDecision(trx, {
             customerId,
             recurringServices: recurringSvcList,

@@ -128,6 +128,13 @@ async function decideUnifiedSetupFee(db, { customerId } = {}) {
   if (customerId && (await hasConsumableSetupClaim(db, customerId))) {
     return { amount: 0, kind: 'unified', waived: 'fee_already_queued' };
   }
+  // A live claims-ledger row is the same evidence when nothing stamped —
+  // an invoice-mode accept seeds no series and writes no stamp, so a
+  // second/concurrent accept can only see its fee here (audit r14 P0).
+  const { customerHasLiveSetupFeeClaim } = require('./secure-appointment-plans');
+  if (customerId && (await customerHasLiveSetupFeeClaim(db, customerId))) {
+    return { amount: 0, kind: 'unified', waived: 'fee_already_queued' };
+  }
   return { amount, kind: 'unified' };
 }
 

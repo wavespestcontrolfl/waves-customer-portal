@@ -30,7 +30,7 @@ const { WAVEGUARD } = require('../services/pricing-engine/constants');
 // active-recurring first, consumable-claim second).
 function makeChain(result) {
   const chain = {};
-  for (const m of ['where', 'whereNot', 'whereIn', 'orWhereIn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'orWhere', 'orWhereExists', 'whereRaw']) {
+  for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orWhereIn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'orWhere', 'orWhereExists', 'whereRaw', 'join']) {
     chain[m] = () => chain;
   }
   chain.first = async () => result || null;
@@ -230,8 +230,9 @@ describe('decide-once enforcement on the billing/handoff paths (pre-push audit P
     // dedupe), amount frozen-first.
     expect(src).toMatch(/prepayUnifiedSetupAmount = acceptUnifiedDecision === true\s*\n\s*\? unifiedAcceptSetupFeeAmount\(estimateData\)/);
     expect(src).toMatch(/prepayUnifiedSetupAmount > 0 \? \[\{\s*description: 'Setup Fee — one-time \(billed with prepay\)'/);
-    // The frozen-positive dedupe exists and can only WAIVE.
-    expect(src).toMatch(/hasActiveRecurringService\(database, customerId\)\)\) return false;\s*\n\s*if \(customerId && \(await hasConsumableSetupClaim\(database, customerId\)\)\) return false;\s*\n\s*return true;/);
+    // The frozen-positive dedupe exists and can only WAIVE — three probes
+    // (live series, consumable stamp, live claims-ledger row) then true.
+    expect(src).toMatch(/hasActiveRecurringService\(database, customerId\)\)\) return false;\s*\n\s*if \(customerId && \(await hasConsumableSetupClaim\(database, customerId\)\)\) return false;[\s\S]{0,300}customerHasLiveSetupFeeClaim\(database, customerId\)\)\) return false;\s*\n\s*\}\s*\n\s*return true;/);
     // Copy: a riding fee suppresses the waiver claim in description AND notes.
     expect(src).toMatch(/prepayUnifiedSetupAmount > 0\s*\n\s*\/\/ The unified fee rides this invoice — never claim a waiver\./);
     expect(src).toMatch(/one-time setup fee billed with the prepay\./);
