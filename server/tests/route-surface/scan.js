@@ -890,6 +890,12 @@ class ModuleAnalysis {
       }
       if (target.type !== 'Identifier') continue;
       const b = this.bindings.get(this.canonName(target.name));
+      if (b && b.kind === 'array') {
+        // Object.assign(chain, { 0: noop }) rewrites elements like a
+        // computed-index write — taint the array.
+        mutatedNames.add(target.name);
+        continue;
+      }
       if (b && (b.kind === 'require' || b.kind === 'requireMember') && b.module !== null) {
         const nameArg = d.arguments[1];
         const prop = nameArg && nameArg.type === 'StringLiteral'
@@ -1114,7 +1120,9 @@ class ModuleAnalysis {
         }
       }
       const passed = resolvedArgs.filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
-      if (!passed.length && !importedArgs.length) continue;
+      const hasFnArg = call.arguments.some((a) => a && a.type === 'Identifier'
+        && (this.bindings.get(this.canonName(a.name)) || {}).kind === 'function');
+      if (!passed.length && !importedArgs.length && !hasFnArg) continue;
       const c = call.callee;
       const consumerOk = (entry) => {
         if (!entry) return false;
@@ -1124,6 +1132,18 @@ class ModuleAnalysis {
           // away from what scan() walks. A side-effect module can do this
           // too, so the finding is sweep-visible.
           this.pushSweepProblem(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got ${passed.join(', ')} — the scanner walks the app, so the process must serve it`);
+        }
+        if (entry.appOnly) {
+          // A NAMED local function is a raw request handler exactly like an
+          // inline one — only the scanned app may be served.
+          for (const a of call.arguments) {
+            if (a && a.type === 'Identifier') {
+              const fb = this.bindings.get(this.canonName(a.name));
+              if (fb && fb.kind === 'function') {
+                this.pushSweepProblem(`${this.loc(call)}: ${entry.name} is reviewed to receive only the app, but got function ${a.name} — a raw request handler would serve surface the scanner never walks`);
+              }
+            }
+          }
         }
         if (entry.appOnly && importedArgs.length) {
           // An IMPORTED binding handed to an app-only consumer may be a
@@ -1629,16 +1649,29 @@ class ModuleAnalysis {
    */
   routerReferencedIn(fnNode) {
     const isRouterName = (canon) => this.routers.has(canon) && !this.apps.has(canon) && !APP_IDENTIFIERS.has(canon);
+    // An IMPORTED binding counts when its module's export resolves to a
+    // router — a wrapper delegating to `require('./hidden')` serves that
+    // router's routes; imports of plain services stay ordinary middleware.
+    const isImportedRouter = (canon) => {
+      const b = this.bindings.get(canon);
+      if (!b || (b.kind !== 'require' && b.kind !== 'requireMember') || b.module === null) return false;
+      if (!this.scanner.exists(b.module)) return false;
+      let m;
+      try { m = this.scanner.peekModule(b.module); } catch { return true; } // unanalyzable: fail closed
+      if (b.kind === 'require') return Boolean(m.exportedRouter);
+      const exp = m.exportLookup(b.name);
+      return exp.kind === 'opaque' || (exp.kind === 'ident' && m.routers.has(m.canonName(exp.name)));
+    };
     let found = null;
     walk(fnNode, (n) => {
       if (found) return;
       if (n.type === 'Identifier') {
         const canon = this.canonName(n.name);
-        if (isRouterName(canon)) found = n.name;
+        if (isRouterName(canon) || isImportedRouter(canon)) found = n.name;
       } else if (n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression') {
         // `holder.api` may BE the router through a modeled object member.
         const t = this.resolveMemberChain(n);
-        if (t && isRouterName(this.canonName(t))) found = this.src.slice(n.start, n.end);
+        if (t && (isRouterName(this.canonName(t)) || isImportedRouter(this.canonName(t)))) found = this.src.slice(n.start, n.end);
       }
     }, { topLevel: false, conds: [], src: this.src });
     return found;
@@ -2025,6 +2058,17 @@ class Scanner {
       this.problems.push(...m.problems);
     }
     return this.modules.get(rel);
+  }
+
+  /**
+   * Analyze a module WITHOUT mounting it: its own problems stay local (it is
+   * not mounted surface — the side-effect sweep still covers it separately).
+   */
+  peekModule(rel) {
+    if (this.modules.has(rel)) return this.modules.get(rel);
+    if (!this.peeked) this.peeked = new Map();
+    if (!this.peeked.has(rel)) this.peeked.set(rel, new ModuleAnalysis(rel, this.read(rel), this));
+    return this.peeked.get(rel);
   }
 
   /** A reference to another module used as a handler: router or opaque. */

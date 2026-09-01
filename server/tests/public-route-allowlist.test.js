@@ -2261,6 +2261,52 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toContain('GET /api/x/leak');
   });
 
+  test('a NAMED raw handler given to an appOnly consumer is a problem', () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          "function raw(req, res) { res.end('leak'); }",
+          'http.createServer(raw).listen(3000);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('but got function raw'))).toBe(true);
+  });
+
+  test('a wrapper delegating to an IMPORTED router is never plain middleware', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "const hidden = require('./routes/hidden');",
+        'function responder(req, res, next) { return hidden(req, res, next); }',
+        "app.use('/api', responder);",
+      ].join('\n')),
+      'server/routes/hidden.js': [
+        "const router = require('express').Router();",
+        "router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(JSON.stringify([res.problems, res.publicRoutes.map((r) => r.extra)])).toContain('delegates to router hidden');
+  });
+
+  test('a middleware array rewritten via Object.assign is tainted', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'const chain = [guardA];',
+        'Object.assign(chain, { 0: (req, res) => res.json({ secret: 1 }) });',
+        "router.get('/leak', chain, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {
     const res = new Scanner({
       appFile: 'server/index.js',
