@@ -37,6 +37,13 @@ import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudi
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
 
+// A 409 from the process route is the documented blocked-claim conflict and
+// carries a classifiable body. Any other non-2xx — an expired session, a
+// server error — is NOT a process outcome, and running it through the
+// interpreter would replace the server's actionable message with a generic
+// "did not confirm the run" (pre-push audit P1).
+const processConflict = (err) => (err?.status === 409 && err?.body?.reason ? err.body : null);
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // 'blocked' is amber, not alert red: nothing broke, but nothing ran either —
 // the operator has to hit Reprocess. alert-fg stays reserved for a genuine
@@ -85,11 +92,18 @@ async function adminFetch(path, options = {}) {
 
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
+    let payload = null;
     try {
-      const body = await response.json();
-      message = body?.error || body?.message || message;
+      payload = await response.json();
+      message = payload?.error || payload?.message || message;
     } catch {}
-    throw new Error(message);
+    // Carry the parsed body: a 409 from the process route is a blocked
+    // claim, which is a classifiable OUTCOME rather than a bare failure —
+    // describeProcessResult turns it into the actionable line.
+    const error = new Error(message);
+    error.status = response.status;
+    error.body = payload;
+    throw error;
   }
 
   return response.json();
@@ -466,20 +480,26 @@ export default function CallLogTabV2() {
     window.location.assign(`/admin/communications?${params.toString()}#tab=sms`);
   };
 
-  const handleProcessCall = async (callSid, alreadyProcessed) => {
+  const handleProcessCall = async (callSid, alreadyProcessed = false) => {
     if (!callSid || processingCallSid) return;
     setProcessingCallSid(callSid);
     setProcessResult(null);
-    // force=true only on Reprocess (alreadyProcessed=true) — the user is
-    // explicitly asking to re-run extraction on a completed row. For the
-    // default Process path, defer to the backend claim guard: it lets
-    // pending/null/no_transcription/stale-'processing' (>10min) through,
-    // and correctly blocks an actively-processing row so a concurrent
-    // run can't duplicate side effects (e.g. extra scheduled_services).
-    const force = alreadyProcessed === true;
+    // operator=true on EVERY click, because every click here is a human
+    // asking on purpose, and that is what selects the short quiet window for
+    // a stalled claim. Previously this sent force=false and the 3-minute
+    // recovery was unreachable from this screen (codex #3677 P1).
+    //
+    // NOT force: that means "re-run a call that already finished" and carries
+    // its own extraction policy — sending it on a manual FIRST run left valid
+    // caller-stated name corrections review-only (codex #3677 P2).
+    //
+    // What makes the short window safe is the heartbeat: the claim guard
+    // reclaims on SILENCE, not on age, so a live pass mid-transcription keeps
+    // beating and is still protected from a concurrent run.
+    const query = alreadyProcessed ? "?force=true&operator=true" : "?operator=true";
     try {
       const res = await adminFetch(
-        `/admin/call-recordings/process/${callSid}${force ? "?force=true" : ""}`,
+        `/admin/call-recordings/process/${callSid}${query}`,
         { method: "POST" },
       );
       // A skip is an HTTP 200 with success:true, and several of them mean
@@ -489,12 +509,13 @@ export default function CallLogTabV2() {
       setProcessResult({ ...verdict, callSid });
       await loadCalls(callLogSearch.trim());
     } catch (err) {
-      setProcessResult({
+      const conflict = processConflict(err);
+      const verdict = conflict ? describeProcessResult(conflict) : {
         didWork: false,
         severity: "failed",
-        callSid,
         text: `Process failed — ${err.message || "unknown error"}`,
-      });
+      };
+      setProcessResult({ ...verdict, callSid });
     } finally {
       setProcessingCallSid(null);
     }
@@ -813,7 +834,7 @@ export default function CallLogTabV2() {
                         {!isProcessing && c.twilio_call_sid && (
                           <button
                             type="button"
-                            onClick={() => handleProcessCall(c.twilio_call_sid, false)}
+                            onClick={() => handleProcessCall(c.twilio_call_sid)}
                             disabled={!!processingCallSid || !!autoProcessingSid}
                             className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
                           >
@@ -1248,7 +1269,7 @@ export default function CallLogTabV2() {
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleProcessCall(c.twilio_call_sid, false)
+                                    handleProcessCall(c.twilio_call_sid)
                                   }
                                   disabled={
                                     !!processingCallSid || !!autoProcessingSid
@@ -1264,6 +1285,8 @@ export default function CallLogTabV2() {
                                 <button
                                   type="button"
                                   onClick={() =>
+                                    // Reprocess: this row already finished, so
+                                    // force applies as well as operator.
                                     handleProcessCall(c.twilio_call_sid, true)
                                   }
                                   disabled={

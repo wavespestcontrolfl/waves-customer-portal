@@ -60,6 +60,48 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     reschedule_token: 'tok-1',
   };
 
+  test('upcoming rows carry the server-derived WaveGuard qualification that follows the live rodent flag (codex #3591 r19 P1)', async () => {
+    const rodentRow = { ...row, id: 'svc-r', service_type: 'Rodent Bait Stations' };
+    const trapRow = { ...row, id: 'svc-t', service_type: 'Rodent Trapping' };
+    // Stale label on a row repointed to the bait program: the CATALOG
+    // identity decides (codex #3591 r23 P1).
+    const staleLabelRow = { ...row, id: 'svc-s', service_type: 'Rodent Trapping', catalog_service_key: 'rodent_bait_quarterly', catalog_service_name: 'Quarterly Rodent Bait Station Service' };
+    // NON-bait rodent catalog identity under a canonical "Rodent Pest
+    // Control" label: the combined text reads as pest_control, but the
+    // non-bait guard runs first (codex #3591 r39 P2). Commercial rows too.
+    const trapCatalogRow = { ...row, id: 'svc-tc', service_type: 'Rodent Pest Control', catalog_service_key: 'rodent_trapping', catalog_service_name: 'Rodent Trapping' };
+    const commercialRow = { ...row, id: 'svc-c', service_type: 'Commercial Pest Control' };
+    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow, trapCatalogRow, commercialRow]));
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/schedule`)).json();
+      const byId = Object.fromEntries(body.upcoming.map((v) => [v.id, v]));
+      expect(byId['svc-1'].waveguardQualifying).toBe(true);
+      expect(byId['svc-r'].waveguardQualifying).toBe(true);
+      expect(byId['svc-t'].waveguardQualifying).toBe(false);
+      expect(byId['svc-s'].waveguardQualifying).toBe(true);
+      expect(byId['svc-tc'].waveguardQualifying).toBe(false);
+      expect(byId['svc-c'].waveguardQualifying).toBe(false);
+      // The RESOLVED family rides the payload (codex #3591 r58 P1): the
+      // stale-labeled bait row resolves rodent_bait; non-qualifying rows null.
+      expect(byId['svc-s'].serviceFamily).toBe('rodent_bait');
+      expect(byId['svc-1'].serviceFamily).toBe('pest_control');
+      expect(byId['svc-t'].serviceFamily).toBeNull();
+    });
+    // Live flag off → rodent bait no longer qualifies on the portal payload.
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      db.mockReturnValueOnce(listChain([rodentRow]));
+      await withServer(async (baseUrl) => {
+        const body = await (await fetch(`${baseUrl}/schedule`)).json();
+        expect(body.upcoming[0].waveguardQualifying).toBe(false);
+      });
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
+  });
+
   test('upcoming rows omit notes entirely while keeping the visit fields', async () => {
     db.mockReturnValueOnce(listChain([row]));
 

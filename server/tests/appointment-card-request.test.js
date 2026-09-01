@@ -253,6 +253,159 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('direct rodent series owing the $99 setup is NEVER auto-secured from a saved card — it takes the ask rail so the plan page discloses the fee (pre-push codex P0 on #3591 r30)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
+    try {
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1' }));
+      // No enrollment, no satisfied row, no undisclosed pending_setup_fee.
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      const satisfied = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'insert' && patch && patch.status === 'satisfied'));
+      expect(satisfied).toHaveLength(0);
+      const stamped = touches('scheduled_services')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
+      expect(stamped).toHaveLength(0);
+      // The ask went out instead: a PENDING request row + the /secure link,
+      // whose plan page discloses and freezes the setup before any stamp.
+      expect(res.requested).toBe(true);
+      const pending = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'insert' && patch && patch.status === 'pending'));
+      expect(pending).toHaveLength(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('EXISTING customer + saved card + owed setup → the July gate is BYPASSED and the ask proceeds — the /secure page discloses the $99, nothing is forgone (owner ruling 2026-08-30)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const logger = require('../services/logger');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      // NOT auto-secured without the fee, NOT skipped as existing_customer —
+      // the funnel falls through to the ask rail like a first-time customer.
+      expect(res.action).not.toBe('auto_secured');
+      expect(res.reason).not.toBe('existing_customer');
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      // Nothing stamped undisclosed; no fee forgone.
+      const stamped = touches('scheduled_services')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
+      expect(stamped).toHaveLength(0);
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('FORGONE'));
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('existing-customer gate bypassed'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('EXISTING customer + NO saved card + owed setup → the gate is bypassed too (the page also collects the card); a failed probe keeps the gate (owner ruling 2026-08-30)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.reason).not.toBe('existing_customer');
+      // Probe failure → fail closed to the July gate (no ask the rule may forbid).
+      spy.mockRejectedValueOnce(new Error('db down'));
+      const gated = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(gated.reason).toBe('existing_customer');
+      // Non-rodent existing customer stays gated.
+      spy.mockResolvedValueOnce(0);
+      const pest = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(pest.reason).toBe('existing_customer');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("delivery 'none' (TCPA-blocked call booking) + owed rodent setup → staff review page, never a silent loss (codex #3591 r46 P1)", async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'none' });
+      expect(res.reason).toBe('rodent_setup_staff_review');
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('Rodent setup'), expect.stringContaining('svc-1'), expect.anything());
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      // Non-rodent (no obligation) keeps the plain suppression.
+      spy.mockResolvedValueOnce(0);
+      const plain = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'none' });
+      expect(plain.reason).toBe('delivery_suppressed');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('FIRST-TIME commercial bait booking with no saved card routes to staff review, never the dead-end /secure link (codex #3591 r51 local P0)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const keySpy = jest.spyOn(plans, 'authoritativeServiceKey').mockResolvedValue('commercial_rodent_bait');
+    const feeSpy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.reason).toBe('commercial_rodent_setup_staff_review');
+      expect(mockNotifyAdmin).toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      keySpy.mockRestore();
+      feeSpy.mockRestore();
+    }
+  });
+
+  test('a STAMPED commercial bait series pages disclosure-only — the completion rail bills the stamp, so staff must not invoice it too (codex #3591 r65 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const keySpy = jest.spyOn(plans, 'authoritativeServiceKey').mockResolvedValue('commercial_rodent_bait');
+    const feeSpy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    const stampSpy = jest.spyOn(plans, 'stampedSetupForVisit').mockResolvedValue(99);
+    try {
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.reason).toBe('commercial_rodent_setup_staff_review');
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('disclose to customer'), expect.stringContaining('do NOT create a separate setup invoice'), expect.anything());
+      // Unstamped: manual billing is still the ask.
+      mockNotifyAdmin.mockClear();
+      stampSpy.mockResolvedValueOnce(null);
+      await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('needs manual billing'), expect.anything(), expect.anything());
+    } finally {
+      keySpy.mockRestore();
+      feeSpy.mockRestore();
+      stampSpy.mockRestore();
+    }
+  });
+
+  test('no obligation (0) → saved-card auto-secure proceeds, no scheduled_services stamp', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);
+    try {
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+      expect(res.action).toBe('auto_secured');
+      const stamped = touches('scheduled_services')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
+      expect(stamped).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('resolver failure inside auto-secure fails closed: skipped, nothing written', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockRejectedValueOnce(new Error('db down'));
+    try {
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+      expect(res.action).toBe('skipped');
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('already_enrolled counts as secured', async () => {
     mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
     mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'already_enrolled' });
@@ -1197,6 +1350,40 @@ describe('loadSecureCardPageData — page state machine', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test('the rodent setup disclosure freezes with a sticky ZERO sentinel (codex #3591 r15/r17 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const stampFor = async (ctx) => {
+      const spy = jest.spyOn(plans, 'deriveSecurePlanContext').mockResolvedValueOnce(ctx);
+      try {
+        await loadSecureCardPageData(REQUEST.token);
+        // Touches accumulate across renders in this file — take the LAST stamp.
+        return touches('appointment_card_requests')
+          .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+          .map(([, patch]) => patch)
+          .filter((p) => 'accepted_setup_fee' in p)
+          .pop();
+      } finally { spy.mockRestore(); }
+    };
+    // Unwaived setup displayed → monotonic-down with the zero sentinel guard.
+    const shown = await stampFor({ mode: 'recurring', perVisit: 89, visitsPerYear: 4, annualBase: 356, prepay: { total: 437.2, discount: 17.8, ratePctLabel: '5%' }, setupFee: { amount: 99, waivedWithPrepay: false }, selected: null });
+    expect(String(shown.accepted_setup_fee.__raw)).toContain('CASE WHEN accepted_setup_fee = 0 THEN 0 ELSE LEAST(COALESCE(accepted_setup_fee');
+    expect(shown.accepted_setup_fee.bindings).toContain(99);
+    // Recurring plan with NO unwaived setup (fee disabled / member) → sticky 0, never NULL.
+    const none = await stampFor({ mode: 'recurring', perVisit: 89, visitsPerYear: 4, annualBase: 356, prepay: { total: 338.2, discount: 17.8, ratePctLabel: '5%' }, setupFee: null, selected: null });
+    expect(none.accepted_setup_fee.bindings).toEqual([0, 0]);
+    // No plan displayed → the column is left UNTOUCHED (codex r29 P1: a
+    // NULL write here would erase a cap frozen by an earlier successful
+    // render, and submit reads NULL as "price live").
+    const before = touches('appointment_card_requests').length;
+    const spy = jest.spyOn(plans, 'deriveSecurePlanContext').mockResolvedValueOnce({ mode: 'one_time', perVisit: 135, selected: null });
+    try { await loadSecureCardPageData(REQUEST.token); } finally { spy.mockRestore(); }
+    const oneTimePatches = touches('appointment_card_requests').slice(before)
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(oneTimePatches.length).toBeGreaterThan(0);
+    expect(oneTimePatches.some((p) => 'accepted_setup_fee' in p)).toBe(false);
   });
 
   test('a plan-context derivation FAILURE renders unavailable and stamps NOTHING — a hiccup is never a no-price consent (#3175 hardening)', async () => {

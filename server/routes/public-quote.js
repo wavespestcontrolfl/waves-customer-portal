@@ -93,6 +93,106 @@ function numberOrNull(...values) {
   return null;
 }
 
+// The wizard's existing-customer match (phone last-10 digits first, email
+// second; never a deleted row) — ONE definition shared by the pre-pricing
+// setup-waiver lookup and the post-pricing customer link (codex #3591 r14 P1).
+// UNAMBIGUOUS only (codex #3591 r88 P1): a shared household/business contact
+// matching TWO active rows must not link the estimate to an arbitrary
+// .first() row — the linked customer's services drive the gained-family
+// waiver reconciliation, so an arbitrary pick can strip the disclosed setup
+// for the wrong property. Same exactly-one rule the r83 pre-pricing waiver
+// probe applies: an ambiguous phone declines outright (falling through to
+// email would resolve the same shared household by another key); only a
+// no-match phone probe falls through.
+async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}) {
+  const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+  const emailLc = String(contactEmail || '').trim().toLowerCase();
+  if (phoneDigits.length === 10) {
+    const matches = await database('customers')
+      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+      .whereNull('deleted_at')
+      .limit(2)
+      .select('*');
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return null;
+  }
+  if (emailLc) {
+    const matches = await database('customers')
+      .whereRaw('LOWER(email) = ?', [emailLc])
+      .whereNull('deleted_at')
+      .limit(2)
+      .select('*');
+    if (matches.length === 1) return matches[0];
+  }
+  return null;
+}
+
+// Which one-time setup obligation a wizard estimate carries into its
+// persisted setupFeeQuote (codex #3591 r17 P1): the WaveGuard membership fee
+// (solo recurring pest/mosquito — the converter's own predicate) or the
+// engine-authorized rodent bait-station setup a non-member rodent plan
+// emitted. Mutually exclusive by construction (the membership-fee mix is a
+// single non-rodent family; the rodent setup fires only without another
+// qualifying family). Commercial / manual quotes never qualify.
+function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, quoteRequired = false } = {}) {
+  if (commercialDetected || quoteRequired) return { qualifies: false, kind: null, amount: 0 };
+  if (recurringMixHasMembershipFeeService(recurringQuoteLines(estimate))) {
+    return { qualifies: true, kind: 'waveguard_membership', amount: WAVEGUARD_SETUP_FEE };
+  }
+  const rodentSetup = (estimate?.lineItems || []).find((line) => line
+    && String(line.service || '').toLowerCase() === 'rodent_bait_setup'
+    && Number(line.priceAfterDiscount ?? line.price) > 0);
+  if (rodentSetup) {
+    return {
+      qualifies: true,
+      kind: 'rodent_bait_setup',
+      amount: Math.round(Number(rodentSetup.priceAfterDiscount ?? rodentSetup.price) * 100) / 100,
+    };
+  }
+  return { qualifies: false, kind: null, amount: 0 };
+}
+
+// The waiver step of the persisted setupFeeQuote (codex #3591 r18 P1): the
+// ACCOUNT-LEVEL member waiver (any active WaveGuard tier) belongs to the
+// membership fee only. The rodent bait-station setup is waived by an OTHER
+// qualifying family — canonical evidence the engine already applied when it
+// emitted (or withheld) the line — so a rodent-only Bronze member still owes
+// it. An in-flight setup-fee claim anywhere on the account waives the
+// MEMBERSHIP fee (one account setup at a time); the rodent setup is
+// per-series and never self-waives (codex #3591 r64 P1: a second rodent
+// program for another property must not ride the first series' in-flight
+// stamp), so a queued claim waives it only when it belongs to THIS draft.
+function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false, queuedForThisDraft = false } = {}) {
+  const memberWaives = activeMember && basis.kind === 'waveguard_membership';
+  const queuedWaives = feeAlreadyQueued && (basis.kind === 'waveguard_membership' || queuedForThisDraft);
+  return memberWaives || queuedWaives
+    ? { amount: 0, waived: memberWaives ? 'existing_member' : 'fee_already_queued', kind: basis.kind }
+    : { amount: basis.amount, kind: basis.kind };
+}
+
+// Remove the engine's rodent_bait_setup line (and its share of the one-time
+// totals) from a persisted wizard draft whose setupFeeQuote decided ZERO for
+// the rodent kind (codex #3591 r26 P1).
+function stripWaivedRodentSetupFromDraft(estimateDataObj = {}) {
+  const engineResult = estimateDataObj?.engineResult;
+  if (!engineResult || !Array.isArray(engineResult.lineItems)) return 0;
+  let removed = 0;
+  engineResult.lineItems = engineResult.lineItems.filter((line) => {
+    if (String(line?.service || '').toLowerCase() !== 'rodent_bait_setup') return true;
+    removed = Math.round((removed + (Number(line?.price) || 0)) * 100) / 100;
+    return false;
+  });
+  if (!(removed > 0)) return 0;
+  const minus = (v) => Math.max(0, Math.round(((Number(v) || 0) - removed) * 100) / 100);
+  if (estimateDataObj.oneTimeTotal != null) estimateDataObj.oneTimeTotal = minus(estimateDataObj.oneTimeTotal);
+  if (engineResult.summary && typeof engineResult.summary === 'object') {
+    if (engineResult.summary.oneTimeTotal != null) engineResult.summary.oneTimeTotal = minus(engineResult.summary.oneTimeTotal);
+    if (engineResult.summary.rodentBaitSetupTotal != null) engineResult.summary.rodentBaitSetupTotal = minus(engineResult.summary.rodentBaitSetupTotal);
+    if (engineResult.summary.year1Total != null) engineResult.summary.year1Total = minus(engineResult.summary.year1Total);
+  }
+  return removed;
+}
+
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
   // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
@@ -213,7 +313,13 @@ function recurringQuoteLines(estimate) {
 // carry perApp/perVisit too, but commercial is exempt from the
 // per-application unit rule and bills monthly (AGENTS.md).
 const MONTHLY_BILLED_SERVICE_KEYS = new Set([
-  'rodent_bait',
+  // rodent_bait left this set 2026-08-29 (owner directive): NEW bracket
+  // pricing bills per quarterly application like the other recurring
+  // programs. LEGACY monthly-billed rodent rows are still refused
+  // per-application provenance by rodentBaitLineBillsMonthly below — the
+  // row-level perApplicationBilled marker (stamped only by the new engine/
+  // mapper) is the design signal, since legacy display rows carry a
+  // perTreatment figure too.
   'commercial_rodent_bait',
   // Rider folded into the bait line at conversion, never a standalone charge —
   // listing it separately would double-count the hardware uplift.
@@ -221,8 +327,16 @@ const MONTHLY_BILLED_SERVICE_KEYS = new Set([
   'commercial_termite_bait',
 ]);
 
+// Legacy rodent bait plans bill monthly; 2026-08-29+ rows bill per
+// application and carry the explicit perApplicationBilled marker.
+function rodentBaitLineBillsMonthly(line = {}) {
+  return String(line.service || '').trim() === 'rodent_bait'
+    && line.perApplicationBilled !== true;
+}
+
 function perApplicationForLine(line) {
   if (MONTHLY_BILLED_SERVICE_KEYS.has(String(line.service || '').trim())) return null;
+  if (rodentBaitLineBillsMonthly(line)) return null;
   // A line qualifies only when it carries an EXPLICIT per-application signal
   // (perApp, or the perVisit that palm/mosquito shapes use) — monthly-billed
   // station lines deliberately emit neither, and that absence is the design
@@ -488,7 +602,7 @@ function publicQuoteBedBugInput(bedBug = {}) {
 // Specialty and installation totals count alongside oneTimeTotal.
 function estimateBlocksBookingHandoff(estimate) {
   const { engineSummaryHasMixedBilling } = require('../services/booking-pay-at-visit');
-  return engineSummaryHasMixedBilling(estimate?.summary || {});
+  return engineSummaryHasMixedBilling(estimate?.summary || {}, { lineItems: estimate?.lineItems || [] });
 }
 
 // Services with no self-bookable slot shape: bed bug treatment is multi-visit
@@ -1288,6 +1402,55 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
 
+    // Rodent bait setup waiver needs the account's OTHER qualifying families
+    // BEFORE pricing (codex #3591 r14 P1): the customer link below runs after
+    // generateEstimate, so priorQualifyingServices is always empty here and a
+    // member's draft would freeze — and later bill — a $99 setup the rule
+    // waives. Resolved through the same contact rules as the link and the
+    // canonical loader; a lookup failure BLOCKS the rodent quote (retry)
+    // rather than mispricing it in either direction.
+    if (services.rodentBait) {
+      try {
+        // UNAMBIGUOUS contact match only (codex #3591 r83 P1): duplicate
+        // emails/phones are supported (shared household/business contacts,
+        // migration 20260417000010), and an unordered .first() on a shared
+        // contact would apply an arbitrary neighbor's account evidence —
+        // nondeterministically waiving or adding the $99. Two or more
+        // matches decline the evidence (fail toward charging; the accept
+        // path re-derives against the actually-linked customer and the
+        // gained-family reconciliation removes a fee the rule waives).
+        const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+        const emailLc = String(contactEmail || '').trim().toLowerCase();
+        let contactMatches = [];
+        if (phoneDigits.length === 10) {
+          contactMatches = await db('customers')
+            .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+            .whereNull('deleted_at')
+            .limit(2)
+            .select('id');
+        }
+        if (!contactMatches.length && emailLc) {
+          contactMatches = await db('customers')
+            .whereRaw('LOWER(email) = ?', [emailLc])
+            .whereNull('deleted_at')
+            .limit(2)
+            .select('id');
+        }
+        const existingForWaiver = contactMatches.length === 1 ? contactMatches[0] : null;
+        // STRICT (codex #3591 r71 P1): the default loader converts a failed
+        // membership/catalog read into [] — this catch's 503 would never run
+        // and /calculate would price and persist a $99 the customer's other
+        // service waives.
+        // planGate: false (codex #3591 r73 P1): the waiver counts live
+        // qualifying families whether or not the tier stamp landed.
+        engineInput.setupWaiverPriorQualifyingServices = existingForWaiver
+          ? await require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys(db, existingForWaiver.id, { strict: true, planGate: false })
+          : [];
+      } catch (lookupErr) {
+        logger.error(`[public-quote] rodent setup-waiver account lookup failed: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Account lookup is temporarily unavailable — please retry in a moment.' });
+      }
+    }
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
       isManualQuoteLine(line)
@@ -1339,11 +1502,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a legacy direct-API request must price identically whether or not an
     // unrelated prior lookup cached a lot-evidence flag (same contract rule
     // as the fallback-lot fix above). The deliberate CONDO-SCOPE protection
-    // applies on every channel. Commercial rodent bait is exempt: it prices
-    // from the building footprint and never reads the lot (GH codex P2 r8).
-    const lotPricedRequested = !!(services.mosquito
-      || (services.rodentBait && !commercialDetected)
-      || services.treeShrub);
+    // applies on every channel. Rodent bait is exempt on BOTH channels
+    // (codex #3591 r76 P2): the footprint-bracket pricer reads only
+    // property.footprint — residential and commercial alike — so weak or
+    // conflicting LOT evidence cannot change its result and must not force
+    // lot_size_requires_verification over an instant quote.
+    const lotPricedRequested = !!(services.mosquito || services.treeShrub);
     const lotFlagForcesSiteQuote = !lotSizeMeasured && (
       ((condoScopeLotFlag || (wizardShaped && lotVerifyFlagged)) && lotPricedRequested)
       || (condoScopeLotFlag && !!(services.lawn || services.oneTimeLawn || services.lawnPestControl
@@ -1371,7 +1535,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
-    const oneTimeTotal = quoteRequired ? 0 : (
+    // `let`: a ZERO rodent-setup decision (decided under the draft row lock
+    // below) strips the setup from the draft AND from this outer total, so
+    // the persisted estimates.onetime_total scalar and the API response
+    // never show a waived setup (codex #3591 r27 P1).
+    let oneTimeTotal = quoteRequired ? 0 : (
       Number(estimate?.summary?.oneTimeTotal || 0) +
       Number(estimate?.summary?.specialtyTotal || 0)
     );
@@ -1533,21 +1701,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // have it.
     let customerId = null;
     try {
-      const phoneDigits = String(contactPhone).replace(/\D/g, '').slice(-10);
-      const emailLc = contactEmail;
-      let existingCust = null;
-      if (phoneDigits.length === 10) {
-        existingCust = await db('customers')
-          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
-          .whereNull('deleted_at')
-          .first();
-      }
-      if (!existingCust && emailLc) {
-        existingCust = await db('customers')
-          .whereRaw('LOWER(email) = ?', [emailLc])
-          .whereNull('deleted_at')
-          .first();
-      }
+      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+      // Normalized email for the new-customer insert below (the shared
+      // lookup normalizes its own copy — codex #3591 r15 P1 TDZ fix).
+      const emailLc = String(contactEmail || '').trim().toLowerCase();
 
       // customers.lead_service_interest is varchar(32); a merged upsell string
       // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.
@@ -1732,9 +1889,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // predicate (incl. this frozen disclosure's member waiver) applies.
     let setupFeeQuote = null;
     let setupFeeMixQualifies = false;
+    let setupFeeBasis = null;
     try {
-      setupFeeMixQualifies = !commercialDetected && !quoteRequired
-        && recurringMixHasMembershipFeeService(recurringQuoteLines(estimate));
+      setupFeeBasis = setupFeeQuoteBasisForEstimate(estimate, { commercialDetected, quoteRequired });
+      setupFeeMixQualifies = setupFeeBasis.qualifies;
     } catch (feeErr) {
       // Can't even establish the service mix — leave the quote ABSENT
       // (legacy behavior for this draft; nothing new disclosed or charged).
@@ -1751,11 +1909,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // the decision fails CLOSED in the customer's favor: a zero-waiver is
     // persisted, so nothing is disclosed and conversion charges nothing —
     // a bounded miss on a transient error, never a surprise $99.
-    const decideSetupFeeQuote = async (q) => {
+    const decideSetupFeeQuote = async (q, draftEstimateId = null) => {
       if (!setupFeeMixQualifies) return null;
       try {
         let activeMember = false;
         let feeAlreadyQueued = false;
+        let queuedForThisDraft = false;
         if (customerId) {
           const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
           const memberRow = await q('customers').where({ id: customerId }).first();
@@ -1773,7 +1932,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // complete and mint it. A fully-cancelled wizard series would
           // otherwise waive this customer's setup fee on every future plan
           // forever (Codex #3489 follow-up).
-          const queued = await q('scheduled_services as claim')
+          const consumableClaimProbe = () => q('scheduled_services as claim')
             .where('claim.customer_id', customerId)
             .whereNotNull('claim.pending_setup_fee')
             .whereNot('claim.pending_setup_fee', 0)
@@ -1807,20 +1966,38 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                     // cannot mint it (Codex #3500).
                     .whereIn('child.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
                 });
-            })
-            .first('claim.id');
-          feeAlreadyQueued = !!queued;
+            });
+          feeAlreadyQueued = !!(await consumableClaimProbe().first('claim.id'));
+          // Provenance for the per-series rodent setup: the claim counts
+          // against THIS quote only when its series was booked from this
+          // draft (source_estimate_id) — the post-booking /calculate refresh
+          // this decision serializes with — never from another series. Its
+          // OWN probe (codex #3591 r65 P1): with several live rodent claims
+          // the account-wide `.first()` is unordered and may not be this
+          // draft's even when one exists.
+          queuedForThisDraft = !!draftEstimateId
+            && !!(await consumableClaimProbe().where('claim.source_estimate_id', draftEstimateId).first('claim.id'));
         }
         // Persist the WAIVER too, not just the fee: a waived draft carries
         // amount 0, and shouldIncludeWaveGuardSetupFeeForRecurring consumes
         // it — so conversion of this same draft can never re-add a fee that
         // /calculate disclosed as absent.
-        return activeMember || feeAlreadyQueued
-          ? { amount: 0, waived: activeMember ? 'existing_member' : 'fee_already_queued' }
-          : { amount: WAVEGUARD_SETUP_FEE };
+        // kind rides the decision: 'waveguard_membership' (solo pest/
+        // mosquito) or 'rodent_bait_setup' (a non-member rodent plan — the
+        // engine-authorized line amount, codex #3591 r17 P1). Either way
+        // booking.js stamps pending_setup_fee from `amount` when the
+        // self-booked series activates, so the obligation travels with the
+        // handoff instead of vanishing with the archived draft.
+        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued, queuedForThisDraft });
       } catch (memberErr) {
-        logger.warn(`[public-quote] setup-fee membership lookup failed — fee waived on draft: ${memberErr.message}`);
-        return { amount: 0, waived: 'membership_undetermined' };
+        // FAIL CLOSED toward the engine-priced line (codex #3591 r43 local
+        // P0): a transient membership/claim lookup failure must never become
+        // a permanent waiver — the persisted zero stripped the
+        // engine-authorized $99 and the undercharge could never be repaired.
+        // Keep the disclosed amount (a genuine member's fee is one staff
+        // waive away; an erased one is gone); `unverified` records why.
+        logger.warn(`[public-quote] setup-fee membership lookup failed — keeping the engine-priced fee (never waived on failure): ${memberErr.message}`);
+        return { amount: setupFeeBasis.amount, kind: setupFeeBasis?.kind, unverified: 'membership_undetermined' };
       }
     };
 
@@ -1959,6 +2136,25 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // tech EXTERIOR ONLY scope (codex #3432 r7).
             interiorOption: item.interiorOption ?? undefined,
             interiorScope: item.interiorScope ?? undefined,
+            // Rodent billing-unit marker + allowance (2026-08-29, codex
+            // #3591 r6): without them the mirrored row reads as a LEGACY
+            // monthly-billed rodent plan — discount-ineligible and showing
+            // the list rate instead of the engine-authorized net.
+            perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
+            stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
+            // WaveGuard posture frozen EXPLICITLY at quote time (codex #3591
+            // r45 local P0): the default qualifying/discountable posture must
+            // survive this compact mirror too, or the replay signal reads
+            // null and a later admin flag flip re-prices the sent token.
+            ...(item.service === 'rodent_bait'
+              && (item.perApplicationBilled === true || Number(item.stations) > 0 || item.pricingBasis === 'RODENT_BAIT_BRACKET')
+              ? {
+                tierQualifier: item.tierQualifier !== false && item.countsTowardWaveGuardTier !== false,
+                countsTowardWaveGuardTier: item.tierQualifier !== false && item.countsTowardWaveGuardTier !== false,
+                excludeFromPctDiscount: item.excludeFromPctDiscount === true || item.waveGuardDiscountEligible === false,
+                waveGuardDiscountEligible: !(item.excludeFromPctDiscount === true || item.waveGuardDiscountEligible === false),
+              }
+              : {}),
           })),
           waveGuard: estimate?.waveGuard || null,
         },
@@ -2012,9 +2208,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the stamp and revives the draft with a WAIVER, never a second
       // chargeable quote.
       const applySetupFeeQuote = async (q) => {
-        setupFeeQuote = await decideSetupFeeQuote(q);
+        setupFeeQuote = await decideSetupFeeQuote(q, existingEst ? existingEst.id : null);
         if (setupFeeQuote) estimateDataObj.setupFeeQuote = setupFeeQuote;
         else delete estimateDataObj.setupFeeQuote;
+        // A ZERO rodent-setup decision (claim already queued on the account,
+        // or the customer-favorable lookup-failure waiver) must also remove
+        // the engine's positive rodent_bait_setup row and its share of the
+        // one-time total from the persisted draft — otherwise a refreshed or
+        // staff-sent draft would still display and invoice the setup the
+        // decision waived (codex #3591 r26 P1). frozenRodentBaitSetupAmount
+        // honors the persisted zero decision as the belt.
+        if (setupFeeQuote?.kind === 'rodent_bait_setup' && !(Number(setupFeeQuote.amount) > 0)) {
+          const removed = stripWaivedRodentSetupFromDraft(estimateDataObj);
+          if (removed > 0) {
+            oneTimeTotal = Math.max(0, Math.round((oneTimeTotal - removed) * 100) / 100);
+            estFields.onetime_total = oneTimeTotal || null;
+          }
+        }
       };
       if (existingEst) {
         // archived_at: null revives a draft the self-booking path retired
@@ -2411,7 +2621,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // failed to mint (draftEstimateId null): with no persisted freeze there
     // is no billable handoff, and disclosing a fee the /book path could
     // never stamp would break disclosure↔billing agreement.
-    const hasSetupFee = Number(setupFeeQuote?.amount) > 0 && !!draftEstimateId;
+    // A rodent bait-station setup is ALREADY disclosed by the estimate's own
+    // one-time line (oneTimeTotal) — has_setup_fee is the membership fee's
+    // separate disclosure and must not double-show it.
+    const hasSetupFee = Number(setupFeeQuote?.amount) > 0 && !!draftEstimateId
+      && setupFeeQuote.kind !== 'rodent_bait_setup';
 
     // Confidence flag: when satellite enrichment came back empty (new construction,
     // missing imagery, AI couldn't classify), widen the customer-facing range from
@@ -2464,7 +2678,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.setup_fee_amount = setupFeeQuote.amount;
     }
     if (oneTimeTotal > 0) {
-      response.one_time_total = Math.round(oneTimeTotal);
+      // Cents-exact (codex #3591 r19 P2): a fractional live setup fee
+      // ($79.50) must read the same on the widget as on the persisted draft
+      // and the accepted invoice.
+      response.one_time_total = Math.round(oneTimeTotal * 100) / 100;
+    }
+    // Additive: the rodent bait-station setup share inside one_time_total,
+    // so the widget can name it without double-showing it as a membership
+    // fee (has_setup_fee stays the membership disclosure).
+    if (setupFeeQuote?.kind === 'rodent_bait_setup' && Number(setupFeeQuote.amount) > 0 && draftEstimateId) {
+      response.rodent_setup_amount = setupFeeQuote.amount;
     }
     const perApplication = derivePerApplication(estimate);
     if (perApplication) {
@@ -2647,6 +2870,7 @@ module.exports._internals = {
   isPublicCommercialQuote,
   publicQuotePestLabel,
   perApplicationForLine,
+  rodentBaitLineBillsMonthly,
   MONTHLY_BILLED_SERVICE_KEYS,
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,
@@ -2656,6 +2880,10 @@ module.exports._internals = {
   quoteOnRequestEstimate,
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
+  findExistingCustomerByContact,
+  setupFeeQuoteBasisForEstimate,
+  resolveSetupFeeQuoteDecision,
+  stripWaivedRodentSetupFromDraft,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,

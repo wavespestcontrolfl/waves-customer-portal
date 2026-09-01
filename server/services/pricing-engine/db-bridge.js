@@ -14,6 +14,17 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 // removes from the DB row reverts to the code default on the NEXT sync
 // instead of lingering until a process restart.
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
+// Pristine code defaults for the rodent bracket ladder (codex #3591 r54
+// P1): a DB row that disappears or invalidates after a prior sync must
+// fall back to these, not keep the stale process-global values.
+const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
+  baitBrackets: constants.RODENT.baitBrackets,
+  baitBracketExtension: constants.RODENT.baitBracketExtension,
+  baitVisitsPerYear: constants.RODENT.baitVisitsPerYear,
+  baitSetupFee: constants.RODENT.baitSetupFee,
+  tierQualifier: constants.RODENT.tierQualifier,
+  excludeFromPctDiscount: constants.RODENT.excludeFromPctDiscount,
+}));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -117,7 +128,7 @@ function requirePalmTierSizes(errors, treatment, name) {
 
 function validatePestPricingConfig(snapshot = constants) {
   const errors = [];
-  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, MOSQUITO, PALM, WAVEGUARD } = snapshot;
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, MOSQUITO, PALM, WAVEGUARD, RODENT } = snapshot;
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
@@ -529,6 +540,18 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!palm.internalCostBasis || typeof palm.internalCostBasis !== 'object') {
     errors.push('PALM.internalCostBasis is required');
   }
+
+  // Rodent bait brackets (owner directive 2026-08-29): the ladder must be
+  // non-empty, strictly sorted, and positively priced — a hand-edited DB row
+  // must never boot an engine that can't resolve a bracket.
+  const rodent = RODENT || {};
+  validateSortedBrackets(errors, 'RODENT.baitBrackets', rodent.baitBrackets, 'maxSqFt', 'perVisit');
+  for (const b of rodent.baitBrackets || []) {
+    if (!isPositiveNumber(b.stations)) errors.push('RODENT.baitBrackets stations must be positive');
+  }
+  const rodentExt = rodent.baitBracketExtension || {};
+  if (!isPositiveNumber(rodentExt.perSqFt)) errors.push('RODENT.baitBracketExtension.perSqFt must be positive');
+  if (!isPositiveNumber(rodentExt.perVisitPerStep)) errors.push('RODENT.baitBracketExtension.perVisitPerStep must be positive');
 
   return { valid: errors.length === 0, errors };
 }
@@ -1219,21 +1242,77 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     // ── Rodent ───────────────────────────────────────────────
-    // Bait stations (recurring monthly)
-    if (config.rodent_monthly) {
-      const rm = config.rodent_monthly;
-      if (rm.small) constants.RODENT.baitMonthly.small.monthly = r(rm.small);
-      if (rm.medium) constants.RODENT.baitMonthly.medium.monthly = r(rm.medium);
-      if (rm.large) constants.RODENT.baitMonthly.large.monthly = r(rm.large);
-      if (rm.visits_per_year) constants.RODENT.baitVisitsPerYear = Number(rm.visits_per_year);
+    // Bait stations (footprint brackets, per quarterly visit — owner
+    // directive 2026-08-29). The retired knobs' rows (rodent_monthly,
+    // rodent_setup_fee, rodent_post_exclusion) are deliberately NOT read:
+    // their constants no longer exist, and migration 20260829000040 retires
+    // the rows themselves.
+    // Rebase to the pristine ladder BEFORE applying the optional row
+    // (codex #3591 r54 P1) — every snapshot starts from code defaults, so a
+    // deleted/invalidated DB row cannot pin stale values in this process
+    // while a fresh pod prices from defaults.
+    constants.RODENT.baitBrackets = JSON.parse(JSON.stringify(RODENT_BRACKET_DEFAULTS.baitBrackets));
+    constants.RODENT.baitBracketExtension = JSON.parse(JSON.stringify(RODENT_BRACKET_DEFAULTS.baitBracketExtension));
+    constants.RODENT.baitVisitsPerYear = RODENT_BRACKET_DEFAULTS.baitVisitsPerYear;
+    constants.RODENT.baitSetupFee = RODENT_BRACKET_DEFAULTS.baitSetupFee;
+    if (config.rodent_bait_brackets) {
+      const rb = config.rodent_bait_brackets;
+      if (Array.isArray(rb.brackets) && rb.brackets.length > 0) {
+        // Cents-preserving (codex #3591 r9 P2): the admin card shows the
+        // exact saved figure, so the runtime must price the same cents —
+        // r() rounds to whole dollars and would quote $90 for a saved $89.50.
+        const parsed = rb.brackets
+          .map((b) => ({
+            maxSqFt: Number(b.max_sq_ft ?? b.maxSqFt),
+            stations: Number(b.stations),
+            perVisit: Math.round(Number(b.per_visit ?? b.perVisit) * 100) / 100,
+          }))
+          .filter((b) => Number.isFinite(b.maxSqFt) && b.maxSqFt > 0
+            && Number.isFinite(b.stations) && b.stations > 0
+            && Number.isFinite(b.perVisit) && b.perVisit > 0)
+          .sort((a, b) => a.maxSqFt - b.maxSqFt);
+        if (parsed.length > 0) constants.RODENT.baitBrackets = parsed;
+      }
+      if (rb.extension) {
+        const ext = rb.extension;
+        if (Number(ext.per_sq_ft ?? ext.perSqFt) > 0) {
+          constants.RODENT.baitBracketExtension.perSqFt = Number(ext.per_sq_ft ?? ext.perSqFt);
+        }
+        // Zero is a VALID increment (price grows past the top bracket while
+        // the station allowance stays flat) and the admin validator accepts
+        // it — the sync must honor it, not silently keep the old value
+        // (codex #3591 r5 P2).
+        const stationsPerStep = Number(ext.stations_per_step ?? ext.stationsPerStep);
+        if (Number.isInteger(stationsPerStep) && stationsPerStep >= 0) {
+          constants.RODENT.baitBracketExtension.stationsPerStep = stationsPerStep;
+        }
+        if (Number(ext.per_visit_per_step ?? ext.perVisitPerStep) > 0) {
+          constants.RODENT.baitBracketExtension.perVisitPerStep = Math.round(Number(ext.per_visit_per_step ?? ext.perVisitPerStep) * 100) / 100;
+        }
+      }
+      // Quarterly is an INVARIANT, not a knob (codex #3591 r45 P2): customer
+      // copy and follow-up seeding are hard-quarterly (admin PUT enforces
+      // exactly 4), so a seeded/imported row with any other cadence must not
+      // reach the pricer — it would charge for N applications while
+      // describing and scheduling four.
+      const rbVisits = Number(rb.visits_per_year);
+      if (rbVisits === 4) {
+        constants.RODENT.baitVisitsPerYear = 4;
+      } else if (rbVisits > 0) {
+        console.warn(`[db-bridge] rodent_bait_brackets.visits_per_year=${rbVisits} rejected — the bait program is quarterly by invariant (4); keeping ${constants.RODENT.baitVisitsPerYear}`);
+      }
     }
-    if (config.rodent_setup_fee?.value) {
-      constants.RODENT.baitSetupFee = r(config.rodent_setup_fee.value);
-    }
-    if (config.rodent_post_exclusion) {
-      const pe = config.rodent_post_exclusion;
-      if (pe.multiplier) constants.RODENT.baitPostExclusion.multiplier = pe.multiplier;
-      if (pe.floor_monthly) constants.RODENT.baitPostExclusion.floorMonthly = r(pe.floor_monthly);
+    // One-time setup fee for non-WaveGuard members (owner 2026-08-29: $99;
+    // migration 20260829000040 rewrites the legacy $199 row). A zero/absent
+    // value disables the fee entirely. Negative values never reach the
+    // runtime (codex #3591 r9 P2 — the engine drops a non-positive setup
+    // row, so a negative sync would silently disable the required charge);
+    // the admin validator rejects them up front, this is the belt.
+    if (config.rodent_setup_fee?.value != null) {
+      const setupFee = Number(config.rodent_setup_fee.value);
+      if (Number.isFinite(setupFee) && setupFee >= 0) {
+        constants.RODENT.baitSetupFee = Math.round(setupFee * 100) / 100;
+      }
     }
 
     // Inspection
@@ -1380,10 +1459,44 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
 
+    // Rebase the qualification/exclusion policy to code defaults BEFORE the
+    // optional row applies (codex #3591 r56 P1) — a removed rodent_waveguard
+    // row must return this pod to the same posture a fresh pod boots with,
+    // in BOTH the RODENT flags and the WAVEGUARD maps.
+    constants.RODENT.tierQualifier = RODENT_BRACKET_DEFAULTS.tierQualifier;
+    constants.RODENT.excludeFromPctDiscount = RODENT_BRACKET_DEFAULTS.excludeFromPctDiscount;
+    {
+      const defaultQualifies = RODENT_BRACKET_DEFAULTS.tierQualifier;
+      const qi = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+      if (defaultQualifies && qi === -1) constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+      if (!defaultQualifies && qi !== -1) constants.WAVEGUARD.qualifyingServices.splice(qi, 1);
+      if (RODENT_BRACKET_DEFAULTS.excludeFromPctDiscount) {
+        constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait = true;
+      } else {
+        delete constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait;
+      }
+    }
     if (config.rodent_waveguard || config.rodent_rules) {
       const rw = config.rodent_waveguard || config.rodent_rules;
-      if (typeof rw.tier_qualifier === 'boolean') constants.RODENT.tierQualifier = rw.tier_qualifier;
-      if (typeof rw.exclude_from_pct_discount === 'boolean') constants.RODENT.excludeFromPctDiscount = rw.exclude_from_pct_discount;
+      // The RODENT flags and the WAVEGUARD maps must move TOGETHER — the
+      // discount engine reads BOTH (serviceExcludedFromPercentDiscount reads
+      // the map, lineFlagsBlockPercentDiscount reads the line-stamped flag).
+      // Before 2026-08-29 only the RODENT flags synced, so flipping the admin
+      // toggle silently changed nothing (the hard-coded map still excluded).
+      if (typeof rw.tier_qualifier === 'boolean') {
+        constants.RODENT.tierQualifier = rw.tier_qualifier;
+        const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+        if (rw.tier_qualifier && idx === -1) constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+        if (!rw.tier_qualifier && idx !== -1) constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+      }
+      if (typeof rw.exclude_from_pct_discount === 'boolean') {
+        constants.RODENT.excludeFromPctDiscount = rw.exclude_from_pct_discount;
+        if (rw.exclude_from_pct_discount) {
+          constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait = true;
+        } else {
+          delete constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait;
+        }
+      }
       if (rw.setup_credit != null) constants.RODENT.setupCredit = r(rw.setup_credit);
     }
 

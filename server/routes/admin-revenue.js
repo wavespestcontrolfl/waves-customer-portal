@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { computeMrrBreakdown } = require('../services/mrr-breakdown');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { VEHICLE_METHODS } = require('../services/pnl-report');
@@ -73,7 +74,10 @@ router.get('/overview', async (req, res, next) => {
     const totalHours = services.reduce((s, r) => s + parseFloat(r.labor_hours || 0), 0);
     const prevRev = prevServices.reduce((s, r) => s + parseFloat(r.revenue || 0), 0);
 
-    const mrr = await db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
+    // Headline MRR = the shared breakdown (monthly lane ∪ payment-pending
+    // prepay, internal excluded) — one definition with the dashboard tile and
+    // the snapshot (Codex #3669 r3).
+    const mrr = await computeMrrBreakdown(db);
     const custCount = await db('customers').where({ active: true }).whereNull('deleted_at').count('* as count').first();
 
     // By service line

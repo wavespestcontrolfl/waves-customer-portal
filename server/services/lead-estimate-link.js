@@ -4,6 +4,7 @@ const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
 const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
 
@@ -326,7 +327,6 @@ async function stampFirstResponseByContact({ database = db, phone = null, email 
     // Positive membership (OPEN_LEAD_STATUSES), not NOT-IN(closed): a
     // negative filter silently re-includes any status it forgot (cancelled /
     // spam leads are not closed-set members but are not answerable either).
-    const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
     const query = database('leads')
       .whereNull('deleted_at')
       .whereNull('response_time_minutes')
@@ -400,6 +400,65 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
     // its terminal stage). The bridge's monotonic rank guards downgrades; this
     // guards phantom advances.
     if (advanced) await bridgeLeadFunnelStage(lead.id, 'estimate_sent', database);
+    // Sending an estimate IS qualification. The extraction model's
+    // lead_quality drives the auto-set flag, and a mislabelled "cold" on a
+    // real buyer left the lead sitting unqualified while the customer was
+    // reading the estimate (2026-08-31: nine open leads in that state, one
+    // of them viewed within a minute of sending). Behavioural evidence
+    // outranks the label: if the office judged the lead worth an estimate,
+    // it is by definition workable. Scoped to open statuses so a replayed
+    // send event can never re-qualify a lead a human explicitly
+    // disqualified or closed, and IS DISTINCT FROM so never-judged (NULL)
+    // rows qualify too — plain != TRUE is NULL for them and would skip
+    // exactly the rows this exists to fix.
+    // Current-state guards, not the stale loaded row: between the resolve
+    // read and this write an admin can soft-delete the lead or move its
+    // estimate link, and a send must not qualify (and log activity on) a
+    // deleted or re-linked lead. estimate_id rides in the WHERE — the
+    // FK-linked path resolved by it and the rescue path just stamped it, so
+    // a mismatch means the link moved. deleted_at folds into the raw
+    // predicate alongside the DISTINCT FROM guard.
+    // Fault-isolated (codex r2): a failure anywhere in the qualify lane must
+    // not skip the first-response stamp and estimate_sent activity below —
+    // and if the flag committed but its audit insert failed, that gap is
+    // LOGGED loudly, because the IS DISTINCT FROM guard means no replay will
+    // ever re-attempt the activity for an already-true flag.
+    // An explicitly EMPTY sentChannels array means every channel was
+    // suppressed (gate/template/owner-kill sentinel) and nothing reached the
+    // customer — no behavioural evidence, no qualification. A missing array
+    // (historical callers) keeps the sendMethod fallback semantics the SLA
+    // stamp below already uses.
+    const nothingDelivered = Array.isArray(sentChannels) && sentChannels.length === 0;
+    if (nothingDelivered) {
+      logger.info(`[lead-estimate-link] qualify-on-send skipped for lead ${lead.id}: all channels suppressed`);
+    } else try {
+      // Flag and audit row commit or roll back TOGETHER (codex r4): the
+      // IS DISTINCT FROM guard means no later send would ever re-attempt
+      // the activity for an already-true flag, so a flag committed without
+      // its audit row would be a permanent gap. database.transaction is a
+      // real transaction on the root handle and a savepoint when the caller
+      // already passed a trx.
+      await database.transaction(async (trx) => {
+        const qualifiedNow = await trx('leads')
+          .where({ id: lead.id, estimate_id: estimateId })
+          .whereIn('status', OPEN_LEAD_STATUSES)
+          .whereRaw('is_qualified IS DISTINCT FROM TRUE AND deleted_at IS NULL')
+          .update({ is_qualified: true, updated_at: new Date() });
+        if (qualifiedNow) {
+          await trx('lead_activities').insert({
+            lead_id: lead.id,
+            activity_type: 'qualified',
+            description: `Marked qualified — estimate sent (${estimateId})`,
+            performed_by: performedBy,
+            metadata: JSON.stringify({ estimateId, via: 'estimate_sent' }),
+          });
+        }
+      });
+    } catch (qualErr) {
+      // Fail-soft for the SEND (the estimate went out either way), but the
+      // rollback means flag and audit can never diverge.
+      logger.warn(`[lead-estimate-link] qualify-on-send skipped for lead ${lead.id}: ${qualErr.message}`);
+    }
     await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
     await database('lead_activities').insert({
       lead_id: lead.id,

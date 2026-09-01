@@ -143,7 +143,10 @@ function waveGuardDiscountForTier(value) {
 
 function waveGuardDiscountAppliesToService(service = {}) {
   const key = cleanText(service.service || service.key).toLowerCase();
-  if (key === 'palm_injection' || key === 'rodent_bait' || service.waveGuardDiscountEligible === false) return false;
+  // rodent_bait is a WaveGuard member since 2026-08-29 (codex #3591 r2 P1)
+  // — it flows through serviceCountsTowardWaveGuardTier below; legacy rows
+  // still refuse via their waveGuardDiscountEligible:false flag.
+  if (key === 'palm_injection' || service.waveGuardDiscountEligible === false) return false;
   if (key && serviceCountsTowardWaveGuardTier(key)) return true;
   const rawLabel = cleanText(service.label || service.name || service.service).toLowerCase();
   if ((/\bpalms?\b|\bpalm injection\b/.test(rawLabel)) || (rawLabel.includes('rodent') && rawLabel.includes('bait'))) return false;

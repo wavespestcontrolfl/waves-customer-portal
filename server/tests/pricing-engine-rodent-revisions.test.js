@@ -147,20 +147,223 @@ describe('revised rodent pricing rules', () => {
     expect(estimate.lineItems.find(i => i.service === 'trap_only_retainer').price).toBe(495);
   });
 
-  test('rodent bait remains excluded from WaveGuard tier benefit, setup credit, and manual coupon', () => {
-    const estimate = generateEstimate(baseInput({
-      services: {
-        rodentBait: {},
-      },
+  test('rodent bait brackets: footprint resolves the station allowance and per-visit price', () => {
+    // 2,000 sf footprint → 1,751–2,750 bracket: 5 stations, $89/quarterly visit.
+    const estimate = generateEstimate(baseInput({ services: { rodentBait: {} } }));
+    const bait = estimate.lineItems.find(i => i.service === 'rodent_bait');
+    expect(bait.perApp).toBe(89);
+    expect(bait.stations).toBe(5);
+    expect(bait.visitsPerYear).toBe(4);
+    expect(bait.annual).toBe(356);
+    expect(bait.excludeFromPctDiscount).toBe(false);
+
+    // ≤1,750 bracket.
+    const small = generateEstimate(baseInput({ homeSqFt: 1500, services: { rodentBait: {} } }))
+      .lineItems.find(i => i.service === 'rodent_bait');
+    expect(small.perApp).toBe(79);
+    expect(small.stations).toBe(4);
+
+    // Above 6,750 sf the ladder EXTENDS: +1 station / +$10 per 1,000 sf
+    // (owner ruling 2026-08-29) — never a manual quote on size alone.
+    const oversized = generateEstimate(baseInput({ homeSqFt: 8000, services: { rodentBait: {} } }))
+      .lineItems.find(i => i.service === 'rodent_bait');
+    expect(oversized.perApp).toBe(149); // 129 + 2 steps × $10
+    expect(oversized.stations).toBe(11);
+    expect(oversized.quoteRequired).toBeFalsy();
+  });
+
+  test('rodent bait is a full WaveGuard member: tier-counted, tier-discounted; manual coupon still excluded', () => {
+    // Rodent-only = 1 qualifying service = Bronze 0%, and the $99
+    // non-member setup fee fires.
+    const solo = generateEstimate(baseInput({
+      services: { rodentBait: {} },
       manualDiscount: { type: 'PERCENT', value: 50, label: 'Half off' },
     }));
-    const bait = estimate.lineItems.find(i => i.service === 'rodent_bait');
+    const soloBait = solo.lineItems.find(i => i.service === 'rodent_bait');
+    expect(solo.waveGuard.qualifyingCount).toBe(1);
+    expect(solo.waveGuard.activeServices).toEqual(['rodent_bait']);
+    expect(soloBait.discount.effectiveDiscount).toBe(0);
+    // Manual recurring discounts stay scoped to the four core programs.
+    expect(solo.summary.manualDiscount.amount).toBe(0);
+    const soloSetup = solo.lineItems.find(i => i.service === 'rodent_bait_setup');
+    expect(soloSetup.price).toBe(99);
+    // The recurring rodent line makes this customer a recurring customer,
+    // but the flat setup fee is excluded from the one-time 15% perk (codex
+    // #3591 r2 P1: it was billing $84.15).
+    expect(soloSetup.priceAfterDiscount ?? soloSetup.price).toBe(99);
 
-    expect(estimate.waveGuard.qualifyingCount).toBe(0);
-    expect(estimate.waveGuard.activeServices).toEqual([]);
-    expect(bait.discount.effectiveDiscount).toBe(0);
-    expect(bait.discount.setupCredit).toBeUndefined();
-    expect(estimate.summary.manualDiscount.amount).toBe(0);
+    // Rodent + pest = Silver: BOTH lines take the 10% tier discount and the
+    // setup fee is waived (WaveGuard member).
+    const member = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, rodentBait: {} },
+    }));
+    const memberBait = member.lineItems.find(i => i.service === 'rodent_bait');
+    expect(member.waveGuard.tier).toBe('silver');
+    expect(memberBait.discount.effectiveDiscount).toBe(0.10);
+    expect(memberBait.annualAfterDiscount).toBeCloseTo(320.4, 2);
+    expect(member.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+
+    // An EXISTING member (prior qualifying service) adding rodent bait alone
+    // reaches Silver and skips the setup fee too.
+    const existing = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      priorQualifyingServices: ['lawn_care'],
+    }));
+    const existingBait = existing.lineItems.find(i => i.service === 'rodent_bait');
+    expect(existing.waveGuard.tier).toBe('silver');
+    expect(existingBait.discount.effectiveDiscount).toBe(0.10);
+    expect(existing.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+  });
+
+  test('legacy replay pin reproduces the stored price with the full legacy posture', () => {
+    // Residential: a pre-realignment estimate pinned at $49/mo must replay
+    // at exactly that figure — monthly-billed, no tier count, no discount,
+    // and NO new $99 setup line appended to the old quote.
+    const replay = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, rodentBait: {} },
+      rodentBaitLegacyReplay: { monthly: 49 },
+    }));
+    const bait = replay.lineItems.find(i => i.service === 'rodent_bait');
+    expect(bait.monthly).toBe(49);
+    expect(bait.annual).toBe(588);
+    expect(bait.legacyPinnedReplay).toBe(true);
+    // Legacy posture: rodent does NOT join the tier on a pinned replay, so
+    // the pest line keeps its originally disclosed Bronze pricing.
+    expect(replay.waveGuard.activeServices).toEqual(['pest_control']);
+    expect(replay.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+
+    // The MAPPED result keeps the legacy shape (codex #3591 r3 P0): no
+    // perApplicationBilled/stations marker on the pinned row, so a
+    // persisted recompute still reads as legacy and the pin survives the
+    // next view/accept.
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    const mapped = mapV1ToLegacyShape(replay);
+    const mappedRodentRow = mapped.recurring.services.find(s => s.service === 'rodent_bait');
+    expect(mappedRodentRow.perApplicationBilled).toBeUndefined();
+    expect(mappedRodentRow.legacyPinnedReplay).toBe(true);
+    expect(mappedRodentRow.waveGuardDiscountEligible).toBe(false);
+    expect(rodentBaitLegacyReplaySignal({ result: mapped })).toEqual({ monthly: 49 });
+
+    // Silver+ replay (codex #3591 r9 P0): a pinned $49/mo row with pest on
+    // the estimate and a prior lawn plan reaches Silver — the pinned line
+    // must keep its disclosed $588/yr (no tier %), while pest takes Silver.
+    const silverReplay = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, rodentBait: {} },
+      priorQualifyingServices: ['lawn_care'],
+      rodentBaitLegacyReplay: { monthly: 49 },
+    }));
+    expect(silverReplay.waveGuard.tier).toBe('silver');
+    const silverBait = silverReplay.lineItems.find(i => i.service === 'rodent_bait');
+    expect(silverBait.annualAfterDiscount).toBe(588);
+    expect(silverBait.monthlyAfterDiscount).toBe(49);
+    expect(silverBait.discount.effectiveDiscount).toBe(0);
+    const silverPest = silverReplay.lineItems.find(i => i.service === 'pest_control');
+    expect(silverPest.discount.effectiveDiscount).toBeGreaterThan(0);
+    expect(silverReplay.summary.recurringAnnualAfterDiscount).toBe(
+      Math.round((silverPest.annualAfterDiscount + 588) * 100) / 100,
+    );
+
+    // Commercial: pin the stored cost-buildup annual exactly.
+    const commercialReplay = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 20000,
+      services: { rodentBait: {} },
+      rodentBaitLegacyReplay: { commercialAnnual: 1080.61, commercialVisits: 4 },
+    }));
+    const commLine = commercialReplay.lineItems.find(i => i.service === 'commercial_rodent_bait');
+    expect(commLine.annual).toBe(1080.61);
+    expect(commLine.pricingBasis).toBe('LEGACY_PINNED_REPLAY');
+  });
+
+  test('the mapped new-model rodent row carries the LIVE eligibility flags the pricer stamped (codex #3591 r22 P1)', () => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const constants = require('../services/pricing-engine/constants');
+    const original = { tq: constants.RODENT.tierQualifier, ex: constants.RODENT.excludeFromPctDiscount };
+    try {
+      constants.RODENT.tierQualifier = false;
+      constants.RODENT.excludeFromPctDiscount = true;
+      const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({ services: { pest: { frequency: 'quarterly' }, rodentBait: {} } })));
+      const row = mapped.recurring.services.find(s => s.service === 'rodent_bait');
+      expect(row).toMatchObject({ perApplicationBilled: true, tierQualifier: false, countsTowardWaveGuardTier: false, excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false });
+    } finally {
+      constants.RODENT.tierQualifier = original.tq;
+      constants.RODENT.excludeFromPctDiscount = original.ex;
+    }
+    // Defaults: a plain new-model row carries no opt-out flags.
+    const plain = mapV1ToLegacyShape(generateEstimate(baseInput({ services: { rodentBait: {} } })))
+      .recurring.services.find(s => s.service === 'rodent_bait');
+    expect(plain.perApplicationBilled).toBe(true);
+    // Default posture is persisted EXPLICITLY (codex #3591 r46 P1) so the
+    // replay signal can freeze it — a later flag flip never re-prices the
+    // saved estimate.
+    expect(plain).toEqual(expect.objectContaining({
+      tierQualifier: true, countsTowardWaveGuardTier: true,
+      excludeFromPctDiscount: false, waveGuardDiscountEligible: true,
+    }));
+    const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    expect(rodentWaveguardPostureReplaySignal({ result: { recurring: { services: [plain] } } }))
+      .toEqual({ tierQualifier: true, excludeFromPctDiscount: false });
+  });
+
+  test('commercial rodent detail states the MONTHLY figure (commercial bills monthly) — never a per-application price (codex #3591 r10 P2)', () => {
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 3000,
+      services: { rodentBait: {} },
+    }));
+    const line = commercial.lineItems.find(i => i.service === 'commercial_rodent_bait');
+    expect(line.quoteRequired).toBeFalsy();
+    expect(line.detail).toContain(`$${line.monthly}/mo, billed monthly (4 applications per year)`);
+    expect(line.detail).not.toMatch(/per application\./);
+  });
+
+  test('rodentBaitLegacyReplaySignal pins legacy stored shapes and never new-model rows', () => {
+    const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    // Legacy scalar-only estimate → pin.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { recurring: { rodentBaitMo: 49, services: [{ service: 'pest_control', mo: 50 }] } },
+    })).toEqual({ monthly: 49 });
+    // New-model row (marker/stations) → replay live.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { recurring: { rodentBaitMo: 29.67, services: [{ service: 'rodent_bait', mo: 29.67, stations: 5, perApplicationBilled: true }] } },
+    })).toBe(null);
+    // Legacy commercial line → pin its stored annual.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { lineItems: [{ service: 'commercial_rodent_bait', annual: 1080.61, visitsPerYear: 4 }], recurring: {} },
+    })).toEqual({ commercialAnnual: 1080.61, commercialVisits: 4 });
+    // No rodent at all → nothing.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] } },
+    })).toBe(null);
+  });
+
+  test('commercial rodent bait uses the same brackets off the building footprint', () => {
+    const estimate = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 3000,
+      services: { rodentBait: {} },
+    }));
+    const line = estimate.lineItems.find(i => i.service === 'commercial_rodent_bait');
+    expect(line).toBeDefined();
+    expect(line.quoteRequired).toBeFalsy();
+    // 3,000 sf building → 2,751–3,750 bracket: 6 stations, $99/visit.
+    expect(line.perVisit).toBe(99);
+    expect(line.stations).toBe(6);
+    // Commercial stays flat — never WaveGuard-discountable — but pays the
+    // $99 non-member setup like any non-member.
+    expect(line.excludeFromPctDiscount).toBe(true);
+    const setup = estimate.lineItems.find(i => i.service === 'rodent_bait_setup');
+    expect(setup?.price).toBe(99);
   });
 
   test('exclusion V2 quotes each section as its own line item, summing to the total', () => {
@@ -233,6 +436,29 @@ describe('revised rodent pricing rules', () => {
 
     expect(combo.breakdown.bundleDiscount).toBe(0);
     expect(combo.breakdown.baitExcludedFromBundleDiscount).toBe(true);
+    // Bait component = the standard bracket per application (post-exclusion
+    // modifier retired — codex #3591 r14 P2): 2,400 sf → 5 stations, $89.
+    const standalone = generateEstimate(baseInput({ homeSqFt: 2400, services: { rodentBait: {} } }))
+      .lineItems.find(i => i.service === 'rodent_bait');
+    expect(combo.breakdown.baitStationQuarterly).toBe(standalone.perVisit);
+    expect(combo.detail).toContain(`${standalone.stations} bait stations`);
+  });
+
+  test('wizard-supplied prior qualifying services waive the setup WITHOUT moving the estimate tier (codex #3591 r14 P1)', () => {
+    const solo = generateEstimate(baseInput({ services: { rodentBait: {} } }));
+    expect(solo.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeDefined();
+    const member = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['lawn_care'],
+    }));
+    expect(member.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+    expect(member.waveGuard.qualifyingCount).toBe(solo.waveGuard.qualifyingCount);
+    // Rodent itself never self-waives through this channel either.
+    const rodentOnlyPrior = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['rodent_bait'],
+    }));
+    expect(rodentOnlyPrior.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeDefined();
   });
 });
 
@@ -408,5 +634,145 @@ describe('gross inspection fields reach the FINAL mapper projection (codex #3521
     expect(row.price).toBe(63.75);
     expect(row.priceBeforeDiscount).toBe(75);
     expect(row.recurringCustomerDiscountRate).toBe(0.15);
+  });
+});
+
+describe('admin pricing-config validation for the rodent rows (codex #3591 r9)', () => {
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+  const brackets = (overrides = {}) => ({
+    brackets: [
+      { max_sq_ft: 1750, stations: 4, per_visit: 79 },
+      { max_sq_ft: 2750, stations: 5, per_visit: 89 },
+    ],
+    extension: { per_sq_ft: 1000, stations_per_step: 1, per_visit_per_step: 10 },
+    visits_per_year: 4,
+    ...overrides,
+  });
+
+  test('visits_per_year is pinned to 4 — the program is quarterly end to end (P1)', () => {
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets()).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets({ visits_per_year: 6 })).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets({ visits_per_year: 1 })).ok).toBe(false);
+  });
+
+  test('bracket prices accept cents but never sub-cent precision (P2)', () => {
+    const halfDollar = brackets();
+    halfDollar.brackets[1].per_visit = 89.5;
+    expect(validatePricingConfigData('rodent_bait_brackets', halfDollar).ok).toBe(true);
+    const subCent = brackets();
+    subCent.brackets[1].per_visit = 89.501;
+    expect(validatePricingConfigData('rodent_bait_brackets', subCent).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets({
+      extension: { per_sq_ft: 1000, stations_per_step: 1, per_visit_per_step: 10.001 },
+    })).ok).toBe(false);
+  });
+
+  test('rodent_setup_fee: non-negative whole cents; zero disables; negative rejected (P2)', () => {
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 99 }).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 0 }).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: -1 }).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 99.001 }).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 'abc' }).ok).toBe(false);
+  });
+});
+
+describe('saved-replay rodent WaveGuard posture freeze (codex #3591 r43 P1)', () => {
+  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  const rodentPest = () => baseInput({ services: { rodentBait: {}, pest: { frequency: 'quarterly' } } });
+
+  test('a frozen NON-qualifying posture keeps the sent quote out of the tier and off the % even after the live flag turns on', () => {
+    const frozen = generateEstimate({
+      ...rodentPest(),
+      rodentWaveguardPostureReplay: { tierQualifier: false, excludeFromPctDiscount: true },
+    });
+    const live = generateEstimate(rodentPest());
+    expect(live.waveGuard.qualifyingCount).toBe(2); // pest + rodent = Silver live
+    expect(frozen.waveGuard.qualifyingCount).toBe(1); // rodent frozen out
+    const row = frozen.lineItems.find((i) => i.service === 'rodent_bait');
+    expect(row).toMatchObject({ tierQualifier: false, countsTowardWaveGuardTier: false, excludeFromPctDiscount: true, waveGuardDiscountEligible: false });
+  });
+
+  test('a frozen QUALIFYING posture holds the tier after the live flag turns off (assumeQualifying, replay-only)', () => {
+    const idx = WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      const fresh = generateEstimate(rodentPest());
+      expect(fresh.waveGuard.qualifyingCount).toBe(1); // live: rodent no longer counts
+      const frozen = generateEstimate({
+        ...rodentPest(),
+        rodentWaveguardPostureReplay: { tierQualifier: true, excludeFromPctDiscount: false },
+      });
+      expect(frozen.waveGuard.qualifyingCount).toBe(2); // sent quote holds Silver
+    } finally {
+      WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
+  });
+
+  test('the posture signal reads the stored new-model row; legacy rows and estimates without posture stamps inject nothing', () => {
+    const stored = { engineResult: { lineItems: [
+      { service: 'rodent_bait', perApplicationBilled: true, stations: 5, tierQualifier: false, countsTowardWaveGuardTier: false, excludeFromPctDiscount: true, waveGuardDiscountEligible: false },
+    ] } };
+    expect(rodentWaveguardPostureReplaySignal(stored)).toEqual({ tierQualifier: false, excludeFromPctDiscount: true });
+    const storedOn = { result: { recurring: { services: [
+      { service: 'rodent_bait', perApplicationBilled: true, stations: 5, tierQualifier: true, excludeFromPctDiscount: false },
+    ] } } };
+    expect(rodentWaveguardPostureReplaySignal(storedOn)).toEqual({ tierQualifier: true, excludeFromPctDiscount: false });
+    // Legacy monthly row (no new-model marker) → nothing.
+    expect(rodentWaveguardPostureReplaySignal({ result: { recurring: { services: [{ service: 'rodent_bait', mo: 49 }] } } })).toBeNull();
+    // New-model row that predates the posture stamps → nothing.
+    expect(rodentWaveguardPostureReplaySignal({ engineResult: { lineItems: [{ service: 'rodent_bait', perApplicationBilled: true, stations: 5 }] } })).toBeNull();
+    expect(rodentWaveguardPostureReplaySignal({})).toBeNull();
+  });
+});
+
+describe('saved-replay rodent % treatment freeze (codex #3591 r44 P1)', () => {
+  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const rodentPest = () => baseInput({ services: { rodentBait: {}, pest: { frequency: 'quarterly' } } });
+
+  test('frozen EXCLUDED posture keeps the % off the rodent line even while the live policy grants it', () => {
+    const frozen = generateEstimate({
+      ...rodentPest(),
+      rodentWaveguardPostureReplay: { tierQualifier: true, excludeFromPctDiscount: true },
+    });
+    const row = frozen.lineItems.find((i) => i.service === 'rodent_bait');
+    expect(frozen.waveGuard.qualifyingCount).toBe(2); // still tier-counted
+    expect(row.discount.effectiveDiscount).toBe(0);
+    expect(row.annualAfterDiscount).toBe(row.annual);
+    // Live pricing keeps the Silver % on the same cart.
+    const live = generateEstimate(rodentPest()).lineItems.find((i) => i.service === 'rodent_bait');
+    expect(live.discount.effectiveDiscount).toBeGreaterThan(0);
+  });
+
+  test('frozen ELIGIBLE posture keeps the % on after the live map flips to excluded (replay-only override)', () => {
+    WAVEGUARD.excludedFromPercentDiscount.rodent_bait = true;
+    try {
+      const fresh = generateEstimate(rodentPest()).lineItems.find((i) => i.service === 'rodent_bait');
+      expect(fresh.discount.effectiveDiscount).toBe(0); // live: excluded
+      const frozen = generateEstimate({
+        ...rodentPest(),
+        rodentWaveguardPostureReplay: { tierQualifier: true, excludeFromPctDiscount: false },
+      }).lineItems.find((i) => i.service === 'rodent_bait');
+      expect(frozen.discount.effectiveDiscount).toBeGreaterThan(0); // sent quote holds its %
+    } finally {
+      delete WAVEGUARD.excludedFromPercentDiscount.rodent_bait;
+    }
+  });
+});
+
+describe('commercial bait setup is never membership-waived (codex #3591 r56 local P0)', () => {
+  test('an existing residential member quoting COMMERCIAL bait still owes the setup; residential bait keeps the waiver', () => {
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      buildingSqFt: 4000,
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['pest_control'],
+    }));
+    expect(commercial.lineItems.find((i) => i.service === 'rodent_bait_setup')).toBeDefined();
+    const residential = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['pest_control'],
+    }));
+    expect(residential.lineItems.find((i) => i.service === 'rodent_bait_setup')).toBeUndefined();
   });
 });

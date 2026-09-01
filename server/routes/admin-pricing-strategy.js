@@ -53,7 +53,13 @@ router.get('/dashboard', async (req, res, next) => {
   try {
     const model = await PricingIntelligence.getMoneyModel();
 
-    // Top upsell opportunities — Bronze/Silver customers who could upgrade
+    // Top upsell opportunities — Bronze/Silver customers who could upgrade.
+    // MEMBERSHIP audience, deliberately NOT the monthly-dues lane: the tier
+    // filter (real Bronze/Silver values, never sentinels) IS the membership
+    // criterion, and per-application / annual-prepay members are valid tier
+    // upgrade candidates too — MONTHLY_LANE_SQL here would drop them (Codex
+    // #3669 r2). The rate predicate narrows to rate-bearing rows for ranking;
+    // its guard exemption is keyed in monthly-lane-source-guard.test.js.
     const upgradeOpps = await db('customers')
       .where('active', true)
       // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
@@ -216,7 +222,9 @@ router.post('/calculate-value', async (req, res, next) => {
 
 router.get('/upsell-opportunities', async (req, res, next) => {
   try {
-    // Active Bronze/Silver customers with good health
+    // Active Bronze/Silver customers with good health. Membership audience,
+    // NOT the monthly-dues lane — same rationale as /dashboard above: prepay /
+    // per-application members must stay upgrade-eligible (Codex #3669 r2).
     const candidates = await db('customers')
       .where('active', true)
       .whereNull('deleted_at')

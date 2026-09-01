@@ -186,6 +186,61 @@ describe('computeStalledCalls', () => {
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
   });
 
+  test('a healthy long pass is judged by its HEARTBEAT, not its start time', () => {
+    // A long transcription is a pass working perfectly; aging it from
+    // processing_started_at alone rang a false stall on it. Inside the
+    // absolute ceiling, the beat is what decides.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 30),
+      processing_status: 'processing',
+      processing_started_at: mins(15),
+      processing_heartbeat_at: mins(1),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
+  });
+
+  test('a claim whose heartbeat STOPPED is wedged', () => {
+    // The beat is after the claim start (so it belongs to this claim) but has
+    // since gone quiet past the threshold.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 30),
+      processing_status: 'processing',
+      processing_started_at: mins(CLAIM_STALE_MINUTES + 6),
+      processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 2),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
+  });
+
+  test('a beat older than the claim start belongs to a PREVIOUS pass', () => {
+    // A freshly claimed row carrying a stale beat from an earlier attempt
+    // must not read as this claim's silence — that rang a false stall during
+    // a rolling deploy.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 30),
+      processing_status: 'processing',
+      processing_started_at: mins(2),
+      processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 20),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
+  });
+
+  test('a hung pass that keeps beating is still a stall past the ceiling', () => {
+    // The heartbeat is a timer: a provider call hung on an open socket keeps
+    // the event loop alive and the beats coming. The absolute ceiling is what
+    // stops that from being invisible here and unreclaimable there.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 60),
+      processing_status: 'processing',
+      processing_started_at: mins(require('../utils/claim-ceiling').alertCeilingMinutes() + 5),
+      processing_heartbeat_at: mins(1),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
+  });
+
   test('a claim the processor still considers live is honoured', () => {
     const rows = [{
       ...base,
