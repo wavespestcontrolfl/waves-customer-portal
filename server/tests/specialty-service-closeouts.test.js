@@ -85,6 +85,21 @@ describe('specialty service closeout vocabulary', () => {
     })).toBe('“Inspection only” cannot be paired with finding “Full quoted area completed”.');
   });
 
+  test('rejects an exclusive action beside other preset actions or applied products', () => {
+    expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
+      observations: ['Active'], actions: ['Inspection and identification only', 'Exposed nest treated'],
+    })).toBe('Clear “Inspection and identification only” or remove the other completed actions before submitting.');
+    expect(validateSpecialtyClosureCombination('mud_dauber_removal', {
+      observations: [], actions: ['No treatment recommended'], productCount: 1,
+    })).toBe('Remove applied products or clear “No treatment recommended” before completing this visit.');
+    expect(validateSpecialtyClosureCombination('bed_bug', {
+      observations: [], actions: ['Inspection only', '[Protocol] free-text line'], productCount: 0,
+    })).toBeNull();
+    expect(validateSpecialtyClosureCombination('bee_wasp_removal', {
+      observations: [], actions: ['Exposed nest treated', 'Nest physically removed'], productCount: 2,
+    })).toBeNull();
+  });
+
   test('accepts consistent work state, tagged free-text actions and lanes without work-state rules', () => {
     expect(validateSpecialtyClosureCombination('dethatching', {
       observations: ['Inspection only'], actions: ['Inspection only', 'Checked irrigation heads'],

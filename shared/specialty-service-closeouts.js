@@ -83,10 +83,30 @@ function specialtyFindingActionConflict(spec, observations, actionLabels) {
   return null;
 }
 
-function validateSpecialtyClosureCombination(serviceKey, { observations, actions } = {}) {
+// An exclusive action (inspection-only, deferred, no treatment recommended)
+// stands alone: no other preset action and no applied product may accompany
+// it. The client reconciles this on selection (reconcileExclusiveProtocolSelections,
+// exclusiveProtocolSelectionConflict, exclusiveProtocolProductConflict); the
+// server enforces it independently for stale or direct API clients.
+function exclusiveSpecialtyActionConflict(spec, actionLabels, productCount) {
+  const byLabel = new Map((spec.protocols || []).map((action) => [action.label, action]));
+  const actions = (Array.isArray(actionLabels) ? actionLabels : []).filter((label) => byLabel.has(label));
+  const exclusive = actions.find((label) => byLabel.get(label).exclusive === true);
+  if (!exclusive) return null;
+  if (actions.length > 1) {
+    return `Clear “${exclusive}” or remove the other completed actions before submitting.`;
+  }
+  if (Number(productCount) > 0) {
+    return `Remove applied products or clear “${exclusive}” before completing this visit.`;
+  }
+  return null;
+}
+
+function validateSpecialtyClosureCombination(serviceKey, { observations, actions, productCount = 0 } = {}) {
   const spec = SPECIALTY_SERVICE_CLOSEOUTS[specialtyServiceKey({ serviceKey })];
   if (!spec) return null;
   return validateSpecialtyObservationCombination(serviceKey, observations)
+    || exclusiveSpecialtyActionConflict(spec, actions, productCount)
     || specialtyFindingActionConflict(spec, observations, actions);
 }
 

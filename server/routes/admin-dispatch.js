@@ -5315,12 +5315,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'invalid_structured_observation',
       });
     }
-    // Findings are also checked against the completed protocol actions: a
-    // no-work finding beside performed work (or vice versa) must not reach
-    // the immutable customer report (codex P2 r8 #3701).
+    // Findings are also checked against the completed protocol actions (a
+    // no-work finding beside performed work, or vice versa) and an exclusive
+    // inspection/deferred action is rejected beside other preset actions or
+    // applied products — none of it may reach the immutable customer report
+    // from a stale or direct API client (codex P2 r8 #3701 + local audit).
     const structuredObservationConflict = validateSpecialtyClosureCombination(
       resolvedSpecialtyServiceKey,
-      { observations: formObservations, actions: reportProtocolActions },
+      {
+        observations: formObservations,
+        actions: reportProtocolActions,
+        productCount: Array.isArray(products)
+          ? products.filter((prod) => prod && typeof prod === 'object').length
+          : 0,
+      },
     );
     if (structuredObservationConflict) {
       return res.status(422).json({

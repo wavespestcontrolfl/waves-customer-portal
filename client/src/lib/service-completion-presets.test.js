@@ -36,6 +36,16 @@ describe("specialty pest completion configuration", () => {
     }
   });
 
+  test("exclusive action conflicts produce the same message on client and server", () => {
+    const preset = SERVICE_COMPLETION_PRESETS.bee_wasp_removal;
+    const actions = ["Inspection and identification only", "Void nest treated"];
+    expect(validateSpecialtyClosureCombination("bee_wasp_removal", { observations: [], actions }))
+      .toBe(exclusiveProtocolSelectionConflict(actions, preset.protocols));
+    const single = ["Inspection and identification only"];
+    expect(validateSpecialtyClosureCombination("bee_wasp_removal", { observations: [], actions: single, productCount: 1 }))
+      .toBe(exclusiveProtocolProductConflict(single, preset.protocols, 1));
+  });
+
   test("work-state findings reject contradictory protocol actions on both sides", () => {
     const dethatching = SERVICE_COMPLETION_PRESETS.dethatching;
     const plugging = SERVICE_COMPLETION_PRESETS.plugging;
