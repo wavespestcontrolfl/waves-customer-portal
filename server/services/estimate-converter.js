@@ -2394,12 +2394,22 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // quote time), and conversion must not re-add one the customer never saw.
   const frozenQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
   if (frozenQuote && !(Number(frozenQuote.amount) > 0)) return false;
+  // A frozen UNIFIED decision (GATE_UNIFIED_SETUP_FEE quotes, owner ruling
+  // 2026-09-01) is authoritative both ways: the zero/waived case returned
+  // above, and a positive amount bills on ANY recurring mix — the solo-mix,
+  // membership-snapshot, and bundle rules below are the legacy kinds' rules
+  // and do not apply. Only the operator's explicit per-estimate waiver
+  // still outranks it.
+  const frozenUnified = frozenQuote?.kind === 'unified' && Number(frozenQuote.amount) > 0;
   // Existing customers never pay the WaveGuard setup again — mirrors the
   // public estimate page, which shows the fee struck through as waived.
+  // (Legacy kinds only: a unified quote decided existing-customer status
+  // once, at quote time — decide-once, never re-derived here.)
   const data = normalizeEstimateData(estimateData);
-  if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
+  if (!frozenUnified && data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
   // Operator-stated waiver: removed from display and never invoiced.
   if (data?.operatorPriceAdjustment?.waiveSetupFee === true) return false;
+  if (frozenUnified) return true;
   // A standalone-scheduling supplement (rodent bait scalar after the
   // pest+rodent route removal) makes the plan a multi-service bundle even
   // with one recurring LINE — and the owner rule says bundles carry no

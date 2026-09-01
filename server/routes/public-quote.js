@@ -136,6 +136,22 @@ async function findExistingCustomerByContact(database, { contactPhone, contactEm
 // qualifying family). Commercial / manual quotes never qualify.
 function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, quoteRequired = false } = {}) {
   if (commercialDetected || quoteRequired) return { qualifies: false, kind: null, amount: 0 };
+  // GATE_UNIFIED_SETUP_FEE (owner ruling 2026-09-01): ONE mix-agnostic fee
+  // replaces both legacy kinds on gated quotes — ANY recurring plan
+  // qualifies (pest+rodent, lawn+pest, rodent alone), and the waiver step
+  // below decides on existing-customer evidence, not the mix. The engine's
+  // rodent_bait_setup line is suppressed on gated fresh pricing (the
+  // unified quote is the one disclosure), so the rodent-kind branch below
+  // is unreachable gate-on by construction.
+  {
+    const { unifiedSetupFeeEnabled, unifiedSetupFeeAmount } = require('../services/unified-setup-fee');
+    if (unifiedSetupFeeEnabled()) {
+      const amount = unifiedSetupFeeAmount();
+      return amount > 0 && recurringQuoteLines(estimate).length > 0
+        ? { qualifies: true, kind: 'unified', amount }
+        : { qualifies: false, kind: null, amount: 0 };
+    }
+  }
   if (recurringMixHasMembershipFeeService(recurringQuoteLines(estimate))) {
     return { qualifies: true, kind: 'waveguard_membership', amount: WAVEGUARD_SETUP_FEE };
   }
@@ -162,11 +178,22 @@ function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, q
 // per-series and never self-waives (codex #3591 r64 P1: a second rodent
 // program for another property must not ride the first series' in-flight
 // stamp), so a queued claim waives it only when it belongs to THIS draft.
-function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false, queuedForThisDraft = false } = {}) {
+function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false, queuedForThisDraft = false, existingCustomer = false } = {}) {
   const memberWaives = activeMember && basis.kind === 'waveguard_membership';
-  const queuedWaives = feeAlreadyQueued && (basis.kind === 'waveguard_membership' || queuedForThisDraft);
-  return memberWaives || queuedWaives
-    ? { amount: 0, waived: memberWaives ? 'existing_member' : 'fee_already_queued', kind: basis.kind }
+  // The unified kind (owner ruling 2026-09-01): waived ONLY by an existing
+  // customer (active recurring service — the caller's
+  // hasActiveRecurringService read), and by an in-flight claim ACCOUNT-WIDE
+  // (one setup per account; the drain protection for undrained old-world
+  // stamps). Decided once here, frozen on the draft, never re-derived.
+  const existingWaives = existingCustomer && basis.kind === 'unified';
+  const queuedWaives = feeAlreadyQueued
+    && (basis.kind === 'waveguard_membership' || basis.kind === 'unified' || queuedForThisDraft);
+  return memberWaives || existingWaives || queuedWaives
+    ? {
+      amount: 0,
+      waived: existingWaives ? 'existing_customer' : (memberWaives ? 'existing_member' : 'fee_already_queued'),
+      kind: basis.kind,
+    }
     : { amount: basis.amount, kind: basis.kind };
 }
 
@@ -1114,6 +1141,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
     const engineInput = {
+      // GATE_UNIFIED_SETUP_FEE: fresh gated pricing suppresses the engine's
+      // residential rodent_bait_setup line — the unified setupFeeQuote is
+      // the ONE disclosure (basis kind 'unified'); two fees must never ride
+      // one quote. Threaded as an INPUT (not read inside the engine) so
+      // saved-estimate replays, which rebuild inputs from stored data,
+      // keep reproducing their disclosed price across a gate flip.
+      suppressRodentBaitSetupLine: require('../services/unified-setup-fee').unifiedSetupFeeEnabled(),
       homeSqFt: sqft,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
       // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
@@ -1913,12 +1947,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (!setupFeeMixQualifies) return null;
       try {
         let activeMember = false;
+        let existingCustomer = false;
         let feeAlreadyQueued = false;
         let queuedForThisDraft = false;
         if (customerId) {
-          const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
-          const memberRow = await q('customers').where({ id: customerId }).first();
-          activeMember = !!memberRow && memberRow.active !== false && isMembershipCustomerRow(memberRow);
+          if (setupFeeBasis.kind === 'unified') {
+            // Owner ruling 2026-09-01: the unified fee's only eligibility
+            // input is "does this account already have an active recurring
+            // service" — tier stamps and family filters play no part.
+            const { hasActiveRecurringService } = require('../services/unified-setup-fee');
+            existingCustomer = await hasActiveRecurringService(q, customerId);
+          } else {
+            const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
+            const memberRow = await q('customers').where({ id: customerId }).first();
+            activeMember = !!memberRow && memberRow.active !== false && isMembershipCustomerRow(memberRow);
+          }
           // An outstanding setup-fee claim anywhere on the account also
           // waives: ANY nonzero pending_setup_fee counts — completion
           // temporarily flips the durable claim negative, and a failed mint
@@ -1988,7 +2031,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // booking.js stamps pending_setup_fee from `amount` when the
         // self-booked series activates, so the obligation travels with the
         // handoff instead of vanishing with the archived draft.
-        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued, queuedForThisDraft });
+        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued, queuedForThisDraft, existingCustomer });
       } catch (memberErr) {
         // FAIL CLOSED toward the engine-priced line (codex #3591 r43 local
         // P0): a transient membership/claim lookup failure must never become

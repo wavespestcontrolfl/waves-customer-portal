@@ -38,6 +38,7 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
+ *   GATE_UNIFIED_SETUP_FEE=true (one accept-time setup fee for any new-customer recurring signup, any mix — owner ruling 2026-09-01)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
@@ -111,6 +112,19 @@ const gates = {
   // carries no planContext and /secure renders exactly the card-only
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
+
+  // Unified accept-time setup fee (owner ruling 2026-09-01): ONE setup fee
+  // (pricing_config.unified_setup_fee, default $99) for every NEW customer
+  // starting recurring service, REGARDLESS of mix — pest+rodent, lawn+pest,
+  // rodent alone all carry it; waived only for EXISTING customers (an
+  // active recurring service on the account). Decided ONCE at accept/quote
+  // and frozen — supersedes the solo-pest/mosquito membership-fee rule and
+  // the rodent cross-family waiver on gated quotes. Money surface —
+  // fail-closed ==='true' in EVERY environment; gate off = today's two-fee
+  // behavior byte-identical. Full effect expects RECURRING_CARD_ON_FILE +
+  // GATE_PREPAY_CARD_AND_CHARGE (+ its prerequisites) so estimate accepts
+  // can collect at accept. Kill switch: unset or any non-'true' value.
+  unifiedSetupFee: process.env.GATE_UNIFIED_SETUP_FEE === 'true',
 
   // Appointment-card fee rail (owner-approved 2026-08-01): auto-charge the
   // no-show/late-cancel fee the /secure lane DISCLOSES against the card it

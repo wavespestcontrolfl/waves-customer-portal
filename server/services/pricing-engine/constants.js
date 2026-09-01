@@ -2140,6 +2140,12 @@ const WAVEGUARD = {
     gold:     { minServices: 3, discount: 0.15 },
     platinum: { minServices: 4, discount: 0.20 },
   },
+  // Unified accept-time setup fee (owner ruling 2026-09-01, live only under
+  // GATE_UNIFIED_SETUP_FEE): one setup fee for every NEW customer starting
+  // recurring service, any mix; waived only for existing customers.
+  // DB-authoritative via pricing_config.unified_setup_fee (db-bridge) —
+  // this in-code value is the fresh-environment default only.
+  unifiedSetupFee: r(99),
   qualifyingServices: [
     'lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait',
     // rodent_bait joined WaveGuard 2026-08-29 (owner directive): counts

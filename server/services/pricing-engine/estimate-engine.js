@@ -1802,7 +1802,16 @@ function generateEstimate(input) {
   // programs are never WaveGuard members, so a priced commercial line
   // carries the fee too (same pricing, owner directive). The old
   // rodentBaitSetupForce escape hatch is retired with the $199 fee.
-  if (services.rodentBait && !rodentLegacyPin) {
+  // suppressRodentBaitSetupLine (GATE_UNIFIED_SETUP_FEE, threaded by the
+  // caller — never read from feature-gates here, so saved-estimate replays
+  // that rebuild inputs from stored data reproduce their disclosed price
+  // across a gate flip): gated FRESH pricing discloses the one unified
+  // setup fee through setupFeeQuote instead, so the residential rodent
+  // setup line must not also ride the quote. COMMERCIAL keeps its line —
+  // commercial bait is never family-waived and stays outside the unified
+  // residential rule (basis excludes commercial quotes entirely).
+  if (services.rodentBait && !rodentLegacyPin
+    && !(input.suppressRodentBaitSetupLine === true && !propertyIsCommercial)) {
     const rodentLine = lineItems.find((i) => i.service === 'rodent_bait' || i.service === 'commercial_rodent_bait');
     const rodentPriced = !!rodentLine && !rodentLine.quoteRequired;
     const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices, ...setupWaiverPriorQualifyingServices])]

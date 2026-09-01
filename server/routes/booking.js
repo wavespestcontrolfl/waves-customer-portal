@@ -2881,6 +2881,12 @@ async function createSelfBooking(payload = {}) {
                   // waive (the owner rule counts estimate + account). A
                   // claim already queued for this draft is not
                   // family-based and stays honored.
+                  // A UNIFIED-kind decision (GATE_UNIFIED_SETUP_FEE quotes,
+                  // owner ruling 2026-09-01) is decide-once: its zero is a
+                  // frozen existing-customer/queued waiver, never a lapsed
+                  // family waiver — no re-derivation, no page. The rodent
+                  // lapse machinery below belongs to legacy-kind drafts.
+                  if (estData?.setupFeeQuote?.kind === 'unified') return;
                   const draftLineServices = (estData?.engineResult?.lineItems || [])
                     .map((l) => String(l?.service || '').toLowerCase());
                   const rodentDraft = draftLineServices.includes('rodent_bait')

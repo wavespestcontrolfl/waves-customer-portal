@@ -1315,6 +1315,16 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
 
+    // Unified accept-time setup fee (owner ruling 2026-09-01, live only
+    // under GATE_UNIFIED_SETUP_FEE). Same belt as rodent_setup_fee: a
+    // negative value never reaches the runtime; zero disables the fee.
+    if (config.unified_setup_fee?.value != null) {
+      const unifiedFee = Number(config.unified_setup_fee.value);
+      if (Number.isFinite(unifiedFee) && unifiedFee >= 0) {
+        constants.WAVEGUARD.unifiedSetupFee = Math.round(unifiedFee * 100) / 100;
+      }
+    }
+
     // Inspection
     if (config.rodent_inspection) {
       const i = config.rodent_inspection;
