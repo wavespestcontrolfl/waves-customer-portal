@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   completionAreasForTypedFindings,
+  specialtyActionScope,
+  typedTreatmentAreaField,
   typedFieldValueConflicts,
 } from "./SchedulePage.jsx";
 
@@ -66,10 +68,31 @@ describe("termite posted-notice pre-submit mirror", () => {
 describe("typed area ownership", () => {
   it("promotes the typed areas into the canonical completion scope", () => {
     expect(completionAreasForTypedFindings({
-      typedOwnsAreas: true,
-      typedAreas: "Exterior perimeter, Garage",
+      typedAreaKey: "areas_treated",
+      findingsValues: { areas_treated: "Exterior perimeter, Garage" },
       genericAreas: [],
     })).toEqual(["Exterior perimeter", "Garage"]);
+  });
+
+  it("recognizes the one-time lawn area field", () => {
+    const schema = { fields: [{ key: "spot_treatment_areas", label: "Areas treated" }] };
+    expect(typedTreatmentAreaField(schema)?.key).toBe("spot_treatment_areas");
+    expect(completionAreasForTypedFindings({
+      typedAreaKey: "spot_treatment_areas",
+      findingsValues: { spot_treatment_areas: "Front yard, Side yards" },
+      genericAreas: ["Back yard"],
+    })).toEqual(["Front yard", "Side yards"]);
+  });
+});
+
+describe("specialty treatment scope", () => {
+  it("marks attic bee void and mud-dauber treatments as interior", () => {
+    expect(specialtyActionScope({
+      specialtyKey: "bee_wasp_removal", label: "Void nest treated", areas: ["Attic"], defaultScope: "exterior",
+    })).toBe("interior");
+    expect(specialtyActionScope({
+      specialtyKey: "mud_dauber_removal", label: "Active nests treated", areas: ["Attic / structural interior"], defaultScope: "exterior",
+    })).toBe("interior");
   });
 });
 

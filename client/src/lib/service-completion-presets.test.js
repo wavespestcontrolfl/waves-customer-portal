@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   SERVICE_COMPLETION_PRESETS,
+  exclusiveProtocolProductConflict,
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   replaceFindingGroupSelection,
@@ -115,6 +116,16 @@ describe("specialty pest completion configuration", () => {
       protocols,
       "Ground nest treated",
     )).toEqual(["Ground nest treated"]);
+  });
+
+  test("exclusive no-treatment actions cannot retain applied products", () => {
+    const protocols = SERVICE_COMPLETION_PRESETS.bee_wasp_removal.protocols;
+    expect(exclusiveProtocolProductConflict(
+      ["Inspection and identification only"], protocols, 1,
+    )).toContain("Remove applied products");
+    expect(exclusiveProtocolProductConflict(
+      ["Void nest treated"], protocols, 1,
+    )).toBeNull();
   });
 
   test("bed bug includes heat and hybrid while bee removal includes yellowjacket-compatible work", () => {

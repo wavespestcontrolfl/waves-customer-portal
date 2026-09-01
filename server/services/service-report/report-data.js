@@ -1509,6 +1509,10 @@ function buildProtocolPayload(record) {
       ...parseJsonArray(structured.observations),
       ...taggedNoteLines(record.technician_notes, ['found']),
     ]),
+    // Safe customer-facing provenance: completion form/chip values only.
+    // Never substitute the merged observations list, which also contains
+    // raw [Found] technician-note lines.
+    structuredObservations: uniqueStrings(parseJsonArray(structured.formObservations)),
     recommendations: uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
@@ -3096,7 +3100,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
 
-  for (const observation of protocol.observations) {
+  for (const observation of protocol.structuredObservations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
     findings.push({
       id: `observation-${findings.length + 1}`,
@@ -3104,7 +3108,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       category: 'observation',
       severity: findingSeverityForObservation(observation),
       title: observation,
-      detail: '',
+      detail: 'Recorded during the structured service closeout.',
       recommendation: '',
     });
   }

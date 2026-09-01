@@ -1132,6 +1132,41 @@ describe('service report v1', () => {
     expect(data.recommendations).toEqual(['Seal the gap under the front threshold.']);
   });
 
+  test('renders provenance-kept form observations without exposing tagged technician notes', async () => {
+    const fixtures = {
+      service_products: [], property_geometries: [], property_zones: [],
+      service_findings: [], service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+    const data = await buildReportV1Data({
+      id: 'service-structured-observation', customer_id: 'customer-1',
+      service_line: 'pest', service_type: 'Bee Removal',
+      service_date: '2026-05-16', status: 'completed',
+      first_name: 'Van', last_name: 'Lee',
+      technician_notes: '[Found] Internal access instruction',
+      structured_notes: JSON.stringify({
+        observations: ['Yellowjacket', 'Internal access instruction'],
+        formObservations: ['Yellowjacket'],
+      }),
+      service_data: '{}',
+    }, 'token-structured-observation', knex);
+
+    expect(data.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'Yellowjacket', detail: 'Recorded during the structured service closeout.' }),
+    ]));
+    expect(data.findings.some((finding) => finding.title.includes('Internal access'))).toBe(false);
+  });
+
   test('elapsed time parser matches completion panel duration strings', () => {
     expect(minutesFromElapsed('10:05')).toBe(10);
     expect(minutesFromElapsed('10:35')).toBe(11);

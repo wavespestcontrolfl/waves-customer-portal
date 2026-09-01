@@ -47,6 +47,7 @@ import {
   pestDefaultMixSelections,
 } from "../../lib/pest-default-mix";
 import {
+  exclusiveProtocolProductConflict,
   reconcileDependentFindingSelections,
   reconcileExclusiveProtocolSelections,
   specialtyCompletionFor,
@@ -306,8 +307,30 @@ function parseApplicationAreas(value) {
     .map((part) => part.trim())
     .filter(Boolean);
 }
-export function completionAreasForTypedFindings({ typedOwnsAreas, typedAreas, genericAreas }) {
-  return typedOwnsAreas ? parseApplicationAreas(typedAreas) : (genericAreas || []);
+export function typedTreatmentAreaField(schema) {
+  return (schema?.fields || []).find((field) => (
+    field?.key === "areas_treated" || field?.key === "spot_treatment_areas"
+  )) || null;
+}
+export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
+  return typedAreaKey
+    ? parseApplicationAreas(findingsValues?.[typedAreaKey])
+    : (genericAreas || []);
+}
+export function specialtyActionScope({ specialtyKey, label, areas, defaultScope }) {
+  const normalizedSpecialty = String(specialtyKey || "").toLowerCase();
+  const selectedAreas = (areas || []).map((area) => String(area).toLowerCase());
+  const interiorAreaSelected = selectedAreas.some((area) => (
+    area.includes("attic") || area.includes("interior wall void") || area.includes("structural interior")
+  ));
+  if (
+    interiorAreaSelected
+    && (((normalizedSpecialty.includes("bee") || normalizedSpecialty.includes("wasp") || normalizedSpecialty.includes("yellowjacket"))
+      && label === "Void nest treated")
+      || ((normalizedSpecialty.includes("mud_dauber") || normalizedSpecialty.includes("mud dauber"))
+        && /treated|application/i.test(label)))
+  ) return "interior";
+  return defaultScope;
 }
 // Chip choices = this visit's treated-area chips, plus any already-selected
 // area that is no longer chipped at the visit level. Keeping stale
@@ -10742,11 +10765,11 @@ export function CompletionPanel({
       });
     return () => { live = false; };
   }, [service?.id, sprayEvidenceInForm]);
-  const typedFindingsOwnAreas = (typedFindingsSchema?.fields || [])
-    .some((field) => field?.key === "areas_treated");
+  const typedTreatmentArea = typedTreatmentAreaField(typedFindingsSchema);
+  const typedFindingsOwnAreas = Boolean(typedTreatmentArea);
   const completionAreasServiced = completionAreasForTypedFindings({
-    typedOwnsAreas: typedFindingsOwnAreas,
-    typedAreas: findingsValues.areas_treated,
+    typedAreaKey: typedTreatmentArea?.key,
+    findingsValues,
     genericAreas: areasServiced,
   });
   const areasTreatedHidden = treeShrubCloseoutOn
@@ -13157,6 +13180,15 @@ export function CompletionPanel({
     // #3187 r18: the guard silently swallowed the resume POST and left the
     // button disabled forever).
     if (submitting && !resumingPoll) return;
+    const specialtyProductConflict = exclusiveProtocolProductConflict(
+      activeSelectedLabels(selectedProtocolActionLabels),
+      specialtyProtocolActions,
+      selectedProducts.length,
+    );
+    if (specialtyProductConflict) {
+      alert(specialtyProductConflict);
+      return;
+    }
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.
@@ -13552,7 +13584,16 @@ export function CompletionPanel({
         .map((label) => {
           const meta = actionScopeByLabel[label];
           if (!meta) return null;
-          return { label, scope: meta.scope, treatmentApplied: meta.treatmentApplied === true };
+          return {
+            label,
+            scope: specialtyActionScope({
+              specialtyKey: service.completionProfile?.serviceKey || service.serviceType,
+              label,
+              areas: completionAreasServiced,
+              defaultScope: meta.scope,
+            }),
+            treatmentApplied: meta.treatmentApplied === true,
+          };
         })
         .filter(Boolean);
       const reportObservations = [

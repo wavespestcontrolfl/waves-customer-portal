@@ -143,6 +143,7 @@ export const SERVICE_COMPLETION_PRESETS = {
   bee_wasp_removal: {
     areas: [
       "Eaves / soffit", "Roofline", "Exterior wall", "Wall void / structural opening",
+      "Interior wall void / structural opening",
       "Attic", "Lanai / pool cage", "Porch / entry", "Garage / carport",
       "Tree / shrub", "Ground cavity", "Utility / irrigation box", "Fence / detached structure",
     ],
@@ -315,4 +316,13 @@ export function reconcileExclusiveProtocolSelections(current, protocols, nextLab
     return nextAction.exclusive !== true && selectedAction.exclusive !== true;
   });
   return [...compatible, nextLabel];
+}
+
+export function exclusiveProtocolProductConflict(selectedLabels, protocols, productCount) {
+  if (!Number(productCount)) return null;
+  const byLabel = new Map((protocols || []).map((action) => [action.label, action]));
+  const exclusive = (selectedLabels || []).find((label) => byLabel.get(label)?.exclusive === true);
+  return exclusive
+    ? `Remove applied products or clear “${exclusive}” before completing this visit.`
+    : null;
 }

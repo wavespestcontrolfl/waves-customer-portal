@@ -5277,6 +5277,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formRecommendations = normalizeCompletionTextArray(
       Array.isArray(recommendations) ? recommendations : [],
     );
+    // Provenance-kept copy of form/chip observations only. reportObservations
+    // also contains [Found] technician-note lines, which must never egress.
+    const formObservations = normalizeCompletionTextArray(
+      Array.isArray(observations) ? observations : [],
+    );
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
@@ -6721,6 +6726,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
+            formObservations,
             formRecommendations,
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
