@@ -744,17 +744,20 @@ async function investigatePaths(db, {
           // A re-investigation DISPROVES only what it actually COVERED: a
           // previously active, non-baseline path absent from this verdict is
           // invalidated (confidence 0 + the reason in its evidence) ONLY when
-          // its own submission URL was among this pass's fetched pages — the
-          // model saw that page and still did not report the path. A path
-          // outside this pass's fetch coverage (budget, fetch error, no URL)
-          // is preserved untouched: absence of evidence never disproves it.
-          // Baselines are descriptive and stay; superseded rows were handled.
+          // it was COVERED: its submission URL was among this pass's fetched
+          // pages (the model saw that page and still did not report the
+          // path), or it has no URL at all — a URL-less outreach path is
+          // fully represented by the domain-level pass, exactly like the
+          // stamping rule below, so a negative verdict retires it too. A
+          // path outside fetch coverage (budget, fetch error) is preserved
+          // untouched: absence of evidence never disproves it. Baselines are
+          // descriptive and stay; superseded rows were handled.
           if (claimState) {
             const stale = (await trx('seo_link_acquisition_paths')
               .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
               .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
               .select('id', 'investigation', 'submission_url'))
-              .filter((s) => s.submission_url && fetchedKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
+              .filter((s) => !s.submission_url || fetchedKeys.has(registry.normalizeSubmissionUrl(s.submission_url)));
             for (const s of stale) {
               const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
               await trx('seo_link_acquisition_paths').where({ id: s.id }).update({

@@ -355,6 +355,24 @@ describe('full run', () => {
     expect(db2._tables.seo_link_domains[0].agent_state).toBe('watching'); // qualified with no executable path downgrades
   });
 
+  test('a URL-less outreach path IS domain-covered: a negative verdict retires it and clears best_path_id (Codex r13 P1)', async () => {
+    const d = domainRow({ agent_state: 'investigating', best_path_id: null });
+    const outreachPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'editorial_outreach', submission_url: null,
+      path_key: 'editorial_outreach:-', superseded_by: null, baseline: false, confidence: 0.8,
+      last_investigated_at: new Date('2026-06-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [outreachPath] });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const p = db._tables.seo_link_acquisition_paths[0];
+    expect(p.confidence).toBe(0);
+    expect(JSON.parse(p.investigation).disproven_reason).toMatch(/not_reproducible/);
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('not_reproducible');
+    expect(dom.best_path_id).toBeNull(); // never a contradictory actionable best path
+  });
+
   test('an omitted path OUTSIDE this pass\'s fetch coverage is preserved, never disproven (Codex r9 P1)', async () => {
     const d = domainRow({ agent_state: 'investigating' });
     const uncovered = {
