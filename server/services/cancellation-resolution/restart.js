@@ -88,12 +88,17 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   // while the request that just cancelled the account has no case at all
   // (codex GH r8 P1). A case that is not the latest request's record
   // contributes neither scope nor correlation — the request itself does.
+  // Savepoint-isolated (codex GH r25 P2): dbh is usually the mint/accept
+  // outer transaction, and a pg statement error here would abort IT — the
+  // catch below would swallow the error yet every later query still fails
+  // ("current transaction is aborted"), turning the intended case-only
+  // fallback into a 500. Same shape as the seed, prepay, and turf reads.
   let latestRequest = null;
   try {
-    latestRequest = await dbh('service_requests')
+    latestRequest = await dbh.transaction((sp) => sp('service_requests')
       .where({ customer_id: customerId, category: 'cancellation' })
       .orderBy('created_at', 'desc')
-      .first('id', 'created_at');
+      .first('id', 'created_at'));
   } catch { /* unreadable — fall back to case-only correlation */ }
   const current = latest && (!latestRequest
     || String(latest.service_request_id || '') === String(latestRequest.id))
