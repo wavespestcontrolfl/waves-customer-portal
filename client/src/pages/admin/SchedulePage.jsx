@@ -350,7 +350,7 @@ export function specialtyActionScope({ specialtyKey, label, areas, defaultScope 
 // selections visible (instead of hiding them like the old <select> did)
 // lets the tech see and clear a value that would otherwise submit
 // invisibly from p.applicationArea (same trap as codex P3 r2 on #2950).
-function productAreaChoices(areasServiced, currentValue) {
+export function productAreaChoices(areasServiced, currentValue) {
   const choices = [...areasServiced];
   for (const area of parseApplicationAreas(currentValue)) {
     if (!choices.includes(area)) choices.push(area);
@@ -10852,11 +10852,13 @@ export function CompletionPanel({
       }
       setAreasServiced([]);
     }
-    setSelectedProducts((prev) => (
-      prev.some((p) => p && p.applicationArea)
-        ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
-        : prev
-    ));
+    if (!typedTreatmentArea?.key) {
+      setSelectedProducts((prev) => (
+        prev.some((p) => p && p.applicationArea)
+          ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
+          : prev
+      ));
+    }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
   // Default pest tank mix (owner 2026-08-29): recurring general-pest and
   // pest re-service completions open with Taurus SC + Talstar P + the
@@ -15896,12 +15898,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
-                      {areasServiced.length > 0 && (() => {
+                      {completionAreasServiced.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
                           sp.applicationArea,
                         );
                         const areaChoices = productAreaChoices(
-                          areasServiced,
+                          completionAreasServiced,
                           sp.applicationArea,
                         );
                         return (

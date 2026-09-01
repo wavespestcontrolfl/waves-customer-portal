@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   completionAreasForTypedFindings,
   labelsPresentInMarkerNotes,
+  productAreaChoices,
   specialtyActionScope,
   typedTreatmentAreaField,
   typedFieldValueConflicts,
@@ -91,6 +92,13 @@ describe("typed area ownership", () => {
       findingsValues: { areas_treated: "" },
       genericAreas: ["Exterior perimeter", "Garage"],
     })).toEqual(["Exterior perimeter", "Garage"]);
+  });
+
+  it("keeps product-specific mappings editable against typed areas", () => {
+    expect(productAreaChoices(
+      ["Exterior perimeter", "Garage"],
+      "Garage, Legacy wall void",
+    )).toEqual(["Exterior perimeter", "Garage", "Legacy wall void"]);
   });
 });
 
