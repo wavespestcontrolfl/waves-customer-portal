@@ -7111,7 +7111,7 @@ export function typedFieldValueConflicts(schemaType, values) {
 // definition: chips keep only allowlisted tokens, selects must match an
 // option, counts must be digit-only. Free-text fields keep anything.
 // Mutates and returns `restored`.
-function pruneRestoredFindingsValues(restored, fields) {
+export function pruneRestoredFindingsValues(restored, fields) {
   const values = restored && typeof restored === "object" ? restored : {};
   if (!Array.isArray(fields)) return values;
   const fieldByKey = new Map(fields.map((f) => [f.key, f]));
@@ -7125,7 +7125,11 @@ function pruneRestoredFindingsValues(restored, fields) {
       // validation the tech can't fix (codex P2). Companion slices clear
       // the flag for fields they collect, so those restores survive.
       delete values[key];
-    } else if ((field.type === "chips" || field.type === "multi_select") && Array.isArray(field.options)) {
+    } else if (
+      (field.type === "chips" || field.type === "multi_select")
+      && Array.isArray(field.options)
+      && !["areas_treated", "spot_treatment_areas", "treatment_zones"].includes(field.key)
+    ) {
       const kept = String(raw || "")
         .split(",")
         .map((s) => s.trim())

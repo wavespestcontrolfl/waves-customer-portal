@@ -10,6 +10,12 @@ function validate(type, values) {
 }
 
 describe('editable service-report findings consistency', () => {
+  test('preserves legacy free-text treatment areas after chip cutover', () => {
+    expect(validate('termite_treatment', { areas_treated: 'Rear addition slab' }).errors).toEqual([]);
+    expect(validate('one_time_lawn_treatment', {
+      spot_treatment_areas: 'Custom strip beside seawall',
+    }).errors).toEqual([]);
+  });
   test.each(Object.entries({
     termite_inspection: 'activity_status',
     pest_inspection: 'findings_observed',

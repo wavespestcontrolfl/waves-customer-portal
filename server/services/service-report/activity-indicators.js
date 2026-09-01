@@ -1091,7 +1091,8 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     // chips and multi_select both store a comma-joined selection —
     // every element must come from the field's options so an off-list
     // string can't reach the immutable customer-facing snapshot.
-    if ((field.type === 'chips' || field.type === 'multi_select') && Array.isArray(field.options) && field.options.length) {
+    const legacyAreaField = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'].includes(field.key);
+    if (!legacyAreaField && (field.type === 'chips' || field.type === 'multi_select') && Array.isArray(field.options) && field.options.length) {
       const parts = String(value).split(',').map((s) => s.trim()).filter(Boolean);
       for (const part of parts) {
         if (!field.options.includes(part)) {

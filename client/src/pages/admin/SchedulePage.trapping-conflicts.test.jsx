@@ -4,6 +4,7 @@ import {
   completionAreasForTypedFindings,
   labelsPresentInMarkerNotes,
   productAreaChoices,
+  pruneRestoredFindingsValues,
   specialtyActionScope,
   typedTreatmentAreaField,
   typedFieldValueConflicts,
@@ -68,6 +69,12 @@ describe("termite posted-notice pre-submit mirror", () => {
 });
 
 describe("typed area ownership", () => {
+  it("preserves off-list area values restored from pre-chip drafts", () => {
+    const restored = { areas_treated: "Rear addition slab" };
+    expect(pruneRestoredFindingsValues(restored, [{
+      key: "areas_treated", type: "chips", options: ["Foundation perimeter"],
+    }])).toEqual({ areas_treated: "Rear addition slab" });
+  });
   it("promotes the typed areas into the canonical completion scope", () => {
     expect(completionAreasForTypedFindings({
       typedAreaKey: "areas_treated",
