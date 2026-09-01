@@ -2873,7 +2873,10 @@ describe('completion route wiring (source contracts)', () => {
     // must come from the FOR UPDATE row, never the handler-entry svc; and
     // the snapshot key sits in the structuredNotes literal so it is written
     // in the same completion transaction as every other frozen posture.
-    expect(source).toMatch(/const closeoutRequirementsSnapshot = await resolveCloseoutRequirementsSnapshotForCompletion\(\{\s*\n\s*trx,\s*\n\s*serviceId: svc\.id,\s*\n\s*catalogServiceId: \(lockedSvcRow \|\| svc\)\.service_id \|\| null,\s*\n\s*serviceType: \(lockedSvcRow \|\| svc\)\.service_type \|\| null,\s*\n\s*\}\);/);
+    // Incomplete visits freeze nothing — their eventual completion writes
+    // the real completion-time freeze (first-freeze-wins would otherwise
+    // keep the stale pre-completion snapshot).
+    expect(source).toMatch(/const closeoutRequirementsSnapshot = isIncompleteVisit \? null\s*\n\s*: await resolveCloseoutRequirementsSnapshotForCompletion\(\{\s*\n\s*trx,\s*\n\s*serviceId: svc\.id,\s*\n\s*catalogServiceId: \(lockedSvcRow \|\| svc\)\.service_id \|\| null,\s*\n\s*serviceType: \(lockedSvcRow \|\| svc\)\.service_type \|\| null,\s*\n\s*\}\);/);
     expect(source).toMatch(/\.\.\.\(closeoutRequirementsSnapshot \? \{ closeoutRequirements: closeoutRequirementsSnapshot \} : \{\}\),\s*\n\s*\};/);
     // Exactly one freeze site in the completion path.
     expect(source.match(/resolveCloseoutRequirementsSnapshotForCompletion\(/g) || []).toHaveLength(1);

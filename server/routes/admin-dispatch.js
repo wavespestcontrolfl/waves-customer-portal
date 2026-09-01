@@ -6646,13 +6646,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // Freeze the closeout requirements in force at completion — the
           // LOCKED row's catalog identity, not the handler-entry svc (same
           // staleness rule as the tier snapshot below). Null = lookup failed:
-          // freeze nothing, readers keep the live-catalog fallback.
-          const closeoutRequirementsSnapshot = await resolveCloseoutRequirementsSnapshotForCompletion({
-            trx,
-            serviceId: svc.id,
-            catalogServiceId: (lockedSvcRow || svc).service_id || null,
-            serviceType: (lockedSvcRow || svc).service_type || null,
-          });
+          // freeze nothing, readers keep the live-catalog fallback. An
+          // INCOMPLETE visit freezes nothing either (pre-push codex P1) —
+          // its eventual completion writes the real completion-time freeze,
+          // and first-freeze-wins would otherwise keep this stale one
+          // (mirrors the backfill migration's status='completed' scope).
+          const closeoutRequirementsSnapshot = isIncompleteVisit ? null
+            : await resolveCloseoutRequirementsSnapshotForCompletion({
+              trx,
+              serviceId: svc.id,
+              catalogServiceId: (lockedSvcRow || svc).service_id || null,
+              serviceType: (lockedSvcRow || svc).service_type || null,
+            });
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
