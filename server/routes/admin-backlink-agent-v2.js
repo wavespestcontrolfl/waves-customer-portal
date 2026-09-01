@@ -293,7 +293,7 @@ const REGISTRY_JOBS = Object.freeze({
     const svc = require('../services/seo/link-path-investigator');
     const args = { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) };
     if (opts.dryRun || !isEnabled('linkInvestigator')) return svc.investigatePaths(db, args);
-    svc.investigatePaths(db, args)
+    void svc.investigatePaths(db, args)
       .then((r) => logger.info(`[link-investigator] admin run: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} investigated ${r.investigated} (qualified ${r.qualified} watching ${r.watching} not_reproducible ${r.notReproducible} refreshes ${r.pathRefreshes}) paths ${r.pathsWritten} failed ${r.failed.length} fetches ${r.fetches} llm ${r.llmCalls}`))
       .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));
     return Promise.resolve({ started: true });
