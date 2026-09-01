@@ -200,7 +200,20 @@ async function authoritativeServiceKey(database, row = {}) {
   if (row.service_id) {
     const catalog = await database('services').where({ id: row.service_id }).first('service_key', 'name');
     if (catalog && (catalog.service_key || catalog.name)) {
-      return recurringServiceKey({ service_key: catalog.service_key || undefined, name: catalog.name || undefined });
+      const catalogKey = recurringServiceKey({ service_key: catalog.service_key || undefined, name: catalog.name || undefined });
+      // Commercial identity lives on the ROW (codex #3591 r81 P1): a
+      // commercial bait series linked to the shared residential bait
+      // catalog row would otherwise resolve 'rodent_bait' and take the
+      // residential family-waiver branch — but commercial setup is never
+      // family-waived (owner 2026-08-29). The catalog still decides the
+      // FAMILY (a stale non-bait label cannot re-family a linked row);
+      // only the commercial channel marker is read from the row's label,
+      // and only within the same bait family.
+      if (catalogKey === 'rodent_bait'
+        && recurringServiceKey({ name: row.service_type }) === 'commercial_rodent_bait') {
+        return 'commercial_rodent_bait';
+      }
+      return catalogKey;
     }
   }
   return recurringServiceKey({ name: row.service_type });

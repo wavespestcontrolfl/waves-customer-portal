@@ -676,6 +676,22 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(migrationSrc).toMatch(/if \(migrationOwnsRuleCycle && ruleAudit\?\.old_value && rule && rule\.tier_qualifier === true && rule\.exclude_from_pct_discount === false\) \{/);
   });
 
+  test('a commercial bait row linked to the residential bait catalog keeps its commercial key (codex #3591 r81 P1)', async () => {
+    const c = conn({ catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' } });
+    // The catalog decides the FAMILY; the commercial channel marker comes
+    // from the row's own label — commercial setup is never family-waived.
+    expect(await plans.authoritativeServiceKey(c, { service_id: 'svc-1', service_type: 'Commercial Rodent Bait Stations' })).toBe('commercial_rodent_bait');
+    expect(await plans.authoritativeServiceKey(c, { service_id: 'svc-1', service_type: 'Rodent Bait Stations' })).toBe('rodent_bait');
+    // A stale non-bait label still cannot re-family the linked bait row.
+    expect(await plans.authoritativeServiceKey(c, { service_id: 'svc-1', service_type: 'Rodent Trapping' })).toBe('rodent_bait');
+  });
+
+  test('the lapse branch skips an operator-disabled fee and retries the page once (codex #3591 r81 P1)', () => {
+    const bookingSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+    expect(bookingSrc).toMatch(/const \{ RODENT \} = require\('\.\.\/services\/pricing-engine\/constants'\);\s+if \(!\(Number\(RODENT\.baitSetupFee\) > 0\)\) return;/);
+    expect(bookingSrc).toMatch(/if \(!\(await pageLapsedWaiver\(\)\) && !\(await pageLapsedWaiver\(\)\)\) \{\s+logger\.error\(`\[booking:confirm\] FIX: lapsed-waiver alert could NOT be persisted/);
+  });
+
   test('lapsed zero-waiver self-bookings page the office · wizard engineInput joins the reconciliation · prepay preview carries the setup (codex #3591 r80)', () => {
     // A rodent draft with a ZERO/ABSENT setup re-derives the waiver under
     // the customer lock; draft-internal families still waive; a lapse pages

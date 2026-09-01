@@ -2888,6 +2888,13 @@ async function createSelfBooking(payload = {}) {
                   if (!rodentDraft) return;
                   if (estData?.setupFeeQuote?.kind === 'rodent_bait_setup'
                     && estData?.setupFeeQuote?.waived === 'fee_already_queued') return;
+                  // An operator-DISABLED fee is not a lapsed waiver (codex
+                  // #3591 r81 P1): rodent_setup_fee.value 0 makes the
+                  // engine emit no setup line for anyone — nothing is owed
+                  // now, so nothing pages. Same live constant the direct
+                  // resolver bills from (DB-authoritative via db-bridge).
+                  const { RODENT } = require('../services/pricing-engine/constants');
+                  if (!(Number(RODENT.baitSetupFee) > 0)) return;
                   const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
                   if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
                   await sp('customers').where({ id: custId }).forUpdate().first('id');
@@ -2902,12 +2909,21 @@ async function createSelfBooking(payload = {}) {
                   // available — this is the exception lane: page the office
                   // to re-quote or bill the setup deliberately.
                   logger.error(`[booking:confirm] FIX: rodent quote ${freshPricingEst.id} waived the bait-station setup on a family that has since lapsed — booking ${custId} commits without the $99; office must re-quote or bill it`);
-                  await require('../services/notification-service').notifyAdmin(
+                  // notifyAdmin swallows insert errors and resolves null
+                  // (codex #3591 r81 P1) — this page is the only recovery
+                  // for the underbilling, so retry once and log loudly on
+                  // a double failure (same convention as the accept-path
+                  // notify retries; the FIX log above stays the Sentry
+                  // trail either way).
+                  const pageLapsedWaiver = () => require('../services/notification-service').notifyAdmin(
                     'billing',
                     'Rodent booking: setup waiver lapsed before self-booking',
                     'A self-booked rodent bait quote had its $99 setup waived by another service that is no longer active. The booking stands without the fee — re-quote or add the setup deliberately.',
                     { link: `/admin/customers/${custId}`, metadata: { customerId: custId, estimateId: freshPricingEst.id } },
-                  ).catch(() => {});
+                  ).catch(() => null);
+                  if (!(await pageLapsedWaiver()) && !(await pageLapsedWaiver())) {
+                    logger.error(`[booking:confirm] FIX: lapsed-waiver alert could NOT be persisted for booking ${custId} / quote ${freshPricingEst.id} — the $99 underbilling has no notification; reconcile from this log`);
+                  }
                   return;
                 }
                 // Bind the stamp to the QUOTED plan: the handoff token and
