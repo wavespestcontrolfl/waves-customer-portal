@@ -506,7 +506,12 @@ export default function ServiceReportDocument({ data, token }) {
   // "Can the schematic draw it?" additionally needs zone IDs, because that is
   // what treatment-map.js filters on. Reusing the map predicate for aftercare
   // silently stripped watering and re-entry instructions from those visits.
-  const hasActualTreatment = applications.some(isProductApplication);
+  // The server's applicationMade verdict also counts a structured protocol
+  // action marked treatmentApplied with no product row (a nest treatment, a
+  // productless specialty application) — the live report honors it, so the
+  // permanent PDF must keep the same re-entry and aftercare content. The
+  // products list and the schematic stay tied to actual application rows.
+  const hasActualTreatment = data.applicationMade === true || applications.some(isProductApplication);
 
   // …and the schematic additionally requires a REAL product application: a
   // bait cartridge placed under bait_placement with zone IDs is a monitoring

@@ -842,6 +842,21 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(legacy.container.textContent).toContain(legacyRec);
   });
 
+  it('keeps re-entry and aftercare for a productless treatment action the server verified', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [],
+      applicationMade: true,
+      dynamicContext: {},
+      advisory: { pet_advisory: 'Keep pets away from the treated nest area until dry.' },
+      reportV2: { aftercare: { watering: 'No watering change is needed.', reentry: 'Re-enter once the treated void is dry.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Re-enter once the treated void is dry.');
+    expect(container.textContent).toContain('Keep pets away from the treated nest area until dry.');
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
   it('keeps aftercare for a legacy application that has no zone ids', () => {
     // "did treatment happen" must not inherit the map predicate's zone-id rule
     const data = {
