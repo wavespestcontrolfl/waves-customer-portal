@@ -77,11 +77,22 @@ async function resolveCatalogIdentity(conn, insertData) {
   }
   const name = String(insertData.service_type || '').trim();
   if (!name) return null;
+  // Name matching goes through the SAME alias bridge completion uses
+  // (serviceNameCandidates: " Service" suffix, visit-program tails,
+  // cadence qualifiers, rename aliases) — an exact-name-only match would
+  // leave legacy/pre-rename labels snapshot-less, exactly the rows the
+  // scoped-discount replay throws on (GH Codex r2 P1). Unique-row
+  // semantics across ALL candidates: more than one DISTINCT catalog row
+  // matching means ambiguity, and enrichment never guesses.
+  const { serviceNameCandidates } = require('../service-completion-profiles');
+  const candidates = serviceNameCandidates(name).map((c) => c.toLowerCase());
+  if (!candidates.length) return null;
   const hits = await conn('services')
     .where({ is_active: true })
-    .whereRaw('LOWER(name) = LOWER(?)', [name])
+    .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates)
     .select('id', 'service_key', 'category');
-  return hits.length === 1 ? hits[0] : null;
+  const distinct = [...new Map(hits.map((h) => [h.id, h])).values()];
+  return distinct.length === 1 ? distinct[0] : null;
 }
 
 /**
@@ -106,8 +117,20 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   if (!cols || typeof cols !== 'object') throw contractError('cols (scheduled_services columnInfo) is required');
 
   // ── Validation (always on) ─────────────────────────────────────────
-  if (!insertData.customer_id && !allowNullCustomer) {
-    throw contractError('customer_id is required (pass allowNullCustomer only for estimate slot holds)');
+  if (!insertData.customer_id) {
+    // The escape hatch admits ONLY the estimate slot-hold shape: an
+    // EXPLICIT customer_id: null plus the reservation expiry marker the
+    // hold lifecycle keys on. A merely omitted customer or a payload
+    // without hold markers would otherwise insert a permanent
+    // customer-less appointment through the nullable column
+    // (GH Codex r2 P2).
+    const explicitHold = allowNullCustomer
+      && Object.prototype.hasOwnProperty.call(insertData, 'customer_id')
+      && insertData.customer_id === null
+      && insertData.reservation_expires_at;
+    if (!explicitHold) {
+      throw contractError('customer_id is required (allowNullCustomer admits only the explicit slot-hold shape: customer_id null + reservation_expires_at)');
+    }
   }
   if (!insertData.scheduled_date) throw contractError('scheduled_date is required');
   const status = insertData.status === undefined ? 'pending' : insertData.status;
@@ -174,11 +197,14 @@ async function createScheduledService({ trx, insertData, cols, source, idempoten
       throw contractError('idempotencyKey was supplied but is blank — refuse rather than insert unguarded');
     }
     if (!cols.idempotency_key) throw contractError('idempotencyKey passed but scheduled_services has no idempotency_key column');
-    // A payload carrying a DIFFERENT key would make the conflict guard
-    // dedupe on the wrong value and let retries under the intended key
-    // double-book (pre-push Codex P1) — refuse the ambiguity.
-    if (data.idempotency_key !== undefined && data.idempotency_key !== idempotencyKey) {
-      throw contractError(`idempotencyKey '${idempotencyKey}' conflicts with insertData.idempotency_key '${data.idempotency_key}'`);
+    // A payload carrying a DIFFERENT non-blank key would make the conflict
+    // guard dedupe on the wrong value and let retries under the intended
+    // key double-book (pre-push Codex P1) — refuse the ambiguity. A
+    // null/blank payload value counts as absent (the column is nullable)
+    // and the supplied option stamps over it (GH Codex r2 P2).
+    const payloadKey = data.idempotency_key;
+    if (payloadKey != null && payloadKey !== '' && payloadKey !== idempotencyKey) {
+      throw contractError(`idempotencyKey '${idempotencyKey}' conflicts with insertData.idempotency_key '${payloadKey}'`);
     }
     data.idempotency_key = idempotencyKey;
     const [row] = await trx('scheduled_services')

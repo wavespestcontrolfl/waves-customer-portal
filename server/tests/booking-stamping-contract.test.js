@@ -30,13 +30,13 @@ function makeConn(catalog = []) {
   const conn = (table) => {
     const chain = { _where: null };
     chain.where = (w) => { chain._where = w; return chain; };
-    chain.whereRaw = (_sql, params) => { chain._name = params?.[0]; return chain; };
+    chain.whereRaw = (_sql, params) => { chain._names = (params || []).map((n) => String(n).toLowerCase()); return chain; };
     chain.first = () => Promise.resolve(
       catalog.find((r) => r.id === chain._where?.id),
     );
     chain.select = () => Promise.resolve(catalog.filter((r) => {
       if (chain._where && !Object.entries(chain._where).every(([k, v]) => r[k] === v)) return false;
-      if (chain._name !== undefined && String(r.name).toLowerCase() !== String(chain._name).toLowerCase()) return false;
+      if (chain._names !== undefined && !chain._names.includes(String(r.name).toLowerCase())) return false;
       return true;
     }));
     chain.insert = (payload) => { calls.inserts.push({ table, payload }); return chain; };
@@ -74,9 +74,15 @@ describe('validation (ungated)', () => {
     trx: makeConn(), cols: COLS, source: { sourceAction: 'test_lane' }, ...opts,
   });
 
-  test('missing customer_id throws; allowNullCustomer admits the slot-hold shape', async () => {
+  test('missing customer_id throws; allowNullCustomer admits ONLY the explicit hold shape', async () => {
     await expect(run({ ...BASE, customer_id: null })).rejects.toThrow(/customer_id/);
-    await expect(run({ ...BASE, customer_id: null }, { allowNullCustomer: true })).resolves.toBeTruthy();
+    // Explicit null + reservation expiry = the slot-hold shape.
+    await expect(run({ ...BASE, customer_id: null, reservation_expires_at: new Date() }, { allowNullCustomer: true })).resolves.toBeTruthy();
+    // Merely omitted customer, or no hold marker: the hatch stays shut
+    // (GH Codex r2 P2 — a permanent customer-less appointment).
+    const { customer_id, ...omitted } = BASE;
+    await expect(run(omitted, { allowNullCustomer: true })).rejects.toThrow(/customer_id/);
+    await expect(run({ ...BASE, customer_id: null }, { allowNullCustomer: true })).rejects.toThrow(/customer_id/);
   });
 
   test('missing scheduled_date throws', async () => {
@@ -165,6 +171,15 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(out.service_category_snapshot).toBeNull(); // explicit null = caller's decision
   });
 
+  test('legacy " Service"-suffixed label resolves through the alias bridge', async () => {
+    const catalog = [
+      { id: 'svc-p', name: 'Pest Control', service_key: 'pest_control', category: 'pest', is_active: true },
+    ];
+    const out = await run({ ...BASE, service_type: 'Pest Control Service' }, catalog);
+    expect(out.service_id).toBe('svc-p');
+    expect(out.service_key_snapshot).toBe('pest_control');
+  });
+
   test('ambiguous name → no stamp (enrichment never guesses)', async () => {
     const dupes = [...CATALOG, { id: 'svc-3', name: 'Quarterly Pest Control', service_key: 'pest_q2', category: 'pest', is_active: true }];
     const out = await run(BASE, dupes);
@@ -215,6 +230,18 @@ describe('createScheduledService wrapper', () => {
       source: { sourceAction: 'x' },
       idempotencyKey: 'idem-1',
     })).rejects.toThrow(/conflicts with insertData.idempotency_key/);
+  });
+
+  test('a NULL payload idempotency_key counts as absent — the option stamps over it', async () => {
+    const conn = makeConn(CATALOG);
+    const row = await createScheduledService({
+      trx: conn,
+      insertData: { ...BASE, idempotency_key: null },
+      cols: COLS,
+      source: { sourceAction: 'x' },
+      idempotencyKey: 'idem-1',
+    });
+    expect(row.idempotency_key).toBe('idem-1');
   });
 
   test('a payload already carrying the SAME idempotency key is fine', async () => {
