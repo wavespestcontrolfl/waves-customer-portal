@@ -330,6 +330,10 @@ describe('CancelPlanDialog', () => {
       expect(screen.getByLabelText('Waive the scheduled-visit fee on pulled visits')).toBeChecked();
       expect(screen.getByLabelText('Send the customer the confirmation text and email')).not.toBeChecked();
     });
+    // The DRIFT direction locks: the server would restore these on commit,
+    // so an editable control here would make the screen lie about the run.
+    expect(screen.getByLabelText('Waive the scheduled-visit fee on pulled visits')).toBeDisabled();
+    expect(screen.getByLabelText('Send the customer the confirmation text and email')).toBeDisabled();
   });
 
   it('scheduled-visit fee exposure renders from the server preview and clears when waived', async () => {

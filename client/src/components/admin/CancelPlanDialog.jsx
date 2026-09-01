@@ -200,13 +200,13 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
     <Dialog open onClose={() => !running && onClose()} size="md">
       <DialogHeader>
         <DialogTitle>Cancel plan</DialogTitle>
-        <div className="text-13 text-ink-secondary mt-1">
+        <div className="text-14 text-ink-secondary mt-1">
           {customer.firstName} {customer.lastName} — same engine the customer portal uses. Nothing happens until you press the red button.
         </div>
       </DialogHeader>
-      <DialogBody className="flex flex-col gap-4 text-13">
+      <DialogBody className="flex flex-col gap-4 text-14">
         {loadErr && (
-          <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">{loadErr}</div>
+          <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">{loadErr}</div>
         )}
 
         {!result && (
@@ -243,7 +243,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                     />
                   ))}
                   {preview?.scopedSupported === false && (
-                    <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">
+                    <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">
                       {preview.scopeError === "scope_not_owned"
                         ? "That service is not on the plan any more."
                         : preview.scopeError === "scoped_covers_prepaid"
@@ -252,7 +252,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                     </div>
                   )}
                   {modeMismatch && (
-                    <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">
+                    <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">
                       That selection is every service on the plan — switch to "The whole plan" to cancel the account.
                     </div>
                   )}
@@ -264,7 +264,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
               {(preview?.openScopedRepairs || [])
                 .filter((r) => wholeAccount || r.families.join(",") !== [...families].sort().join(","))
                 .map((r) => (
-                  <div key={r.families.join(",")} className="px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 flex items-center justify-between gap-2">
+                  <div key={r.families.join(",")} className="px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-14 flex items-center justify-between gap-2">
                     <span>An unfinished cancellation of {r.labels.join(", ")} still has follow-up steps open.</span>
                     <Button
                       size="sm"
@@ -299,7 +299,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                   disabled={running}
                 />
                 {effectiveDate === "now" && prepay.refund && (
-                  <div className="ml-6 text-12 text-ink-secondary">
+                  <div className="ml-6 text-14 text-ink-secondary">
                     {prepay.refund.needsManualCalc
                       ? "Refund amount needs a manual calculation (the term has no included-visit count). An office task will say so."
                       : `${money(prepay.refund.amount)} = ${money(prepay.refund.prepaidAmount)} ÷ ${prepay.refund.includedVisits} visits × ${prepay.refund.remainingVisits} remaining. Recorded on the case and opened as an office task — not refunded automatically.`}
@@ -310,15 +310,20 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
 
             {/* OPTIONS */}
             <div className="flex flex-col gap-2">
+              {/* Repairs run under the ACCEPTED choices, one-way: an
+                  accepted waiver is sticky-true and an accepted
+                  no-communication is sticky-false on the server — lock the
+                  drift direction so the screen never disagrees with the
+                  execution (adding a waiver / silencing comms stays legal). */}
               <Checkbox
                 id="cancel-plan-waive-fee"
                 label="Waive the scheduled-visit fee on pulled visits"
                 checked={waiveLateFee}
                 onChange={(e) => setWaiveLateFee(e.target.checked)}
-                disabled={running}
+                disabled={running || (preview?.repairRetry === true && waiveLateFee)}
               />
               {preview?.visitFees?.applies && !waiveLateFee && (
-                <div className="ml-6 text-12 text-ink-secondary">
+                <div className="ml-6 text-14 text-ink-secondary">
                   {preview.visitFees.total != null
                     ? `${money(preview.visitFees.total)} in scheduled-visit fees will be charged on ${preview.visitFees.visits.length} pulled visit${preview.visitFees.visits.length === 1 ? "" : "s"} unless waived.`
                     : `A scheduled-visit fee may apply to ${preview.visitFees.visits.length} pulled visit${preview.visitFees.visits.length === 1 ? "" : "s"} — the amount could not be verified. Waive it, or the fee rail judges at commit.`}
@@ -329,10 +334,10 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                 label="Send the customer the confirmation text and email"
                 checked={sendConfirmation}
                 onChange={(e) => setSendConfirmation(e.target.checked)}
-                disabled={running}
+                disabled={running || (preview?.repairRetry === true && !sendConfirmation)}
               />
               {sendConfirmation && preview && !preview.confirmationChannels.sms && !preview.confirmationChannels.email && (
-                <div className="ml-6 text-12 text-ink-secondary">No phone or email on file — nothing can be sent.</div>
+                <div className="ml-6 text-14 text-ink-secondary">No phone or email on file — nothing can be sent.</div>
               )}
             </div>
 
@@ -357,7 +362,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
             <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
               <div className="font-medium text-zinc-900 mb-1">Preview — what pressing the button will do</div>
               {preview?.repairRetry && (
-                <div className="text-12 text-ink-secondary mb-1">
+                <div className="text-14 text-ink-secondary mb-1">
                   A prior cancellation attempt left follow-up steps unfinished — cancelling again retries them.
                 </div>
               )}
@@ -428,7 +433,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
               </Fact>
             </div>
             {result.errors?.length > 0 && (
-              <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">
+              <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">
                 Needs review: {result.errors.join(", ")}
               </div>
             )}
@@ -436,7 +441,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
         )}
 
         {runErr && (
-          <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-13">{runErr}</div>
+          <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">{runErr}</div>
         )}
       </DialogBody>
       <DialogFooter>

@@ -218,12 +218,21 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         try {
           const recoveredScope = await committedScopeFor(dupe.id);
           if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
-          const retry = await processCancellationRequest({
-            customerId: req.customer.id,
-            reason: `Portal cancellation request ${dupe.id}`,
-            requestId: dupe.id,
-            families: recoveredScope,
-          });
+          // Same customer-scoped lock as the admin commit: an unlocked
+          // portal run racing an admin end_of_coverage confirm can pull the
+          // paid visits the admin sweep is deliberately keeping. Busy or
+          // unacquirable throws into this catch — the request parks for
+          // review instead of processing unlocked.
+          const releaseCancelLock = await require('../services/admin-cancellation').acquireCancelCommitLock(req.customer.id);
+          let retry;
+          try {
+            retry = await processCancellationRequest({
+              customerId: req.customer.id,
+              reason: `Portal cancellation request ${dupe.id}`,
+              requestId: dupe.id,
+              families: recoveredScope,
+            });
+          } finally { await releaseCancelLock(); }
           retryOutcome = retry;
           logger.info(
             `Re-ran cancellation processing for deduped request ${dupe.id}: ok=${retry.ok}` +
@@ -297,12 +306,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // Fail closed exactly like the dedupe branch: an unrecoverable
         // scope must never widen into a whole-account churn (codex P0).
         if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
-        const retry = await processCancellationRequest({
-          customerId: req.customer.id,
-          reason: `Portal cancellation request ${priorCancellation.id}`,
-          requestId: priorCancellation.id,
-          families: recoveredScope,
-        });
+        // Locked like every other cancellation writer (see the dedupe
+        // branch above) — never process unlocked beside an admin commit.
+        const releaseCancelLock = await require('../services/admin-cancellation').acquireCancelCommitLock(req.customer.id);
+        let retry;
+        try {
+          retry = await processCancellationRequest({
+            customerId: req.customer.id,
+            reason: `Portal cancellation request ${priorCancellation.id}`,
+            requestId: priorCancellation.id,
+            families: recoveredScope,
+          });
+        } finally { await releaseCancelLock(); }
         retryOutcome = retry;
         logger.info(
           `Re-ran cancellation processing for inactive-account retry ${priorCancellation.id}: ok=${retry.ok}` +
@@ -500,12 +515,20 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     let cancellationProcessed = false;
     if (isCancellation) {
       try {
-        cancellationResult = await processCancellationRequest({
-          customerId: req.customer.id,
-          reason: `Portal cancellation request ${request.id}`,
-          requestId: request.id,
-          families: scopedFamilies,
-        });
+        // Locked like the admin commit (shared customer-scoped advisory
+        // lock): a portal submission racing an admin end_of_coverage
+        // confirm must never pull the paid visits the admin run keeps.
+        // Busy throws into this catch — the durable request row + alert
+        // remain and the repair paths pick it up.
+        const releaseCancelLock = await require('../services/admin-cancellation').acquireCancelCommitLock(req.customer.id);
+        try {
+          cancellationResult = await processCancellationRequest({
+            customerId: req.customer.id,
+            reason: `Portal cancellation request ${request.id}`,
+            requestId: request.id,
+            families: scopedFamilies,
+          });
+        } finally { await releaseCancelLock(); }
       } catch (cancelErr) {
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }

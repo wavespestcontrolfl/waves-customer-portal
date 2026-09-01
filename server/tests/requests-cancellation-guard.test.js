@@ -25,6 +25,10 @@ jest.mock('../services/account-membership-email', () => ({
   sendRequestReceived: jest.fn().mockResolvedValue(null),
   sendCancellationReceived: jest.fn().mockResolvedValue(null),
 }));
+// The portal cancellation paths serialize on the shared admin cancel lock.
+jest.mock('../services/admin-cancellation', () => ({
+  acquireCancelCommitLock: jest.fn(async () => async () => {}),
+}));
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: jest.fn().mockResolvedValue({
     ok: true, cancelledCount: 1, recurrenceStopped: 1, churned: true, errors: [],
@@ -152,6 +156,17 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.code).toBe('nothing_to_cancel');
     expect(processCancellationRequest).not.toHaveBeenCalled();
     expect(mockState.service_requests_inserted).toBeUndefined();
+  }));
+
+  test('the shared cancel lock guards portal processing — busy parks the request for review, never an unlocked run', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    const { acquireCancelCommitLock } = require('../services/admin-cancellation');
+    acquireCancelCommitLock.mockRejectedValueOnce(Object.assign(new Error('Another cancellation for this customer is already being processed.'), { status: 409, code: 'cancel_in_progress' }));
+    const res = await postCancellation(baseUrl);
+    // The durable request row + alert remain; processing is deferred to the
+    // repair paths instead of racing the admin commit unlocked.
+    expect(res.status).toBe(201);
+    expect(processCancellationRequest).not.toHaveBeenCalled();
   }));
 
   test('ongoing recurring series → allowed, processor runs', () => withServer(async (baseUrl) => {

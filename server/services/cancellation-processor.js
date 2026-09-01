@@ -386,6 +386,13 @@ async function processCancellationRequest({
   //                the approved fingerprint. Null (portal path / repair
   //                retries) = live now, byte-identical to old behavior.
   feeEvaluationAt = null,
+  //   approvedScopedPricing (C3): canonical string of the scoped pricing
+  //                the operator approved (tier/monthly/rates/per-app) —
+  //                the recomputed wind-down plan must serialize to exactly
+  //                this or the repricing is refused (scoped_pricing_changed)
+  //                and the run parks for a fresh preview. Null = no
+  //                assertion (portal path, repairs).
+  approvedScopedPricing = null,
   // historyNote (C3): an IMMUTABLE request-scoped marker for the visit
   // history notes and the retry repair matching. The recorded REASON is
   // operator text (churn detail/classification) and may change between a
@@ -1085,6 +1092,24 @@ async function processCancellationRequest({
       scopedWoundDown = false;
     }
     if (!scopedWoundDown) errors.push('scoped_wind_down');
+  }
+  // The operator approved SPECIFIC numbers: a ledger/hold/tier write landing
+  // after the commit's validation would recompute different prices here and
+  // silently charge them. Reassert the approved snapshot at the wind-down
+  // boundary — a mismatch refuses the repricing (partial + belled; a fresh
+  // preview re-approves the live numbers).
+  if (scoped && scopedPlan?.ok && approvedScopedPricing != null) {
+    const live = [
+      `tier=${scopedPlan.tierAfter ?? ''}`,
+      `monthly=${scopedPlan.scalarAfter ?? ''}`,
+      `rates=${(scopedPlan.remainingRates || []).map((r) => `${r.family}:${r.before}:${r.after}`).sort().join(',')}`,
+      `perapp=${(scopedPlan.perAppRows || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
+    ].join('|');
+    if (live !== approvedScopedPricing) {
+      errors.push('scoped_pricing_changed');
+      logger.error(`[cancellation-processor] scoped pricing drifted since approval for ${customerId} — wind-down refused (approved ${approvedScopedPricing} vs live ${live})`);
+      scopedPlan = { ok: false, error: 'pricing_changed' };
+    }
   }
   if (scoped && scopedPlan?.ok) {
     try {

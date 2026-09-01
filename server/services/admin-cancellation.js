@@ -1137,7 +1137,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // acceptance closes — a lost stamp leaves everything retryable.
       const outcome = priorSnap && priorSnap.outcome ? priorSnap.outcome : null;
       const isConfirmErr = (e) => String(e).startsWith('confirmation_');
-      if (outcome && (refundRepairedNow
+      const hasTermiteErr = !!(outcome && Array.isArray(outcome.errors) && outcome.errors.includes('termite_retrieval_task'));
+      if (outcome && (refundRepairedNow || hasTermiteErr
         || (Array.isArray(outcome.errors) && outcome.errors.some(isConfirmErr)))) {
         try {
           const reqRow = prior.service_request_id
@@ -1146,8 +1147,21 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           if (reqRow && reqRow.status === 'new') {
             // A freshly repaired refund task answers the stale disposition
             // error the lost task recorded.
-            const promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
+            let promotedErrors = (outcome.errors || []).filter((e) => !(refundRepairedNow
               && (e === 'prepay_term_disposition' || e === 'prepay_refund_task')));
+            // A lost DEFERRED dated retrieval task repairs here too — the
+            // decided-term latch is the only path a retried end_at_term run
+            // reaches, and without this the stale error echoes forever and
+            // the office never gets the pull-after date.
+            if (hasTermiteErr && priorSnap.effectiveDate === 'end_of_coverage' && priorSnap.effectiveOn) {
+              try {
+                const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
+                await raiseTermiteRetrievalTask(customerId, reqRow.id, { retrieveAfter: priorSnap.effectiveOn });
+                promotedErrors = promotedErrors.filter((e) => e !== 'termite_retrieval_task');
+              } catch (termiteErr) {
+                logger.warn(`[admin-cancellation] deferred termite retrieval repair failed for request ${reqRow.id}: ${termiteErr.message}`);
+              }
+            }
             let channels = Array.isArray(outcome.confirmationChannels) ? outcome.confirmationChannels : [];
             let errorsNext = promotedErrors;
             if (outcome.confirmationRequested === true
@@ -1262,6 +1276,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // slow sweep crossing a visit's fee cutoff mid-run cannot charge a fee
   // that was absent from the approved fingerprint.
   let feeEvaluationAt = null;
+  // The APPROVED scoped pricing (canonical string): the processor recomputes
+  // planScopedWindDown from live rows, and a ledger/hold/tier write landing
+  // between validation and the wind-down would apply prices nobody approved
+  // — the processor reasserts this snapshot before repricing anything.
+  let approvedScopedPricing = null;
   // The approval boundary is MANDATORY for new destructive commits: both
   // first-party surfaces always carry the preview's fingerprint, so a
   // commit without one is a stale or hand-built call bypassing the facts
@@ -1284,6 +1303,14 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       approvedPulledKeysForMeta = liveImpact.pulledVisitKeys.map(String);
     }
     feeEvaluationAt = new Date();
+    if (!wholeAccount && liveImpact) {
+      approvedScopedPricing = [
+        `tier=${liveImpact.tierAfter ?? ''}`,
+        `monthly=${liveImpact.accountMonthlyAfter ?? ''}`,
+        `rates=${(liveImpact.remaining || []).map((r) => `${r.key}:${r.monthlyBefore}:${r.monthlyAfter}`).sort().join(',')}`,
+        `perapp=${(liveImpact.perAppChanges || []).map((p) => `${p.id}:${p.before}:${p.after}`).sort().join(',')}`,
+      ].join('|');
+    }
   }
 
   let caseSnapshot = null;
@@ -1423,6 +1450,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       keepVisitIds,
       waiveLateFee: input.waiveLateFee,
       feeEvaluationAt,
+      approvedScopedPricing,
     });
   } catch (err) {
     logger.error(`[admin-cancellation] processor threw for request ${request.id}: ${err.message}`);
