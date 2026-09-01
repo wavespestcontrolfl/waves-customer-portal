@@ -13,10 +13,23 @@ describe("describeProcessResult", () => {
     expect(v.didWork).toBe(false);
     expect(v.severity).toBe("blocked");
     expect(v.text).toMatch(/Nothing ran/);
-    // Names the control that is actually visible for a 'processing' row —
-    // both lists show Reprocess only once the row reads 'processed'.
-    expect(v.text).toMatch(/hit Process again/);
+    // Never names Reprocess: a blocked row is still 'processing', and both
+    // lists show Reprocess only once the row reads 'processed'.
     expect(v.text).not.toMatch(/Reprocess/);
+  });
+
+  it("the server's own explanation wins over the fallback copy", () => {
+    // The retry window depends on whether the run was forced, and only the
+    // server knows which constants apply — hardcoding "ten minutes" here cost
+    // an operator seven of them on a hot call.
+    const v = describeProcessResult({
+      success: false,
+      skipped: true,
+      reason: "already_processing",
+      error: "Another pass is still working this call. If it has stalled, try again about 3 minutes after it goes quiet.",
+    });
+    expect(v.severity).toBe("blocked");
+    expect(v.text).toMatch(/about 3 minutes/);
   });
 
   it("an unrecognised skip fails closed as blocked", () => {

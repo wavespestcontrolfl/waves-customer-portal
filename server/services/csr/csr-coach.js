@@ -7,6 +7,12 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 let TwilioService;
+
+// Matches the call pipeline's extraction budget: this runs INSIDE a
+// processing claim, so an unbounded hang here wedges the whole call.
+const CSR_SCORE_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
+  ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
+  : 180000;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
 class CSRCoach {
@@ -14,7 +20,14 @@ class CSRCoach {
   /**
    * Score a call and grade the lead. Returns score + coaching + follow-up task.
    */
-  async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata }) {
+  /**
+   * `stillOwnsClaim` — optional async predicate from a caller that holds a
+   * processing claim. Scoring awaits a provider for minutes, and the row it
+   * writes is not idempotent, so a caller whose claim was reclaimed during
+   * that await must not persist a second score (codex #3677 P1). Checked
+   * immediately before the insert, which is the only moment that matters.
+   */
+  async scoreCall({ csrName, customerId, callDirection, callSource, transcript, metadata, stillOwnsClaim }) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return { error: 'Anthropic API not configured' };
     }
@@ -112,7 +125,16 @@ ${transcript || 'No transcript available — score based on available metadata o
 
 Score the call, grade the lead, and generate a follow-up task if applicable.`
       }]
-    });
+    // BOUNDED. The call-recording pass AWAITS this while holding its
+    // processing claim, and its heartbeat runs on a timer — so on the SDK's
+    // defaults a hang here kept the claim alive and unreclaimable by both the
+    // 3-minute human path and the 10-minute automatic one (codex #3677 P1).
+    // Scoring is best-effort: failing after four minutes is strictly better
+    // than pinning a call in 'processing'.
+      // maxRetries: 0 — the SDK applies the timeout per ATTEMPT and defaults
+      // to 2 retries, which would let a bounded call hold the caller's claim
+      // for three intervals (codex #3677 P2).
+    }, { timeout: CSR_SCORE_TIMEOUT_MS, maxRetries: 0 });
 
     let score;
     try {
@@ -126,6 +148,11 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`
     if (customerId) {
       const prev = await db('csr_call_scores').where('customer_id', customerId).count('* as count').first();
       isFirstCall = parseInt(prev.count) === 0;
+    }
+
+    if (stillOwnsClaim && !(await stillOwnsClaim())) {
+      logger.warn('[csr-coach] ownership lost during scoring — discarding the score rather than writing a second one');
+      return { skipped: true, reason: 'ownership_lost' };
     }
 
     // Save the score

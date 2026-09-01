@@ -43,7 +43,9 @@ const BLOCKED_SKIP_COPY = {
   // lists label the control by status — Reprocess appears only once a row
   // reads 'processed'. Pointing at a button the operator cannot see is its
   // own small lie.
-  already_processing: 'Nothing ran — another pass still holds this call. Give it about ten minutes, then hit Process again.',
+  // Fallback only — the route sends its own message naming the real retry
+  // window, which differs for a forced run. See describeProcessResult.
+  already_processing: 'Nothing ran — another pass still holds this call. Try again once it goes quiet.',
   recording_not_ready: "Nothing ran — the recording hasn't landed from Twilio yet.",
   // NOT "nothing was saved": the transcript is persisted before the terminal
   // fence, so a pass that loses its claim here may already have written real
@@ -82,7 +84,16 @@ export function describeProcessResult(res) {
     // Unknown reasons fail CLOSED — an unrecognised skip is reported as
     // nothing-ran rather than quietly styled as success. That default is
     // the whole point of this module.
-    return { didWork: false, severity: 'blocked', text: BLOCKED_SKIP_COPY[reason] || `Nothing ran — ${reason}` };
+    // Prefer the SERVER's own explanation when it sent one: the retry window
+    // depends on whether the run was forced, and only the server knows which
+    // constants apply. The table below is the fallback for a body that
+    // carries no message.
+    const served = typeof res.error === 'string' && res.error.trim() ? res.error.trim() : null;
+    return {
+      didWork: false,
+      severity: 'blocked',
+      text: served || BLOCKED_SKIP_COPY[reason] || `Nothing ran — ${reason}`,
+    };
   }
   // FAIL CLOSED on anything that is not an explicit success. The processor's
   // happy path always sets success: true, so a null body, an empty object, or

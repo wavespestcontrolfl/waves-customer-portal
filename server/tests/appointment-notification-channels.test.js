@@ -385,6 +385,49 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 
+  // A caller holding a processing claim (the call-recording pass) cannot
+  // abandon from inside its SMS closure — a return there only leaves the
+  // closure. The helper therefore takes the ownership predicate itself and
+  // gates EVERY leg on it, so a claim that moved sends nothing further and
+  // raises no "unreachable customer" alert (codex #3677 P1).
+  test("'both' preference: a claim already lost sends neither leg and raises no alert", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'both' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+    });
+    const { notifyAdmin } = require('../services/notification-service');
+    const smsAttempt = jest.fn(async () => true);
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', apptTime: new Date('2026-06-20T12:00:00Z'),
+      smsAttempt, stillOwnsClaim: async () => false,
+    });
+    expect(reached).toBe(false);
+    expect(smsAttempt).not.toHaveBeenCalled();
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test("'both' preference: a claim lost DURING the SMS leg stops the email leg", async () => {
+    setDbQueues({
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'both' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+      appointment_reminders: [firstChain(null)], // deliverAppointmentNotice unit-move hold check → no hold
+    });
+    const { notifyAdmin } = require('../services/notification-service');
+    let owned = true;
+    // The closure discovers the loss (as the processor's does) and answers
+    // "not reached" — the predicate the helper holds now reads false.
+    const smsAttempt = jest.fn(async () => { owned = false; return false; });
+    const reached = await deliverConfirmationByChannel({
+      customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', apptTime: new Date('2026-06-20T12:00:00Z'),
+      smsAttempt, stillOwnsClaim: async () => owned,
+    });
+    expect(reached).toBe(false);
+    expect(smsAttempt).toHaveBeenCalledTimes(1);
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test("'email' preference: emails the confirmation with the derived appt time, skips SMS", async () => {
     setDbQueues({
       notification_prefs: [firstChain({ appointment_confirmation_channel: 'email' })],
