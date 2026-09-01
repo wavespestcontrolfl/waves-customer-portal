@@ -382,6 +382,25 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       const who = rewindStops.map((st) => String(st.customer || st.id)).join(', ');
       push('operational', `Clears stale tracker evidence on ${rewindStops.length} stop(s) — ${who}: tracker state is released and cleanup runs (no status change)`);
     }
+    // Grouped moved stops (GH r18 P1): a sole-open-member grouped stop
+    // passes eligibility, and the post-move seam then detaches it and
+    // dissolves the empty group — disclosed, with membership bound in the
+    // fingerprint (grouped_visit_id) and re-asserted by the confirmed pass.
+    const groupedStops = preview.stops.filter((st) => st && st.grouped_visit_id);
+    if (groupedStops.length) {
+      const who = groupedStops.map((st) => String(st.customer || st.id)).join(', ');
+      push('operational', `${groupedStops.length} moved stop(s) are the sole open member of a grouped visit — ${who}: the date move also detaches them from that visit and dissolves the now-empty group (a failed repair surfaces as a warning)`);
+    }
+    // Pinned text recipients (GH r18 P1): with notify_customers the card
+    // names each number (last4) the reschedule text goes to — the full
+    // number binds the fingerprint and is enforced at the sender's final
+    // recipient read.
+    if (params?.notify_customers === true) {
+      const who = preview.stops
+        .map((st) => `${String(st.customer || st.id)} (${st.notify_phone_last4 ? `…${st.notify_phone_last4}` : 'no SMS recipient'})`)
+        .join(', ');
+      push('comms', `Reschedule texts go to: ${who}`);
+    }
   }
   // Grouped stops in a reassignment get seam effects beyond the tech column
   // (GH r14 P1): after commit the visit-group seam either adopts the new

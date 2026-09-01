@@ -71,7 +71,7 @@ function ContractView({ contract, dark }) {
     : undefined;
   const tierClass = dark
     ? undefined
-    : `inline-block px-2 py-0.5 rounded-sm text-[14px] font-semibold border ${
+    : `inline-block px-2 py-0.5 rounded-sm text-[14px] font-medium border ${
         red ? "border-alert-fg text-alert-fg" : "border-zinc-400 text-zinc-700"
       }`;
   return (

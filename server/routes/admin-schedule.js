@@ -1110,7 +1110,7 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // the provider handoff if the visit moved again or went terminal, and closes/
 // re-arms the covered reminder windows guarded on the pre-send snapshot.
 // Returns { sent, error }.
-async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
+async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = null } = {}) {
   // Shared belt for every notice path (update-details, bulk reschedule, IB
   // schedule tools): a LEGACY outbound-review row (pending before the
   // 2026-08-11 review-hold removal) must be activated — reminders armed,
@@ -1144,6 +1144,13 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
     if (!customer) {
       error = 'Customer not found';
+    } else if (expectedPhone
+      && String(require('../services/customer-contact').getServiceContactSmsRecipient(customer).phone || '') !== String(expectedPhone)) {
+      // W0B pinned recipient at the sender's own customer read (GH r18
+      // P1): a card-confirmed batch move approved a specific number — a
+      // phone changed after the card must refuse here, never text an
+      // unapproved number. Callers without a pin are unchanged.
+      error = 'The recipient phone changed after the card was shown — reschedule text not sent to the new number.';
     } else {
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
       // sentinel) — safeSendAppointment then treats the primary as opted

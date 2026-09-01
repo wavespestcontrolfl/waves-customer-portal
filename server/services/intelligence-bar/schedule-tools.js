@@ -782,6 +782,22 @@ async function moveStopsToDay(input) {
   // (evidence appearing during the pending window is drift, not a silent
   // tracker release).
   const { needsLifecycleRewind: previewNeedsRewind } = require('../rebooker');
+  // Pinned SMS recipients (GH r18 P1): with notify_customers the commit
+  // texts each stop's resolved service-contact recipient, re-resolved from
+  // a fresh customer load at send time — so the phone the operator
+  // approves must ride the preview (full number binds the fingerprint,
+  // last4 renders on the card) and be enforced at the sender's final
+  // recipient read (sendRescheduleNoticeForVisit expectedPhone).
+  const notifyPhoneByCustomer = new Map();
+  if (notifyCustomers) {
+    const contactApi = require('../customer-contact');
+    for (const s of movable) {
+      if (!s.customer_id || notifyPhoneByCustomer.has(String(s.customer_id))) continue;
+      const customerRow = await db('customers').where('id', s.customer_id).first();
+      notifyPhoneByCustomer.set(String(s.customer_id),
+        customerRow ? (contactApi.getServiceContactSmsRecipient(customerRow).phone || null) : null);
+    }
+  }
   const stops = movable.map(s => ({
     id: s.id,
     customer: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
@@ -794,6 +810,15 @@ async function moveStopsToDay(input) {
     // live during the pending window is drift, not a silent workflow kill).
     status: s.status,
     ...(!LIVE_MOVE_STATUSES.has(String(s.status)) && previewNeedsRewind(s) ? { track_rewind: true } : {}),
+    // Grouped-visit membership (GH r18 P1): a sole-open-member grouped
+    // stop passes eligibility, and the post-commit seam then detaches it
+    // and dissolves the empty group — the card must disclose that, and a
+    // membership change during the pending window must drift.
+    ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
+    ...(notifyCustomers ? {
+      notify_phone: notifyPhoneByCustomer.get(String(s.customer_id)) || null,
+      notify_phone_last4: String(notifyPhoneByCustomer.get(String(s.customer_id)) || '').replace(/\D/g, '').slice(-4) || null,
+    } : {}),
     old_date: s.scheduled_date,
     new_date: dateStr,
   }));
@@ -836,7 +861,14 @@ async function moveStopsToDay(input) {
         return !a
           || String(a.status) !== String(s.status)
           || (a.track_rewind === true) !== (s.track_rewind === true)
-          || stopDateOnly(a.old_date) !== stopDateOnly(s.old_date);
+          || stopDateOnly(a.old_date) !== stopDateOnly(s.old_date)
+          // Grouped membership + pinned SMS recipient bind too (GH r18
+          // P1): a stop that joined/left/switched groups, or whose
+          // resolved recipient phone changed, gets effects the card never
+          // showed. `s` here is THIS confirmed pass's re-derived stop
+          // (same builder), so both sides carry the fields.
+          || String(a.grouped_visit_id || '') !== String(s.grouped_visit_id || '')
+          || (notifyCustomers && String(a.notify_phone || '') !== String(s.notify_phone || ''));
       });
     if (drifted) {
       return {
@@ -1131,7 +1163,13 @@ async function moveStopsToDay(input) {
               });
             } else {
               const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
-              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
+              // The card-approved recipient phone rides to the sender's
+              // final recipient read (GH r18 P1) — a number changed after
+              // the card refuses there instead of texting an unapproved
+              // phone.
+              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start, {
+                expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) || null,
+              });
               if (notice.sent) textedCount++;
               else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
             }
@@ -1151,11 +1189,17 @@ async function moveStopsToDay(input) {
   // moved child leaves a visit that stays on the old date. Runs LAST,
   // after every query this tool issues for its own result (the helper is
   // best-effort and self-contained). No-op for ungrouped rows.
+  let moveGroupWarning = null;
   for (const movedId of movedIds) {
     try {
       await require('../visit-groups').handleChildStopChanged(movedId);
     } catch (vgErr) {
       logger.warn(`[intelligence-bar:schedule] visit-group seam failed for moved ${movedId}: ${vgErr.message}`);
+      // The card disclosed the detach/dissolve for grouped moved stops —
+      // a failed repair must surface, never a bare Done (GH r18 P1).
+      if (movable.some((s) => movedIds.has(s.id) && s.visit_id)) {
+        moveGroupWarning = 'Moved, but repairing grouped-visit membership failed — one or more grouped stops may still show the old visit; re-check the affected visits on the schedule.';
+      }
     }
   }
 
@@ -1193,7 +1237,7 @@ async function moveStopsToDay(input) {
   const lifecycleNote = lifecycleCleanupFailures.length
     ? `${lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
     : null;
-  const combinedWarning = [overlapNote, notifyNote, conflictNote, lifecycleNote].filter(Boolean).join(' ');
+  const combinedWarning = [overlapNote, notifyNote, conflictNote, lifecycleNote, moveGroupWarning].filter(Boolean).join(' ');
 
   return {
     success: true,
