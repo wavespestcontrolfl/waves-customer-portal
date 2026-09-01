@@ -20,6 +20,8 @@ jest.mock('../models/db', () => {
           Object.entries(a).forEach(([k, v]) => preds.push((r) => r[k] === v));
         } else if (val === undefined) {
           preds.push((r) => r[a] === op);
+        } else if (op === '>=') {
+          preds.push((r) => r[a] >= val);
         } else {
           preds.push((r) => r[a] === val);
         }
@@ -31,6 +33,7 @@ jest.mock('../models/db', () => {
       orderBy() { return api; },
       limit() { return api; },
       select() { return api; },
+      distinct() { return api; },
       first() {
         const match = (state[table] || []).find((r) => preds.every((p) => p(r)));
         return Promise.resolve(match ? { ...match } : undefined);
@@ -51,7 +54,7 @@ jest.mock('../services/previsit-brief', () => ({
   deterministicVisitFacts: (...a) => mockDeterministicVisitFacts(...a),
 }));
 
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { executeTechTool } = require('../services/intelligence-bar/tech-tools');
 
 const ACCESS_BLOCK = {
@@ -99,5 +102,34 @@ describe('get_stop_details access-facts gate', () => {
     const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, {});
     expect(r.property).toBeNull();
     expect(r.todays_service).toMatchObject({ id: 's1' });
+  });
+
+  test("tech caller: another technician's same-day visit is invisible (no codes, no todays_service)", async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-2';
+    // keep the caller authorized on the customer via yesterday's assignment
+    state.scheduled_services.push({ id: 's0', customer_id: 'c1', scheduled_date: etDateString(addETDays(new Date(), -1)), status: 'completed', technician_id: 'tech-1' });
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.todays_service).toBeNull();
+    expect(r.property).toBeNull();
+    expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
+  });
+
+  test('tech caller: reassignment during the facts read withholds the codes (post-facts recheck)', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-1';
+    mockDeterministicVisitFacts.mockImplementation(async () => {
+      state.scheduled_services[0].technician_id = 'tech-2'; // dispatch reassigns mid-read
+      return { access: ACCESS_BLOCK, last_visit: null };
+    });
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.property).toBeNull();
+  });
+
+  test('tech caller still assigned: shared access block served', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    state.scheduled_services[0].technician_id = 'tech-1';
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.property).toEqual(ACCESS_BLOCK);
   });
 });

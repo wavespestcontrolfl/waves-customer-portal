@@ -267,11 +267,15 @@ async function getStopDetails(input, techId = null) {
     .orderBy('service_date', 'desc').limit(3)
     .select('service_date', 'service_type', 'notes', 'products_used', 'technician_name');
 
-  // Today's scheduled service
+  // Today's scheduled service — tech callers see only THEIR visit for this
+  // customer (the same-day row can belong to another technician); admin/
+  // unscoped callers (no techId) stay unrestricted.
   const today = etDateString();
-  const todayService = await db('scheduled_services')
+  const todayQuery = db('scheduled_services')
     .where({ customer_id: customer.id, scheduled_date: today })
-    .whereNotIn('status', ['cancelled']).first();
+    .whereNotIn('status', ['cancelled']);
+  if (techId) todayQuery.where('technician_id', techId);
+  const todayService = await todayQuery.first();
 
   // Access/property facts follow the same GATE_VISIT_FACTS policy as the
   // visit brief (GET /:id/visit-brief): gate on, the shared fail-soft access
@@ -284,7 +288,19 @@ async function getStopDetails(input, techId = null) {
     if (todayService) {
       try {
         const facts = await PrevisitBrief.deterministicVisitFacts(todayService);
-        property = facts.access;
+        // Re-verify the assignment AFTER the facts queries (same race the
+        // visit-brief route closes, Codex P1 on #3638): they run outside
+        // the scoped fetch above, so a dispatch reassignment during them
+        // would otherwise hand gate/garage/lockbox codes to the former
+        // technician. Admin callers (no techId) skip the recheck.
+        let stillOwned = true;
+        if (techId) {
+          stillOwned = !!(await db('scheduled_services')
+            .where({ id: todayService.id, technician_id: techId })
+            .whereNotIn('status', ['cancelled'])
+            .first('id'));
+        }
+        property = stillOwned ? facts.access : null;
       } catch { property = null; }
     }
   } else {
