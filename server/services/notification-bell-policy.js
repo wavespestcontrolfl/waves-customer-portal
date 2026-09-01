@@ -171,6 +171,11 @@ async function bellAllowed({ category, triggerKey, options = {} } = {}) {
   if (triggerKey && TRIGGER_BELL_DENYLIST.has(triggerKey)) return false;
   const overrides = await loadCategoryOverrides();
   if (category && overrides.has(category)) return overrides.get(category) === true;
+  // bellDefault: the site says "ring unless the owner said otherwise" — it
+  // sits BELOW the category override (unlike bell:true, which the override
+  // cannot silence), so an overridable category can default on and still
+  // honor a saved "off" (GH codex P2 on #3706).
+  if (options.bellDefault === true) return true;
   if (category && CATEGORY_BELL_ALLOWLIST.has(category)) return true;
   return false;
 }

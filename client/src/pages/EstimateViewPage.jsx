@@ -7487,7 +7487,7 @@ function EstimateViewPageInner() {
                   chips={askChips}
                 />
               ) : null}
-              {data?.softExit === true && !isRegulatedCertificateSurface
+              {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
                 ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
               <EstimateAddServiceRequestCard
                 offer={addServiceOffer}
@@ -7507,7 +7507,7 @@ function EstimateViewPageInner() {
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
-          {data?.softExit === true && !isRegulatedCertificateSurface && !(ctaPhase === 'review' && reservation)
+          {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
             ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
         </>
       )}

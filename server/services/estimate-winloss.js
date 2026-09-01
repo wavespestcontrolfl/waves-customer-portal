@@ -19,6 +19,7 @@
  */
 
 const db = require('../models/db');
+const logger = require('./logger');
 const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
 const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
 
@@ -275,6 +276,24 @@ const SLICE_COLUMNS = [
   'decline_reason', 'service_interest', 'notes',
 ];
 
+// Estimate ids that carry the customer's "still deciding" signal. Best-effort:
+// an activity_log read failure degrades the card to "no signals", never to a
+// failed slice build.
+async function stillDecidingEstimateIds(estimateIds) {
+  const ids = (estimateIds || []).map(String).filter(Boolean);
+  if (!ids.length) return new Set();
+  try {
+    const marks = await db('activity_log')
+      .whereIn('estimate_id', ids)
+      .where({ action: 'estimate_customer_still_deciding' })
+      .select('estimate_id');
+    return new Set((Array.isArray(marks) ? marks : []).map((m) => String(m?.estimate_id || '')).filter(Boolean));
+  } catch (err) {
+    logger.warn(`[estimate-winloss] still-deciding read skipped: ${err.message}`);
+    return new Set();
+  }
+}
+
 async function winLossSlices({ days = 90 } = {}) {
   const cutoffMs = Date.now() - days * 86400000;
   const cutoff = new Date(cutoffMs);
@@ -348,6 +367,12 @@ async function winLossSlices({ days = 90 } = {}) {
   // WaveGuard tier. Every input is a persisted column or the persisted
   // estimate_data — never today's price constants.
   const byDispositionCount = new Map();
+  // "Still deciding" — the soft-exit sheet's one-tap signal (activity_log,
+  // never an estimate write). Joined here so an expired estimate whose
+  // customer said "still deciding" can be told apart from one that went
+  // silent (GH codex P2 on #3706). Read AFTER both estimate reads.
+  const stillDecidingIds = await stillDecidingEstimateIds(rows.map((r) => r.id));
+  const stillDeciding = { signaled: 0, wonAfter: 0, lostAfter: 0, expiredViewedAfter: 0 };
   const byServiceLine = new Map();
   const byLeadSource = new Map();
   const byWaveguardTier = new Map();
@@ -365,6 +390,11 @@ async function winLossSlices({ days = 90 } = {}) {
 
     const disposition = isWon ? null : effectiveDisposition(row);
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
+    if (stillDecidingIds.has(String(row.id))) {
+      stillDeciding.signaled += 1;
+      if (isWon) stillDeciding.wonAfter += 1; else stillDeciding.lostAfter += 1;
+      if (disposition === 'expired_viewed') stillDeciding.expiredViewedAfter += 1;
+    }
     // Archived rows still drop from every RATE symmetrically (archived
     // losses and wins leave together — same reasoning as PipelineAnalytics'
     // activeRows), but their classification above stays in "why we lose":
@@ -478,6 +508,7 @@ async function winLossSlices({ days = 90 } = {}) {
     byPriceBand,
     recurringBandsByFlag,
     byDisposition,
+    stillDeciding,
     byServiceLine: keyedToList(byServiceLine, (k) => SERVICE_LINE_LABELS[k] || k),
     byLeadSource: keyedToList(byLeadSource),
     byWaveguardTier: keyedToList(byWaveguardTier, (k) => (k === 'none' ? 'No bundle' : k.charAt(0).toUpperCase() + k.slice(1))),

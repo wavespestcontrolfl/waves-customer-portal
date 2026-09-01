@@ -129,8 +129,10 @@ describe('createEstimateChangeRequest', () => {
     expect(category).toBe('estimate_change_request');
     expect(subject).toContain('EST-2026-0099');
     expect(opts.link).toBe('/admin/customers?customerId=cust-1');
-    // Direct customer communication rings by default (explicit bell tag).
-    expect(opts.bell).toBe(true);
+    // Direct customer communication rings by default, below the owner's
+    // category override (bellDefault, never the un-silenceable bell:true).
+    expect(opts.bellDefault).toBe(true);
+    expect(opts.bell).toBeUndefined();
     expect(opts.metadata).toMatchObject({ estimateId: 'est-1', requestId: 'req-1' });
   });
 
