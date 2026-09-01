@@ -28,7 +28,9 @@ const SKIP_FILES = new Set(['config/lead-writer-registry.js']);
 // `db('leads').returning('*').insert(...)` — with paren-free arguments; it
 // also covers the multi-line `db('leads')\n  .insert({` form (zero segments,
 // `\s*` spans the newline).
-const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\([^()]*\))*`;
+// Segment arguments allow ONE level of nested parens, so a chain like
+// `.modify((qb) => qb.where('active', true))` doesn't stop the walk.
+const CHAIN = String.raw`(?:\s*\.\s*(?!insert\b)[\w$]+\s*\((?:[^()]|\([^()]*\))*\))*`;
 const Q = '[\'"`]'; // quote class incl. backtick
 // Optional schema qualifier INSIDE the literal too — knex accepts
 // `db('public.leads')` as a schema-qualified table name.
@@ -57,7 +59,7 @@ function knexInsertPatterns(token) {
 // match. Also fires on a comment SAYING "insert into leads" — that's fine,
 // registering (or rewording) it is cheaper than an unscanned writer form.
 const RAW_SQL_INSERT_RE = new RegExp(
-  String.raw`\binsert\s+into\s+(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
+  String.raw`\binsert\s+into\s+(?:only\s+)?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
   'gi'
 );
 
@@ -120,54 +122,71 @@ function blankCommentsAndStrings(code) {
     .replace(/`(?:\\.|[^`\\])*`/g, blank);
 }
 
-const DYN_EXPR = String.raw`([A-Za-z_$][\w$]*(?:\.[\w$]+)*)`;
+// ANY table argument, running over BLANKED code: a pure string-literal
+// argument blanks to whitespace (skipped — the literal scan owns it), while
+// an identifier, member, call (`resolveTable(kind)` — one nesting level),
+// conditional, or concatenation survives blanking and is treated as dynamic.
+// No top-level comma (a two-argument call is not a knex builder head).
+const DYN_EXPR = String.raw`((?:[^(),]|\([^()]*\))+)`;
 const DYNAMIC_INSERT_PATTERNS = [
-  new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\(\s*${DYN_EXPR}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  new RegExp(String.raw`\.\s*table\s*\(\s*${DYN_EXPR}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
-  new RegExp(String.raw`\bbatchInsert\s*\(\s*${DYN_EXPR}\s*,`, 'g'),
-  new RegExp(String.raw`\.into\(\s*${DYN_EXPR}\s*\)`, 'g'),
+  new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  new RegExp(String.raw`\.\s*table\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  new RegExp(String.raw`\bbatchInsert\s*\(${DYN_EXPR},`, 'g'),
+  new RegExp(String.raw`\.into\(${DYN_EXPR}\)`, 'g'),
 ];
 
 function scanSourceForDynamicTableInserts(src) {
   const lines = src.split('\n');
   const code = blankCommentsAndStrings(src); // patterns run on CODE only …
-  const seen = new Set();
-  const sites = [];
+  const endsByLine = new Map();
+  const exprByLine = new Map();
   // … but constant resolution reads the ORIGINAL source (the literal lives
-  // in a string). Only a MODULE-LEVEL `const` counts as resolution: `const`
-  // cannot be reassigned, and requiring column 0 keeps a like-named function
-  // parameter or block-scoped `let` from borrowing the module constant as
-  // proof (a `let` that is later reassigned proves nothing).
-  const isResolved = (expr) => new RegExp(
-    String.raw`^const\s+${escapeRe(expr.split('.')[0])}\s*=\s*${Q}[\w.]+${Q}`, 'm'
-  ).test(src);
-  const record = (index, expr) => {
+  // in a string). Resolution requires a MODULE-LEVEL `const` (column 0 —
+  // cannot be reassigned) whose name is SCREAMING_SNAKE, the repo's table
+  // constant convention. A lowercase identifier is treated as shadowable
+  // (`const table = 'audit'` can be shadowed by a like-named parameter the
+  // file-wide regex cannot scope) and conservatively stays dynamic.
+  const isResolved = (rawExpr) => {
+    const expr = rawExpr.trim();
+    if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+)*$/.test(expr)) return false; // computed — never resolved
+    const root = expr.split('.')[0];
+    if (!/^[A-Z][A-Z0-9_]*$/.test(root)) return false; // shadowable name
+    return new RegExp(String.raw`^const\s+${escapeRe(root)}\s*=\s*${Q}[\w.]+${Q}`, 'm').test(src);
+  };
+  const record = (index, matchLen, expr) => {
+    if (!expr.trim()) return; // pure string literal, blanked — the literal scan owns it
+    if (isResolved(expr)) return;
     const line = code.slice(0, index).split('\n').length;
-    if (seen.has(line)) return;
-    seen.add(line);
-    sites.push({ line, anchor: lines[line - 1].trim(), expr });
+    if (!endsByLine.has(line)) endsByLine.set(line, new Set());
+    endsByLine.get(line).add(index + matchLen);
+    if (!exprByLine.has(line)) exprByLine.set(line, expr.trim());
   };
   for (const pattern of DYNAMIC_INSERT_PATTERNS) {
     pattern.lastIndex = 0;
     let m;
-    while ((m = pattern.exec(code))) {
-      if (!isResolved(m[1])) record(m.index, m[1]);
-    }
+    while ((m = pattern.exec(code))) record(m.index, m[0].length, m[1]);
   }
   // Stored builders over a dynamic table — `const target = db(table);
   // await target.insert(row);` — the dynamic mirror of the alias pass.
   const dynDeclRe = new RegExp(
-    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${DYN_EXPR}\s*\)`,
+    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   let decl;
   while ((decl = dynDeclRe.exec(code))) {
-    if (isResolved(decl[2])) continue;
+    if (!decl[2].trim() || isResolved(decl[2])) continue;
     const useRe = new RegExp(String.raw`\b${escapeRe(decl[1])}${CHAIN}\s*\.\s*insert\s*\(`, 'g');
     let use;
-    while ((use = useRe.exec(code))) record(use.index, decl[2]);
+    while ((use = useRe.exec(code))) record(use.index, use[0].length, decl[2]);
   }
-  return sites;
+  return [...endsByLine.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([line, ends]) => ({
+      line,
+      anchor: lines[line - 1].trim(),
+      expr: exprByLine.get(line),
+      siteCount: ends.size,
+    }));
 }
 
 function walk(dir, out = []) {
@@ -261,6 +280,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['constant table name via batchInsert', "const TABLE = 'leads';\nawait db.batchInsert(TABLE, rows);"],
     ['constant table name through stored builder', "const TABLE = 'leads';\nconst b = trx(TABLE);\nawait b.insert({ a: 1 });"],
     ['schema-qualified table literal', "await db('public.leads').insert({ a: 1 });"],
+    ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
+    ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
   ])('detects: %s', (_name, src) => {
     expect(scanSourceForLeadInserts(src).length).toBeGreaterThanOrEqual(1);
   });
@@ -311,6 +332,24 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     );
     expect(reassigned).toHaveLength(1);
   });
+
+  test('dynamic-table scan: computed expressions and shadowable lowercase constants stay dynamic', () => {
+    const computed = scanSourceForDynamicTableInserts('await db(resolveTable(kind)).insert(row);');
+    expect(computed).toHaveLength(1);
+    expect(computed[0].expr).toBe('resolveTable(kind)');
+    // A lowercase module const is shadowable by a like-named parameter the
+    // file-wide regex cannot scope — conservatively dynamic.
+    const shadowable = scanSourceForDynamicTableInserts(
+      "const table = 'audit';\nasync function f(table, row) {\n  await db(table).insert(row);\n}"
+    );
+    expect(shadowable).toHaveLength(1);
+  });
+
+  test('dynamic-table scan: two dynamic inserts on one line surface as TWO sites', () => {
+    const sites = scanSourceForDynamicTableInserts('await db(a).insert(x); await db(b).insert(y);');
+    expect(sites).toHaveLength(1);
+    expect(sites[0].siteCount).toBe(2);
+  });
 });
 
 describe('lead-writer registry (#3137 groundwork)', () => {
@@ -328,6 +367,9 @@ describe('lead-writer registry (#3137 groundwork)', () => {
     const allowed = new Set(DYNAMIC_TABLE_INSERTS.map(key));
     const unlisted = dynamic.filter((s) => !allowed.has(key(s)));
     expect(unlisted.map((s) => `${s.file}:${s.line} — ${s.anchor} (expr: ${s.expr})`)).toEqual([]);
+    // Same rule as the literal scan: two dynamic inserts on one line cannot
+    // get distinguishable allowlist keys.
+    expect(dynamic.filter((s) => s.siteCount > 1).map(key)).toEqual([]);
     const present = new Set(dynamic.map(key));
     const stale = DYNAMIC_TABLE_INSERTS.filter((w) => !present.has(key(w)));
     expect(stale.map(key)).toEqual([]);
