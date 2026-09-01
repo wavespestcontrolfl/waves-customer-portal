@@ -215,6 +215,53 @@
     ]
   },
   "exclusions": {
+    "dethatching": [
+      {
+        "value": "Inspection only",
+        "excludes": [
+          "Light debris removed",
+          "Moderate debris removed",
+          "Heavy debris removed",
+          "Debris consolidated onsite"
+        ]
+      },
+      {
+        "value": "Work deferred",
+        "excludes": [
+          "Light debris removed",
+          "Moderate debris removed",
+          "Heavy debris removed",
+          "Debris consolidated onsite"
+        ]
+      }
+    ],
+    "plugging": [
+      {
+        "value": "Not installed",
+        "excludes": [
+          "Full quoted area completed",
+          "Partial quoted area completed"
+        ]
+      },
+      {
+        "value": "Inspection only",
+        "excludes": [
+          "6-inch spacing",
+          "9-inch spacing",
+          "12-inch spacing",
+          "Mixed spacing per site conditions"
+        ]
+      },
+      {
+        "value": "Work deferred",
+        "excludes": [
+          "6-inch spacing",
+          "9-inch spacing",
+          "12-inch spacing",
+          "Mixed spacing per site conditions"
+        ]
+      }
+    ],
     "fire_ant": [
       {
         "value": "No active fire ants observed",

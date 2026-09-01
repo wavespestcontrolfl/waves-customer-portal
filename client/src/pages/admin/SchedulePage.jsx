@@ -13606,17 +13606,21 @@ export function CompletionPanel({
       // labels the selector no longer offers — they must not persist as
       // completed protocol actions. Only applied once the (filtered) action
       // set has loaded; pest keeps its fallback-chip labels untouched.
+      // Specialty preset lanes (any service) accept only the preset's own
+      // actions — a restored label from a previously served list is stale
+      // and must not reach the customer report (codex P2 r7 #3701).
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
       ).filter(
         (label) =>
-          !isLawn ||
-          specialtyProtocolActions.length > 0 ||
-          (protocolActionsLoaded &&
-            protocolActions.some(
-              (action) =>
-                (action.label || action.note || action.raw || "") === label,
-            )),
+          specialtyProtocolActions.length > 0
+            ? specialtyProtocolActions.some((action) => action.label === label)
+            : !isLawn ||
+              (protocolActionsLoaded &&
+                protocolActions.some(
+                  (action) =>
+                    (action.label || action.note || action.raw || "") === label,
+                )),
       );
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
@@ -14039,6 +14043,7 @@ export function CompletionPanel({
   // Lawn closeouts are product-backed-only: no generic pest fallback chips
   // (a scout-only or unmatched-catalog visit must not surface "Cobweb sweep"),
   // and an empty list hides the field instead of exposing the fallback.
+  const activeSpecialtyObservationLabels = activeSelectedLabels(selectedObservationLabels);
   const specialtyProtocolActions = (specialtyCompletion?.protocols || []).map((action, index) => ({
     ...action,
     id: `specialty-${index}`,
@@ -15223,8 +15228,11 @@ export function CompletionPanel({
               </div>
             )}
             {!isTypedFindings && specialtyCompletion?.findingGroups?.map((group) => {
+              // Marker-backed: before an AI draft, deleting the [Found] line
+              // deselects, so the dropdown must read the same active set the
+              // submit path uses (codex P2 r7 #3701).
               const selected = group.options.find((item) =>
-                selectedObservationLabels.includes(item.value),
+                activeSpecialtyObservationLabels.includes(item.value),
               )?.value || "";
               return (
                 <Field key={group.key} label={group.label}>
@@ -17516,8 +17524,11 @@ export function CompletionPanel({
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
             {!isTypedFindings && specialtyCompletion?.findingGroups?.map((group) => {
+              // Marker-backed: before an AI draft, deleting the [Found] line
+              // deselects, so the dropdown must read the same active set the
+              // submit path uses (codex P2 r7 #3701).
               const selected = group.options.find((item) =>
-                selectedObservationLabels.includes(item.value),
+                activeSpecialtyObservationLabels.includes(item.value),
               )?.value || "";
               return (
                 <div key={group.key} style={{ marginBottom: 12 }}>

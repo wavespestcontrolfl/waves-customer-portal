@@ -490,6 +490,15 @@ describe('service report v1', () => {
       expect(normalized).toMatchObject({ interior_reentry_min: 120, exterior_reentry_min: 30 });
     });
 
+    test.each([
+      'Thin / stressed turf areas', 'Weed breakthrough areas', 'Insect activity areas', 'Disease-affected areas',
+    ])('one-time lawn area chip %s alone classifies as exterior scope', (area) => {
+      const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+        service: { areas_serviced: JSON.stringify([area]) },
+      });
+      expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+    });
+
     test('pet-resting area chips retain interior scope beside lawn treatment', () => {
       const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
         service: { areas_serviced: JSON.stringify(['Pet resting areas', 'Front lawn']) },

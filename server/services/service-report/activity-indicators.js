@@ -1216,6 +1216,11 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       && (evidence.includes('Live pests observed') || evidence.includes('Active trail / foraging'))) {
       errors.push('Activity level "None observed" contradicts current live pest evidence');
     }
+    const activityLevel = String(values.activity_level || '');
+    if (activityLevel && activityLevel !== 'None observed'
+      && (pests.includes('No pest activity observed') || evidence.includes('No evidence observed'))) {
+      errors.push(`Activity level "${activityLevel}" contradicts no-activity or no-evidence findings`);
+    }
     const noApplicationChoices = ['Inspection / identification only', 'Treatment deferred'];
     const applicationChoices = work.filter((item) => ![
       ...noApplicationChoices,

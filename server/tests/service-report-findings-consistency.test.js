@@ -55,10 +55,20 @@ describe('editable service-report findings consistency', () => {
     ['one_time_pest_treatment', { work_completed: 'Inspection / identification only, Bait placement' }],
     ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Exterior perimeter application' }],
     ['one_time_pest_treatment', { work_completed: 'Treatment deferred, Treatment limited by site conditions' }],
+    ['one_time_pest_treatment', { activity_level: 'Heavy', pests_observed: 'No pest activity observed' }],
+    ['one_time_pest_treatment', { activity_level: 'Light', evidence_observed: 'No evidence observed' }],
     ['termite_treatment', { termite_evidence: 'Preventive treatment — no activity observed, Live termites observed' }],
     ['palm_injection', { pest_disease_signs: 'None observed today, Scale' }],
   ])('%s rejects a zero-state paired with positive technician evidence', (type, values) => {
     expect(validate(type, values).ok).toBe(false);
+  });
+
+  test('a positive activity level stays valid beside observed pests', () => {
+    expect(validate('one_time_pest_treatment', {
+      activity_level: 'Moderate',
+      pests_observed: 'Fire ants',
+      evidence_observed: 'Live pests observed',
+    }).ok).toBe(true);
   });
 
   test('customer-reported activity remains compatible with no technician-observed evidence', () => {

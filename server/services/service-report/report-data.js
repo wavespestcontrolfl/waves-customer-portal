@@ -515,7 +515,12 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   // deck / patio", "Bait stations", "Crawlspace", "Garage / slab edge",
   // "Wood contact points") — exterior choices that would otherwise fall
   // through and zero the customer's dry-down timer (codex inline r6).
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact)\b/.test(text);
+  // turf / weed breakthrough / insect activity areas / disease affected cover
+  // the one-time lawn "Areas treated" chips ("Thin / stressed turf areas",
+  // "Weed breakthrough areas", "Insect activity areas", "Disease-affected
+  // areas") — exterior applications that carry the dry-down target (codex P1
+  // r7 #3701).
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact|turf|weed breakthrough|insect activity areas|disease affected)\b/.test(text);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
