@@ -23,18 +23,20 @@ describe('ReturnVisitStrip', () => {
       visitNumber: 3,
       lastVisitAt: '2026-08-30T14:00:00.000Z',
       changes: [
-        { kind: 'service_removed', label: 'You removed Mosquito; the price below reflects that.', at: '2026-08-31T10:00:00.000Z' },
-        { kind: 'extension_granted', label: 'Your expiration date was extended.', at: '2026-08-31T11:00:00.000Z' },
+        { kind: 'service_removed', label: 'Mosquito was removed from this estimate; the price below reflects that.', at: '2026-08-31T10:00:00.000Z' },
+        { kind: 'extension_granted', label: 'The expiration date was extended.', at: '2026-08-31T11:00:00.000Z' },
       ],
     }} />);
-    expect(screen.getByText(/what’s changed since August 30/)).toBeInTheDocument();
-    expect(screen.getByText('You removed Mosquito; the price below reflects that.')).toBeInTheDocument();
-    expect(screen.getByText('Your expiration date was extended.')).toBeInTheDocument();
+    expect(screen.getByText(/opened 3 times — here’s what’s changed on it since August 30/)).toBeInTheDocument();
+    expect(screen.getByText('Mosquito was removed from this estimate; the price below reflects that.')).toBeInTheDocument();
+    expect(screen.getByText('The expiration date was extended.')).toBeInTheDocument();
+    // Estimate-level wording only — never claims the current reader did it.
+    expect(screen.queryByText(/\byou\b/i)).not.toBeInTheDocument();
   });
 
   it('never claims "nothing changed" when the server named no change (only two stamps are recognized)', () => {
     render(<ReturnVisitStrip returnVisit={{ visitNumber: 2, lastVisitAt: '2026-08-30T14:00:00.000Z', changes: [] }} />);
-    expect(screen.getByText(/Back for another look since August 30 — the estimate below is current as of today\./)).toBeInTheDocument();
+    expect(screen.getByText(/opened 2 times, last on August 30 — the estimate below is current as of today\./)).toBeInTheDocument();
     expect(screen.queryByText(/same price|nothing has changed/i)).not.toBeInTheDocument();
   });
 

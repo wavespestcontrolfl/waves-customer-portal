@@ -38,9 +38,11 @@ describe('buildReturnVisitPayload', () => {
         },
       },
     });
-    expect(out.changes.map((c) => c.kind)).toEqual(['service_removed', 'service_restored']);
-    expect(out.changes[0].label).toBe('You removed Lawn Care; the price below reflects that.');
-    expect(out.changes[1].label).toBe('You added Lawn Care back; the price below reflects that.');
+    // Lawn Care was removed then restored after the boundary: only its FINAL
+    // state is described (never "removed; the price reflects that" for a line
+    // that is back on the plan).
+    expect(out.changes.map((c) => c.kind)).toEqual(['service_restored']);
+    expect(out.changes[0].label).toBe('Lawn Care was added back to this estimate; the price below reflects that.');
   });
 
   test('labels fall back to the opt-out label map when the event carries none', () => {
@@ -58,7 +60,7 @@ describe('buildReturnVisitPayload', () => {
       extensionAutoGrantedAt: '2026-08-31T08:00:00Z',
     });
     expect(out.changes.map((c) => c.kind)).toEqual(['extension_granted', 'service_removed']);
-    expect(out.changes[0].label).toBe('Your expiration date was extended.');
+    expect(out.changes[0].label).toBe('The expiration date was extended.');
   });
 
   test('an extension granted BEFORE the previous visit is not a change', () => {
@@ -93,6 +95,24 @@ describe('buildReturnVisitPayload', () => {
       estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-30T10:51:00Z' }] } },
     });
     expect(later.changes).toHaveLength(1);
+  });
+
+  test('an extension granted inside the post-visit gap is still named (it is not a sitting mutation)', () => {
+    const out = buildReturnVisitPayload({
+      sessions: [s('2026-08-30T10:00:00Z', '2026-08-30T10:20:00Z'), s('2026-09-01T12:00:00Z')],
+      estimateData: {},
+      extensionAutoGrantedAt: '2026-08-30T10:30:00Z',
+    });
+    expect(out.changes.map((c) => c.kind)).toEqual(['extension_granted']);
+  });
+
+  test('a removal that stands after the boundary reads estimate-level, never "you"', () => {
+    const out = buildReturnVisitPayload({
+      sessions: [s('2026-08-30T10:00:00Z'), s('2026-09-01T12:00:00Z')],
+      estimateData: { serviceOptOut: { events: [{ serviceKey: 'mosquito', label: 'Mosquito', included: false, at: '2026-08-31T09:00:00Z' }] } },
+    });
+    expect(out.changes[0].label).toBe('Mosquito was removed from this estimate; the price below reflects that.');
+    expect(out.changes[0].label).not.toMatch(/\byou\b/i);
   });
 
   test('malformed sessions and events are dropped, not thrown', () => {

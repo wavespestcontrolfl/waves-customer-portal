@@ -1142,12 +1142,15 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
     color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer',
   };
   return (
-    <section data-glass="card" aria-label="Welcome back" style={{ ...estimateCard(), display: 'grid', gap: 8 }}>
-      <div style={{ ...HEADER_EYEBROW_STYLE }}>Welcome back</div>
+    <section data-glass="card" aria-label="Another look" style={{ ...estimateCard(), display: 'grid', gap: 8 }}>
+      {/* Estimate-level wording, never "you": the link may be opened by a
+          spouse or bookkeeper after the share action, and views carry no
+          viewer identity (GH codex P2 on #3708). */}
+      <div style={{ ...HEADER_EYEBROW_STYLE }}>Another look</div>
       {changes.length ? (
         <>
           <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-            Back for another look &mdash; here&rsquo;s what&rsquo;s changed{since}:
+            This estimate has been opened {returnVisit.visitNumber} times &mdash; here&rsquo;s what&rsquo;s changed on it{since}:
           </div>
           <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: COLORS.glassNavy, lineHeight: 1.5 }}>
             {changes.map((c, i) => <li key={`${c.kind}-${c.at || i}`}>{c.label}</li>)}
@@ -1155,7 +1158,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
         </>
       ) : (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
-          Back for another look{lastDisplay ? ` since ${lastDisplay}` : ''} &mdash; the estimate below is current as of today.
+          This estimate has been opened {returnVisit.visitNumber} times{lastDisplay ? `, last on ${lastDisplay}` : ''} &mdash; the estimate below is current as of today.
         </div>
       )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
@@ -4696,7 +4699,11 @@ function EstimateViewPageInner() {
   // aborts whichever load is in flight, not just the mount-time one.
   const lifetimeAbortRef = useRef(null);
 
-  const loadEstimate = useCallback(async ({ preserveSelection = false } = {}) => {
+  // countView: keep the refresh UI semantics (no skeleton) but let the server
+  // COUNT this open — the revived fetch after an expired-screen extension is
+  // a real visit, and tagging it refresh=1 would leave the returning-visitor
+  // projection one session behind (GH codex P2 on #3708).
+  const loadEstimate = useCallback(async ({ preserveSelection = false, countView = false } = {}) => {
     const signal = lifetimeAbortRef.current?.signal;
     const isRefresh = initialViewCountedRef.current;
     // Refreshes keep the loaded UI on screen instead of dropping back to the
@@ -4705,7 +4712,7 @@ function EstimateViewPageInner() {
     if (!isRefresh) setLoading(true);
     setLoadError(false);
     const params = [];
-    if (isRefresh) params.push('refresh=1');
+    if (isRefresh && !countView) params.push('refresh=1');
     if (pdfDocumentMode) {
       params.push('mode=pdf');
       if (pdfDocPin) params.push(`dpin=${encodeURIComponent(pdfDocPin)}`);
@@ -5948,10 +5955,11 @@ function EstimateViewPageInner() {
             // up until /data actually 200s (then the live estimate renders
             // in place); on failure nothing changes and the card—with its
             // success copy and retry button—survives. The server counts the
-            // revived estimate's first real view regardless (?refresh=1 is
-            // only honored once viewed_at is set).
+            // revived estimate's open as a real view: countView keeps the
+            // refresh UI but omits ?refresh=1, so the returning-visitor
+            // projection sees this sitting (GH codex P2 on #3708).
             initialViewCountedRef.current = true;
-            loadEstimate().catch(() => {});
+            loadEstimate({ countView: true }).catch(() => {});
           }}
         />
       </Page>
@@ -6793,8 +6801,9 @@ function EstimateViewPageInner() {
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
-        {/* No Ask bar renders on this branch, so the strip drops that action. */}
-        {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={false} /> : null}
+        {/* aiPanelBlock below renders the Ask bar on this branch (regulated
+            certificate surfaces excepted), so the action follows that. */}
+        {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
