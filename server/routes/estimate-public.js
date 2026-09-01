@@ -1962,7 +1962,7 @@ const SERVICE_COPY = {
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
     askChips: [
       'How long does each visit last?',
-      'Pet & kid safe?',
+      'What precautions should I follow for pets and children?',
       'When does the season start?',
       'What about my pool area?',
     ],
@@ -2026,12 +2026,7 @@ const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
@@ -2043,7 +2038,7 @@ const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets & kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'What product is used for Bora-Care?',
       'When should this be done?',
     ],
@@ -2066,6 +2061,30 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for lawn care.",
     },
   },
+  wdo_inspection: {
+    headline: "Hey {first}, here's your WDO inspection quote.",
+    aiEyebrow: 'Your inspection',
+    aiTitle: 'Your WDO inspection was prepared for this property',
+    aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
+    askChips: [],
+    priceWording: {},
+  },
+  termite_foam: {
+    headline: "Hey {first}, here's your termite foam treatment quote.",
+    aiEyebrow: 'Your treatment plan',
+    aiTitle: 'This quote was prepared for the targeted termite treatment area',
+    aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
+    priceWording: {},
+  },
+  trap_only: {
+    headline: "Hey {first}, here's your trap-only monitoring plan.",
+    aiEyebrow: 'Your monitoring plan',
+    aiTitle: 'This trap-only plan was prepared for your property',
+    aiBody: 'The plan separates the initial setup and inspection from the ongoing trap-monitoring service and its scheduled cadence.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',
@@ -2075,7 +2094,7 @@ const SERVICE_COPY = {
       'What is included in this plan?',
       'How do you handle ants?',
       'How does your lawn assessment tech work?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
@@ -2219,10 +2238,10 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
-const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+const SAFETY_ASK_CHIP = 'What precautions should I follow for pets and children?';
 // Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
 // borate-specific answer instead of the generic label-direction safety copy.
-const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+const BORA_CARE_SAFETY_ASK_CHIP = 'What precautions should I follow with Bora-Care around pets and children?';
 // Bora-Care service chip — shared between the SSR prompt builder and the React
 // pricing contract so a Bora-Care add-on surfaces it on both paths.
 const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
@@ -3121,7 +3140,7 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || /\bpre\s+slab\b/.test(words)) return 'pre_slab_termiticide';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || raw.includes('slab_pretreat') || /\bpre\s+slab\b|\bslab\s+pre\s?treat\b/.test(words)) return 'pre_slab_termiticide';
   if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -3174,6 +3193,9 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
@@ -3200,7 +3222,7 @@ function isPreSlabOneTimeItem(item = {}) {
     .join(' ')
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return raw.includes('pre slab')
+  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
     && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
 }
 
@@ -3248,6 +3270,19 @@ function boraCareCustomerCopy() {
   return {
     note: 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi.',
   };
+}
+
+function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|slab pre ?treat/i.test(
+    [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
+  );
+  return recurringRows.some(isRegulatedRow)
+    || oneTimeRows.some((row) => (
+      ['wdo_inspection', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(row))
+      || isRegulatedRow(row)
+    ));
 }
 
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
@@ -5625,7 +5660,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  const intelligence = isRegulatedCertificateSurface
+    ? null
+    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -5833,7 +5871,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     pestRecurring,
     hasPestOneTime,
   );
-  const estimateAskEnabled = isEstimateAskAnswerable({
+  const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
   });
@@ -18424,6 +18462,9 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'bundle': return 'Recurring services';
     default: return fallback || recurringServiceDisplayName(category) || 'Service';
   }
@@ -18455,6 +18496,16 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
+  // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
+  // "not for real-estate transactions — use WDO for those") and stays OFF the
+  // regulated certificate surface; only the WDO report itself maps here.
+  if (service === 'wdo' || service === 'wdo_inspection') return 'wdo_inspection';
+  // Canonical catalog key for the slab pre-treat (completion-lane-registry routes
+  // it to pre_treatment_termite_certificate); the name-based matcher below
+  // covers its "Slab Pre-Treat Termite Service" label.
+  if (service === 'termite_slab_pretreat' || service.includes('slab_pretreat')) return 'pre_slab_termiticide';
+  if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
+  if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -21955,9 +22006,17 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // sections, so its chip is missing from the section-derived list. Prepend it (so
   // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
   // Waves prompt builder now reads.
-  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-    : askChipsBase;
+  // Regulated check sees the RAW normalized rows too: the contract's aligned
+  // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
+  // not surface on an FDACS certificate surface (pre-push codex P1).
+  const askChips = hasRegulatedCertificateServiceMix(services, [
+    ...oneTimeBreakdownItems,
+    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+  ])
+    ? []
+    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+      : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -24398,10 +24457,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
+    // Category + regulated-surface decisions see the RAW normalized rows
+    // unioned with the bundle items (same union as the glass scope check
+    // below): alignOneTimeChoiceBreakdown (show_one_time_option) replaces raw
+    // rows with the synthetic choice + preserved pest/Bora add-ons, which
+    // would drop a WDO row and let the AI narrative + Ask bar render on an
+    // FDACS certificate surface (pre-push codex P1).
+    const oneTimeItemsForCategory = [
+      ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+    ];
     const serviceCategory = deriveServiceCategory(
       estimateDataForIntelligence,
       recurringServicesForIntelligence,
-      pricingBundle?.oneTimeBreakdown?.items || []
+      oneTimeItemsForCategory,
+    );
+    const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(
+      recurringServicesForIntelligence,
+      oneTimeItemsForCategory,
     );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
@@ -24421,29 +24494,33 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = buildWaveGuardIntelligencePayload(
-      {
-        ...estimate,
-        satelliteUrl: estimate.satellite_url || null,
-        tier: estimate.waveguard_tier || null,
-      },
-      estimateDataForIntelligence,
-      { pricingBundle, recurringServices: recurringServicesForIntelligence },
-    );
-    try {
-      const assistantContext = buildEstimateAssistantContext({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        selectedFrequency: '',
-        serviceMode: defaultServiceMode,
-      });
-      intelligence.supportSources = loadPublicEstimateSupportSources({
-        question: 'What is included in this WaveGuard estimate?',
-        context: assistantContext,
-      });
-    } catch (err) {
-      logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+    const intelligence = isRegulatedCertificateSurface
+      ? null
+      : buildWaveGuardIntelligencePayload(
+          {
+            ...estimate,
+            satelliteUrl: estimate.satellite_url || null,
+            tier: estimate.waveguard_tier || null,
+          },
+          estimateDataForIntelligence,
+          { pricingBundle, recurringServices: recurringServicesForIntelligence },
+        );
+    if (intelligence) {
+      try {
+        const assistantContext = buildEstimateAssistantContext({
+          estimate,
+          estData: estimateDataForIntelligence,
+          pricingBundle,
+          selectedFrequency: '',
+          serviceMode: defaultServiceMode,
+        });
+        intelligence.supportSources = loadPublicEstimateSupportSources({
+          question: 'What is included in this WaveGuard estimate?',
+          context: assistantContext,
+        });
+      } catch (err) {
+        logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+      }
     }
 
     const terminalState = (() => {
@@ -24908,6 +24985,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
           : (estimate.satellite_url || null),
         intelligence,
+        // The server's regulated-surface decision (WDO / pre-treatment
+        // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
+        // the raw one-time rows BEFORE any breakdown alignment. The React page
+        // consumes this ahead of its own row-based derivation, so a public
+        // breakdown that no longer carries the regulated row cannot resurrect
+        // the Ask bar (codex r5 P1). Present only when true so every other
+        // response stays byte-identical.
+        ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
@@ -25131,6 +25216,7 @@ module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationCol
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServiceMix;
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;

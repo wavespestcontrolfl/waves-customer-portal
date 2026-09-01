@@ -56,6 +56,7 @@ function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) 
   return (
     <button
       type="button"
+      data-estimate-slot=""
       className={stale ? 'gc-slot-stale' : undefined}
       disabled={stale}
       aria-disabled={stale || undefined}

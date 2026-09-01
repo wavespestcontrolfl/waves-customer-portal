@@ -193,6 +193,7 @@ const SERVICE_LABEL = {
   bed_bug_heat: 'Bed Bug (Heat)',
   bed_bug: 'Bed Bug',
   wdo: 'WDO Inspection',
+  wdo_inspection: 'WDO Inspection',
   flea: 'Flea Treatment',
   flea_package: 'Flea Treatment Package',
   german_roach: 'German Roach',
