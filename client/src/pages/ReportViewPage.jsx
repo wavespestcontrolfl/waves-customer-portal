@@ -2333,6 +2333,9 @@ export function composeTechNote({ tips = [], customerName = '', seed = 0 } = {})
 }
 
 export function TechNoteCard({ data, mode = 'live' }) {
+  // A photo that fails to load falls back to the initial instead of a
+  // broken-image glyph beside the name (hook first: it runs on every render).
+  const [photoBroken, setPhotoBroken] = useState(false);
   const note = data?.techNote;
   const tips = Array.isArray(note?.tips) ? note.tips.filter((t) => t && t.copy) : [];
   if (mode !== 'live' || !tips.length) return null;
@@ -2348,8 +2351,8 @@ export function TechNoteCard({ data, mode = 'live' }) {
     <section data-glass="card" className="sr-section" id="tech-note">
       <div className="section-eyebrow">{techFirst ? `A note from ${techFirst}` : 'A note from your technician'}</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '10px 0 12px' }}>
-        {photoUrl ? (
-          <img src={photoUrl} alt="" className="tech-photo" referrerPolicy="no-referrer" style={{ width: 38, height: 38, borderRadius: '50%', objectFit: 'cover' }} />
+        {photoUrl && !photoBroken ? (
+          <img src={photoUrl} alt="" className="tech-photo" referrerPolicy="no-referrer" onError={() => setPhotoBroken(true)} style={{ width: 38, height: 38, borderRadius: '50%', objectFit: 'cover' }} />
         ) : (
           <div aria-hidden="true" style={{ width: 38, height: 38, borderRadius: '50%', background: 'var(--text, #04395E)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 600, fontSize: 14 }}>{initial}</div>
         )}

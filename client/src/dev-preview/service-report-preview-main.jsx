@@ -69,8 +69,23 @@ const SCENARIOS = {
   'pest-v2': pestReportV2,
   'tree-shrub-v2': treeShrubReportV2,
 };
-const scenario = new URLSearchParams(window.location.search).get('scenario') || 'server-summary';
-const payload = SCENARIOS[scenario] || serverSummary;
+const params = new URLSearchParams(window.location.search);
+const scenario = params.get('scenario') || 'server-summary';
+// ?techNote=1 lays the tips-from-your-tech note (payload.techNote, what
+// report-data emits with GATE_TECH_TIPS on) over any scenario so the card
+// can be eyeballed under the Visit Timeline on every layout.
+const TECH_NOTE_SAMPLE = {
+  technicianFirstName: 'Adam',
+  tips: [
+    { id: 'light_warm_bulbs', source: 'library', copy: 'Insects steer by short-wavelength light, so a bright white or blue-white bulb — anything over about 3000K — pulls flying insects to your door, and the spiders and geckos that eat them follow. A warm 2700K bulb, or a yellow "bug" bulb, is far less visible to them.' },
+    { id: 'lawn_irrigation_portal', source: 'library', link: { label: 'My Property', path: '/portal?tab=property' }, copy: 'If you add your irrigation settings to your Waves portal — the watering days, run minutes per zone, and whether you have a rain sensor — under My Property, I can compare what the lawn is actually getting against what it needs each season and adjust the program to match. It takes about two minutes and makes every lawn report after it more accurate.' },
+    { id: 'custom', source: 'technician', copy: 'Keep the lanai door sweep tight — that is where the ants were coming in.' },
+  ],
+};
+const basePayload = SCENARIOS[scenario] || serverSummary;
+const payload = params.get('techNote')
+  ? { ...basePayload, techNote: TECH_NOTE_SAMPLE, customerName: basePayload.customerName || 'CHRIS SMITH' }
+  : basePayload;
 
 const realFetch = window.fetch.bind(window);
 window.fetch = async (url, opts) => {
