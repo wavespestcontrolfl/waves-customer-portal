@@ -904,7 +904,6 @@ async function moveStopsToDay(input) {
   // Committed stops whose landing block overlaps another appointment on the
   // target date (advisory — the moves stand; the result warns).
   const overlapMovedIds = [];
-  const skippedConflict = [];
   // Moved rows whose requested customer text did NOT go out — reported so
   // the operator learns the move committed but someone wasn't notified.
   const notificationFailures = [];
@@ -915,91 +914,67 @@ async function moveStopsToDay(input) {
   // Moved rows whose reschedule_log audit append failed (GH r19 P2).
   const auditFailures = [];
   let textedCount = 0;
-  for (const s of movable) {
-    const oldDate = s.scheduled_date;
-    // A live (en_route/on_site) stop being moved rewinds its tracker
-    // lifecycle exactly like the rebooker's live override does.
+  // ── Phase A: the COMPLETE approved set moves in ONE transaction
+  // (pre-push r21 P1): the exact-effects card promised one frozen effect
+  // set, so a CAS miss, a grouped/frozen refusal, or any target drift
+  // aborts EVERY move (same all-or-none contract as bulk_update_leads)
+  // instead of leaving a partially applied batch behind a Done. Per-stop
+  // lifecycle classification derives from the same read the CAS pins; the
+  // CAS rationale (status + observed schedule fields + visit_id + tracker
+  // snapshot, no FOR UPDATE) is unchanged from the per-stop version.
+  const classified = movable.map((s) => {
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
-    // Rewind on stale evidence too, not just live status — see
-    // needsLifecycleRewind in rebooker.js. The status flip and the history
-    // append stay keyed on wasLive; an evidence-only rewind still gets the
-    // post-commit tracker cleanup below without recording a status
-    // transition that never happened.
     const trackRewound = !wasLive && needsLifecycleRewind(s);
-    const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
-    // Compare-and-swap on the OBSERVED status + schedule fields: everything
-    // below (the wasLive classification, the lifecycle rewind, the
-    // 'confirmed' restamp) was derived from the initial read — if the stop
-    // completed, got cancelled, or went live between that read and this
-    // write, applying the stale branch by id alone would rewrite a terminal
-    // row back to 'confirmed' (or leave a now-live row unrewound). Status
-    // alone also let two ORDINARY moves of the same confirmed stop both
-    // match — the later write silently clobbered the newer date and logged
-    // from a stale snapshot. Matching the observed scheduled_date +
-    // window_start makes the later writer miss instead (knex renders a null
-    // value in the object form as IS NULL — the same contract auto-dispatch's
-    // rebooker `expect` relies on). window_end is in the predicate too: this
-    // mover never writes the window columns themselves, but it DOES stamp
-    // track_token_expires_at derived from the observed end (and classified
-    // movability + logs the window pair off the same read) — a concurrent
-    // end-resize would otherwise still match and get a token expiry computed
-    // from the stale end. Field-level CAS is the repo's established
-    // pattern for exactly this (rebooker options.expect); still deliberately
-    // NOT SELECT..FOR UPDATE. The short transaction below exists solely to
-    // hold the tech-day advisory fence (a date-move edits tech-day MEMBERSHIP
-    // on both the leaving and joining day, and the nightly reorder's
-    // membership read is only fenced against writers holding the same lock —
-    // see tech-day-lock.js); the CAS predicate remains the conflict
-    // detector. updated_at stays out of the
-    // predicate: knex never auto-touches it and not every mover stamps it
-    // (the bulk route's UPDATE doesn't), so it isn't a reliable change
-    // marker. Zero rows matched = the stop changed under us; skip it and
-    // report the conflict.
-    const observedDate = s.scheduled_date instanceof Date
-      ? s.scheduled_date.toISOString().slice(0, 10)
-      : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
-    const { lockTechDays } = require('../scheduling/tech-day-lock');
-    // Advisory overlap note for THIS stop, set inside the trx but reported
-    // only after the CAS commits (a missed CAS rolls back and must not warn).
-    let stopOverlapped = false;
-    let groupedSkip = null;
-    const runMoveTrx = async () => db.transaction(async trx => {
-      // Rung 1 + tech-blind probe FIRST (occupancy.js ORDERING CONTRACT:
-      // the date-wide lock precedes the tech-day fence below). A hit never
-      // blocks the move (owner ruling 2026-08-25 — staff saves warn, not
-      // block): the stop still moves and the result carries a warning.
-      // Windowless stops carry no occupancy and skip the probe; an end-less
-      // stop probes its duration-derived block (default 60), mirroring the
-      // shared predicate.
-      {
-        const probeStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
-        let probeEnd = s.window_end ? String(s.window_end).slice(0, 5) : null;
-        if (probeStart && (!probeEnd || probeEnd <= probeStart)) {
-          const [h, m] = probeStart.split(':').map(Number);
-          const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
-          probeEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-        }
-        if (probeStart && probeEnd) {
-          const overlap = await probeSlotOverlap({
-            trx, date: dateStr, windowStart: probeStart, windowEnd: probeEnd, excludeServiceIds: [String(s.id)],
-          });
-          if (overlap.length) stopOverlapped = true;
-        }
+    return {
+      s,
+      oldDate: s.scheduled_date,
+      wasLive,
+      trackRewound,
+      liveReset: wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {},
+      observedDate: s.scheduled_date instanceof Date
+        ? s.scheduled_date.toISOString().slice(0, 10)
+        : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null),
+    };
+  });
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  const runBatchTrx = async () => db.transaction(async (trx) => {
+    const overlappedIds = [];
+    // Rung 1 + tech-blind probes FIRST (occupancy.js ORDERING CONTRACT: the
+    // date-wide lock precedes the tech-day fence). Advisory only — a hit
+    // warns, never blocks (owner ruling 2026-08-25).
+    for (const c of classified) {
+      const s = c.s;
+      const probeStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
+      let probeEnd = s.window_end ? String(s.window_end).slice(0, 5) : null;
+      if (probeStart && (!probeEnd || probeEnd <= probeStart)) {
+        const [h, m] = probeStart.split(':').map(Number);
+        const endMin = Math.min(h * 60 + m + (parseInt(s.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+        probeEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
       }
-      await lockTechDays(trx, [
-        { techId: s.technician_id, date: observedDate },
-        { techId: s.technician_id, date: dateStr },
-      ]);
+      if (probeStart && probeEnd) {
+        const overlap = await probeSlotOverlap({
+          trx, date: dateStr, windowStart: probeStart, windowEnd: probeEnd, excludeServiceIds: [String(s.id)],
+        });
+        if (overlap.length) overlappedIds.push(s.id);
+      }
+    }
+    // ONE tech-day fence over every day this batch touches (each stop's
+    // leaving day + the joining day).
+    await lockTechDays(trx, classified.flatMap((c) => [
+      { techId: c.s.technician_id, date: c.observedDate },
+      { techId: c.s.technician_id, date: dateStr },
+    ]));
+    for (const c of classified) {
+      const s = c.s;
       // Grouped/frozen refusal under the stop lock, AFTER the tech-day
-      // fence (lock order; codex #3609 r29 P1): a grouped member moved
-      // alone strands its siblings — the whole stop moves from the board.
+      // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
-      return applyTrackLifecycleCas(
+      const updated = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
           .where('status', String(s.status))
           .where({
-            scheduled_date: observedDate,
+            scheduled_date: c.observedDate,
             window_start: s.window_start ?? null,
             window_end: s.window_end ?? null,
             // Observed membership joins the CAS (codex r29): grouped-since ⇒ miss.
@@ -1007,83 +982,69 @@ async function moveStopsToDay(input) {
           }),
         // Full observed tracker/lifecycle snapshot in the CAS — any
         // concurrent lifecycle or SMS-guard write must make this miss.
-        // See reschedule_appointment in tools.js.
         s,
       )
         .update({
-        scheduled_date: dateStr,
-        ...(observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
-        // Old day's sequence number is meaningless on the new date — NULL
-        // appends the stop after the target day's ordered run.
-        route_order: null,
-        notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
-        track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
-        // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
-        // moved en_route/on_site stop back on 'confirmed' so it isn't left live
-        // on a future date, matching the rebooker's own path.
-          ...(wasLive ? { status: 'confirmed' } : {}),
-          ...liveReset,
+          scheduled_date: dateStr,
+          ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
+          // Old day's sequence number is meaningless on the new date — NULL
+          // appends the stop after the target day's ordered run.
+          route_order: null,
+          notes: reason ? `${s.notes || ''}\nMoved from ${c.oldDate}: ${reason}`.trim() : s.notes,
+          track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
+          // LIVE_LIFECYCLE_RESET clears the tracker fields but not status —
+          // land a moved live stop back on 'confirmed', matching the
+          // rebooker's own path.
+          ...(c.wasLive ? { status: 'confirmed' } : {}),
+          ...c.liveReset,
           updated_at: new Date(),
         });
-    });
-    let updatedRows = 0;
-    try {
-      // Deadlock retry (codex #3609 r31 P2): this trx holds the tech-day
-      // locks and then waits on the visit stop lock inside
-      // assertRowMovableAlone, while a concurrent createOrJoinVisit holds
-      // that stop lock and waits on the same tech-day lock via
-      // alignMemberTechnician → assignDispatchJob. Postgres aborts one
-      // side with 40P01 — retry the whole transaction (locks re-acquired
-      // fresh) so the batch still lands the move or the intended
-      // grouped-row skip instead of failing the staff action.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          updatedRows = await runMoveTrx();
-          break;
-        } catch (err) {
-          if (err && err.code === '40P01' && attempt < 2) {
-            stopOverlapped = false;
-            continue;
-          }
-          throw err;
-        }
+      if (updated === 0) {
+        throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
       }
-    } catch (err) {
-      if (err && (err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
-        groupedSkip = err.code; // grouped/frozen member: skipped per-row, never aborts the batch
-      } else {
+    }
+    return overlappedIds;
+  });
+  try {
+    // Deadlock retry (codex #3609 r31 P2) around the WHOLE batch — locks
+    // re-acquired fresh on 40P01.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        overlapMovedIds.push(...await runBatchTrx());
+        break;
+      } catch (err) {
+        if (err && err.code === '40P01' && attempt < 2) {
+          overlapMovedIds.length = 0;
+          continue;
+        }
         throw err;
       }
     }
-    if (groupedSkip) {
-      skippedConflict.push({ id: s.id, status: `${s.status} (${groupedSkip === 'VISIT_FROZEN_MOVE_UNSUPPORTED' ? 'frozen grouped visit' : 'grouped visit — move the stop from the schedule'})` });
-      continue;
+  } catch (err) {
+    if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
+      return {
+        error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
     }
-    if (updatedRows === 0) {
-      // Best-effort re-read so the operator sees the status that blocked the
-      // move (falls back to the stale one if the row vanished).
-      let nowStatus = s.status;
-      try {
-        const row = await db('scheduled_services').where('id', s.id).first('status');
-        if (row) nowStatus = row.status;
-      } catch { /* reporting only */ }
-      skippedConflict.push({ id: s.id, status: nowStatus });
-      continue;
-    }
-    movedIds.add(s.id);
-    if (stopOverlapped) overlapMovedIds.push(s.id);
-    // Rebooker-parity side effects of the live → confirmed flip above:
-    // job_status_history audit row, tech_status release, customer tracker
-    // refresh. Best-effort: the move is committed — a side-effect failure
-    // must not report the whole batch as failed.
-    if (wasLive) {
+    throw err;
+  }
+  for (const c of classified) movedIds.add(c.s.id);
+
+  // ── Phase B: post-commit side effects per moved stop — best-effort; the
+  // batch is committed, so failures surface as warnings, never unwind it.
+  for (const c of classified) {
+    const s = c.s;
+    if (c.wasLive) {
+      // Rebooker-parity effects of the live → confirmed flip:
+      // job_status_history audit, tech_status release, tracker refresh.
       try {
         await applyLiveMoveSideEffects(db, s);
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
         lifecycleCleanupFailures.push(s.id);
       }
-    } else if (trackRewound) {
+    } else if (c.trackRewound) {
       // Tracker rewind without a status transition: cleanup only, no
       // history row, refresh with the stop's unchanged status.
       try {
@@ -1094,13 +1055,11 @@ async function moveStopsToDay(input) {
       }
     }
     // Audit row matching the rebooker's reschedule_log conventions.
-    // Best-effort: the move is committed — a log failure must not report
-    // the whole batch as failed.
     try {
       await db('reschedule_log').insert({
         scheduled_service_id: s.id,
         customer_id: s.customer_id,
-        original_date: oldDate,
+        original_date: c.oldDate,
         new_date: dateStr,
         reason_code: 'admin',
         initiated_by: 'admin_ib',
@@ -1114,7 +1073,6 @@ async function moveStopsToDay(input) {
       // surfaces in the combined warning, never a bare Done.
       auditFailures.push(s.id);
     }
-
   }
 
   // Notification phase — runs only after EVERY approved stop has been
@@ -1229,16 +1187,6 @@ async function moveStopsToDay(input) {
     }
   }
 
-  if (!movedStops.length) {
-    return {
-      error: 'No stops were moved — every selected stop changed concurrently (status, date, or window) while the move was pending; re-check and retry',
-      ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
-      ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
-      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
-      ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-      ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
-    };
-  }
 
   logger.info(`[intelligence-bar:schedule] Moved ${movedStops.length} stops to ${dateStr}`);
 
@@ -1254,19 +1202,13 @@ async function moveStopsToDay(input) {
   const notifyNote = notifyCustomers && notificationFailures.length
     ? `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}`
     : null;
-  // An approved stop that did NOT move (concurrent change or a group formed
-  // during the pending window) must surface as a warning, never a bare Done
-  // — the card promised its listed exact target set (GH r8 P1).
-  const conflictNote = skippedConflict.length
-    ? `${skippedConflict.length} approved stop(s) were NOT moved (changed or became grouped while the card was pending): ${skippedConflict.map((c) => c.status).slice(0, 3).join('; ')}${skippedConflict.length > 3 ? '…' : ''}`
-    : null;
   const lifecycleNote = lifecycleCleanupFailures.length
     ? `${lifecycleCleanupFailures.length} moved stop(s) committed but their technician/tracker release failed — check the tech pointer for those visits.`
     : null;
   const auditNote = auditFailures.length
     ? `${auditFailures.length} moved stop(s) are missing their reschedule audit entry (the moves stand; the history append failed).`
     : null;
-  const combinedWarning = [overlapNote, notifyNote, conflictNote, lifecycleNote, moveGroupWarning, auditNote].filter(Boolean).join(' ');
+  const combinedWarning = [overlapNote, notifyNote, lifecycleNote, moveGroupWarning, auditNote].filter(Boolean).join(' ');
 
   return {
     success: true,
@@ -1279,7 +1221,6 @@ async function moveStopsToDay(input) {
     ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
-    ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
     ...(skippedGrouped.length ? { skipped_grouped: skippedGrouped } : {}),
     ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
   };

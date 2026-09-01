@@ -118,6 +118,29 @@ function redactEmail(value) {
   return `${local.slice(0, 1)}***@${domain}`;
 }
 
+// A freshly created Gmail filter whose DB record failed AND whose rollback
+// could not be CONFIRMED deleted (Gmail auth unavailable, or the delete
+// itself failed) would be permanently untracked — silently blocking the
+// sender past any unblock (pre-push r21 P1). Persist it to the dedupe
+// orphan ledger so the ops sweep (spam-block-orphan-filter-sweep.js)
+// recovers it; best-effort — a ledger miss still logs the filter id loudly.
+async function ledgerUnconfirmedFilter({ filterId, blockEmail = null, blockDomain = null, reason }) {
+  if (!filterId) return;
+  try {
+    const hasLedger = await db.schema.hasTable('blocked_email_senders_dedupe_orphans');
+    if (!hasLedger) throw new Error('ledger table missing');
+    await db('blocked_email_senders_dedupe_orphans').insert({
+      email_address: blockEmail,
+      domain: blockDomain,
+      gmail_filter_id: filterId,
+      source_row_id: `rollback:${reason}`,
+    });
+    logger.warn(`[spam-blocker] unconfirmed filter rollback (${reason}) — filter ${filterId} ledgered for the ops sweep`);
+  } catch (ledgerErr) {
+    logger.error(`[spam-blocker] ORPHANED Gmail filter ${filterId} (${reason}) could not be ledgered — delete it manually: ${ledgerErr.message}`);
+  }
+}
+
 async function blockSpamSender(email) {
   const fromAddress = normalizeAddress(email.from_address);
   const domain = domainFromAddress(fromAddress);
@@ -191,6 +214,7 @@ async function blockSpamSender(email) {
     // filter back (best effort) so a retry recreates BOTH atomically enough,
     // instead of stacking orphaned filters no unblock can ever find.
     if (filterId) {
+      let rolledBack = false;
       try {
         const gmailClient = require('./gmail-client');
         const auth = await gmailClient.getAuthClient();
@@ -198,10 +222,12 @@ async function blockSpamSender(email) {
           const gmail = google.gmail({ version: 'v1', auth });
           await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
           logger.info(`[spam-blocker] rolled back unrecorded Gmail filter ${filterId}`);
+          rolledBack = true;
         }
       } catch (rollbackErr) {
-        logger.warn(`[spam-blocker] filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+        logger.warn(`[spam-blocker] filter rollback failed (${filterId}): ${rollbackErr.message}`);
       }
+      if (!rolledBack) await ledgerUnconfirmedFilter({ filterId, blockEmail: fromAddress, reason: 'auto_insert_failed' });
     }
     // Unique-scope race lost (pre-push r18 P1): count the hit on the row
     // that won, exactly as the existing-row branch above would have.
@@ -300,16 +326,19 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     let entry = existing;
     if (filterId) {
       const rollbackFilter = async (reason) => {
+        let rolledBack = false;
         try {
           const gmailClient = require('./gmail-client');
           const auth = await gmailClient.getAuthClient();
           if (auth) {
             const gmail = google.gmail({ version: 'v1', auth });
             await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
+            rolledBack = true;
           }
         } catch (rollbackErr) {
-          logger.warn(`[spam-blocker] repair filter rollback (${reason}) failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+          logger.warn(`[spam-blocker] repair filter rollback (${reason}) failed (${filterId}): ${rollbackErr.message}`);
         }
+        if (!rolledBack) await ledgerUnconfirmedFilter({ filterId, blockEmail, blockDomain, reason: `repair_${reason}` });
       };
       try {
         // CAS: only the FIRST repair records its filter (pre-push r18 P1) —
@@ -353,16 +382,19 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     // Same orphan-filter rollback contract as the auto path: a filter with
     // no record is invisible to every unblock path.
     if (filterId) {
+      let rolledBack = false;
       try {
         const gmailClient = require('./gmail-client');
         const auth = await gmailClient.getAuthClient();
         if (auth) {
           const gmail = google.gmail({ version: 'v1', auth });
           await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
+          rolledBack = true;
         }
       } catch (rollbackErr) {
-        logger.warn(`[spam-blocker] manual filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+        logger.warn(`[spam-blocker] manual filter rollback failed (${filterId}): ${rollbackErr.message}`);
       }
+      if (!rolledBack) await ledgerUnconfirmedFilter({ filterId, blockEmail, blockDomain, reason: 'manual_insert_failed' });
     }
     // Unique-scope race lost (pre-push r18 P1): a concurrent block landed
     // first — that IS the block; return it as already_blocked.
