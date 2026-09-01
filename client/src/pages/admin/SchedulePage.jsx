@@ -56,6 +56,7 @@ import {
 } from "../../lib/service-completion-presets";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
+import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -82,6 +83,8 @@ import {
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
+const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
+const CONTROLLED_AREA_LABELS = new Set([...AREA_SCOPES.interior, ...AREA_SCOPES.exterior, ...AREA_SCOPES.unscoped]);
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const D = {
@@ -312,11 +315,7 @@ function parseApplicationAreas(value) {
     .filter(Boolean);
 }
 export function typedTreatmentAreaField(schema) {
-  return (schema?.fields || []).find((field) => (
-    field?.key === "areas_treated"
-    || field?.key === "spot_treatment_areas"
-    || field?.key === "treatment_zones"
-  )) || null;
+  return (schema?.fields || []).find((field) => TREATMENT_AREA_FIELD_KEYS.includes(field?.key)) || null;
 }
 export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
   if (!typedAreaKey) return genericAreas || [];
@@ -7132,12 +7131,17 @@ export function pruneRestoredFindingsValues(restored, fields) {
     } else if (
       (field.type === "chips" || field.type === "multi_select")
       && Array.isArray(field.options)
-      && !["areas_treated", "spot_treatment_areas", "treatment_zones"].includes(field.key)
     ) {
+      // Treatment-area fields also keep labels from the other controlled
+      // area vocabularies — a pre-typed draft's generic chips migrate into
+      // them — but never free text; the server enforces the same rule.
+      const controlledFallback = TREATMENT_AREA_FIELD_KEYS.includes(field.key)
+        ? CONTROLLED_AREA_LABELS
+        : null;
       const kept = String(raw || "")
         .split(",")
         .map((s) => s.trim())
-        .filter((s) => field.options.includes(s));
+        .filter((s) => field.options.includes(s) || (controlledFallback && controlledFallback.has(s)));
       if (kept.length) values[key] = kept.join(", ");
       else delete values[key];
     } else if (

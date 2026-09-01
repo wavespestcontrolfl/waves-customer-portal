@@ -69,11 +69,12 @@ describe("termite posted-notice pre-submit mirror", () => {
 });
 
 describe("typed area ownership", () => {
-  it("preserves off-list area values restored from pre-chip drafts", () => {
-    const restored = { areas_treated: "Rear addition slab" };
-    expect(pruneRestoredFindingsValues(restored, [{
-      key: "areas_treated", type: "chips", options: ["Foundation perimeter"],
-    }])).toEqual({ areas_treated: "Rear addition slab" });
+  it("keeps migrated controlled area chips but drops free text from pre-chip drafts", () => {
+    const field = { key: "areas_treated", type: "chips", options: ["Foundation perimeter"] };
+    expect(pruneRestoredFindingsValues(
+      { areas_treated: "Garage, Foundation perimeter, Rear addition slab" }, [field],
+    )).toEqual({ areas_treated: "Garage, Foundation perimeter" });
+    expect(pruneRestoredFindingsValues({ areas_treated: "Rear addition slab" }, [field])).toEqual({});
   });
   it("promotes the typed areas into the canonical completion scope", () => {
     expect(completionAreasForTypedFindings({

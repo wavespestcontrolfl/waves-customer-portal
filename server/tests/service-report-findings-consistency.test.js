@@ -10,11 +10,16 @@ function validate(type, values) {
 }
 
 describe('editable service-report findings consistency', () => {
-  test('preserves legacy free-text treatment areas after chip cutover', () => {
-    expect(validate('termite_treatment', { areas_treated: 'Rear addition slab' }).errors).toEqual([]);
+  test('treatment-area fields accept migrated controlled chips but reject free text', () => {
+    // A pre-typed draft migrates the generic completion chips into the typed
+    // area field; those labels are controlled vocabulary from another lane.
+    expect(validate('termite_treatment', { areas_treated: 'Garage, Foundation perimeter' }).errors).toEqual([]);
+    expect(validate('one_time_pest_treatment', { areas_treated: 'Laundry / utility room' }).errors).toEqual([]);
+    expect(validate('termite_treatment', { areas_treated: 'Rear addition slab' }).errors)
+      .toEqual(['Invalid value for areas_treated: Rear addition slab']);
     expect(validate('one_time_lawn_treatment', {
-      spot_treatment_areas: 'Custom strip beside seawall',
-    }).errors).toEqual([]);
+      spot_treatment_areas: 'Front lawn, Custom strip beside seawall',
+    }).errors).toEqual(['Invalid value for spot_treatment_areas: Custom strip beside seawall']);
   });
   test.each(Object.entries({
     termite_inspection: 'activity_status',
