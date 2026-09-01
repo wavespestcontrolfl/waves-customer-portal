@@ -12,13 +12,21 @@ jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplat
 const mockEmail = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('../services/account-membership-email', () => ({ sendCancellationReceived: (...a) => mockEmail(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Send-once probe (messaging_audit_log): default = no prior accepted send.
+let mockPriorSmsRow = null;
+jest.mock('../models/db', () => jest.fn(() => ({
+  where() { return this; },
+  whereNotNull() { return this; },
+  whereRaw() { return this; },
+  first: async () => mockPriorSmsRow,
+})));
 
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 
 const customer = { id: 'cust-1', first_name: 'Pat', phone: '+15550000000' };
 const request = { id: 'req-1', created_at: new Date('2026-08-31T14:00:00Z') };
 
-beforeEach(() => { mockSend.mockClear(); mockRender.mockClear(); mockEmail.mockClear(); });
+beforeEach(() => { mockSend.mockClear(); mockRender.mockClear(); mockEmail.mockClear(); mockPriorSmsRow = null; });
 
 test('keptThrough whole-account: end-of-term template, email told the date and that visits stay', async () => {
   const out = await sendCancellationConfirmations({
@@ -58,4 +66,16 @@ test('the processor-verified fee waiver reaches the email (never warn about a wa
 test('unprocessed stays on the received (by-hand) template even with keptThrough', async () => {
   const out = await sendCancellationConfirmations({ customer, request, result: null, processed: false, keptThrough: true });
   expect(out.smsTemplateKey).toBe('service_cancellation_received');
+});
+
+test('a retry whose SMS already accepted for this request+template skips the resend and still reports the channel', async () => {
+  // The audit log shows a provider-accepted send of this exact template for
+  // this request — a retry driven by the OTHER channel's failure must not
+  // text the same copy twice.
+  mockPriorSmsRow = { id: 'audit-1' };
+  const out = await sendCancellationConfirmations({ customer, request, result: { scope: [] }, processed: true });
+  expect(out.smsSent).toBe(true);
+  expect(mockSend).not.toHaveBeenCalled();
+  // The email leg still runs (its own class-keyed idempotency dedupes it).
+  expect(mockEmail).toHaveBeenCalled();
 });

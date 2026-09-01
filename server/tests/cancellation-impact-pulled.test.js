@@ -106,3 +106,26 @@ test('whole-account: rows with NO WaveGuard family (commercial/unmatched) still 
   // The money table stays family-bucketed — no phantom family row.
   expect(impact.families.map((f) => f.key)).toEqual(['pest_control']);
 });
+
+test('termiteRental promises a retrieval task only when one will be raised — never for an unrelated scoped cancel', async () => {
+  const db = require('../models/db');
+  // Customer flagged as a rental; scoped LAWN cancel raises no task.
+  db.mockImplementation((table) => {
+    const b = {};
+    b.where = () => b; b.leftJoin = () => b;
+    b.first = async () => (String(table).startsWith('customers')
+      ? { waveguard_tier: 'Silver', monthly_rate: '100.00', billing_mode: 'monthly_membership', per_application_fee: null, autopay_enabled: false, next_charge_date: null, termite_stations_rented: true }
+      : null);
+    b.select = async () => mockRows;
+    return b;
+  });
+  mockRows = [
+    { id: 'v1', family: 'lawn_care', status: 'confirmed', scheduled_date: '2099-02-01', track_state: null },
+    { id: 'v2', family: 'pest_control', status: 'confirmed', scheduled_date: '2099-02-05', track_state: null },
+  ];
+  const scoped = await buildCancellationImpact('cust-1', ['lawn_care']);
+  expect(scoped.termiteRental).toBe(false);
+  // Whole-account: the churn raises the task for the flagged rental.
+  const whole = await buildCancellationImpact('cust-1', []);
+  expect(whole.termiteRental).toBe(true);
+});

@@ -113,7 +113,13 @@ async function loadCustomer(customerId) {
 async function resolveLiveTerm(customerId, wholeAccount) {
   if (!wholeAccount) return null;
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
-  const terms = await coveredTermsAsOf(db, etDateString())
+  // ALL still-paid terms, current AND future: a renewal is a NEW row
+  // starting the day after the old term ends, so an as-of-today query would
+  // dispose only the current term while the sweep pulls the paid
+  // successor's visits and leaves that term live. Two live terms refuse
+  // below (multiple_prepay_terms) — dispose the extra one first.
+  const terms = await coveredTermsAsOf(db, null)
+    .where('t.term_end', '>=', etDateString())
     .where('t.customer_id', customerId)
     .orderBy('t.term_end', 'desc')
     .select('t.id', 't.term_start', 't.term_end', 't.plan_label', 't.prepay_amount',
@@ -358,7 +364,10 @@ async function liveCoveredKeepIds(term, customerId) {
 // read also refuses).
 async function scopedCoverageConflict(customerId, scope) {
   const { coveredTermsAsOf, coverageRowsForTerm } = require('./annual-prepay-renewals');
-  const terms = await coveredTermsAsOf(db, etDateString())
+  // Current AND future still-paid terms — a paid successor's covered visits
+  // are just as untouchable as the live term's.
+  const terms = await coveredTermsAsOf(db, null)
+    .where('t.term_end', '>=', etDateString())
     .where('t.customer_id', customerId)
     .select('t.id', 't.term_start', 't.term_end', 't.coverage_service_type', 't.coverage_visit_count');
   if (!terms || !terms.length) return false;
@@ -872,6 +881,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // churn classification — boilerplate here misclassifies every
       // admin-driven churn (the Pareto reads the customer columns).
       reason: reasonParts.length ? reasonParts.join(' — ') : `Admin cancellation request ${request.id}`,
+      // Immutable retry marker: repairs match on THIS, never on the
+      // operator's editable reason/note — a retry with a reworded note must
+      // still find the first attempt's cancelled rows.
+      historyNote: `Admin cancellation request ${request.id}`,
       requestId: request.id,
       families: wholeAccount ? [] : scope,
       actor: { type: actorType, userId: actorUserId },
@@ -893,12 +906,21 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // while pulling a different appointment. Any pull outside the approved
   // set is an exception for office eyes, not a clean "Done."
   if (processed && approvedPulled != null) {
-    const beyond = approvedPulledIds && Array.isArray(result?.cancelledIds)
-      ? result.cancelledIds.some((id) => !approvedPulledIds.has(String(id)))
-      : Number(result?.cancelledCount) > approvedPulled;
+    // SET EQUALITY, both directions: an unapproved pull (minted occurrence)
+    // AND a missing approved pull (the visit completed mid-run and was
+    // delivered — now payable, not cancelled as shown) are both changed
+    // facts the operator never approved.
+    let beyond;
+    if (approvedPulledIds && Array.isArray(result?.cancelledIds)) {
+      const cancelledSet = new Set(result.cancelledIds.map(String));
+      beyond = result.cancelledIds.some((id) => !approvedPulledIds.has(String(id)))
+        || [...approvedPulledIds].some((id) => !cancelledSet.has(id));
+    } else {
+      beyond = Number(result?.cancelledCount) > approvedPulled;
+    }
     if (beyond) {
       errors.push('visits_pulled_beyond_preview');
-      logger.warn(`[admin-cancellation] request ${request.id} pulled visits outside the approved preview (${result?.cancelledCount} pulled vs ${approvedPulled} approved)`);
+      logger.warn(`[admin-cancellation] request ${request.id} pulled a different visit set than the approved preview (${result?.cancelledCount} pulled vs ${approvedPulled} approved)`);
     }
   }
 

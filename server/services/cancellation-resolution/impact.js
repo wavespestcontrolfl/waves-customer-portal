@@ -190,7 +190,10 @@ async function buildCancellationImpact(customerId, requestedFamilies = [], { aft
     payUrl: null,
     prepay,
     autopayOn: customer.autopay_enabled === true,
-    termiteRental: customer.termite_stations_rented === true || cancelledFamilies.includes('termite_bait'),
+    // The processor raises the retrieval task on a whole-account churn or a
+    // scoped cancel that INCLUDES termite — a flagged rental cancelling only
+    // another family gets no task, so the preview must not promise one.
+    termiteRental: (wholeAccount && customer.termite_stations_rented === true) || cancelledFamilies.includes('termite_bait'),
     effectiveDate: today,
     billingMode: customer.billing_mode || null,
     wholeAccount,

@@ -71,7 +71,29 @@ async function sendCancellationConfirmations({
   let smsSent = false;
   let emailSent = false;
 
+  // Send-once per request + template (mirrors the email leg's class-keyed
+  // idempotency): a retry that reuses the acceptance because the OTHER
+  // channel failed must not text the same copy twice. The durable proof is
+  // the messaging audit log's provider-accepted send for this request and
+  // template; a template-class change (received → completed) still sends.
+  // An unreadable log sends — at-most-twice beats never telling the
+  // customer.
+  let smsAlreadySent = false;
   try {
+    const db = require('../models/db');
+    const prior = await db('messaging_audit_log')
+      .where({ customer_id: customer.id, channel: 'sms' })
+      .whereNotNull('sent_at')
+      .whereRaw("metadata::jsonb ->> 'service_request_id' = ?", [String(request.id)])
+      .whereRaw("metadata::jsonb ->> 'original_message_type' = ?", [smsTemplateKey])
+      .first('id');
+    smsAlreadySent = !!prior;
+  } catch (probeErr) {
+    logger.warn(`Cancellation confirmation send-once probe failed for request ${request.id}: ${probeErr.message}`);
+  }
+  if (smsAlreadySent) {
+    smsSent = true;
+  } else try {
     const smsVars = {
       first_name: gsmSafeName(customer.first_name),
       effective_date: etDisplayDate(effectiveAt || request.created_at),

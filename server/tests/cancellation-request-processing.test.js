@@ -995,6 +995,22 @@ describe('processCancellationRequest', () => {
       expect(unwound.ok).toBe(false);
       expect(unwound.errors).toContain('scoped_wind_down');
 
+      // The retry marker is the IMMUTABLE historyNote, never the editable
+      // reason: a reworded note still finds run 1's rows.
+      const reworded = await processCancellationRequest({ customerId: 'c1', reason: 'price — customer called back', historyNote: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
+      expect(reworded).toEqual(expect.objectContaining({ ok: true, scopedWoundDown: true }));
+
+      // Per-application account: components prove nothing — the wind-down's
+      // own tier-source stamp is the committed-transaction signal.
+      db.__tables.customers[0].billing_mode = 'per_application';
+      db.__tables.customers[0].waveguard_tier_source = 'self_booking';
+      const perAppUnverified = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
+      expect(perAppUnverified.scopedWoundDown).toBe(false);
+      expect(perAppUnverified.errors).toContain('scoped_wind_down');
+      db.__tables.customers[0].waveguard_tier_source = 'cancellation_scoped';
+      const perAppVerified = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r1', requestId: 'r1', families: ['lawn_care'] });
+      expect(perAppVerified.scopedWoundDown).toBe(true);
+
       // No prior-cancelled rows for the reason → the refusal stands.
       db.__tables.job_status_history = [];
       const refused = await processCancellationRequest({ customerId: 'c1', reason: 'Admin cancellation request r2', requestId: 'r2', families: ['lawn_care'] });

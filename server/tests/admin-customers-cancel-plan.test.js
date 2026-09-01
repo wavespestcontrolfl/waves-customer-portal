@@ -368,8 +368,10 @@ describe('POST /:id/cancel-plan', () => {
       customerId: 'cust-1', requestId: request.id, families: [], keepThrough: null, waiveLateFee: true,
       actor: { type: 'admin', userId: 'admin-1' },
       // The recorded reason (code + note) feeds churn classification — never
-      // the request-id boilerplate when the operator said why.
+      // the request-id boilerplate when the operator said why. Repairs key
+      // on the IMMUTABLE request-scoped marker instead.
       reason: 'price — Too expensive',
+      historyNote: `Admin cancellation request ${request.id}`,
     }));
     expect(mockOpenCase).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', serviceRequestId: request.id, families: [], reasonCode: 'price', reasonText: 'Too expensive', processed: true,
@@ -513,6 +515,12 @@ describe('POST /:id/cancel-plan', () => {
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 3, cancelledIds: ['v1', 'v2', 'vNEW'] });
     const swap = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
     expect(swap.errors).toContain('visits_pulled_beyond_preview');
+
+    // A MISSING approved visit (it completed mid-run and was delivered,
+    // not cancelled) is changed facts too — strict subset flags.
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 2, cancelledIds: ['v1', 'v2'] });
+    const subset = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    expect(subset.errors).toContain('visits_pulled_beyond_preview');
 
     // The exact approved set reads clean.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 3, cancelledIds: ['v1', 'v2', 'v3'] });

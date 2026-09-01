@@ -341,9 +341,18 @@ async function processCancellationRequest({
   //                appointment-card rail closes 'waived'; recorded on the
   //                result and the timeline note.
   actor = null, keepThrough = null, keepVisitIds = null, waiveLateFee = false,
+  // historyNote (C3): an IMMUTABLE request-scoped marker for the visit
+  // history notes and the retry repair matching. The recorded REASON is
+  // operator text (churn detail/classification) and may change between a
+  // partial run and its retry — keying repairs on it would strand the first
+  // attempt's failed side effects the moment the operator edits the note.
+  // Absent (portal path) the reason doubles as the note, byte-identical to
+  // the old behavior.
+  historyNote = null,
 } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
+  const visitNote = String(historyNote || cancelReason).slice(0, 500);
   const errors = [];
   const actorType = actor && actor.type ? String(actor.type) : 'customer';
   const actorLabel = actorType === 'admin'
@@ -406,7 +415,7 @@ async function processCancellationRequest({
         if (scopedPlan.error === 'scope_not_owned' && reason) {
           try {
             const priorCancelled = await db('job_status_history')
-              .where({ to_status: 'cancelled', notes: cancelReason })
+              .where({ to_status: 'cancelled', notes: visitNote })
               .select('job_id');
             const ids = [...new Set(priorCancelled.map((h) => h.job_id))];
             if (ids.length) {
@@ -697,7 +706,7 @@ async function processCancellationRequest({
   if (reason) {
     try {
       const history = await db('job_status_history')
-        .where({ to_status: 'cancelled', notes: cancelReason })
+        .where({ to_status: 'cancelled', notes: visitNote })
         .select('job_id');
       const priorIds = [...new Set(history.map((h) => h.job_id))];
       if (priorIds.length) {
@@ -778,7 +787,7 @@ async function processCancellationRequest({
           fromStatus: svc.status,
           toStatus: 'cancelled',
           transitionedBy: null,
-          notes: cancelReason,
+          notes: visitNote,
           // Caller-owned: this processor suppresses per-visit notices via
           // its OWN awaited handleCancellation AFTER its went-live
           // compensation check — a fire-and-forget hook claim here could
@@ -1048,6 +1057,20 @@ async function processCancellationRequest({
       const components = await loadComponents(db, customerId);
       const residual = (components || []).filter((c) => scopedFamilies.includes(c.family_key) && Number(c.monthly_rate) > 0);
       scopedWoundDown = residual.length === 0;
+      if (scopedWoundDown) {
+        // Per-application accounts carry NO monthly components, so the
+        // ledger check proves nothing there — the wind-down's one
+        // transaction stamps waveguard_tier_source='cancellation_scoped'
+        // on the customer, which is the signal that the tier demote and
+        // row repricing committed. A later tier writer can overwrite the
+        // stamp; that false negative stays partial + belled (safe side).
+        const custRow = await db('customers').where({ id: customerId })
+          .first('billing_mode', 'waveguard_tier_source');
+        if (custRow && String(custRow.billing_mode || '') === 'per_application'
+          && custRow.waveguard_tier_source !== 'cancellation_scoped') {
+          scopedWoundDown = false;
+        }
+      }
     } catch (verifyErr) {
       logger.error(`[cancellation-processor] repair-retry wind-down verification failed for ${customerId}: ${verifyErr.message}`);
       scopedWoundDown = false;
