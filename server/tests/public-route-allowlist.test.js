@@ -169,6 +169,12 @@ describe('auth-guard registry (server/config/route-auth-guards.json)', () => {
     const mutations = [...src.matchAll(/OAUTH_PUBLIC_PATHS\s*\.\s*(\w+)/g)]
       .map((x) => x[1]).filter((method) => method !== 'has');
     expect(mutations).toEqual([]);
+    // EVERY occurrence must be the declaration or a .has() read — an alias
+    // (`const paths = OAUTH_PUBLIC_PATHS`), a borrowed mutator, or passing
+    // the Set to any function could widen the exemption invisibly.
+    const occurrences = [...src.matchAll(/OAUTH_PUBLIC_PATHS/g)].length;
+    const hasReads = [...src.matchAll(/OAUTH_PUBLIC_PATHS\s*\.\s*has\s*\(/g)].length;
+    expect({ occurrences, accountedFor: 1 + hasReads }).toEqual({ occurrences: 1 + hasReads, accountedFor: 1 + hasReads });
     const runtimePaths = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] || x[2]).sort();
     const guard = registry.guards.find((g) => g.name === 'adminAuthenticateExceptOauthCallback');
     expect(guard).toBeDefined();
@@ -1662,6 +1668,54 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     const st = res.publicRoutes.find((r) => r.path === '/files');
     expect(st).toBeDefined();
     expect(st.extra).toContain("dotfiles: 'allow'");
+  });
+
+  test('a LOGICAL assignment to a registration method (router.use &&= fn) is a problem', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const { guardA } = require('../middleware/a');",
+        "const router = require('express').Router();",
+        'router.use &&= (() => router);',
+        'router.use(guardA);',
+        "router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('overwriting a router/app registration method'))).toBe(true);
+  });
+
+  test('an IMPORTED router handed to an unanalysed function is caught in the sweep', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "const shared = require('../routes/x');",
+        "function install(r) { r.get('/leak', (req, res) => res.json({})); }",
+        'install(shared);',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('passed to an unanalysed function'))).toBe(true);
+  });
+
+  test("a module that REBINDS require is rejected outright", () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const require = () => ({ guardA: (req, res, next) => next() });",
+        "const { guardA } = require('../middleware/a');",
+        "const router = { get: () => {} };",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes("'require' is rebound"))).toBe(true);
   });
 
   test('an ALIAS of the express factory (const makeApp = express) still makes a tracked app', () => {

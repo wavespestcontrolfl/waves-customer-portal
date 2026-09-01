@@ -299,6 +299,7 @@ class ModuleAnalysis {
     this.exportProps = new Map(); // module.exports.<name> = <ident|false>
     this.directExternalRegs = []; // require('./x').<verb>() registrations
     this.importMemberWrites = []; // auth.guardA = ... on a require() binding
+    this.externalRouterPasses = []; // required module handed to an unanalysed fn
     this.bindingWrites = new Map(); // name -> count of value-bearing writes
     this.reassignedNames = new Set(); // written more than once — ambiguous
     const callsWithIdentifierArgs = [];
@@ -431,15 +432,21 @@ class ModuleAnalysis {
         if (!ctx.topLevel) this.exportUnstable = true;
         this.exportProps.set(memberPropName(node.left),
           node.right.type === 'Identifier' ? node.right.name : false);
-      } else if (node.type === 'AssignmentExpression' && node.operator === '='
+      } else if (node.type === 'AssignmentExpression'
         && node.left.type === 'MemberExpression' && memberPropName(node.left) !== null) {
-        // `holder.api = router` / `router['use'] = fn` — modeled post-walk
-        // (props may involve bindings declared later in the file).
-        memberAssignments.push({ objectNode: node.left.object, prop: memberPropName(node.left), right: node.right, node });
-      } else if (node.type === 'AssignmentExpression' && node.operator === '='
+        // `holder.api = router` / `router['use'] = fn` — modeled post-walk.
+        // A COMPOUND write (&&=, ||=, ??=, +=, ...) still overwrites the
+        // property at runtime: it skips value modeling but keeps every
+        // overwrite/import-write check, and poisons a modeled object prop.
+        const compound = node.operator !== '=';
+        if (compound && this.src.slice(node.left.start, node.left.end).startsWith('module.exports')) {
+          this.exportUnstable = true; // a conditional export rewrite is never trustable
+        }
+        memberAssignments.push({ objectNode: node.left.object, prop: memberPropName(node.left), right: node.right, compound, node });
+      } else if (node.type === 'AssignmentExpression'
         && node.left.type === 'MemberExpression' && node.left.computed) {
-        // A computed NON-literal member write — the target property is
-        // unknowable; resolved post-walk and rejected on a router/app.
+        // A computed NON-literal member write (any operator) — the target
+        // property is unknowable; resolved post-walk, rejected on a router/app.
         computedMemberWrites.push({ objectNode: node.left.object, node });
       } else if (node.type === 'AssignmentExpression' && node.operator === '='
         && node.left.type === 'Identifier') {
@@ -447,6 +454,10 @@ class ModuleAnalysis {
         // declarator (alias, router factory, require, ...); without this a
         // registration through the assigned name would be silently dropped.
         this.recordBinding(node.left.name, node.right, ctx.topLevel);
+      } else if (node.type === 'AssignmentExpression' && node.left.type === 'Identifier') {
+        // A compound write to a binding makes its value execution-order
+        // dependent — count it so the name is refused like any reassignment.
+        this.countWrite(node.left.name);
       } else if (node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression'
         && (node.callee.object.type === 'Identifier' || node.callee.object.type === 'CallExpression'
@@ -560,7 +571,11 @@ class ModuleAnalysis {
         const mod = this.resolveModule(a.objectNode.arguments[0].value);
         if (mod) this.importMemberWrites.push({ module: mod, prop: a.prop, loc: this.loc(a.node) });
       }
-      if (b && b.kind === 'object' && a.right.type === 'Identifier') {
+      if (a.compound && b && b.kind === 'object') {
+        // Which value the prop holds now depends on execution order — poison
+        // its resolution (and fall through to the overwrite checks below).
+        bumpProp(`${base}.${a.prop}`);
+      } else if (b && b.kind === 'object' && a.right.type === 'Identifier') {
         bumpProp(`${base}.${a.prop}`);
         if (!this.reassignedProps.has(`${base}.${a.prop}`)) b.props.set(a.prop, a.right.name);
         else if (this.routers.has(this.canonName(b.props.get(a.prop) || '')) || this.routers.has(this.canonName(a.right.name))) {
@@ -758,8 +773,19 @@ class ModuleAnalysis {
           }
         }
       }
+      // An imported binding of a LOCAL module handed to an unanalysed
+      // function may BE a mounted router (`install(require('./routes/x'))`)
+      // — recorded here, judged in the sweep once mounted surface is known.
+      const importedArgs = [];
+      for (const a of call.arguments) {
+        if (!a || a.type !== 'Identifier') continue;
+        const ib = this.cleanBinding(this.canonName(a.name));
+        if (ib && (ib.kind === 'require' || ib.kind === 'requireMember') && ib.module !== null) {
+          importedArgs.push({ module: ib.module, name: ib.kind === 'requireMember' ? ib.name : null });
+        }
+      }
       const passed = resolvedArgs.filter((n) => this.routers.has(n) || APP_IDENTIFIERS.has(n));
-      if (!passed.length) continue;
+      if (!passed.length && !importedArgs.length) continue;
       const c = call.callee;
       const consumerOk = (entry) => {
         if (!entry) return false;
@@ -784,7 +810,16 @@ class ModuleAnalysis {
         if (b && b.kind === 'requireMember'
           && consumerOk(this.scanner.registry.lookupRouterConsumer(b.module === null ? b.spec : b.module, b.name))) continue;
       }
-      this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`);
+      if (passed.length) {
+        this.problems.push(`${this.loc(call)}: ${passed.join(', ')} passed to an unanalysed function — the scanner cannot see routes the helper may register; register routes at module top level (or add a reviewed routerConsumers entry for a helper proven not to register routes)`);
+      } else {
+        for (const ia of importedArgs) this.externalRouterPasses.push({ ...ia, loc: this.loc(call) });
+      }
+    }
+    // `require` rebound to anything else makes every import-based conclusion
+    // in this module a lie (a fake require can hand back no-op guards).
+    if (this.bindings.has('require') || this.shadowedNames.has('require')) {
+      this.problems.push(`${this.file}: 'require' is rebound in this module — the scanner cannot trust any import here; use Node's require only`);
     }
     // EXECUTION order, not AST pre-order: in a fluent chain the outer call's
     // node encloses the inner one (`router.get('/x', h).use(guard)` runs the
@@ -1602,6 +1637,23 @@ class Scanner {
         }
         if (targetsRouter) {
           this.problems.push(`${x.loc}: ${x.method}() on the router exported by ${x.module} — routes registered outside the owning module bypass its guard ordering; register them in ${x.module}`);
+        }
+      }
+      // A required module handed to an unanalysed function IS a router when
+      // its export resolves to one in the mounted surface — the helper could
+      // register routes the owning module's guard ordering never sees.
+      for (const x of m.externalRouterPasses || []) {
+        if (!this.modules.has(x.module)) continue;
+        const t = this.modules.get(x.module);
+        let isRouter;
+        if (x.name) {
+          const exp = t.exportLookup(x.name);
+          isRouter = exp.kind === 'ident' ? t.routers.has(t.canonName(exp.name)) : exp.kind === 'opaque';
+        } else {
+          isRouter = Boolean(t.exportedRouter);
+        }
+        if (isRouter) {
+          this.problems.push(`${x.loc}: the router exported by ${x.module} is passed to an unanalysed function — the scanner cannot see routes the helper may register; register them in ${x.module} (or add a reviewed routerConsumers entry)`);
         }
       }
       // A consumer overwriting a REGISTERED guard/passthrough export rewrites
