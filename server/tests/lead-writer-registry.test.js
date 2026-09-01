@@ -57,10 +57,10 @@ function knexInsertPatterns(token) {
 }
 
 // Raw SQL — `db.raw('INSERT INTO leads ...')` in any casing/quoting, with
-// an optional schema qualifier (`public.leads`, `"public"."leads"`). Word
-// characters after `leads` (lead_activities etc.) break the \b and don't
-// match. Also fires on a comment SAYING "insert into leads" — that's fine,
-// registering (or rewording) it is cheaper than an unscanned writer form.
+// an optional schema qualifier (`public.leads`, `"public"."leads"`) and the
+// optional ONLY keyword. Word characters after `leads` (lead_activities
+// etc.) break the \b and don't match. The scan runs on comment-blanked
+// source, so a comment merely saying "insert into leads" is not a site.
 const RAW_SQL_INSERT_RE = new RegExp(
   String.raw`\binsert\s+into\s+(?:only\s+)?(?:${Q}?[\w$]+${Q}?\s*\.\s*)?${Q}?leads\b`,
   'gi'
@@ -92,8 +92,10 @@ function leadsTableTokens(src) {
 // CHAIN of intermediate calls the direct patterns allow, for X = the literal
 // or a resolved constant.
 function aliasInsertPatterns(src, token) {
+  // Declaration keyword OPTIONAL — a builder stored by a later assignment
+  // (`let target; target = db('leads');`) is the same stored-builder form.
   const declRe = new RegExp(
-    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${token}\s*\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(\s*${token}\s*\)`,
     'g'
   );
   const patterns = [];
@@ -120,10 +122,11 @@ function aliasInsertPatterns(src, token) {
 // leaves `schema` visible and reads as a dynamic argument. (Regex literals
 // are not lexed; a quote inside one can over-blank to end-of-line, which
 // only errs toward flagging.)
-function blankCommentsAndStrings(code) {
+function lexBlank(code, { keepStrings = false } = {}) {
   const n = code.length;
   let out = '';
   const blank = (c) => { out += c === '\n' ? '\n' : ' '; };
+  const emitStr = (c) => { if (keepStrings) out += c; else blank(c); };
   let i = 0;
   while (i < n) {
     const c = code[i];
@@ -139,31 +142,31 @@ function blankCommentsAndStrings(code) {
       continue;
     }
     if (c === "'" || c === '"') {
-      blank(c); i += 1;
+      emitStr(c); i += 1;
       while (i < n && code[i] !== c && code[i] !== '\n') {
-        if (code[i] === '\\') { blank(code[i]); i += 1; }
-        if (i < n) { blank(code[i]); i += 1; }
+        if (code[i] === '\\') { emitStr(code[i]); i += 1; }
+        if (i < n) { emitStr(code[i]); i += 1; }
       }
-      if (i < n) { blank(code[i]); i += 1; }
+      if (i < n) { emitStr(code[i]); i += 1; }
       continue;
     }
     if (c === '`') {
-      blank(c); i += 1;
+      emitStr(c); i += 1;
       let depth = 0;
       while (i < n) {
-        if (depth === 0 && code[i] === '\\') { blank(code[i]); i += 1; if (i < n) { blank(code[i]); i += 1; } continue; }
-        if (depth === 0 && code[i] === '`') { blank(code[i]); i += 1; break; }
-        if (depth === 0 && code[i] === '$' && code[i + 1] === '{') { depth = 1; blank('$'); blank('{'); i += 2; continue; }
+        if (depth === 0 && code[i] === '\\') { emitStr(code[i]); i += 1; if (i < n) { emitStr(code[i]); i += 1; } continue; }
+        if (depth === 0 && code[i] === '`') { emitStr(code[i]); i += 1; break; }
+        if (depth === 0 && code[i] === '$' && code[i + 1] === '{') { depth = 1; out += keepStrings ? '${' : '  '; i += 2; continue; }
         if (depth > 0) {
           if (code[i] === '{') depth += 1;
           else if (code[i] === '}') {
             depth -= 1;
-            if (depth === 0) { blank('}'); i += 1; continue; }
+            if (depth === 0) { out += keepStrings ? '}' : ' '; i += 1; continue; }
           }
           out += code[i]; i += 1;
           continue;
         }
-        blank(code[i]); i += 1;
+        emitStr(code[i]); i += 1;
       }
       continue;
     }
@@ -172,6 +175,12 @@ function blankCommentsAndStrings(code) {
   }
   return out;
 }
+// Full blanking (strings + comments gone) — the dynamic scan's view.
+const blankCommentsAndStrings = (code) => lexBlank(code, { keepStrings: false });
+// Comments-only blanking (strings preserved) — the LITERAL scan's view, so
+// `db(/* primary table */ 'leads').insert(` reads as an ordinary literal
+// insert, and a comment merely SAYING "insert into leads" is not a site.
+const blankComments = (code) => lexBlank(code, { keepStrings: true });
 
 // ANY table argument, running over BLANKED code: a pure string-literal
 // argument blanks to whitespace (skipped — the literal scan owns it), while
@@ -224,7 +233,7 @@ function scanSourceForDynamicTableInserts(src) {
   // Stored builders over a dynamic table — `const target = db(table);
   // await target.insert(row);` — the dynamic mirror of the alias pass.
   const dynDeclRe = new RegExp(
-    String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(${DYN_EXPR}\)`,
+    String.raw`\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?!await\b)[A-Za-z_$][\w$]*(?:${CHAIN}\s*\.\s*table)?\s*\(${DYN_EXPR}\)`,
     'g'
   );
   let decl;
@@ -291,16 +300,20 @@ function walk(dir, out = []) {
 // same-line sites cannot get distinguishable anchor keys.
 function scanSourceForLeadInserts(src) {
   const lines = src.split('\n');
+  // Comment-normalized, string-preserving view: an inline comment inside a
+  // builder call (`db(/* primary table */ 'leads')`) reads as whitespace,
+  // and a comment merely SAYING "insert into leads" is not a site.
+  const code = blankComments(src);
   const endsByLine = new Map();
   const patterns = [RAW_SQL_INSERT_RE];
-  for (const token of leadsTableTokens(src)) {
-    patterns.push(...knexInsertPatterns(token), ...aliasInsertPatterns(src, token));
+  for (const token of leadsTableTokens(code)) {
+    patterns.push(...knexInsertPatterns(token), ...aliasInsertPatterns(code, token));
   }
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
     let m;
-    while ((m = pattern.exec(src))) {
-      const line = src.slice(0, m.index).split('\n').length;
+    while ((m = pattern.exec(code))) {
+      const line = code.slice(0, m.index).split('\n').length;
       if (!endsByLine.has(line)) endsByLine.set(line, new Set());
       endsByLine.get(line).add(m.index + m[0].length);
     }
@@ -359,6 +372,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['constant table name through stored builder', "const TABLE = 'leads';\nconst b = trx(TABLE);\nawait b.insert({ a: 1 });"],
     ['schema-qualified table literal', "await db('public.leads').insert({ a: 1 });"],
     ['callable-factory builder', "await getDb()('leads').insert(row);"],
+    ['inline comment in builder call', "await db(/* primary table */ 'leads').insert(row);"],
+    ['assigned-later stored builder', "let target;\ntarget = db('leads');\nawait target.insert(row);"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -559,9 +574,13 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         const src = files.find((f) => f.rel === w.file).src;
         const propAlt = cc.props.map(escapeRe).join('|');
         // Object SHORTHAND of a listed prop ({ table, … }) binds a runtime
-        // variable no matcher can validate — rejected outright.
+        // variable no matcher can validate — rejected outright. So are
+        // QUOTED ("table":) and COMPUTED (['table']:) keys, which would
+        // dodge the assignment matcher below.
         const shorthand = [...src.matchAll(new RegExp(String.raw`[{,]\s*(?:${propAlt})\s*(?=[,}])`, 'g'))];
         expect(shorthand.map((s) => s[0].trim())).toEqual([]);
+        const noncanonical = [...src.matchAll(new RegExp(String.raw`(?:["'\x60](?:${propAlt})["'\x60]\s*:|\[\s*["'\x60](?:${propAlt})["'\x60]\s*\])`, 'g'))];
+        expect(noncanonical.map((s) => s[0])).toEqual([]);
         const assignments = [...src.matchAll(new RegExp(String.raw`\b(?:${propAlt})\s*:\s*('[\w.]+'|[^,}\n]+)`, 'g'))];
         const literals = [];
         for (const a of assignments) {
@@ -577,16 +596,32 @@ describe('lead-writer registry (#3137 groundwork)', () => {
         }
         expect(literals.length).toBeGreaterThanOrEqual(cc.minValues);
       } else if (cc.kind === 'positional-call') {
-        // In-file helper: every call passes a LITERAL table at argIndex.
-        const src = files.find((f) => f.rel === w.file).src;
-        const argSkip = String.raw`[\w$]+\s*,\s*`.repeat(cc.argIndex);
-        const calls = [...src.matchAll(new RegExp(String.raw`(?<!function )${escapeRe(cc.helper)}\s*\(\s*${argSkip}('[\w.]+'|[^,)]+)`, 'g'))];
-        expect(calls.length).toBeGreaterThanOrEqual(cc.minCallers);
-        for (const c of calls) {
-          const lit = c[1].match(/^'([\w.]+)'$/);
-          expect({ call: c[0], literal: Boolean(lit) }).toEqual({ call: c[0], literal: true });
+        // In-file helper: EVERY invocation is enumerated, and its arguments
+        // are split by balanced-paren depth — a computed earlier argument
+        // (upsertChunked(getTrx(), …)) cannot hide the call. The table
+        // argument must be a LITERAL non-leads table.
+        const code = blankComments(files.find((f) => f.rel === w.file).src);
+        const re = new RegExp(String.raw`(?<!function )\b${escapeRe(cc.helper)}\s*\(`, 'g');
+        let m;
+        let callCount = 0;
+        while ((m = re.exec(code))) {
+          callCount += 1;
+          const args = [];
+          let depth = 1;
+          let start = re.lastIndex;
+          for (let j = re.lastIndex; j < code.length && depth > 0; j += 1) {
+            const ch = code[j];
+            if (ch === '(') depth += 1;
+            else if (ch === ')') { depth -= 1; if (depth === 0) args.push(code.slice(start, j)); }
+            else if (ch === ',' && depth === 1) { args.push(code.slice(start, j)); start = j + 1; }
+          }
+          const t = (args[cc.argIndex] || '').trim();
+          const lit = t.match(/^'([\w.]+)'$/);
+          expect({ call: `${w.file}@${m.index}`, arg: t, literal: Boolean(lit) })
+            .toEqual({ call: `${w.file}@${m.index}`, arg: t, literal: true });
           assertNotLeads(`${w.file} ${cc.helper}`, lit[1]);
         }
+        expect(callCount).toBeGreaterThanOrEqual(cc.minCallers);
       } else if (cc.kind === 'object-call') {
         // Exported helper: EVERY invocation anywhere under server/ — not
         // just object-literal ones — is enumerated. A call passing a
@@ -624,6 +659,24 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           }
         }
         expect(callers).toBeGreaterThanOrEqual(cc.minCallers);
+        // Aliasing the helper (const savePhotos = storeFunnelPhotos) would
+        // route calls around this name-based scan — every bare (non-call)
+        // reference in live code is rejected, except require /
+        // module.exports destructuring lines. Runs on fully blanked code so
+        // string mentions (e.g. the registry's own config) don't count.
+        for (const { rel, src } of files) {
+          const code = blankCommentsAndStrings(src);
+          const refRe = new RegExp(String.raw`\b${escapeRe(cc.helper)}\b(?!\s*\()`, 'g');
+          let r;
+          while ((r = refRe.exec(code))) {
+            const lineStart = code.lastIndexOf('\n', r.index) + 1;
+            const lineEnd = code.indexOf('\n', r.index);
+            const lineText = code.slice(lineStart, lineEnd === -1 ? code.length : lineEnd);
+            const allowed = /\brequire\s*\(|\bmodule\.exports\b/.test(lineText);
+            expect({ ref: `${rel}: ${lineText.trim()}`, allowed })
+              .toEqual({ ref: `${rel}: ${lineText.trim()}`, allowed: true });
+          }
+        }
       } else {
         // Unknown kind — extend this test before inventing one.
         expect({ site: key(w), kind: cc.kind, supported: false }).toEqual({ site: key(w), kind: cc.kind, supported: true });

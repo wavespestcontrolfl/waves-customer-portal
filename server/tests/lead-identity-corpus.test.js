@@ -186,7 +186,10 @@ describe('lead identity corpus — shape and PII hygiene', () => {
           // exact numeric caller-ID sentinel, or an allowlisted word
           // sentinel. Digit-stripping alone would let prose (a name, a
           // street) ride in front of a reserved number and pass.
-          const ok = /^\+?1?[\s.-]?\(?[2-9]\d\d\)?[\s.-]?555[\s.-]?01\d\d$/.test(v)
+          // A '+' requires the FULL +1 country code — '+' directly on the
+          // area code (+5415550101) is an international E.164 shape that
+          // could be a real number, never a reserved NANP fixture.
+          const ok = /^(?:\+1|1)?[\s.-]?\(?[2-9]\d\d\)?[\s.-]?555[\s.-]?01\d\d$/.test(v)
             || (/^\+?\d+$/.test(v) && NUMERIC_PHONE_SENTINELS.has(v.replace('+', '')))
             || NON_PHONE_SENTINELS.has(v.toLowerCase());
           expect({ id: c.id, phone: rec.phone, ok })
