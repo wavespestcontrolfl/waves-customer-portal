@@ -486,6 +486,12 @@ describe('full run', () => {
     const evidence = JSON.parse(p.investigation);
     expect(evidence.offhost_urls).toEqual({ submission_url: 'https://evil.example.net/join', legal_terms_url: 'https://evil.example.net/terms' });
     expect(r.pathsWritten).toBe(1);
+    // a stripped submission URL is a rejected claim — never model-confidence
+    // riding the null-URL exemption into best_path_id (Codex r10 P1)
+    expect(p.confidence).toBe(0);
+    expect(evidence.submission_verification).toBe('offhost_submission_url');
+    expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('watching'); // qualified downgrades with no executable path
     // a subdomain of the investigated host IS bound
     expect(_internals.hostBound('example.com', 'https://members.example.com/join')).toBe(true);
     expect(_internals.hostBound('example.com', 'https://notexample.com/join')).toBe(false);

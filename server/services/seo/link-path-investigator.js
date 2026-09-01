@@ -591,6 +591,10 @@ async function investigatePaths(db, {
                 clean[key] = null;
               }
             }
+            // A stripped submission URL is a REJECTED claim, not a genuinely
+            // URL-less outreach path — it must not keep its model confidence
+            // and ride the null-URL exemption into best_path_id.
+            if (clean.offhost.submission_url) clean.submissionUnverified = 'offhost_submission_url';
             return clean;
           });
 
