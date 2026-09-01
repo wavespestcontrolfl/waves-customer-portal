@@ -456,8 +456,11 @@ function PayAppMark({ app, size = 32 }) {
   const spec = PAY_APP_MARKS[app];
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false" style={{ flexShrink: 0, display: 'block' }}>
-      <rect width="32" height="32" rx="8" fill={spec.bg} />
-      <path d={spec.d} fill="#FFFFFF" transform="translate(6 6) scale(0.8333)" />
+      {/* fill via inline style: the glass theme's `[data-glass-accent] *`
+          rule repaints fill ATTRIBUTES navy (the header cluster sits inside
+          the gold accent button); inline style keeps the brand marks. */}
+      <rect width="32" height="32" rx="8" style={{ fill: spec.bg }} />
+      <path d={spec.d} style={{ fill: '#FFFFFF' }} transform="translate(6 6) scale(0.8333)" />
     </svg>
   );
 }
