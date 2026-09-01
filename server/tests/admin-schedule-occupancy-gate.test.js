@@ -325,6 +325,13 @@ describe('POST / — admin create', () => {
     recurringPattern: 'monthly',
     recurringCount: 3,
     boosterMonths: [11],
+    // Priced AND invoice-stamped on purpose: these tests are about occupancy
+    // locking, and a recurring plan that would complete without ever minting
+    // an invoice is refused by recurringWithoutBillableAmount before any
+    // locking happens. CreateAppointmentModal always sends createInvoice on a
+    // real booking, so this mirrors production rather than relaxing the gate.
+    estimatedPrice: 89,
+    createInvoice: true,
   };
   // monthly from Fri 07-03 ×3 anchors on the ordinal weekday → children on
   // the first Fridays 08-07, 09-04; November booster → 11-03.
@@ -395,7 +402,12 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
   test('a recurrence-only save that spawns children locks the parent + every child date, sorted, before any insert', async () => {
     const inserts = [];
     trx.mockImplementation((table) => {
-      const c = chain(table === 'scheduled_services' ? { ...SVC, is_recurring: false } : (table === 'customers' ? { id: 'cust-1' } : undefined));
+      // A normal recurring customer: real tier + monthly rate, so dues cover
+      // the series. Without those, recurringWithoutBillableAmount refuses the
+      // spawn before any locking — these tests are about lock ordering.
+      const c = chain(table === 'scheduled_services'
+        ? { ...SVC, is_recurring: false }
+        : (table === 'customers' ? { id: 'cust-1', waveguard_tier: 'Bronze', monthly_rate: 46.33 } : undefined));
       if (table === 'scheduled_services') {
         c.insert = jest.fn((data) => {
           inserts.push(data);

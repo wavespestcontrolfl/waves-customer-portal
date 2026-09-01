@@ -33,7 +33,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -3055,8 +3055,17 @@ async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayAct
   }
 }
 
+// An attached invoice that completion treats as REPLACEABLE rather than as
+// an existing-invoice suppressor: void and canceled rows never settle and
+// completion mints past them, so neither may short-circuit the mint
+// question (Codex P1 — the shortcut excluded only void, and a canceled
+// latest invoice silenced the warning on a visit that then completed with
+// no replacement). Refunded is deliberately NOT here: completion suppresses
+// on it and parks a manual-billing alert instead of re-minting.
+const DEAD_ATTACHED_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cancelled']);
+
 function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
-  if (!invoice || invoice.status === 'void') return null;
+  if (!invoice || DEAD_ATTACHED_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
     : null;
@@ -3132,6 +3141,345 @@ function noCardOnFileAlert({ hasChargeableMethod, prediction }) {
   if (hasChargeableMethod) return null;
   if (!prediction || prediction.kind !== 'invoice' || !(Number(prediction.amount) > 0)) return null;
   return { type: 'no_card_on_file', text: 'NO CARD ON FILE — collect payment on site' };
+}
+
+// "This visit will bill nothing, and not on purpose" alert — the money-gap
+// half of a no_charge prediction (see unbilledCompletionGap). Deliberately
+// NON-BLOCKING: the owner ruled 2026-08-31 that completion warns and never
+// stops the tech, mirroring the 2026-07-27 ruling that removed the blocking
+// completion pre-gate. Sibling of noCardOnFileAlert rather than an extension
+// of it: that badge means "money is due and you must collect it here", this
+// one means "no money is due at all and it should have been".
+function unbilledVisitAlert({ hasChargeableMethod, prediction, willMint = null }) {
+  const gap = unbilledCompletionGap({ prediction, hasChargeableMethod, willMint });
+  if (!gap) return null;
+  let text;
+  if (gap.reason === 'no_invoice_will_mint') {
+    text = 'NOTHING WILL BILL — this visit is priced but no invoice will be created';
+  } else if (gap.noPaymentMethod === true) {
+    text = 'NOTHING WILL BILL — no rate set and no card on file';
+  } else {
+    text = 'NOTHING WILL BILL — no rate or price set for this visit';
+  }
+  return { type: 'unbilled_visit', text };
+}
+
+// Wallet read + money-gap enrichment for an appointment payload. Shared by
+// the DAY and WEEK feeds because Dispatch's 5-Day/Week rows open the SAME
+// MobileAppointmentDetailSheet — enriching only the day feed left week rows
+// showing the original ambiguous "nothing bills" text with no warning and no
+// card-link action (Codex P1). One helper, so a third feed cannot drift.
+//
+// Fails toward NOT flagging, like the reads it wraps: an unreadable wallet
+// yields noPaymentMethod null (never a false "no card on file"), and any
+// lookup error leaves the payload exactly as it was.
+async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, completionContext = null }) {
+  const customerId = svc?.customer_id;
+  const achStatus = svc?.ach_status;
+  // auto_charge is in this list for the MINT question below, not the badge:
+  // an active-autopay visit predicts auto_charge and still mints nothing
+  // when no mint trigger applies, and returning early on it left that gap
+  // unreachable (Codex P1).
+  const needsWallet = ['invoice', 'auto_charge', 'payer'].includes(billingLane?.prediction?.kind)
+    || !!unbilledCompletionGap({ prediction: billingLane?.prediction });
+  if (!needsWallet) return billingLane;
+  let hasChargeableMethod = true;
+  try {
+    const methods = await db('payment_methods')
+      .where({ customer_id: customerId, processor: 'stripe' })
+      .whereNotNull('stripe_payment_method_id')
+      .select('method_type', 'ach_status', 'exp_month', 'exp_year');
+    hasChargeableMethod = methods.some((m) => {
+      if (isBankMethodType(m.method_type)) {
+        if (achStatus && achStatus !== 'active') return false;
+        return !['pending_verification', 'verification_failed'].includes(m.ach_status);
+      }
+      // Legacy rows carry 2-digit years — normalize BEFORE the expiry check,
+      // as the default-swap route does, or a valid '12/32' card reads as
+      // year 32 and isExpiredCardMethod fails closed.
+      const rawYear = parseInt(m.exp_year, 10);
+      return !isExpiredCardMethod({
+        ...m,
+        exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
+      });
+    });
+  } catch { hasChargeableMethod = true; }
+  // Will an invoice actually EXIST? The prediction answers what the visit
+  // would bill; only shouldAutoInvoiceCompletion answers whether anything
+  // gets minted, and the two diverge (Codex GH P1 — the same divergence the
+  // booking gate already asks about). Every completion-time suppressor is a
+  // reason NOT to mint, so leaving them false asks the permissive question:
+  // even at its best, does this visit bill? Failure leaves willMint null,
+  // which is never treated as a gap.
+  let willMint = null;
+  // An ATTACHED non-void invoice already exists and completion reuses it —
+  // there is nothing left to mint, and asking the fresh-mint question would
+  // read its `false` as "nothing will bill" for work that is already billed
+  // (Codex GH P1). Provenance, not a re-derivation.
+  const fromAttachedInvoice = billingLane.prediction?.source === 'attached_invoice';
+  // The typed one-time completion profile is one of completion's own mint
+  // triggers, so a preview that omits it under-reports minting. When the
+  // profile could not be resolved we leave willMint null rather than guess:
+  // unknown is never a gap, so an unreadable profile stays silent instead of
+  // warning on a visit that will bill.
+  const profileKnown = !!completionContext && !completionContext.completionProfileLookupFailed;
+  const typedOneTimeBilling = profileKnown
+    && String(completionContext.completionProfile?.billingType || '').toLowerCase() === 'one_time'
+    && svc?.followup_included !== true;
+  const pricedPayer = billingLane.prediction?.kind === 'payer'
+    && Number(billingLane.prediction.amount) > 0;
+  if (!fromAttachedInvoice && profileKnown
+    && (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind) || pricedPayer)) {
+    try {
+      const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+      willMint = shouldAutoInvoiceCompletion({
+        recapReviewOnly: false,
+        alreadyPaid: false,
+        prepaidCovered: false,
+        autopayCoversVisit: false,
+        preMintedInvoice: false,
+        existingCompletionInvoice: false,
+        createInvoiceOnComplete: !!svc?.create_invoice_on_complete,
+        waveguardTier: svc?.waveguard_tier || null,
+        explicitMembership: svc?.billing_mode === 'monthly_membership',
+        explicitPerVisitLane: ['per_visit', 'one_time'].includes(svc?.billing_mode),
+        perApplicationBilling: svc?.billing_mode === 'per_application',
+        annualPrepayBilling: svc?.billing_mode === 'annual_prepay',
+        hasVisitPrice: svc?.estimated_price != null && Number(svc.estimated_price) > 0,
+        invoiceAmount: Number(billingLane.prediction.amount) || 0,
+        autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+        serviceType: svc?.service_type,
+        isCallback: !!svc?.is_callback,
+        visitPerformed: true,
+        typedOneTimeBilling,
+      });
+    } catch { willMint = null; }
+  }
+  const gap = unbilledCompletionGap({ prediction: billingLane.prediction, hasChargeableMethod, willMint });
+  if (Array.isArray(alerts)) {
+    // Alerts derive from the mint verdict, so both are computed AFTER it: a
+    // priced visit that mints nothing has nothing to collect on site, and
+    // the no-card badge would tell the tech to collect for an invoice that
+    // will never exist, right beside the NOTHING WILL BILL line (Codex P2).
+    const noCardAlert = gap?.reason === 'no_invoice_will_mint'
+      ? null
+      : noCardOnFileAlert({ hasChargeableMethod, prediction: billingLane.prediction });
+    if (noCardAlert) alerts.push(noCardAlert);
+    const unbilledAlert = unbilledVisitAlert({ hasChargeableMethod, prediction: billingLane.prediction, willMint });
+    if (unbilledAlert) alerts.push(unbilledAlert);
+  }
+  billingLane.unbilledGap = gap;
+  return billingLane;
+}
+
+// Recurring bookings must land with a NUMBER on them. A hand-booked customer
+// (2026-08-31) took four recurring visits with no stamped price and
+// monthly_rate 0: every visit then completes at $0 and the plan runs free
+// forever. It is the repo's unpriced rule violated at schedule scale —
+// unpriced means NULL ("manual quote pending"), never 0 ("charge nothing").
+//
+// The verdict is the CANONICAL completion prediction, not a local rule list
+// (Codex 3×P0 on the first cut of this guard: a hand-rolled exemption list
+// diverged from predictCompletionBilling three ways — it honored a stale
+// monthly_rate that explicit per_visit/one_time lanes deliberately ignore,
+// waved through per_application customers without an acceptance fee, and
+// trusted a requested annual-prepay term the route can still downgrade). One
+// classifier, the same one the sheet and the completion path read.
+//
+// MUST be called with the FINAL persisted values: the EFFECTIVE billing term
+// after any downgrade (never the requested one) and the recurring FLOOR
+// price — not the anchor's finalPrice. The anchor total includes every
+// add-on booked on it, while children and boosters recompute from
+// date-filtered add-ons: a series whose primary line is $0 and whose anchor
+// is priced only by a seasonal add-on passes an anchor check and then
+// generates children that calculateVisitFinancialsForAddons prices at null,
+// completing unbilled (Codex P0). The floor is what EVERY generated visit is
+// guaranteed to carry: the primary net plus only those add-on lines with no
+// cadence of their own, which lineDueOnRecurringDate puts on every date.
+function recurringWithoutBillableAmount({
+  isRecurring,
+  recurringFloorPrice,
+  customer,
+  createInvoiceOnComplete,
+  // One of completion's own mint triggers (admin-dispatch.js:5508 — a
+  // completion profile whose billing_type is 'one_time'). Omitting it made
+  // the gate 409 a priced service that completion WOULD invoice (Codex P1).
+  // Defaults FALSE to match shouldAutoInvoiceCompletion's own default:
+  // defaulting true would let ANY priced visit satisfy the typed-one-time
+  // branch and silently undo the round-16 fix. Callers resolve it; NULL
+  // means the profile lookup FAILED (the resolver always returns a profile
+  // on success) — see the unverified verdict after the mint question.
+  typedOneTimeBilling = false,
+  isCallback,
+  serviceType,
+}) {
+  if (!isRecurring) return null;
+  // Free BY DESIGN — completion suppresses these before any amount matters.
+  if (isCallback || isAlwaysFreeServiceType(serviceType)) return null;
+
+  // The REAL lane flags — these are what completion will see, so they are
+  // what the mint question below must be asked with. Feeding it a rewritten
+  // lane made the gate believe an invoice would mint that completion then
+  // declines to cut (Codex P0, round 18).
+  const billingMode = customer?.billing_mode || null;
+  const explicitMembership = billingMode === 'monthly_membership';
+  const explicitPerVisitLane = ['per_visit', 'one_time'].includes(billingMode);
+  const perApplicationBilling = billingMode === 'per_application';
+  const annualPrepayBilling = billingMode === 'annual_prepay';
+  const monthlyRate = Number(customer?.monthly_rate) || 0;
+
+  // DUES COVERAGE is the one question the annual lane must not be allowed to
+  // answer. resolveBillingLane INFERS monthly_membership from a retained
+  // WaveGuard tier + positive monthly_rate — a supported shape for an
+  // annual-prepay customer — and would exempt the booking as dues-covered,
+  // while completion sees billing_mode='annual_prepay', ignores the monthly
+  // rate, and bills nothing. So the annual lane is neutralized for THIS
+  // check only, and nowhere else: the prepay invoice + term are created
+  // post-commit inside a catch that leaves the booking standing, so neither
+  // a requested term nor an inherited lane is an amount.
+  const customerForDues = annualPrepayBilling
+    ? { ...customer, billing_mode: 'per_visit' }
+    : customer;
+  // Dues are real coverage — the 8AM cron collects them and the visit is free
+  // by design — but only when there is a rate to collect.
+  if (resolveBillingLane(customerForDues).mode === 'monthly_membership' && monthlyRate > 0) return null;
+
+  // Otherwise the series must actually MINT. Asking the advisory prediction
+  // was not enough (Codex P0): it answers "what would this bill", while
+  // shouldAutoInvoiceCompletion answers "will an invoice exist", and the two
+  // diverge — a NULL-mode customer with a rate or a stamped price predicts
+  // 'invoice' yet mints nothing when create_invoice_on_complete is false, no
+  // explicit lane/tier applies, and GATE_AUTOINVOICE_PRICED_VISITS is off.
+  // Lazy require: admin-dispatch pulls admin-schedule helpers, so a
+  // top-level import would close a cycle.
+  const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+  const { completionInvoiceAmount } = require('../services/billing-lane');
+  const invoiceAmount = completionInvoiceAmount({
+    estimatedPrice: Number(recurringFloorPrice) > 0 ? recurringFloorPrice : null,
+    isCallback,
+    perApplicationBilling,
+    perApplicationFee: customer?.per_application_fee,
+    monthlyRate: customer?.monthly_rate,
+    billingMode,
+  });
+  const willMint = shouldAutoInvoiceCompletion({
+    // Completion-time suppressors cannot be known at booking and are all
+    // reasons NOT to mint, so leaving them false asks the most permissive
+    // question: "even at its best, does this series bill?"
+    recapReviewOnly: false,
+    alreadyPaid: false,
+    prepaidCovered: false,
+    autopayCoversVisit: false,
+    preMintedInvoice: false,
+    existingCompletionInvoice: false,
+    createInvoiceOnComplete,
+    waveguardTier: customer?.waveguard_tier || null,
+    explicitMembership,
+    explicitPerVisitLane,
+    perApplicationBilling,
+    annualPrepayBilling,
+    hasVisitPrice: Number(recurringFloorPrice) > 0,
+    invoiceAmount,
+    autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+    serviceType,
+    isCallback,
+    visitPerformed: true,
+    typedOneTimeBilling: typedOneTimeBilling === true,
+  });
+  if (willMint) return null;
+  // An UNREADABLE profile (transient catalog error) matters only where the
+  // profile could have flipped the verdict: a POSITIVE floor, which a typed
+  // one-time profile would mint. A $0 floor mints under no profile at all,
+  // so it takes the ordinary refusal below. For the priced case the gate
+  // stays CLOSED — standing down let a priced null-mode series through on
+  // a read error and complete unbilled (pre-push Codex P0) — but says what
+  // actually happened: the plan could not be verified, retry. Calling it
+  // "no billable amount" sent the operator chasing a rate the plan may
+  // already have (pre-push Codex P1). Distinct code; no fix hints, since
+  // nothing on the profile needs changing.
+  if (typedOneTimeBilling === null && Number(recurringFloorPrice) > 0) {
+    return {
+      error: 'Could not verify whether this recurring plan will bill — the service catalog read failed. Try again in a moment.',
+      code: 'RECURRING_BILLING_UNVERIFIED',
+      fix: { monthlyRate: false, perApplicationFee: false, visitPrice: false },
+    };
+  }
+
+  // Lane-specific guidance: recommending a monthly rate to a customer whose
+  // lane deliberately IGNORES monthly rates leaves the operator stuck
+  // following advice that cannot clear the gate (Codex P1).
+  const acceptsMonthlyRate = !explicitPerVisitLane && !perApplicationBilling && !annualPrepayBilling;
+  const needsPerApplicationFee = perApplicationBilling;
+  const remedy = needsPerApplicationFee
+    ? 'set a per-application fee on the customer profile, or price the visit'
+    : acceptsMonthlyRate
+      ? 'set a monthly rate on the customer profile, or price the visit'
+      : 'price the visit (this customer\'s billing lane does not bill from a monthly rate)';
+  return {
+    error: `This recurring plan has no billable amount — every visit would complete without an invoice. Please ${remedy} before booking.`,
+    code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
+    fix: {
+      monthlyRate: acceptsMonthlyRate,
+      perApplicationFee: needsPerApplicationFee,
+      visitPrice: true,
+    },
+  };
+}
+
+// The SAME billable-amount verdict for every OFFICE writer that grows an
+// existing series — the Edit Appointment count raise and fixed→ongoing flip
+// (reconcileRecurringSeriesVisitCount) and the recurring-plan alert actions
+// (extend / convert_ongoing). Each of these mints recurring rows without
+// passing the POST or make-recurring gates, so an unpriced, zero-rate plan
+// kept growing through them (Codex P1, two rounds). One helper, so a fourth
+// office writer cannot drift. Priced exactly as the insert loops stamp their
+// rows: the extension price template + the add-on lines due on each date
+// through calculateStoredVisitFinancials (the same call
+// applyStoredVisitFinancials makes), minimum across `dates`; the
+// create-invoice stamp is the sibling-resolved value the rows get.
+//
+// NOT applied to the completion-time auto-extend (runRecurringSeriesMaintenance):
+// owner ruling 2026-08-31 — warn at completion, block at booking — and a
+// refusal there would either fail the completion or silently end an ongoing
+// plan. The visit it spawns carries the non-blocking NOTHING WILL BILL
+// warning instead, which is the completion-side mechanism for existing
+// unpriced plans.
+//
+// An unreadable customer skips the verdict, as the spawn gate does: the
+// writer never fails on a read the insert itself does not need. A failed
+// completion-profile read maps to null and takes the unverified verdict
+// inside recurringWithoutBillableAmount.
+async function seriesExtensionUnbillable(conn, {
+  parent, dates, cols, parentAddons, storedDiscountScope, blackoutDates, skipParent, seriesCioc,
+}) {
+  if (!dates.length) return null;
+  const gateCustomer = await conn('customers').where({ id: parent.customer_id }).first().catch(() => null);
+  if (!gateCustomer) return null;
+  const gatePriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
+  const floor = dates.reduce((min, d) => {
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, blackoutDates, skipParent);
+    const f = calculateStoredVisitFinancials(gatePriceParent, dueAddons, parentAddons, storedDiscountScope);
+    return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
+  }, Infinity);
+  const extendProfile = await resolveCompletionProfileForScheduledService(parent, conn).catch(() => null);
+  // The PARENT's own label — asks whether the series' service is always-free;
+  // children still resolve the live catalog identity at insert (same
+  // convention as the spawn gate, so the child-identity golden master stays
+  // strict).
+  const extendSeriesServiceType = parent.service_type;
+  return recurringWithoutBillableAmount({
+    isRecurring: true,
+    recurringFloorPrice: Number.isFinite(floor) ? floor : 0,
+    customer: gateCustomer,
+    createInvoiceOnComplete: !!(cols.create_invoice_on_complete
+      && (seriesCioc !== undefined ? seriesCioc : parent.create_invoice_on_complete)),
+    typedOneTimeBilling: extendProfile
+      ? String(extendProfile.billingType || '').toLowerCase() === 'one_time'
+        && parent.followup_included !== true
+      : null,
+    isCallback: !!parent.is_callback,
+    serviceType: extendSeriesServiceType,
+  });
 }
 
 // GET /api/admin/schedule — day view (board + dispatch)
@@ -3302,7 +3650,7 @@ router.get('/', async (req, res, next) => {
       try {
         checkoutInvoice = await db('invoices')
           .where({ scheduled_service_id: s.id })
-          .whereNot('status', 'void')
+          .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
           .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
       } catch { /* scheduled_service_id may be absent before migration */ }
@@ -3449,37 +3797,7 @@ router.get('/', async (req, res, next) => {
       // just any payment_methods row. Fail toward NOT flagging, like the
       // reads above: a wrong badge on a covered customer teaches the tech
       // to ignore it.
-      if (billingLane.prediction?.kind === 'invoice') {
-        let hasChargeableMethod = true;
-        try {
-          const methods = await db('payment_methods')
-            .where({ customer_id: s.customer_id, processor: 'stripe' })
-            .whereNotNull('stripe_payment_method_id')
-            .select('method_type', 'ach_status', 'exp_month', 'exp_year');
-          hasChargeableMethod = methods.some((m) => {
-            if (isBankMethodType(m.method_type)) {
-              // Both ACH gates the collection paths enforce: the customer-
-              // level health block (billing-v2 default-swap) and the row's
-              // own unverified/failed state (customer-autopay).
-              if (s.ach_status && s.ach_status !== 'active') return false;
-              return !['pending_verification', 'verification_failed'].includes(m.ach_status);
-            }
-            // Legacy rows carry 2-digit years — normalize BEFORE the expiry
-            // check, as the default-swap route does, or a valid '12/32' card
-            // reads as year 32 and isExpiredCardMethod fails closed.
-            const rawYear = parseInt(m.exp_year, 10);
-            return !isExpiredCardMethod({
-              ...m,
-              exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
-            });
-          });
-        } catch { hasChargeableMethod = true; }
-        const noCardAlert = noCardOnFileAlert({
-          hasChargeableMethod,
-          prediction: billingLane.prediction,
-        });
-        if (noCardAlert) alerts.push(noCardAlert);
-      }
+      await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts, completionContext: projectCompletionContext });
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
@@ -3859,7 +4177,7 @@ router.get('/week', async (req, res, next) => {
         try {
           checkoutInvoice = await db('invoices')
             .where({ scheduled_service_id: s.id })
-            .whereNot('status', 'void')
+            .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
             .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
@@ -3929,7 +4247,7 @@ router.get('/week', async (req, res, next) => {
         try {
           attachedInvoice = await db('invoices')
             .where({ scheduled_service_id: s.id })
-            .whereNot('status', 'void')
+            .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
             .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
@@ -3988,6 +4306,10 @@ router.get('/week', async (req, res, next) => {
             completionAutopayChargeEnabled: require('../config/feature-gates').gates.completionAutopayCharge === true,
           }),
         };
+        // Week rows open the SAME detail sheet as the day feed, so they get
+        // the same wallet read and money-gap note (Codex P1). No alerts array
+        // here — the propertyAlerts feed is a day-view concept.
+        await enrichBillingLaneWithWalletGap({ billingLane, svc: s, alerts: null, completionContext: projectCompletionContext });
         return {
           id: s.id,
           customerId: s.customer_id,
@@ -4927,6 +5249,64 @@ router.post('/', requireAdmin, async (req, res, next) => {
         logger.warn(`[schedule/create] ${droppedBoosters} booster visit(s) could not be placed — blackout/closed-day nudge exhausted`);
         bookingWarnings.push(`${droppedBoosters} booster visit${droppedBoosters === 1 ? '' : 's'} could not be placed — the date${droppedBoosters === 1 ? ' falls' : 's fall'} in an extended blackout/closed-day stretch. Adjust the days-off/blackout settings or add ${droppedBoosters === 1 ? 'it' : 'them'} manually.`);
       }
+    }
+
+    // Billable-amount gate, evaluated on the ACTUAL generated series. Every
+    // date this booking will write is known here (parent + children +
+    // boosters, the same list rung 1 locks below), so the floor is computed
+    // by running the REAL per-date pricing — filterAddonLinesForDate +
+    // calculateVisitFinancialsForAddons, exactly what the insert loop uses —
+    // over every one of them and taking the minimum.
+    //
+    // This replaced a hand-written "is this add-on durable?" predicate that
+    // was wrong in both directions across three Codex rounds: first it
+    // dropped every cadence-bearing add-on (false 409 on add-on-priced
+    // series), then it kept cadence-matched ones while ignoring skipWeekends
+    // / weekendShift, so a weekend-shifted child could silently lose the
+    // add-on that justified the booking and complete unbilled. Asking the
+    // pricing code what each date actually costs cannot drift from what the
+    // insert loop then writes.
+    {
+      const gateDates = [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates].filter(Boolean);
+      // The amount the row will ACTUALLY carry. memberSeriesCovered strips the
+      // primary price from the parent and every child (dues are meant to cover
+      // them) and disables create_invoice_on_complete, so gating on the
+      // calculated price let an explicit monthly_membership customer with
+      // monthly_rate 0 pass on a catalog price and then receive rows with
+      // neither a price nor collectible dues (Codex P0). For covered rows the
+      // stamp is addon-only — mirror that exactly.
+      // Booster rows are is_recurring:false — completion bills them as one-off
+      // visits at their OWN price, so the member-series stripping deliberately
+      // does not touch them (:5488). Applying the covered-member addon-only
+      // rule to booster dates understated them and could 409 a legitimately
+      // priced series whose boosters carry the primary price (Codex P1).
+      const boosterDateSet = new Set(plannedBoosterDates);
+      const floorForDate = (targetDate) => {
+        const lines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective);
+        return memberSeriesCovered && !boosterDateSet.has(targetDate)
+          ? addonOnlyTotal(lines)
+          : (calculateVisitFinancialsForAddons(pricing, lines).price || 0);
+      };
+      const recurringFloorPrice = zeroCallbackPrice
+        ? 0
+        : gateDates.reduce((min, d) => Math.min(min, floorForDate(d)), Infinity);
+      // Completion's typed-one-time mint trigger, resolved from the same
+      // authority admin-dispatch reads (Codex P1).
+      const gateProfile = await resolveCompletionProfileForScheduledService(
+        { service_id: serviceId || null, service_type: serviceType },
+      ).catch(() => null);
+      const unbillable = recurringWithoutBillableAmount({
+        isRecurring,
+        recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
+        customer,
+        createInvoiceOnComplete: createInvoiceStamp,
+        typedOneTimeBilling: gateProfile
+          ? String(gateProfile.billingType || '').toLowerCase() === 'one_time'
+          : null,
+        isCallback: resolvedIsCallback,
+        serviceType,
+      });
+      if (unbillable) return res.status(409).json(unbillable);
     }
 
     let waveguardPlanSync = null;
@@ -9389,6 +9769,69 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             existingUpcomingChildren = parseInt(upRow?.c || 0, 10);
           } catch { existingUpcomingChildren = 0; }
           const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
+          // SAME billable-amount gate as POST creation (Codex P0, round 19):
+          // this path also mints a recurring series and never consulted it.
+          // Placed HERE because every input the insert loop prices with is in
+          // scope: the planned child dates, the parent's stored financials,
+          // the date-filtered add-ons and the discount scope. An earlier cut
+          // hardcoded the floor to 0 on the belief that children carry no
+          // price — wrong, applyStoredVisitFinancials copies the parent's
+          // price onto each child (:9507), so priced per_visit appointments
+          // were refused (Codex P1, round 20). Same calculation as the loop,
+          // minimum across the dates it will actually write.
+          {
+            const gateCustomer = await trx('customers').where({ id: parent.customer_id }).first().catch(() => null);
+            // Seeded from the SAME seenChildDates the insert loop walks with
+            // (a copy, so planning cannot mutate it). A fresh Set made the
+            // gate price early occurrences the loop then skips as already
+            // occupied — on a top-up it would check one date and insert
+            // another, and with cadence-sensitive add-ons the checked date
+            // can carry an amount the inserted one does not (Codex P0).
+            const gateDates = [baseDateStr, ...planSpawnChildDates({
+              baseDateStr, pattern: recurringPattern, rOpts, skip: skipChild, dir: dirChild,
+              seen: new Set(seenChildDates), spawnCount, spawnTarget, blackoutDates: spawnBlackoutDates,
+            })];
+            const spawnInv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
+            const spawnFloor = gateDates.reduce((min, d) => {
+              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, d, spawnBlackoutDates, skipChild);
+              if (memberSeriesCovered) {
+                // Covered rows are stamped add-on-only, mirroring the insert.
+                const addonStamp = dueAddons.reduce((sum, a) => {
+                  const n = Number(a.estimated_price);
+                  return Number.isFinite(n) && n > 0 ? sum + n : sum;
+                }, 0);
+                return Math.min(min, addonStamp);
+              }
+              const f = calculateStoredVisitFinancials(
+                { ...parent, discount_type: discountType !== undefined ? discountType : parent.discount_type,
+                  discount_amount: discountAmount !== undefined ? discountAmount : parent.discount_amount },
+                dueAddons, parentAddons, storedDiscountScope,
+              );
+              return Math.min(min, Number(f.price) > 0 ? Number(f.price) : 0);
+            }, Infinity);
+            const spawnProfile = await resolveCompletionProfileForScheduledService(parent, trx)
+              .catch(() => null);
+            // The PARENT's own label — this asks whether the series' service is
+            // always-free, it is not a child row's identity (children resolve
+            // the live catalog identity at insert). Named so the child-insert
+            // golden master stays strict rather than allow-listing a line.
+            const spawnSeriesServiceType = parent.service_type;
+            const unbillableSpawn = gateCustomer && recurringWithoutBillableAmount({
+              isRecurring: true,
+              recurringFloorPrice: Number.isFinite(spawnFloor) ? spawnFloor : 0,
+              customer: gateCustomer,
+              createInvoiceOnComplete: memberSeriesCovered ? false : spawnInv,
+              typedOneTimeBilling: spawnProfile
+                ? String(spawnProfile.billingType || '').toLowerCase() === 'one_time'
+                  && parent.followup_included !== true
+                : null,
+              isCallback: !!parent.is_callback,
+              serviceType: spawnSeriesServiceType,
+            });
+            if (unbillableSpawn) {
+              throw Object.assign(httpError(409, unbillableSpawn.error), { code: unbillableSpawn.code });
+            }
+          }
           // Iterate by inserts (matches POST spawn): skip-weekends can
           // collapse multiple raw recurrences onto the same shifted weekday,
           // and a fixed-count plan still owes spawnTarget children. Same
@@ -11260,6 +11703,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     baseDateStr, pattern: parent.recurring_pattern, rOpts, skip: skipParent, dir: dirParent, seen, need,
     blackoutDates: extendBlackoutDates,
   });
+  // Billable-amount gate on the dates this writer will add (shared helper —
+  // rationale on seriesExtensionUnbillable). Trims and unchanged counts never
+  // reach here.
+  const unbillableExtend = await seriesExtensionUnbillable(trx, {
+    parent, dates: extendDates, cols, parentAddons, storedDiscountScope,
+    blackoutDates: extendBlackoutDates, skipParent, seriesCioc,
+  });
+  if (unbillableExtend) {
+    throw Object.assign(httpError(409, unbillableExtend.error), { code: unbillableExtend.code });
+  }
   for (const nd of extendDates) {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
@@ -16390,6 +16843,15 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        // Billable-amount gate per placed date (shared helper); a refusal
+        // throws and rolls the whole action back, alert left open.
+        const unbillableAction = await seriesExtensionUnbillable(trx, {
+          parent, dates: [nd], cols, parentAddons, storedDiscountScope,
+          blackoutDates: alertBlackoutDates, skipParent, seriesCioc,
+        });
+        if (unbillableAction) {
+          throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
+        }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
@@ -16469,6 +16931,15 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
+        // Billable-amount gate per placed date (shared helper); a refusal
+        // throws and rolls the whole action back, alert left open.
+        const unbillableAction = await seriesExtensionUnbillable(trx, {
+          parent, dates: [nd], cols, parentAddons, storedDiscountScope,
+          blackoutDates: alertBlackoutDates, skipParent, seriesCioc,
+        });
+        if (unbillableAction) {
+          throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
+        }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
@@ -16793,6 +17264,9 @@ router._test = {
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,
   noCardOnFileAlert,
+  unbilledVisitAlert,
+  recurringWithoutBillableAmount,
+  predictionFromAttachedInvoice,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,

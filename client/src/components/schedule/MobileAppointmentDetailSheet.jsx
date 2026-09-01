@@ -663,7 +663,15 @@ export default function MobileAppointmentDetailSheet({
         {/* Billing lane + what completing this visit will do — server-computed
             from the same predicates the completion path uses, so the office
             sees the money outcome before the visit instead of after. */}
-        <BillingLaneCard billingLane={service.billingLane} style={{ marginTop: 12 }} />
+        <BillingLaneCard
+          billingLane={service.billingLane}
+          // Same handler the Customer section's button uses — one send path,
+          // two entry points, so the money-gap warning can be acted on where
+          // it is read instead of sending the tech hunting for the button.
+          onSendCardLink={canSendCardRequest(cardRequestInfo) && !cardLinkNotice ? sendCardRequestLink : null}
+          sendingCardLink={cardLinkSending}
+          style={{ marginTop: 12 }}
+        />
 
         {/* Switch to annual prepay, on site (GATE_ONSITE_PREPAY_SWITCH). Only
             offered where it can actually be sold: a recurring visit for a
