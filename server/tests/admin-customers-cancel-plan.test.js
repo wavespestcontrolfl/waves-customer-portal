@@ -29,6 +29,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }) }));
 jest.mock('../services/cancellation-confirmations', () => ({
+  confirmationChannelAvailability: jest.fn(async (c) => ({ sms: !!(c && c.phone), email: !!(c && c.email) })),
   sendCancellationConfirmations: jest.fn().mockResolvedValue({ smsSent: true, emailSent: true, channels: ['sms', 'email'], smsTemplateKey: 'service_cancellation_confirmation' }),
   familyLabelOf: (k) => ({ pest_control: 'Pest Control', lawn_care: 'Lawn Care' }[k] || k),
 }));

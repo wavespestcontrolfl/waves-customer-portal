@@ -177,4 +177,47 @@ async function sendCancellationConfirmations({
   };
 }
 
-module.exports = { sendCancellationConfirmations, familyLabelOf, etDisplayDate };
+// Channel availability for the operator-facing preview: presence alone lies
+// when the server already KNOWS a channel cannot send — landline (cached or
+// latest compliance lookup), an active STOP suppression, email prefs off,
+// or a malformed address. These are the same definitive signals the send
+// legs enforce; unknown/unreadable states stay AVAILABLE (fail-open for
+// display — the send-time blocked-flag handling is the authority).
+async function confirmationChannelAvailability(customer) {
+  const channels = { sms: !!(customer && customer.phone), email: !!(customer && customer.email) };
+  const db = require('../models/db');
+  if (channels.sms) {
+    try {
+      const row = await db('customers').where({ id: customer.id }).first('line_type');
+      if (row && String(row.line_type || '') === 'landline') channels.sms = false;
+    } catch (err) { logger.warn(`channel availability: line_type cache read failed for ${customer.id}: ${err.message}`); }
+  }
+  if (channels.sms) {
+    try {
+      const { latestContactCheck, isSmsMobileLineType } = require('./messaging/compliance-contact-checks');
+      const latest = await latestContactCheck(customer.phone);
+      if (latest && latest.line_type != null && !isSmsMobileLineType(latest.line_type)) channels.sms = false;
+    } catch (err) { logger.warn(`channel availability: contact check read failed for ${customer.id}: ${err.message}`); }
+  }
+  if (channels.sms) {
+    try {
+      const suppressed = await db('messaging_suppression')
+        .where({ phone: customer.phone, active: true }).first('id');
+      if (suppressed) channels.sms = false;
+    } catch (err) { logger.warn(`channel availability: suppression read failed for ${customer.id}: ${err.message}`); }
+  }
+  if (channels.email) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(customer.email).trim())) {
+      channels.email = false;
+    } else {
+      try {
+        const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first('email_enabled');
+        if (prefs && prefs.email_enabled === false) channels.email = false;
+      } catch (err) { logger.warn(`channel availability: notification prefs read failed for ${customer.id}: ${err.message}`); }
+    }
+  }
+  return channels;
+}
+
+module.exports = {
+  confirmationChannelAvailability, sendCancellationConfirmations, familyLabelOf, etDisplayDate };

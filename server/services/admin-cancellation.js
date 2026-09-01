@@ -786,7 +786,10 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     waiveLateFee: input.waiveLateFee,
     visitFees,
     sendConfirmation: input.sendConfirmation,
-    confirmationChannels: { sms: !!customer.phone, email: !!customer.email },
+    // Deliverability, not mere presence: a stored landline, an active
+    // STOP, disabled email prefs, or a malformed address must not let the
+    // card promise "text + email" the send legs will refuse.
+    confirmationChannels: await require('./cancellation-confirmations').confirmationChannelAvailability(customer),
     reasonCode: input.reasonCode,
     reasonCodes: [...REASON_CODE_VALUES],
     note: input.note,
