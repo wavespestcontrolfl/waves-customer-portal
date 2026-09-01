@@ -6,9 +6,11 @@
  * the booking contract (services/booking/create-scheduled-service.js —
  * the createScheduledService wrapper, or a bespoke insert whose payload
  * came out of completeScheduledServiceInsert) or be one of the frozen
- * legacy sites below. The inventory freezes each
- * site's FINGERPRINT — the statement prefix (call-site identity: the
- * assignment/return context on the ref's line) plus the normalized
+ * legacy sites below. The inventory freezes each site's FINGERPRINT — the
+ * nearest enclosing named scope (function / arrow binding / router
+ * handler path, plus the nearest `case` label inside it — call-site
+ * identity that survives line churn), the statement prefix
+ * (assignment/return context on the ref's line) and the normalized
  * `('scheduled_services')…insert(<arg head>` expression — as a per-file
  * multiset, not a bare count: with
  * counts alone, converting one legacy insert while adding a different
@@ -43,62 +45,64 @@ const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', '
 // sibling module become a parallel booking mechanism (GH Codex P2).
 const CONTRACT_MODULE = 'server/services/booking/create-scheduled-service.js';
 
-// Frozen 2026-09-01 inventory: 26 sites, 14 files, keyed by fingerprint
+// Frozen 2026-09-01 inventory (re-frozen at the origin/main merge base of
+// this PR — main reworked admin-dispatch's schedule-followup insert while
+// the PR was in review): 26 sites, 14 files, keyed by fingerprint
 // multiset. Shrink-only.
 const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
   'server/routes/admin-schedule.js': [
-    "[svc] = await trx( scheduled_services').insert(insertData",
-    "const [childRow] = await trx( scheduled_services').insert(childData",
-    "const [boosterRow] = await trx( scheduled_services').insert(boosterData",
-    "const [childRow] = await trx( scheduled_services').insert(childData",
-    "const [row] = await trx( scheduled_services').insert(data",
-    "const [autoExtRow] = await conn( scheduled_services').insert(nextData",
-    "const [row] = await trx( scheduled_services').insert(data",
-    "const [row] = await trx( scheduled_services').insert(data",
+    "post / :: [svc] = await trx( scheduled_services').insert(insertData",
+    "post / :: const [childRow] = await trx( scheduled_services').insert(childData",
+    "post / :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
+    "put /:id/update-details :: const [childRow] = await trx( scheduled_services').insert(childData",
+    "reconcileRecurringSeriesVisitCount :: const [row] = await trx( scheduled_services').insert(data",
+    "runRecurringSeriesMaintenanceLocked :: const [autoExtRow] = await conn( scheduled_services').insert(nextData",
+    "runLocked / action === 'extend' :: const [row] = await trx( scheduled_services').insert(data",
+    "runLocked / action === 'convert_ongoing' :: const [row] = await trx( scheduled_services').insert(data",
   ],
   'server/routes/booking.js': [
-    "const [scheduledRow] = await trx( scheduled_services').insert({",
+    "createSelfBooking :: const [scheduledRow] = await trx( scheduled_services').insert({",
   ],
   'server/routes/admin-dispatch.js': [
-    "return trx( scheduled_services').insert(insertData",
+    "post /:serviceId/schedule-followup :: const inserted = await trx( scheduled_services').insert(insertData",
   ],
   'server/routes/admin-leads.js': [
-    "const [appt] = await trx( scheduled_services').insert(insertData",
+    "post /:id/schedule-appointment :: const [appt] = await trx( scheduled_services').insert(insertData",
   ],
   'server/services/slot-reservation.js': [
-    "const [row] = await trx( scheduled_services').insert({",
+    "reserveSlot :: const [row] = await trx( scheduled_services').insert({",
   ],
   'server/services/health-alerts.js': [
-    "return trx( scheduled_services').insert({",
+    "executeAction :: return trx( scheduled_services').insert({",
   ],
   'server/services/availability.js': [
-    "const [scheduledRow] = await trx( scheduled_services').insert({",
+    "runBookingWork :: const [scheduledRow] = await trx( scheduled_services').insert({",
   ],
   'server/services/recurring-appointment-seeder.js': [
-    "? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn( scheduled_services').insert(rows",
-    ": await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx( scheduled_services').insert(rows",
+    "seedFollowUpsForParent :: ? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn( scheduled_services').insert(rows",
+    "seedFollowUpsForParent :: : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx( scheduled_services').insert(rows",
   ],
   'server/services/annual-prepay-renewals.js': [
-    "const [row] = await trx( scheduled_services').insert(buildInsert(scheduledDate, windowStart)",
-    "[created] = await conn( scheduled_services').insert(buildInsert(scheduledDate, null)",
-    "return trx( scheduled_services').insert(buildInsert(scheduledDate, null)",
+    "seedTimedFirstVisit :: const [row] = await trx( scheduled_services').insert(buildInsert(scheduledDate, windowStart)",
+    "ensureCoverageRowsForTerm :: [created] = await conn( scheduled_services').insert(buildInsert(scheduledDate, null)",
+    "ensureCoverageRowsForTerm :: return trx( scheduled_services').insert(buildInsert(scheduledDate, null)",
   ],
   'server/services/intelligence-bar/tools.js': [
-    "const [created] = await trx( scheduled_services').insert({",
+    "createAppointment :: const [created] = await trx( scheduled_services').insert({",
   ],
   'server/services/estimate-converter.js': [
-    "const inserted = await trx( scheduled_services').insert(standaloneRow",
-    "const inserted = await trx( scheduled_services').insert(row",
+    "convertEstimate :: const inserted = await trx( scheduled_services').insert(standaloneRow",
+    "convertEstimate :: const inserted = await trx( scheduled_services').insert(row",
   ],
   'server/services/voice-agent/relay-booking.js': [
-    "const [created] = await trx( scheduled_services').insert(insertRow",
+    "commitVoiceBooking :: const [created] = await trx( scheduled_services').insert(insertRow",
   ],
   'server/services/call-recording-processor.js': [
-    "const [fuRow] = await sp( scheduled_services').insert({",
-    "const [created] = await trx( scheduled_services').insert(insertData",
+    "ensureCallFollowUpVisit :: const [fuRow] = await sp( scheduled_services').insert({",
+    "processRecording :: const [created] = await trx( scheduled_services').insert(insertData",
   ],
   'scripts/import-ical-appointments.js': [
-    "const [inserted] = await db( scheduled_services').insert(row",
+    "importToDatabase :: const [inserted] = await db( scheduled_services').insert(row",
   ],
 };
 
@@ -294,6 +298,7 @@ function isSingleBinding(source, id) {
 }
 
 function isContractCompleted(source, arg) {
+  if (!importsCanonicalHelper(source)) return false;
   const text = String(arg || '').trim();
   if (rootedInHelper(text)) return true;
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) return false;
@@ -316,6 +321,110 @@ function isContractCompleted(source, arg) {
     + `|\\bObject\\s*\\.\\s*assign\\s*\\(\\s*${text}\\b`,
   );
   return !mutated.test(source);
+}
+
+// Whether the file binds completeScheduledServiceInsert to the CANONICAL
+// contract module — a same-named local function or an import from
+// anywhere else is a parallel stamping mechanism, and its output launders
+// nothing (GH Codex r6 P2).
+const CANONICAL_IMPORT = /\{[^}]*\bcompleteScheduledServiceInsert\b[^}]*\}\s*=\s*require\(\s*['"][^'"]*\/booking\/create-scheduled-service(?:\.js)?['"]\s*\)/;
+const LOCAL_HELPER = /\b(?:function\s+completeScheduledServiceInsert\b|(?:const|let|var)\s+completeScheduledServiceInsert\s*=|completeScheduledServiceInsert\s*:\s*(?:async\s*)?(?:function\b|\())/;
+function importsCanonicalHelper(source) {
+  return CANONICAL_IMPORT.test(source) && !LOCAL_HELPER.test(source);
+}
+
+// Enclosing named scope of the site at `index` — a function declaration,
+// an arrow/function bound to a const, a router handler's path — plus the
+// nearest enclosing branch label (`case X:` / `if (x === 'lit')`) inside
+// it. Lexical approximation by indentation: a candidate counts only when
+// it sits at a SHALLOWER indent than the site and no closer (`}`/`)`) at
+// its own indent or less appears before the site. Call-site identity that
+// survives line churn, so two byte-identical statements in different
+// functions (or different branches of one function) freeze as distinct
+// entries and a migrated site can't cancel against a twin added elsewhere
+// in the file (GH Codex r6 P2).
+const SCOPE_RE = /(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|router\.(get|post|put|patch|delete)\(\s*['"`]([^'"`]+)|(?:^|\n)[ \t]*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{|\bcase\s+((?:['"`][^'"`]*['"`])|[\w$.]+)\s*:|\bif\s*\(\s*([\w$.]+)\s*===\s*((?:['"`][^'"`]*['"`])|[\w$.]+)\s*\)/g;
+const NOT_A_SCOPE = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'function', 'return']);
+const scopeCache = new Map();
+function scopeCandidates(source) {
+  if (scopeCache.has(source)) return scopeCache.get(source);
+  const lines = [];
+  let at = 0;
+  for (const text of source.split('\n')) {
+    lines.push({ start: at, indent: text.search(/\S|$/), text });
+    at += text.length + 1;
+  }
+  const lineOf = (i) => {
+    let lo = 0; let hi = lines.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lines[mid].start <= i) lo = mid; else hi = mid - 1; }
+    return lo;
+  };
+  const cands = [];
+  SCOPE_RE.lastIndex = 0;
+  let m;
+  while ((m = SCOPE_RE.exec(source)) !== null) {
+    let label;
+    let name;
+    if (m[6] !== undefined) label = `case ${m[6]}`;
+    else if (m[7] !== undefined) label = `${m[7]} === ${m[8]}`;
+    else {
+      name = m[1] !== undefined ? (m[1] || 'function')
+        : m[2] !== undefined ? m[2]
+          : m[3] !== undefined ? `${m[3]} ${m[4]}`
+            : m[5];
+      if (name === undefined || NOT_A_SCOPE.has(name)) {
+        // A keyword caught by the method-shorthand form (`\n  if (…) {`)
+        // is not a scope — but the same text may be a branch label, so
+        // resume the scan just past the newline instead of past the match.
+        SCOPE_RE.lastIndex = m.index + 1;
+        continue;
+      }
+    }
+    cands.push({ index: m.index, line: lineOf(m.index), name, label });
+  }
+  const out = { lines, lineOf, cands };
+  scopeCache.set(source, out);
+  return out;
+}
+
+function enclosingScope(source, index) {
+  const { lines, lineOf, cands } = scopeCandidates(source);
+  let siteLine = lineOf(index);
+  // A table string alone on its line: the statement (and its indent) is
+  // the previous non-blank line.
+  if (/^\s*['"`]/.test(lines[siteLine].text) && siteLine > 0) siteLine -= 1;
+  const siteIndent = lines[siteLine].indent;
+  const encloses = (c) => {
+    const k = lines[c.line].indent;
+    if (k >= siteIndent) return false;
+    for (let l = c.line + 1; l < siteLine; l += 1) {
+      const ln = lines[l];
+      if (ln.indent > k) continue;
+      const t = ln.text.trim();
+      if (!/^[})\]]/.test(t)) continue;
+      // `}) {` closes a multi-line parameter list and OPENS the function
+      // body — not a closer for a function candidate. For a branch label
+      // `} else if (…) {` at its indent does end the branch.
+      if (c.name !== undefined && /\{\s*$/.test(t)) continue;
+      return false;
+    }
+    return true;
+  };
+  let fn = null;
+  let label = null;
+  for (let i = cands.length - 1; i >= 0; i -= 1) {
+    const c = cands[i];
+    if (c.index >= index) continue;
+    if (!encloses(c)) continue;
+    if (c.name !== undefined) { fn = c; break; }
+    if (!label) label = c;
+  }
+  return [fn && fn.name, label && label.label].filter(Boolean).join(' / ');
+}
+
+function withScope(source, index, rest) {
+  const scope = enclosingScope(source, index);
+  return scope ? `${scope} :: ${rest.trim()}` : rest.trim();
 }
 
 // The statement text on the ref's line BEFORE the match — call-site
@@ -344,8 +453,8 @@ function collectInsertSites(source) {
   const out = [];
   // A site whose payload came out of the completion helper is compliant —
   // it is what a bespoke adopter looks like — and is not reported.
-  const site = (fingerprint, arg) => {
-    if (!isContractCompleted(source, arg)) out.push(fingerprint.trim());
+  const site = (index, fingerprint, arg) => {
+    if (!isContractCompleted(source, arg)) out.push(withScope(source, index, fingerprint));
   };
   // Raw SQL inserts are sites too — a knex.raw('INSERT INTO
   // scheduled_services …') must not slip past a builder-only scan
@@ -359,7 +468,7 @@ function collectInsertSites(source) {
     const lineStart = source.lastIndexOf('\n', rawM.index - 1) + 1;
     const line = source.slice(lineStart, rawM.index);
     if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
-    site(`${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`, null);
+    site(rawM.index, `${statementPrefix(source, rawM.index)} raw:INSERT INTO scheduled_services`, null);
   }
   // Builder refs, schema-qualified or not (`trx('public.scheduled_services')`).
   const re = /['"`](?:\w+\.)?scheduled_services['"`]/g;
@@ -377,7 +486,7 @@ function collectInsertSites(source) {
       const linkAt = m.index - link[0].length;
       const stmt = source.slice(statementStart(source, linkAt), m.index).replace(/\s+/g, ' ').trim();
       if (/\.insert\s*\(/.test(stmt)) {
-        site(`${stmt} table-last:scheduled_services`, insertArgument(stmt));
+        site(m.index, `${stmt} table-last:scheduled_services`, insertArgument(stmt));
       }
       continue;
     }
@@ -402,7 +511,7 @@ function collectInsertSites(source) {
     }
     const prefix = statementPrefix(source, m.index);
     if (/\.insert\s*\(/.test(chain)) {
-      site(`${prefix} ${fingerprintOf(chain)}`, insertArgument(chain));
+      site(m.index, `${prefix} ${fingerprintOf(chain)}`, insertArgument(chain));
       continue;
     }
     // No insert on the fluent chain — if the builder was captured in a
@@ -416,7 +525,7 @@ function collectInsertSites(source) {
         const open = am.index + am[0].length - 1;
         const arg = source.slice(open + 1, balancedParens(source, open) - 1);
         const head = (/^\s*(\{|[A-Za-z0-9_.$]+)/.exec(arg) || [, ''])[1];
-        site(`${statementPrefix(source, am.index)} alias:${alias}.insert(${head}`, arg);
+        site(am.index, `${statementPrefix(source, am.index)} alias:${alias}.insert(${head}`, arg);
       }
     }
   }
@@ -466,50 +575,74 @@ describe('booking insert-site contract', () => {
     // not cancel against a newly added twin).
     const twins = collectInsertSites("const [a] = await trx('scheduled_services').insert(insertData);\nreturn trx('scheduled_services').insert(insertData);");
     expect(new Set(twins).size).toBe(2);
+    // …and so do byte-identical STATEMENTS in different enclosing scopes:
+    // functions, router handlers, or branches of one function (GH Codex
+    // r6 P2). A closed sibling scope does not leak onto a later site.
+    expect(collectInsertSites("async function a(trx) {\n  const [row] = await trx('scheduled_services').insert(data);\n}\nasync function b(trx) {\n  const [row] = await trx('scheduled_services').insert(data);\n}")).toEqual([
+      "a :: const [row] = await trx( scheduled_services').insert(data",
+      "b :: const [row] = await trx( scheduled_services').insert(data",
+    ]);
+    expect(collectInsertSites("router.post('/x', async (req, res) => {\n  await trx('scheduled_services').insert(data);\n});\nrouter.put('/y', async (req, res) => {\n  await trx('scheduled_services').insert(data);\n});")).toEqual([
+      "post /x :: await trx( scheduled_services').insert(data",
+      "put /y :: await trx( scheduled_services').insert(data",
+    ]);
+    expect(collectInsertSites("async function run(trx, {\n  action,\n}) {\n  const helper = () => {\n    return 1;\n  };\n  if (action === 'extend') {\n    const [row] = await trx('scheduled_services').insert(data);\n  } else if (action === 'convert') {\n    const [row] = await trx('scheduled_services').insert(data);\n  }\n  switch (action) {\n    case 'a':\n      await trx('scheduled_services').insert(data);\n      break;\n    case 'b':\n      await trx('scheduled_services').insert(data);\n      break;\n  }\n}")).toEqual([
+      "run / action === 'extend' :: const [row] = await trx( scheduled_services').insert(data",
+      "run / action === 'convert' :: const [row] = await trx( scheduled_services').insert(data",
+      "run / case 'a' :: await trx( scheduled_services').insert(data",
+      "run / case 'b' :: await trx( scheduled_services').insert(data",
+    ]);
     // Table-last forms and raw SQL are caught (GH Codex r5 P1).
     expect(collectInsertSites("await trx.insert(data).into('scheduled_services');")).toEqual(["await trx.insert(data).into( table-last:scheduled_services"]);
     expect(collectInsertSites("await trx.insert(data).table('scheduled_services');")).toEqual(["await trx.insert(data).table( table-last:scheduled_services"]);
     // …across any number of lines, inside a block (pre-push Codex r6 P1).
-    expect(collectInsertSites("async function save(trx, data) {\n  await audit();\n  return trx\n    .insert(data)\n    .into('scheduled_services');\n}")).toEqual(["return trx .insert(data) .into( table-last:scheduled_services"]);
+    expect(collectInsertSites("async function save(trx, data) {\n  await audit();\n  return trx\n    .insert(data)\n    .into('scheduled_services');\n}")).toEqual(["save :: return trx .insert(data) .into( table-last:scheduled_services"]);
     expect(collectInsertSites("const [row] = await trx\n  .insert(data)\n  .returning('*')\n  .table('scheduled_services');")).toEqual(["const [row] = await trx .insert(data) .returning('*') .table( table-last:scheduled_services"]);
     expect(collectInsertSites("await db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
     // Schema-qualified forms, raw or builder, are the same table (r5 P2).
     expect(collectInsertSites("await db.raw(`INSERT INTO public.scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
     expect(collectInsertSites('await db.raw(\'INSERT INTO "public"."scheduled_services" (a) VALUES (?)\', [1]);')).toHaveLength(1);
     expect(collectInsertSites("await trx('public.scheduled_services').insert(x);")).toEqual(["await trx( scheduled_services').insert(x"]);
-    // A bespoke insert whose payload came out of the completion helper is
-    // COMPLIANT — it may leave the frozen inventory (GH Codex r5 P2)…
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, { trx, cols, source });\nconst [row] = await trx('scheduled_services').insert(data).returning('*');")).toEqual([]);
-    expect(collectInsertSites("await trx('scheduled_services').insert(await completeScheduledServiceInsert(raw, { trx, cols, source }));")).toEqual([]);
-    expect(collectInsertSites("const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, { trx, cols, source }));\nawait trx('scheduled_services').insert(rows);")).toEqual([]);
-    expect(collectInsertSites("const rows = await Promise.all(raws.map((r) => completeScheduledServiceInsert(r, { trx, cols, source })));\nconst visits = trx('scheduled_services');\nawait visits.insert(rows);")).toEqual([]);
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');")).toEqual([]);
-    // …but importing the helper elsewhere in the file launders nothing…
-    expect(collectInsertSites("const ok = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(other);")).toEqual(["await trx( scheduled_services').insert(other"]);
+    // A bespoke insert whose payload came out of the CANONICAL completion
+    // helper is COMPLIANT — it may leave the frozen inventory (GH Codex r5 P2)…
+    const IMPORT = "const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');\n";
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, { trx, cols, source });\nconst [row] = await trx('scheduled_services').insert(data).returning('*');`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}await trx('scheduled_services').insert(await completeScheduledServiceInsert(raw, { trx, cols, source }));`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const rows = [];\nfor (const r of raws) rows.push(await completeScheduledServiceInsert(r, { trx, cols, source }));\nawait trx('scheduled_services').insert(rows);`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const rows = await Promise.all(raws.map((r) => completeScheduledServiceInsert(r, { trx, cols, source })));\nconst visits = trx('scheduled_services');\nawait visits.insert(rows);`)).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nawait trx.insert(data).into('scheduled_services');`)).toEqual([]);
+    // …but a same-named helper that is NOT the canonical module's — no
+    // import, a local definition, or an import from elsewhere — launders
+    // nothing (GH Codex r6 P2)…
+    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}function completeScheduledServiceInsert(x) { return x; }\nconst data = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites("const { completeScheduledServiceInsert } = require('./my-booking-helpers');\nconst data = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
+    // …and importing the canonical helper elsewhere in the file launders nothing either…
+    expect(collectInsertSites(`${IMPORT}const ok = await completeScheduledServiceInsert(raw, opts);\nawait trx('scheduled_services').insert(other);`)).toEqual(["await trx( scheduled_services').insert(other"]);
     // …a value only PARTLY rooted in the helper stays bare (pre-push r6 P1)…
-    expect(collectInsertSites("const data = useContract ? await completeScheduledServiceInsert(raw, opts) : buildRaw();\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
-    expect(collectInsertSites("const data = { ...(await completeScheduledServiceInsert(raw, opts)), extra: 1 };\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
-    expect(collectInsertSites("await trx('scheduled_services').insert((await completeScheduledServiceInsert(raw, opts)) || raw);")).toHaveLength(1);
-    expect(collectInsertSites("const rows = await Promise.all(raws.map((r) => r.ok ? completeScheduledServiceInsert(r, opts) : r));\nawait trx('scheduled_services').insert(rows);")).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = useContract ? await completeScheduledServiceInsert(raw, opts) : buildRaw();\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = { ...(await completeScheduledServiceInsert(raw, opts)), extra: 1 };\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}await trx('scheduled_services').insert((await completeScheduledServiceInsert(raw, opts)) || raw);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const rows = await Promise.all(raws.map((r) => r.ok ? completeScheduledServiceInsert(r, opts) : r));\nawait trx('scheduled_services').insert(rows);`)).toHaveLength(1);
     // …an identifier that is not ONE binding file-wide stays bare: a
     // parameter of the same name elsewhere, or a shadowing declaration
     // (pre-push r6 P1 — the scan is textual, not lexical)…
-    expect(collectInsertSites("async function a(raw) {\n  const data = await completeScheduledServiceInsert(raw, opts);\n  return data;\n}\nasync function b(trx, data) {\n  await trx('scheduled_services').insert(data);\n}")).toHaveLength(1);
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nlist.forEach((data) => trx('scheduled_services').insert(data));")).toHaveLength(1);
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nconst save = data => trx('scheduled_services').insert(data);")).toHaveLength(1);
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\n{\n  const data = raw;\n  await trx('scheduled_services').insert(data);\n}")).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}async function a(raw) {\n  const data = await completeScheduledServiceInsert(raw, opts);\n  return data;\n}\nasync function b(trx, data) {\n  await trx('scheduled_services').insert(data);\n}`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nlist.forEach((data) => trx('scheduled_services').insert(data));`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nconst save = data => trx('scheduled_services').insert(data);`)).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n{\n  const data = raw;\n  await trx('scheduled_services').insert(data);\n}`)).toHaveLength(1);
     // (control-flow parens and call arguments are not parameter positions)
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nif (data) {\n  log(data);\n  await trx('scheduled_services').insert(data);\n}")).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nif (data) {\n  log(data);\n  await trx('scheduled_services').insert(data);\n}`)).toEqual([]);
     // …a payload MUTATED after completion stays bare (pre-push r6 P1)…
     for (const mutation of ['data.customer_id = null;', "data['status'] = 'x';", 'data.count += 1;', 'Object.assign(data, raw);', 'delete data.source_action;']) {
-      expect(collectInsertSites(`const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
+      expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\n${mutation}\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     }
     // (a READ of a property, or a comparison, is not a mutation)
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nif (data.status === 'x' || data.n >= 2) log(data.customer_id);\nawait trx('scheduled_services').insert(data);")).toEqual([]);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nif (data.status === 'x' || data.n >= 2) log(data.customer_id);\nawait trx('scheduled_services').insert(data);`)).toEqual([]);
     // …a payload REASSIGNED without the helper stays bare…
-    expect(collectInsertSites("let data = await completeScheduledServiceInsert(raw, opts);\ndata = buildRaw();\nawait trx('scheduled_services').insert(data);")).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}let data = await completeScheduledServiceInsert(raw, opts);\ndata = buildRaw();\nawait trx('scheduled_services').insert(data);`)).toHaveLength(1);
     // …and raw SQL never passes through the helper.
-    expect(collectInsertSites("const data = await completeScheduledServiceInsert(raw, opts);\nawait db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [data.a]);")).toHaveLength(1);
+    expect(collectInsertSites(`${IMPORT}const data = await completeScheduledServiceInsert(raw, opts);\nawait db.raw(\`INSERT INTO scheduled_services (a) VALUES (?)\`, [data.a]);`)).toHaveLength(1);
     // …but a table-last READ does not.
     expect(collectInsertSites("await trx.select('*').from('x').table('scheduled_services');")).toEqual([]);
     // A read chained near the ref must NOT count…

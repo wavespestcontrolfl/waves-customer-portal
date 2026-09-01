@@ -69,15 +69,16 @@ async function resolveCatalogIdentity(conn, insertData) {
     return row || null;
   }
   // Fallback lookups link only LIVE catalog rows: is_active AND not
-  // archived (archiveService sets both flags together; the pair is what the
-  // 20260831 typed-visit resolution migration treats as authoritative), so
-  // an archived row can neither be newly stamped nor make an otherwise
-  // unique name ambiguous (pre-push Codex r6 P1).
-  const live = { is_active: true, is_archived: false };
+  // archived (archiveService sets both flags together), so an archived row
+  // can neither be newly stamped nor make an otherwise unique name
+  // ambiguous (pre-push Codex r6 P1). The archive flag is nullable and a
+  // NULL on an active row reads as live everywhere (20260730160000), so
+  // the predicate is IS NOT TRUE, not = false (GH Codex r6 P2).
+  const live = (q) => q.where({ is_active: true }).whereRaw('is_archived IS NOT TRUE');
   const snapshotKey = String(insertData.service_key_snapshot || '').trim();
   if (snapshotKey) {
-    const byKey = await stable(conn('services')
-      .where({ service_key: snapshotKey, ...live }))
+    const byKey = await stable(live(conn('services')
+      .where({ service_key: snapshotKey })))
       .select('id', 'service_key', 'category');
     return byKey.length === 1 ? byKey[0] : null;
   }
@@ -93,8 +94,7 @@ async function resolveCatalogIdentity(conn, insertData) {
   const { serviceNameCandidates } = require('../service-completion-profiles');
   const candidates = serviceNameCandidates(name).map((c) => c.toLowerCase());
   if (!candidates.length) return null;
-  const hits = await stable(conn('services')
-    .where(live)
+  const hits = await stable(live(conn('services'))
     .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates))
     .select('id', 'service_key', 'category');
   const distinct = [...new Map(hits.map((h) => [h.id, h])).values()];
@@ -160,7 +160,11 @@ async function completeScheduledServiceInsert(insertData, { trx, cols, source, a
   if (cols.source_action) data.source_action = trimmed(data.source_action) || sourceAction;
   if (cols.booking_source) {
     const bookingSource = trimmed(data.booking_source) || trimmed(source?.bookingSource);
+    // Optional, so absent stays absent — but a blank payload value is
+    // normalized to null rather than persisted as '' provenance
+    // (GH Codex r6 P2).
     if (bookingSource) data.booking_source = bookingSource;
+    else if ('booking_source' in data) data.booking_source = null;
   }
 
   if (!isEnabled('bookingStampingContract')) return data;

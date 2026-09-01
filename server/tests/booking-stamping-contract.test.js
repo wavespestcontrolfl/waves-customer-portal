@@ -31,14 +31,19 @@ function makeConn(rows = []) {
   const calls = { inserts: [], onConflict: [], ignored: 0 };
   const conn = (table) => {
     const chain = { _where: null };
-    chain.where = (w) => { chain._where = w; return chain; };
+    chain.where = (w) => { chain._where = { ...(chain._where || {}), ...w }; return chain; };
     chain.forShare = () => { calls.forShare = (calls.forShare || 0) + 1; return chain; };
-    chain.whereRaw = (_sql, params) => { chain._names = (params || []).map((n) => String(n).toLowerCase()); return chain; };
+    chain.whereRaw = (sql, params) => {
+      if (/is_archived IS NOT TRUE/.test(sql)) chain._notArchived = true;
+      else chain._names = (params || []).map((n) => String(n).toLowerCase());
+      return chain;
+    };
     chain.first = () => Promise.resolve(
       catalog.find((r) => r.id === chain._where?.id),
     );
     chain.select = () => Promise.resolve(catalog.filter((r) => {
       if (chain._where && !Object.entries(chain._where).every(([k, v]) => r[k] === v)) return false;
+      if (chain._notArchived && r.is_archived === true) return false;
       if (chain._names !== undefined && !chain._names.includes(String(r.name).toLowerCase())) return false;
       return true;
     }));
@@ -124,6 +129,12 @@ describe('validation (ungated)', () => {
     const out = await run(BASE, { source: { sourceAction: ' admin_ib ', bookingSource: '   ' } });
     expect(out.source_action).toBe('admin_ib');
     expect(out).not.toHaveProperty('booking_source');
+    // A blank PAYLOAD booking_source with nothing to stamp over it is
+    // normalized to null, never persisted as '' (GH Codex r6 P2).
+    for (const empty of ['', '   ']) {
+      const blankPayload = await run({ ...BASE, booking_source: empty });
+      expect(blankPayload.booking_source).toBeNull();
+    }
   });
 });
 
@@ -215,6 +226,16 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     expect(byName.service_id).toBe('svc-live');
     const byKey = await run({ ...BASE, service_key_snapshot: 'pest_q_old' }, catalog);
     expect(byKey.service_id).toBeUndefined();
+  });
+
+  test('a live row whose archive flag is NULL still links (nullable column, GH Codex r6 P2)', async () => {
+    const catalog = [
+      { id: 'svc-null', name: 'Quarterly Pest Control', service_key: 'pest_quarterly', category: 'pest', is_archived: null },
+    ];
+    const out = await run(BASE, catalog);
+    expect(out.service_id).toBe('svc-null');
+    const byKey = await run({ ...BASE, service_key_snapshot: 'pest_quarterly' }, catalog);
+    expect(byKey.service_id).toBe('svc-null');
   });
 
   test('ambiguous name → no stamp (enrichment never guesses)', async () => {
