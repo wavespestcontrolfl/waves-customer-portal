@@ -261,9 +261,6 @@ async function getStopDetails(input, techId = null) {
   const customer = await resolveAuthorizedCustomer(input, techId);
   if (!customer) return { error: 'Customer not found' };
 
-  // Property preferences
-  const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
-
   // Last 3 services
   const history = await db('service_records')
     .where({ customer_id: customer.id, status: 'completed' })
@@ -276,18 +273,23 @@ async function getStopDetails(input, techId = null) {
     .where({ customer_id: customer.id, scheduled_date: today })
     .whereNotIn('status', ['cancelled']).first();
 
-  return {
-    customer: {
-      name: `${customer.first_name} ${customer.last_name}`,
-      phone: customer.phone,
-      address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
-      tier: customer.waveguard_tier,
-      lawn_type: customer.lawn_type,
-      property_sqft: customer.property_sqft,
-      lot_sqft: customer.lot_sqft,
-      notes: customer.crm_notes,
-    },
-    property: prefs ? {
+  // Access/property facts follow the same GATE_VISIT_FACTS policy as the
+  // visit brief (GET /:id/visit-brief): gate on, the shared fail-soft access
+  // block is the source and codes ride a PER-VISIT answer — no live visit
+  // today, no codes. The raw property_preferences dump below (gate off)
+  // predates the gate and bypassed it.
+  let property = null;
+  const PrevisitBrief = require('../previsit-brief');
+  if (PrevisitBrief.visitFactsGateEnabled()) {
+    if (todayService) {
+      try {
+        const facts = await PrevisitBrief.deterministicVisitFacts(todayService);
+        property = facts.access;
+      } catch { property = null; }
+    }
+  } else {
+    const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
+    property = prefs ? {
       neighborhood_gate_code: prefs.neighborhood_gate_code,
       property_gate_code: prefs.property_gate_code,
       garage_code: prefs.garage_code,
@@ -299,7 +301,21 @@ async function getStopDetails(input, techId = null) {
       pet_details: prefs.pet_details,
       pets_secured_plan: prefs.pets_secured_plan,
       special_instructions: prefs.special_instructions,
-    } : null,
+    } : null;
+  }
+
+  return {
+    customer: {
+      name: `${customer.first_name} ${customer.last_name}`,
+      phone: customer.phone,
+      address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
+      tier: customer.waveguard_tier,
+      lawn_type: customer.lawn_type,
+      property_sqft: customer.property_sqft,
+      lot_sqft: customer.lot_sqft,
+      notes: customer.crm_notes,
+    },
+    property,
     todays_service: todayService ? {
       id: todayService.id,
       service_type: todayService.service_type,
