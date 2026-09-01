@@ -305,10 +305,11 @@ const TIPS = Object.freeze([
 // Deep-frozen: the registry is the screened source of customer copy, and
 // tipsForVisit hands out these same objects — a consumer annotating one
 // must not be able to change what a later resolveTipIds emits.
-function deepFreeze(value) {
-  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+function deepFreeze(value, seen = new WeakSet()) {
+  if (value && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
     Object.freeze(value);
-    for (const inner of Object.values(value)) deepFreeze(inner);
+    for (const inner of Object.values(value)) deepFreeze(inner, seen);
   }
   return value;
 }

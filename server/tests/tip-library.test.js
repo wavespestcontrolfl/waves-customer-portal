@@ -77,7 +77,7 @@ describe('tip-library registry', () => {
     expect(Object.isFrozen(tip.link)).toBe(true);
     expect(() => { tip.copy = 'unscreened'; }).toThrow(TypeError);
     expect(() => { tip.link.path = '/evil'; }).toThrow(TypeError);
-    const served = tipsForVisit({ serviceLine: 'lawn', date: '2026-08-15' }).groups.flatMap((g) => g.tips).find((t) => t.id === tip.id);
+    const served = tipsForVisit({ serviceLine: 'lawn', date: new Date('2026-08-15T16:00:00Z') }).groups.flatMap((g) => g.tips).find((t) => t.id === tip.id);
     expect(Object.isFrozen(served)).toBe(true);
     expect(resolveTipIds([tip.id])[0].copy).toBe(tip.copy);
   });
