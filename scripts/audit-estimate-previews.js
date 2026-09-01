@@ -6,6 +6,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const { chromium } = require('playwright');
 
 const ALL_SCENARIOS = [
@@ -30,7 +31,35 @@ fs.mkdirSync(artifactDir, { recursive: true });
 const failures = [];
 const observations = [];
 const fail = (scenario, viewport, message) => failures.push({ scenario, viewport, message });
-const PROPOSAL_SCENARIOS = new Set(['proposal', 'proposal_terms', 'proposal_structured', 'proposal_programs']);
+
+async function previewServerAvailable() {
+  try {
+    const response = await fetch(`${baseUrl}/preview-estimate.html`, { signal: AbortSignal.timeout(1000) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensurePreviewServer() {
+  if (await previewServerAvailable()) return null;
+  if (process.env.ESTIMATE_PREVIEW_BASE_URL) {
+    throw new Error(`Estimate preview server is unavailable at ${baseUrl}`);
+  }
+
+  const child = spawn(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['--prefix', 'client', 'run', 'dev', '--', '--host', '127.0.0.1', '--port', '4178'],
+    { stdio: 'inherit' },
+  );
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (child.exitCode != null) throw new Error(`Estimate preview server exited with code ${child.exitCode}`);
+    if (await previewServerAvailable()) return child;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  child.kill('SIGTERM');
+  throw new Error(`Timed out waiting for estimate preview server at ${baseUrl}`);
+}
 
 async function revealWholePage(page) {
   await page.evaluate(async () => {
@@ -57,8 +86,11 @@ async function launchBrowser() {
 }
 
 (async () => {
-  const browser = await launchBrowser();
+  let previewServer = null;
+  let browser = null;
   try {
+    previewServer = await ensurePreviewServer();
+    browser = await launchBrowser();
     for (const scenario of SCENARIOS) {
       for (const [viewportName, viewport] of Object.entries(VIEWPORTS)) {
         const page = await browser.newPage({ viewport });
@@ -116,7 +148,7 @@ async function launchBrowser() {
       }
 
       const printPage = await browser.newPage({ viewport: VIEWPORTS.desktop });
-      const printUrl = `${baseUrl}/preview-estimate.html?scenario=${scenario}&chrome=0${PROPOSAL_SCENARIOS.has(scenario) ? '&mode=pdf' : ''}`;
+      const printUrl = `${baseUrl}/preview-estimate.html?scenario=${scenario}&chrome=0&mode=pdf`;
       await printPage.goto(printUrl, { waitUntil: 'domcontentloaded' });
       await printPage.locator('body').waitFor({ state: 'visible', timeout: 15000 });
       await printPage.waitForTimeout(150);
@@ -125,7 +157,8 @@ async function launchBrowser() {
       await printPage.close();
     }
   } finally {
-    await browser.close();
+    await browser?.close();
+    previewServer?.kill('SIGTERM');
   }
 
   const result = { artifactDir, scenarios: SCENARIOS.length, renderedPages: observations.length, failures, observations };

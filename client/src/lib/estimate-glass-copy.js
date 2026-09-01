@@ -351,7 +351,7 @@ const GLASS_PACKS = {
     eyebrow: 'Your targeted termite treatment quote',
     aiTitle: 'Prepared for the targeted treatment area',
     aiBody: 'This quote covers localized termite foam treatment, not recurring pest control or a whole-home liquid barrier.',
-    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow?', 'How do I schedule the treatment?'],
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
     ctaMicro: ONE_TIME_CTA_MICRO,
   },
   trap_only: {
@@ -459,7 +459,7 @@ export function glassCtaMicroForKeys(keys) {
 // pest copy, so callers keep the server-provided wording on null.
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
-  if (raw.includes('wdo') || raw.includes('wood destroying')) return 'wdo_inspection';
+  if (raw.includes('wdo') || raw.includes('wood destroying') || raw.includes('termite_inspection')) return 'wdo_inspection';
   if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('pre slab') || raw.includes('termiticide')) return 'pre_slab_termiticide';
   if (raw.includes('trap_only') || raw.includes('trap-only')) return 'trap_only';
   if (raw.includes('termite_foam') || (raw.includes('termite') && raw.includes('foam'))) return 'termite_foam';

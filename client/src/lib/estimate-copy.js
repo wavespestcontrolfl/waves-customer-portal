@@ -156,7 +156,7 @@ export const SERVICE_COPY = {
     aiEyebrow: 'Your treatment plan',
     aiTitle: 'This quote was prepared for the targeted termite treatment area',
     aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
-    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow?', 'How do I schedule the treatment?'],
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
     priceWording: {},
   },
   trap_only: {

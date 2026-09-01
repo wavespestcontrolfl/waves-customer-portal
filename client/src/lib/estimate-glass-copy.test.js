@@ -104,6 +104,10 @@ describe('glassServiceSlug regulated certificate routing', () => {
   ])('keeps mixed-estimate pre-slab row %s out of the termite-bait fallback', (value) => {
     expect(glassServiceSlug(value)).toBe('pre_slab_termiticide');
   });
+
+  it('maps the legacy termite_inspection alias to the regulated WDO category', () => {
+    expect(glassServiceSlug('termite_inspection')).toBe('wdo_inspection');
+  });
 });
 
 describe('glassCtaMicroFor', () => {
