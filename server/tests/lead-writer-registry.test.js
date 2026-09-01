@@ -180,6 +180,16 @@ function aliasInsertPatterns(src, token) {
   );
   let cnd;
   while ((cnd = condDeclRe.exec(src))) builders.add(cnd[1]);
+  // Builders stored in OBJECT PROPERTIES — `const queries = { lead:
+  // db('leads') }; queries.lead.insert(row)`. The use pattern keys on the
+  // property name reached through any object.
+  const propDeclRe = new RegExp(
+    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)`,
+    'g'
+  );
+  const props = new Set();
+  let pd;
+  while ((pd = propDeclRe.exec(src))) props.add(pd[1]);
   // Arrow FACTORY returning the builder — `const baseQuery = () =>
   // db('leads'); … baseQuery().insert(row)` (the v2-promotion-readiness
   // idiom). Parenthesized or bare parameter lists both count.
@@ -191,7 +201,7 @@ function aliasInsertPatterns(src, token) {
   while ((fac = factoryRe.exec(src))) factories.add(fac[1]);
   // Function/block-arrow factories with BALANCED bodies of any depth —
   // `function baseQuery() { try { … } finally { … } return db('leads'); }`.
-  const returnRe = new RegExp(String.raw`\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*(${token})\s*\)`);
+  const returnRe = new RegExp(String.raw`\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(\s*(${token})\s*\)`);
   for (const f of balancedBodyFactories(src, returnRe)) factories.add(f.name);
   // TRANSITIVE aliases: `const target = base;` makes `target` the same
   // builder (or factory), to a fixpoint. One pass collects every simple
@@ -209,6 +219,9 @@ function aliasInsertPatterns(src, token) {
   const patterns = [];
   for (const n of builders) {
     patterns.push(new RegExp(String.raw`\b${escapeRe(n)}${CHAIN}\s*${INSERT_CALL}`, 'g'));
+  }
+  for (const pn of props) {
+    patterns.push(new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\.\s*${escapeRe(pn)}${CHAIN}\s*${INSERT_CALL}`, 'g'));
   }
   for (const n of factories) {
     patterns.push(new RegExp(String.raw`\b${escapeRe(n)}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g'));
@@ -432,6 +445,24 @@ function scanSourceForDynamicTableInserts(src) {
     if (!cnd[2].trim() || isResolved(cnd[2]) || dynBuilders.has(cnd[1])) continue;
     dynBuilders.set(cnd[1], cnd[2]);
   }
+  // Builders stored in OBJECT PROPERTIES over a dynamic table —
+  // `const queries = { lead: db(table) }; queries.lead.insert(row)`.
+  const dynPropDeclRe = new RegExp(
+    String.raw`([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`,
+    'g'
+  );
+  const seenDynProps = new Set();
+  let pdd;
+  while ((pdd = dynPropDeclRe.exec(code))) {
+    if (!pdd[2].trim() || isResolved(pdd[2]) || seenDynProps.has(pdd[1])) continue;
+    seenDynProps.add(pdd[1]);
+    // Cheap precheck before the heavy use-pattern: the file must even
+    // mention `.prop` and an insert call.
+    if (!code.includes(`.${pdd[1]}`)) continue;
+    const useRe = new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\.\s*${escapeRe(pdd[1])}${CHAIN}\s*${INSERT_CALL}`, 'g');
+    let use;
+    while ((use = useRe.exec(code))) record(use.index, use[0].length, pdd[2]);
+  }
   // Transitive aliases inherit the table expression (in-memory closure
   // over one assignment-pair pass).
   const dynPairs = simpleAssignPairs(code);
@@ -461,7 +492,7 @@ function scanSourceForDynamicTableInserts(src) {
     while ((use = useRe.exec(code))) record(use.index, use[0].length, fac[2]);
   }
   // Function/block-arrow factories over a dynamic table, balanced bodies.
-  const dynReturnRe = new RegExp(String.raw`\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)`);
+  const dynReturnRe = new RegExp(String.raw`\breturn\s+[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*(?:\??\.\s*(?:table|from)|\[\s*['"\x60](?:table|from)['"\x60]\s*\]))?\s*\(${DYN_EXPR}\)`);
   for (const f of balancedBodyFactories(code, dynReturnRe)) {
     if (!f.capture || !f.capture.trim() || isResolved(f.capture)) continue;
     const useRe = new RegExp(String.raw`(?<!function )\b${escapeRe(f.name)}\s*\([^()]*\)${CHAIN}\s*${INSERT_CALL}`, 'g');
@@ -630,6 +661,8 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['multiline SQL constant passed to raw', "const SQL =\n  'INSERT INTO leads (a) VALUES (?)';\nawait db.raw(SQL, [a]);"],
     ['multiline conditional builder', "const target = useLeads\n  ? db('leads')\n  : db('audit');\nawait target.insert(row);"],
     ['class-method factory', "class Queries {\n  base() { return db('leads'); }\n}\nawait queries.base().insert(row);"],
+    ['builder stored in an object property', "const queries = { lead: db('leads') };\nawait queries.lead.insert(row);"],
+    ['factory returning a table-selected builder', "function baseQuery() { return db.table('leads'); }\nawait baseQuery().insert(row);"],
     ['SQL line comment between keywords', 'await db.raw(`INSERT -- audit\nINTO leads (a) VALUES (?)`, [a]);'],
     ['block-bodied arrow factory', "const baseQuery = () => { audit(); return db('leads'); };\nawait baseQuery().insert(row);"],
     ['transitive stored-builder alias', "const base = db('leads');\nconst target = base;\nawait target.insert(row);"],
@@ -927,6 +960,10 @@ describe('lead-writer registry (#3137 groundwork)', () => {
           const aliasMutation = bare.match(mutationReFor(name));
           expect({ file: w.file, alias: name, mutation: aliasMutation && aliasMutation[0].trim() })
             .toEqual({ file: w.file, alias: name, mutation: null });
+          // A let/var alias could be REBOUND wholesale (config = req.body).
+          const rb = bare.match(new RegExp(String.raw`\b(?:let|var)\s+${escapeRe(name)}\b`));
+          expect({ file: w.file, alias: name, rebindableDecl: rb && rb[0] })
+            .toEqual({ file: w.file, alias: name, rebindableDecl: null });
         }
         expect({ file: w.file, spreads: (objBare.match(/\.\.\./g) || []).length })
           .toEqual({ file: w.file, spreads: 0 });

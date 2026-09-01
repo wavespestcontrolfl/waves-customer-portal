@@ -218,6 +218,13 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   // phones: an explicit allowlist, so a real identifier copied in as a
   // malformed email (missing its @domain) cannot slip past the guard.
   const NON_EMAIL_SENTINELS = new Set(['unknown']);
+  // Email LOCAL PARTS are an explicit synthetic vocabulary too — replacing
+  // a real address's domain with example.com must not keep its local part.
+  const SYNTHETIC_EMAIL_LOCALS = new Set([
+    'beatrix.la', 'emeka.s', 'marisol.q', 'office', 'p.havlicek', 'petra.h',
+    'priyanka.vellore', 'ravi.moorcroft', 'rtremontaine', 'shared.inbox',
+    'sofia', 'sofia.marchetti', 'thornehousehold',
+  ]);
 
   test('every contact value is synthetic: reserved NANP 555-01xx phones (or allowlisted non-phone sentinels), example.com emails', () => {
     for (const c of CASES) {
@@ -248,6 +255,7 @@ describe('lead identity corpus — shape and PII hygiene', () => {
           // allowlisted sentinel strings only.
           const ok = normalized.includes('@')
             ? /^[a-z0-9._%+-]+@(?:[a-z0-9-]+\.)*example\.com$/.test(normalized)
+              && SYNTHETIC_EMAIL_LOCALS.has(normalized.split('@')[0])
             : NON_EMAIL_SENTINELS.has(normalized);
           expect({ id: c.id, email: rec.email, ok })
             .toEqual({ id: c.id, email: rec.email, ok: true });
