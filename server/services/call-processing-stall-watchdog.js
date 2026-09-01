@@ -81,6 +81,12 @@ const GRACE_MINUTES = 20;
 // working perfectly. Falls back to processing_started_at for rows claimed
 // before the column existed.
 const CLAIM_STALE_MINUTES = 8;
+// The heartbeat is a TIMER, so it keeps beating while a pass is alive even
+// when the work is hung on a provider socket. The processor bounds that with
+// an absolute ceiling on how long any claim may be held; the watchdog reads
+// the same ceiling, so a hung-but-beating pass is still a stall here rather
+// than a call that silently never rings.
+const CLAIM_ABSOLUTE_CEILING_MINUTES = 20;
 // One bell per call per DAY, not one per call forever. Permanence was what
 // made an aggressive staleness threshold dangerous: a single false positive
 // on a slow-but-healthy pass would have settled that SID for good and
@@ -123,6 +129,7 @@ function maskPhone(value) {
 function computeStalledCalls(rows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const claimCutoff = new Date(now.getTime() - CLAIM_STALE_MINUTES * 60 * 1000);
+  const ceilingCutoff = new Date(now.getTime() - CLAIM_ABSOLUTE_CEILING_MINUTES * 60 * 1000);
   const stalled = [];
   for (const r of rows) {
     const readyAt = recordingReadyAt(r);
@@ -138,7 +145,10 @@ function computeStalledCalls(rows, { now = new Date() } = {}) {
     if (status === 'processing') {
       const beat = r.processing_heartbeat_at || r.processing_started_at;
       const claimed = beat ? new Date(beat) : null;
-      if (claimed && !Number.isNaN(claimed.getTime()) && claimed > claimCutoff) continue;
+      const beating = claimed && !Number.isNaN(claimed.getTime()) && claimed > claimCutoff;
+      const started = r.processing_started_at ? new Date(r.processing_started_at) : null;
+      const withinCeiling = !started || Number.isNaN(started.getTime()) || started > ceilingCutoff;
+      if (beating && withinCeiling) continue;
     }
     const hasRecording = !!String(r.recording_url || '').trim();
     const panQuarantined = (() => {
@@ -340,6 +350,7 @@ module.exports = {
   MIN_DURATION_SECONDS,
   GRACE_MINUTES,
   CLAIM_STALE_MINUTES,
+  CLAIM_ABSOLUTE_CEILING_MINUTES,
   PAGE_SIZE,
   MAX_PAGES,
   COLLECT_CAP,

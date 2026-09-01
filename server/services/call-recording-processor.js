@@ -1910,6 +1910,23 @@ const {
 // phone-matched successors; never re-inline or duplicate it.
 const { hasWorkableLeadSignal } = require('../utils/workable-lead-signal');
 
+// A claim is reclaimable when it STOPPED BEATING — or when it has simply been
+// held too long, whatever the beat says.
+//
+// The heartbeat runs on a timer, so it keeps beating while the pass is alive
+// even if the WORK is not progressing: a provider call hung on an open socket
+// keeps the event loop alive, the timer keeps firing, and a heartbeat-only
+// rule would leave that claim unreclaimable forever — strictly worse than the
+// fixed window it replaced, and the 2026-08-31 failure was a pass that stalled
+// rather than crashed. The absolute ceiling is the backstop: generous enough
+// that a long transcription is never stolen mid-flight, finite so a hang is
+// always recoverable (pre-push audit P1).
+const CLAIM_ABSOLUTE_CEILING_MINUTES = 20;
+const reclaimableClaim = (quietMinutes) => "("
+  + `COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '${quietMinutes} minutes'`
+  + ` OR COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '${CLAIM_ABSOLUTE_CEILING_MINUTES} minutes'`
+  + ")";
+
 // A voicemail landing on the TERMINAL skip path despite concrete service
 // intent — the workable-lead gate declined it (existing customer matched, or
 // a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
@@ -6106,7 +6123,7 @@ const CallRecordingProcessor = {
           .whereRaw("processing_status IS DISTINCT FROM 'processed'")
           .where(function () {
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+              .orWhereRaw(reclaimableClaim(10));
           })
           // Retryable-failure guard: the sweep's cap/backoff filter only
           // protects sweep-originated runs — direct callers (the
@@ -6176,7 +6193,7 @@ const CallRecordingProcessor = {
             // after looking at the row; the automatic paths keep the
             // conservative window.
             this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
-              .orWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '3 minutes'");
+              .orWhereRaw(reclaimableClaim(3));
           })
           .update({
             processing_status: 'processing',
@@ -14848,7 +14865,7 @@ const CallRecordingProcessor = {
                 // the backstop too (round-12 P1).
                 .orWhere(function () {
                   this.where('processing_status', 'processing')
-                    .andWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                    .andWhereRaw(reclaimableClaim(10));
                 })
                 // A transient extraction failure on a quarantined row must
                 // keep its normal retry budget (round-13 P1): the outer
@@ -14888,7 +14905,7 @@ const CallRecordingProcessor = {
         })
         .orWhere(function () {
           this.where('processing_status', 'processing')
-            .andWhereRaw("COALESCE(processing_heartbeat_at, processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+            .andWhereRaw(reclaimableClaim(10));
         });
       })
       .where(function () {

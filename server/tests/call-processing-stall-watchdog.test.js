@@ -8,6 +8,7 @@ const {
   GRACE_MINUTES,
   MIN_DURATION_SECONDS,
   CLAIM_STALE_MINUTES,
+  CLAIM_ABSOLUTE_CEILING_MINUTES,
 } = require('../services/call-processing-stall-watchdog');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { leadFirstContactAt } = CallRecordingProcessor._test;
@@ -187,13 +188,14 @@ describe('computeStalledCalls', () => {
   });
 
   test('a healthy long pass is judged by its HEARTBEAT, not its start time', () => {
-    // A five-minute transcription is a pass working perfectly; aging it from
-    // processing_started_at alone rang a false stall on it.
+    // A long transcription is a pass working perfectly; aging it from
+    // processing_started_at alone rang a false stall on it. Inside the
+    // absolute ceiling, the beat is what decides.
     const rows = [{
       ...base,
       created_at: mins(GRACE_MINUTES + 30),
       processing_status: 'processing',
-      processing_started_at: mins(25),
+      processing_started_at: mins(15),
       processing_heartbeat_at: mins(1),
     }];
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
@@ -206,6 +208,20 @@ describe('computeStalledCalls', () => {
       processing_status: 'processing',
       processing_started_at: mins(2),
       processing_heartbeat_at: mins(CLAIM_STALE_MINUTES + 2),
+    }];
+    expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
+  });
+
+  test('a hung pass that keeps beating is still a stall past the ceiling', () => {
+    // The heartbeat is a timer: a provider call hung on an open socket keeps
+    // the event loop alive and the beats coming. The absolute ceiling is what
+    // stops that from being invisible here and unreclaimable there.
+    const rows = [{
+      ...base,
+      created_at: mins(GRACE_MINUTES + 60),
+      processing_status: 'processing',
+      processing_started_at: mins(CLAIM_ABSOLUTE_CEILING_MINUTES + 5),
+      processing_heartbeat_at: mins(1),
     }];
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(1);
   });
