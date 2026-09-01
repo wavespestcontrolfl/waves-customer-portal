@@ -144,6 +144,33 @@ async function resolveLiveTerm(customerId, wholeAccount) {
 
 const dateOnly = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
 
+// Acceptance matching is by CUSTOMER + canonical SCOPE SET, never the exact
+// presentation subject: the subject embeds the proposing operator and the
+// caller's family order, and a partial cancellation must stay repairable by
+// another admin, from the other surface (Customer 360 ↔ Intelligence Bar),
+// or with the families reordered. The scope is recovered from our own
+// subject format with the actor suffix stripped.
+const ACTOR_SUFFIX_RE = / \((?:Admin|Intelligence Bar)(?: \(user [^)]*\))?\)$/;
+function subjectScopeLabels(subject) {
+  const base = String(subject || '').replace(ACTOR_SUFFIX_RE, '');
+  if (base === 'Cancel plan') return []; // whole account
+  if (!base.startsWith('Cancel ')) return null; // not a cancel-plan subject
+  return base.slice('Cancel '.length).split(', ').sort();
+}
+async function findCancelAcceptance(customerId, wholeAccount, scope, status) {
+  const wanted = JSON.stringify(wholeAccount ? [] : scope.map(familyLabelOf).sort());
+  const candidates = await db('service_requests')
+    .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status })
+    .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
+    .orderBy('created_at', 'desc')
+    .select('*');
+  for (const row of candidates || []) {
+    const labels = subjectScopeLabels(row.subject);
+    if (labels && JSON.stringify(labels) === wanted) return row;
+  }
+  return null;
+}
+
 // coverageRowsForTerm returns [] BOTH for "no covered rows" and for a term
 // whose coverage identity is unreadable (coverage_service_type /
 // coverage_visit_count are nullable legacy columns) — the two must never be
@@ -530,6 +557,18 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   const input = normalizeInput(raw);
   const customer = await loadCustomer(customerId);
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
+  // Repair-retry awareness: a partial run leaves its acceptance open, and
+  // the account may now have nothing cancellable (or the scoped family gone
+  // from the live rows) — the preview must still present a committable
+  // retry, or the dialog's only button stays disabled and the first
+  // attempt's failed side effects are stranded. Mirrors the commit gate.
+  let repairRetry = false;
+  try {
+    repairRetry = !!(await findCancelAcceptance(customerId, wholeAccount, scope, 'new'));
+  } catch (retryErr) {
+    logger.warn(`[admin-cancellation] retry-acceptance preview lookup failed for ${customerId}: ${retryErr.message}`);
+  }
+  const scopedRetry = repairRetry && scopeError === 'scope_not_owned';
   const term = await resolveLiveTerm(customerId, wholeAccount);
   const prepayPlan = resolvePrepay(input, term, wholeAccount);
   // The preview's "visits pulled" must count what pressing the button pulls:
@@ -550,12 +589,14 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }),
     enabled: true,
     customer: customerSummary(customer),
-    eligible,
+    eligible: eligible || repairRetry,
+    // The dialog/IB card can say "this retries an unfinished cancellation".
+    repairRetry,
     wholeAccount,
     scope,
     scopeLabels: scope.map(familyLabelOf),
-    scopedSupported: wholeAccount ? null : !scopeError,
-    scopeError,
+    scopedSupported: wholeAccount ? null : (!scopeError || scopedRetry),
+    scopeError: scopedRetry ? null : scopeError,
     impact,
     effectiveDate: prepayPlan.effectiveDate,
     effectiveOn: prepayPlan.keepThrough || today,
@@ -634,16 +675,13 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // Scoped feasibility BEFORE the request row exists (fail closed).
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
   const subject = wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`;
-  // The still-open acceptance from a recent attempt (same customer, scope,
-  // actor) — reused by retries so the processor's repair pass can find the
-  // first attempt's rows, and honored by the eligibility gate below.
+  // The still-open acceptance from a recent attempt for the SAME customer +
+  // scope set (actor- and order-independent) — reused by retries so the
+  // processor's repair pass can find the first attempt's rows, and honored
+  // by the eligibility gate below.
   const findOpenAcceptance = async () => {
     try {
-      return await db('service_requests')
-        .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new', subject })
-        .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
-        .orderBy('created_at', 'desc')
-        .first('*');
+      return await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
     } catch (reuseErr) {
       logger.warn(`[admin-cancellation] open-acceptance lookup failed for ${customerId}: ${reuseErr.message}`);
       return null;
@@ -677,11 +715,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       // recorded case echoes — nothing re-runs; a genuine post-win-back
       // cancel has cancellable work and never reaches this branch.
       try {
-        const resolved = await db('service_requests')
-          .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'resolved', subject })
-          .where('created_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000))
-          .orderBy('created_at', 'desc')
-          .first('id');
+        const resolved = await findCancelAcceptance(customerId, wholeAccount, scope, 'resolved');
         const priorCase = resolved ? await db('cancellation_cases')
           .where({ service_request_id: resolved.id })
           .orderBy('created_at', 'desc')
@@ -756,6 +790,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   if (term && term.renewal_decision === 'cancel') {
     let prior = null;
     let priorSnap = null;
+    let priorEndNow = false;
     try {
       const recent = await db('cancellation_cases')
         .where({ customer_id: customerId })
@@ -764,6 +799,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         .select('id', 'service_request_id', 'status', 'snapshot');
       prior = (recent || []).find((c) => {
         const snap = typeof c.snapshot === 'string' ? JSON.parse(c.snapshot) : (c.snapshot || {});
+        if (String(snap.prepayTermId || '') === String(term.id)
+          && String(snap.prepayDisposition || '') === 'end_now_refund') priorEndNow = true;
         const match = String(snap.prepayTermId || '') === String(term.id)
           && String(snap.prepayDisposition || '') === String(prepayPlan.prepayDisposition || '');
         if (match) priorSnap = snap;
@@ -771,6 +808,16 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       }) || null;
     } catch (dupErr) {
       logger.warn(`[admin-cancellation] duplicate-case lookup failed for ${customerId}: ${dupErr.message}`);
+    }
+    // The destructive inverse is REFUSED: after end_now_refund the paid
+    // visits are pulled and the refund is in flight, so a later
+    // end_at_term commit would re-run the engine and tell the customer
+    // those visits remain through the term end. (The intentional
+    // end_at_term → end_now_refund transition stays allowed — it still has
+    // kept visits to pull and a refund to record.)
+    if (!prior && priorEndNow && prepayPlan.prepayDisposition === 'end_at_term') {
+      throw new CancelPlanError(409, 'prepay_term_already_ended',
+        'This term was already ended now with a recorded refund — its paid visits were pulled and the refund is in flight. End of paid coverage no longer applies; review the refund task instead.');
     }
     if (prior) {
       logger.info(`[admin-cancellation] duplicate cancel for customer ${customerId} matched case ${prior.id} — returning the recorded outcome`);
@@ -896,8 +943,30 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // exact note — a fresh request would skip their failed side effects
   // forever (and per-request dedupe keys would double-bell).
   let request = await findOpenAcceptance();
+  let priorOutcome = null;
   if (request) {
     logger.info(`[admin-cancellation] retry reuses accepted request ${request.id} for customer ${customerId} by ${actorLabel}`);
+    // The FIRST attempt's recorded facts: its accepted waiver is STICKY on
+    // repairs (a retry from the dialog's default unchecked state must not
+    // push already-waived rows through the ordinary charge path), and its
+    // outcome merges into this run's record so the case never regresses to
+    // "0 visits pulled" repair facts.
+    try {
+      const priorCase = await db('cancellation_cases')
+        .where({ service_request_id: request.id })
+        .orderBy('created_at', 'desc')
+        .first('snapshot');
+      const snap = priorCase
+        ? (typeof priorCase.snapshot === 'string' ? JSON.parse(priorCase.snapshot) : (priorCase.snapshot || {}))
+        : null;
+      priorOutcome = snap && snap.outcome ? snap.outcome : null;
+      if (snap && snap.waiveLateFee === true && !input.waiveLateFee) {
+        input.waiveLateFee = true;
+        logger.info(`[admin-cancellation] retry inherits the accepted fee waiver from request ${request.id}`);
+      }
+    } catch (priorErr) {
+      logger.warn(`[admin-cancellation] prior-case load failed for request ${request.id}: ${priorErr.message}`);
+    }
   } else {
     [request] = await db('service_requests')
       .insert({
@@ -1129,15 +1198,25 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       await db('cancellation_cases').where({ id: caseRow.id }).update({
         snapshot: JSON.stringify({
           ...caseSnapshotBody,
+          // MERGED with the first attempt's outcome on repair retries: a
+          // retry re-flips nothing (repairs don't count) and a scoped
+          // repair-only run has no plan, so its bare facts would rewrite
+          // "3 visits pulled, Silver → Bronze" into "0 pulled" — the case
+          // and lost-response echoes must keep what actually happened.
           outcome: {
-            visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
-            scope: Array.isArray(result?.scope) ? result.scope : (wholeAccount ? [] : scope),
-            tierBefore: result?.tierBefore ?? (caseSnapshot ? caseSnapshot.waveguard_tier : null),
-            tierAfter: result?.tierAfter ?? null,
-            lateFeeWaived: result ? result.lateFeeWaived === true : false,
-            confirmationRequested: input.sendConfirmation,
-            confirmation: confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null),
-            confirmationChannels: confirmations.channels,
+            visitsPulled: (priorOutcome ? Number(priorOutcome.visitsPulled) || 0 : 0)
+              + (result ? Number(result.cancelledCount) || 0 : 0),
+            scope: (Array.isArray(result?.scope) && result.scope.length)
+              ? result.scope
+              : (priorOutcome && Array.isArray(priorOutcome.scope) && priorOutcome.scope.length
+                ? priorOutcome.scope : (wholeAccount ? [] : scope)),
+            tierBefore: priorOutcome?.tierBefore ?? result?.tierBefore ?? (caseSnapshot ? caseSnapshot.waveguard_tier : null),
+            tierAfter: result?.tierAfter ?? priorOutcome?.tierAfter ?? null,
+            lateFeeWaived: (result ? result.lateFeeWaived === true : false) || priorOutcome?.lateFeeWaived === true,
+            confirmationRequested: input.sendConfirmation || priorOutcome?.confirmationRequested === true,
+            confirmation: (confirmations.smsSent ? 'sms' : (confirmations.emailSent ? 'email' : null))
+              ?? priorOutcome?.confirmation ?? null,
+            confirmationChannels: [...new Set([...(priorOutcome?.confirmationChannels || []), ...confirmations.channels])],
             // Follow-up failures ride the record: a lost-response retry must
             // answer with the run's real verdict, not a clean "Done."
             errors: [...errors],

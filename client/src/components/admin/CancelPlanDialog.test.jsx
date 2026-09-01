@@ -294,6 +294,15 @@ describe('CancelPlanDialog', () => {
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).toBeDisabled();
   });
 
+  it('a repair retry previews as committable with the retry notice', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview')
+      ? response(previewBody({ eligible: true, repairRetry: true }))
+      : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText(/A prior cancellation attempt left follow-up steps unfinished/);
+    expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).not.toBeDisabled();
+  });
+
   it('scheduled-visit fee exposure renders from the server preview and clears when waived', async () => {
     stubFetch((path) => (path.endsWith('/cancel-plan/preview')
       ? response(previewBody({

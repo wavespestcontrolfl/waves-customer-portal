@@ -529,6 +529,65 @@ describe('POST /:id/cancel-plan', () => {
     expect((await res.json()).code).toBe('scope_not_owned');
   }));
 
+  test('acceptance matching is actor- and order-independent — another operator or the other surface can drive the repair', () => withServer(async (baseUrl) => {
+    // The first attempt was proposed from the Intelligence Bar by ANOTHER
+    // operator; this dialog retry must still land on it.
+    mockState.service_requests = [{
+      id: 'req-ib', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel Lawn Care (Intelligence Bar (user other-admin))', description: '',
+      created_at: new Date('2026-08-31T14:00:00Z'),
+    }];
+    mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: true, churned: false, scopedWoundDown: true, scope: ['lawn_care'], remaining: [], cancelledCount: 0 });
+    const body = await (await post(baseUrl, '/cancel-plan', { families: ['lawn_care'] })).json();
+    expect(body.requestId).toBe('req-ib');
+    expect(mockState.inserted).toBeUndefined();
+  }));
+
+  test('a sticky waiver: a repair retry inherits the first attempt\'s accepted fee waiver', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, lateFeeWaived: false, errors: ['card_hold:s1'] });
+    const first = await (await post(baseUrl, '/cancel-plan', { waiveLateFee: true })).json();
+    expect(first.processed).toBe(false);
+    // Retry from the dialog's default UNCHECKED state.
+    const second = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(mockProcess.mock.calls[1][0].waiveLateFee).toBe(true);
+  }));
+
+  test('a repair retry MERGES its outcome with the first attempt\'s — the case never regresses to "0 pulled"', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, cancelledCount: 3, errors: ['invoice_void:s1'] });
+    const first = await (await post(baseUrl, '/cancel-plan')).json();
+    expect(first.visitsPulled).toBe(3);
+    // Retry: nothing new flips (repairs don't count).
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 0 });
+    await post(baseUrl, '/cancel-plan');
+    const latest = mockState.cancellation_cases[mockState.cancellation_cases.length - 1];
+    const snap = JSON.parse(latest.snapshot);
+    expect(snap.outcome.visitsPulled).toBe(3);
+    expect(snap.outcome.errors).toEqual([]);
+  }));
+
+  test('the preview presents a partial run as a committable retry (eligible + scoped support restored)', () => withServer(async (baseUrl) => {
+    // Whole-account: wound down, follow-up failed, acceptance open.
+    mockState.service_requests = [{
+      id: 'req-1', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '', created_at: new Date('2026-08-31T14:00:00Z'),
+    }];
+    hasCancellableWork.mockResolvedValue(false);
+    let preview = await (await post(baseUrl, '/cancel-plan/preview')).json();
+    expect(preview.eligible).toBe(true);
+    expect(preview.repairRetry).toBe(true);
+
+    // Scoped: the family is gone from the live rows but the acceptance is open.
+    mockState.service_requests = [{
+      id: 'req-2', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel Lawn Care (Admin (user admin-1))', description: '', created_at: new Date('2026-08-31T14:00:00Z'),
+    }];
+    mockPlan.mockResolvedValue({ ok: false, error: 'scope_not_owned' });
+    preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] })).json();
+    expect(preview).toEqual(expect.objectContaining({ scopedSupported: true, scopeError: null, repairRetry: true }));
+  }));
+
   test('a wound-down account with a lost follow-up step can still retry — the open acceptance beats nothing_to_cancel', () => withServer(async (baseUrl) => {
     // First run: the wind-down lands, the case write fails.
     mockOpenCase.mockRejectedValueOnce(new Error('case table down'));
@@ -788,6 +847,21 @@ describe('POST /:id/cancel-plan', () => {
       expect((await res.json()).code).toBe('preview_changed');
       expect(mockState.inserted).toBeUndefined();
       expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('the destructive inverse is refused: end_at_term after a recorded end_now_refund → 409', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
+      mockState.annual_prepay_terms[0].status = 'cancelled';
+      mockState.cancellation_cases = [{
+        id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
+        snapshot: JSON.stringify({ prepayTermId: 'term-1', prepayDisposition: 'end_now_refund', refund: { amount: 360 } }),
+      }];
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('prepay_term_already_ended');
+      expect(mockState.inserted).toBeUndefined();
+      expect(mockProcess).not.toHaveBeenCalled();
+      expect(sendCancellationConfirmations).not.toHaveBeenCalled();
     }));
 
     test('a prior end_at_term case does NOT swallow a new end-now-refund request (disposition must match)', () => withServer(async (baseUrl) => {

@@ -531,6 +531,11 @@ function confirmationDisplayParams(toolName, params, preview) {
           ? `ends at term ${prepay.termEnd}; no renewal`
           : `ended now — refund ${prepay.refund && !prepay.refund.needsManualCalc ? `$${prepay.refund.amount.toFixed(2)}` : 'needs manual calc'} recorded as an office task (not automatic)`,
       } : {}),
+      // Outstanding balance stays payable through the cancel — a money fact
+      // the card must show (the dialog shows the same line).
+      ...(Number(preview.open_balance) > 0 ? {
+        open_balance: `$${Number(preview.open_balance).toFixed(2)} outstanding — remains payable`,
+      } : {}),
       // The fee-or-waive exposure on the pulled visits (both card fee
       // lanes) — a money fact the operator must see BEFORE confirming;
       // unresolved lanes read fee-may-apply, never a silent no-fee.

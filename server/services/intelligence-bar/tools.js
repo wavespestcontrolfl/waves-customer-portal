@@ -1663,6 +1663,7 @@ async function cancelPlan(input, actionContext = {}) {
       customer_id: customerId,
       customer_name: preview.customer.name,
       eligible: preview.eligible,
+      repair_retry: preview.repairRetry === true,
       whole_account: preview.wholeAccount,
       scope: preview.scopeLabels,
       scoped_supported: preview.scopedSupported,

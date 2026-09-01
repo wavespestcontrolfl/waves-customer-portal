@@ -327,6 +327,11 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
             {/* PREVIEW FACTS */}
             <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
               <div className="font-medium text-zinc-900 mb-1">Preview — what pressing the button will do</div>
+              {preview?.repairRetry && (
+                <div className="text-12 text-ink-secondary mb-1">
+                  A prior cancellation attempt left follow-up steps unfinished — cancelling again retries them.
+                </div>
+              )}
               {loading && <div className="text-ink-secondary">Loading…</div>}
               {!loading && preview && !preview.eligible && (
                 <div className="text-ink-secondary">There is no active plan, recurring service, or upcoming visit on this account to cancel.</div>
