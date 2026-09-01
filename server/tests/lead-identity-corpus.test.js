@@ -323,7 +323,8 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     expect({ where, type: typeof text }).toEqual({ where, type: 'string' });
     // Unicode-aware: an internationalized address (josé@example.net) is an
     // email-shaped token too, and must pass the same synthetic rules.
-    for (const email of String(text).match(/[\p{L}\p{N}_.+%-]+@[\p{L}\p{N}_.-]+/gu) || []) {
+    // …and so is an RFC domain literal (person@[192.0.2.10]).
+    for (const email of String(text).match(/[\p{L}\p{N}_.+%-]+@(?:[\p{L}\p{N}_.-]+|\[[^\]\s]+\])/gu) || []) {
       const ok = /@(?:[a-z0-9-]+\.)*example\.com$/i.test(email)
         && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
       expect({ where, email, ok }).toEqual({ where, email, ok: true });
