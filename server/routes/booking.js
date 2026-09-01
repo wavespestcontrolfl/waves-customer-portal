@@ -2694,6 +2694,23 @@ async function createSelfBooking(payload = {}) {
           .where({ id: scheduledRow.id })
           .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
       }
+      // Visit groups (visit-group-scope.md §2): the primary self-booked row
+      // stamps at scheduling, same as the seeded series rows below.
+      // Gate-checked + best-effort + self-refusing inside maybeGroupRow
+      // (savepoint on the trx — a grouping failure never poisons the
+      // booking). Automatic grouping needs BOTH a catalog identity
+      // (services.groupable / group_family via service_id) and a property
+      // anchor: estimate-backed rows gain both downstream (converter
+      // catalog relink + the estimate-property-linkage regroup pass);
+      // non-estimate self-books carry no service_id by design — the
+      // catalog resolver refuses to guess a row from a funnel label
+      // (wrong identity = wrong billing/completion profile) — so they
+      // stay ungrouped until a catalog-linkage lane stamps them
+      // (GH codex #3699 r6 P2: a deliberate skip, not an oversight).
+      {
+        const { maybeGroupRow } = require('../services/visit-groups');
+        await maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
+      }
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
       // booking (same transaction), so converted_at is visible the instant the

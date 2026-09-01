@@ -5747,6 +5747,11 @@ const EstimateConverter = {
             const insertedId = Array.isArray(inserted)
               ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
               : (typeof inserted === 'object' ? inserted?.id : inserted);
+            // Visit groups (visit-group-scope.md §2): the recurring-unit
+            // converter path stamps like the standalone path — bare call is
+            // safe: maybeGroupRow refuses null-property/windowless rows
+            // itself, and the property-linkage regroup completes them.
+            if (insertedId) await VisitGroups.maybeGroupRow(insertedId, { database: trx, createdBy: 'converter' });
             // Accepting an estimate IS a real customer booking, so it
             // qualifies for an open inspection-credit promise. Marked
             // in-transaction (dark behind the gate): the marker commits

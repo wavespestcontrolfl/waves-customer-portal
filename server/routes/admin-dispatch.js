@@ -13498,6 +13498,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       followup_source_service_id: svc.id,
     };
     if (cols.service_id && svc.service_id) insertData.service_id = svc.service_id;
+    // Same address as the source visit — carry its property identity so
+    // the follow-up can join a stop (maybeGroupRow refuses null-property
+    // rows, and a follow-up has no estimate for the linkage regroup —
+    // GH codex #3699 r6 P2).
+    if (cols.property_id && svc.property_id) insertData.property_id = svc.property_id;
     if (cols.zone && svc.zone) insertData.zone = svc.zone;
     if (cols.estimated_duration_minutes && svc.estimated_duration_minutes) insertData.estimated_duration_minutes = svc.estimated_duration_minutes;
     if (cols.estimated_price) insertData.estimated_price = 0;
@@ -13527,7 +13532,15 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
           err.code = 'VISIT_OWNER_CHANGED';
           throw err;
         }
-        return trx('scheduled_services').insert(insertData).returning('*');
+        const inserted = await trx('scheduled_services').insert(insertData).returning('*');
+        // Visit groups (visit-group-scope.md §2): stamp at scheduling —
+        // gate-checked + best-effort + self-refusing inside maybeGroupRow
+        // (savepoint on the trx; a grouping failure never poisons the
+        // follow-up booking).
+        if (inserted && inserted[0]) {
+          await require('../services/visit-groups').maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'dispatch' });
+        }
+        return inserted;
       });
     } catch (err) {
       // Partial unique index on followup_source_service_id — a concurrent
