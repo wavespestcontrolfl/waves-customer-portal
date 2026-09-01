@@ -326,7 +326,8 @@ describe('lead identity corpus — shape and PII hygiene', () => {
         && SYNTHETIC_EMAIL_LOCALS.has(email.toLowerCase().split('@')[0]);
       expect({ where, email, ok }).toEqual({ where, email, ok: true });
     }
-    for (const run of String(text).match(/\+?\d[\d\s().-]{5,}\d/g) || []) {
+    // Separator class includes `/` — `941/555/2091` is a phone spelling too.
+    for (const run of String(text).match(/\+?\d[\d\s().\/-]{5,}\d/g) || []) {
       const digits = run.replace(/\D/g, '');
       if (digits.length < 7) continue;
       // Same +1 rule as the contact validator: a '+' not followed by the
