@@ -22,6 +22,7 @@ jest.mock('../services/account-membership-email', () => ({
 jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: jest.fn(),
   CHURN_REASON: 'Customer cancellation request',
+  PORTAL_CANCEL_REASON_PREFIX: 'Portal cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn().mockResolvedValue(true) }));

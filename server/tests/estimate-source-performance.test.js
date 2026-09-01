@@ -140,6 +140,27 @@ describe('sourcePerformance', () => {
     expect(cta.sendLatencyHoursMedian).toBe(30);
   });
 
+  test('plan_restart mints get their own bucket and the same real-delivery rule (C4, #3671 r8)', async () => {
+    const created = daysAgo(5);
+    mockQueues.estimates = [
+      [
+        // Self-serve restart tap: sent + sent_at stamped at mint, nothing
+        // delivered — drafted, NOT sent, and NOT folded into 'other'.
+        { id: 'r1', source: 'plan_restart', status: 'viewed', created_at: created, sent_at: created, viewed_at: hoursAfter(created, 0.01), cta_first_delivered_at: null },
+        // An operator later really handed one off.
+        { id: 'r2', source: 'plan_restart', status: 'sent', created_at: created, sent_at: hoursAfter(created, 50), cta_first_delivered_at: hoursAfter(created, 20) },
+      ],
+      [], // resolved query
+    ];
+    mockQueues.estimate_learning_events = [[]];
+    const out = await sourcePerformance({ windowDays: 30 });
+    const restart = out.sources.find((s) => s.source === 'plan_restart');
+    expect(restart.drafted).toBe(2);
+    expect(restart.sent).toBe(1);
+    expect(restart.sendLatencyHoursMedian).toBe(20);
+    expect(out.sources.find((s) => s.source === 'other')).toBeUndefined();
+  });
+
   test('empty window returns an empty source list', async () => {
     mockQueues.estimates = [[], []];
     mockQueues.estimate_learning_events = [[]];

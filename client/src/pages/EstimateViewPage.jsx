@@ -1753,11 +1753,15 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
     ? Number(breakdown.total)
     : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
   const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
+  const hasTrapOnlyMonitoring = items.some((item) => String(item?.service || '').startsWith('trap_only_'));
+  const sectionTitle = hasTrapOnlyMonitoring
+    ? (items.every((item) => String(item?.service || '').startsWith('trap_only_')) ? 'Trap-only monitoring plan' : 'Plan services and one-time work')
+    : 'One-time services';
 
   return (
     <div style={estimateCard({ padding: 16 })}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
-        One-time services
+        {sectionTitle}
       </div>
       <div style={{ display: 'grid', gap: 12 }}>
         {items.map((item, i) => {
@@ -3879,6 +3883,8 @@ function customerOneTimeLabel(item = {}) {
   const isTermiteInstall = item.service === 'termite_bait_installation'
     || /\b(advance|trelona)\s+installation\b/i.test(label);
   if (isTermiteInstall) return 'Termite Bait Installation';
+  if (item.service === 'wdo_inspection' || item.service === 'wdo') return 'WDO Inspection';
+  if (item.service === 'termite_foam' || item.service === 'foam_drill') return 'Termite Foam Treatment';
   return label || 'One-time service';
 }
 
@@ -4039,6 +4045,12 @@ export function ServiceSection({
   onFrequencyChange,
   onAddOnToggle,
   disabled = false,
+  // C4 plan-restart quote: the offer is frozen server-side (every repricing
+  // mutation 409s restart_quote_frozen), so the cadence renders as fixed
+  // text and the add-on / bond / interior pickers are omitted rather than
+  // shown inert. Informational rows (details packet, comparison sheet) and
+  // the price itself are unaffected.
+  frozen = false,
   renderFlags = {},
   waveGuardTier,
   afterPrice = null,
@@ -4082,8 +4094,9 @@ export function ServiceSection({
   const priceWording = glassDayLines
     ? { ...copy.priceWording, dayLineByKey: glassDayLines }
     : copy.priceWording;
-  const showSlider = frequencies.length > 1;
+  const showSlider = frequencies.length > 1 && !frozen;
   const showAddOns = showAddOnsProp
+    && !frozen
     && section.isPest
     && section.isRecurring
     && renderFlags.showPestRecurringAddOns === true
@@ -4143,7 +4156,8 @@ export function ServiceSection({
           // flow on phones.
           paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
         }}>
-          {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
+          {SERVICE_CARD_HEADLINES[sectionSlug]
+            || (frozen ? 'Same protection — at today\'s price' : 'Same protection — pick the rhythm that fits your home')}
         </h2>
         {showSlider ? (
           <GlassFrequencyPills
@@ -4152,6 +4166,11 @@ export function ServiceSection({
             onChange={(next) => onFrequencyChange(section.key, next)}
             disabled={disabled}
           />
+        ) : null}
+        {frozen && frequencies.length > 1 && current?.label ? (
+          <div data-testid="frozen-cadence" style={{ fontSize: 14, color: ESTIMATE_MUTED, margin: '2px 0 6px' }}>
+            Cadence: <strong style={{ color: '#04395E' }}>{current.label}</strong>
+          </div>
         ) : null}
 
         {/* Termite reads install-first (owner copy 2026-07-10, investment
@@ -4296,7 +4315,7 @@ export function ServiceSection({
             server truth — the displayed price and the billed price can never
             diverge. */}
         {sectionSlug === 'termite_bait' && Array.isArray(section.bondOptions)
-          && section.bondOptions.length > 0 && onSelectBondTerm ? (
+          && section.bondOptions.length > 0 && onSelectBondTerm && !frozen ? (
           <div style={{ marginTop: 6 }} aria-label="Termite bond options">
             <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
               Termite Bond — optional re-treatment warranty
@@ -4324,7 +4343,7 @@ export function ServiceSection({
             billed price can never diverge. Gated on the RAW section key: the
             glass slug normalizes commercial_pest to pest_control. */}
         {section.key === 'commercial_pest' && section.interiorOption
-          && onToggleInteriorService ? (
+          && onToggleInteriorService && !frozen ? (
           <div style={{ marginTop: 6 }} aria-label="Interior service options">
             <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
               Interior service — treatments inside the building
@@ -4530,6 +4549,18 @@ const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']
 // payment intents into B. It also neutralizes a slow /:token/data fetch: a
 // response for A that resolves after navigating to B lands on the unmounted
 // old tree and is dropped, instead of rendering A's PII/pricing under B's URL.
+// The server's decision (estimate.regulatedCertificateSurface, computed from
+// the raw one-time rows before any breakdown alignment) wins outright; the
+// row-based derivation below is the fail-closed fallback for payloads that
+// predate the flag and for the dev-preview fixtures.
+export function estimateHasRegulatedCertificateSurface(serviceCategory, services = [], oneTimeItems = [], serverAffirmed = false) {
+  if (serverAffirmed === true) return true;
+  const regulatedCategories = new Set(['wdo_inspection', 'pre_slab_termiticide']);
+  return regulatedCategories.has(serviceCategory)
+    || services.some((service) => regulatedCategories.has(glassServiceSlug(service?.key || service?.name)))
+    || oneTimeItems.some((item) => regulatedCategories.has(glassServiceSlug(item?.service || item?.label || item?.name)));
+}
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   return <EstimateViewPageInner key={token || 'no-token'} />;
@@ -4793,6 +4824,9 @@ function EstimateViewPageInner() {
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
+  // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
+  // the repricing controls and the one-time mode toggle are omitted.
+  const restartQuote = data?.estimate?.planRestart === true;
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   // Payment-only accept (guarantee-only renewal): no slot picker, no
   // reservation — accept goes straight to review, then invoice.
@@ -6220,6 +6254,12 @@ function EstimateViewPageInner() {
   const serviceCategory = copyCommercial
     ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
+  const isRegulatedCertificateSurface = estimateHasRegulatedCertificateSurface(
+    serviceCategory,
+    services,
+    pricing?.oneTimeBreakdown?.items || [],
+    estimate?.regulatedCertificateSurface === true,
+  );
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic
@@ -6231,8 +6271,12 @@ function EstimateViewPageInner() {
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
   // Review-gated quotes get the confirm-with-you variant instead of
   // "approve online and pick a day" (codex P2 r3).
+  const serviceSpecificOneTimeHero = new Set([
+    'termite_trenching', 'pre_slab_termiticide', 'bora_care',
+    'wdo_inspection', 'termite_foam', 'trap_only',
+  ]).has(serviceCategory);
   const glassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
     : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
@@ -6269,7 +6313,9 @@ function EstimateViewPageInner() {
   // The server's intelligence.title/body outrank the static copy fallbacks in
   // WaveGuardIntelligenceCard, so the glass headline has to be applied to the
   // intelligence payload itself — metrics/signals/satellite stay untouched.
-  const intelligenceDisplay = glassPack && estimate.intelligence
+  const intelligenceDisplay = isRegulatedCertificateSurface
+    ? null
+    : glassPack && estimate.intelligence
     ? { ...estimate.intelligence, title: fillGlassTokens(glassPack.aiTitle), body: glassPack.aiBody }
     : estimate.intelligence;
   const askChips = glassPack?.askChips || pricing.askChips;
@@ -6475,6 +6521,7 @@ function EstimateViewPageInner() {
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
+                frozen={restartQuote}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
                 waveGuardDiscountPct={Number(pricing.combinedRecurring?.waveGuardDiscountPct) || null}
@@ -6506,7 +6553,7 @@ function EstimateViewPageInner() {
                 // the control can never offer what the write refuses. Never on
                 // the read-only accepted recap (an accepted plan's price is
                 // frozen), and never while the cards are locked mid-submit.
-                serviceOptOut={section.removable === true && !readOnly && !cardsDisabled
+                serviceOptOut={section.removable === true && !readOnly && !cardsDisabled && !restartQuote
                   ? {
                     phase: optOut.sectionKey === section.key ? optOut.phase : 'idle',
                     quote: optOut.sectionKey === section.key ? optOut.quote : null,
@@ -6537,7 +6584,7 @@ function EstimateViewPageInner() {
               the mirror add-service offer above) but the write refuses
               restores — an itemized proposal or a standing tier selection —
               so the "Add it back" control must not render. */}
-          {!readOnly && data?.serviceOptOut?.restoreBlocked !== true
+          {!readOnly && !restartQuote && data?.serviceOptOut?.restoreBlocked !== true
             && (data?.serviceOptOut?.removedKeys || []).length ? (
             <div style={{ marginTop: 12 }}>
               {data.serviceOptOut.removedKeys.map((key, i) => {
@@ -6867,7 +6914,7 @@ function EstimateViewPageInner() {
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-        {showAskBar ? (
+        {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
@@ -6926,14 +6973,18 @@ function EstimateViewPageInner() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
-      <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
-      <EstimateAskBar
-        token={token}
-        askToken={estimate.askToken}
-        selectedFrequency={selectedFrequency}
-        serviceMode={serviceMode}
-        chips={askChips}
-      />
+      {!isRegulatedCertificateSurface ? (
+        <>
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+          <EstimateAskBar
+            token={token}
+            askToken={estimate.askToken}
+            selectedFrequency={selectedFrequency}
+            serviceMode={serviceMode}
+            chips={askChips}
+          />
+        </>
+      ) : null}
       <EstimateAddServiceRequestCard
         offer={addServiceOffer}
         requestState={addServiceRequestState}
@@ -7244,7 +7295,7 @@ function EstimateViewPageInner() {
               ranged price is a recurring concept, and a one-time accept there
               dead-ends — no slots exist, and the one-time card-hold/deposit
               gates require a booked appointment the customer can't pick. */}
-          {!estimate.isOneTimeOnly && !manualScheduleAccept && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+          {!estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
@@ -7406,14 +7457,17 @@ function EstimateViewPageInner() {
                   — the standalone card read as a duplicate review section). */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <EstimateAskBar
-                token={token}
-                askToken={estimate.askToken}
-                selectedFrequency={selectedFrequency}
-                serviceMode={serviceMode}
-                chips={askChips}
-              />
-              {data?.softExit === true ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
+              {!isRegulatedCertificateSurface ? (
+                <EstimateAskBar
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedFrequency={selectedFrequency}
+                  serviceMode={serviceMode}
+                  chips={askChips}
+                />
+              ) : null}
+              {data?.softExit === true && !isRegulatedCertificateSurface
+                ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
               <EstimateAddServiceRequestCard
                 offer={addServiceOffer}
                 requestState={addServiceRequestState}

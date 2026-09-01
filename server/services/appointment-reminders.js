@@ -351,7 +351,10 @@ async function moveHoldActive(scheduledServiceId) {
 // the same occurrence will not double-deliver. Best-effort — never throws.
 // A held: true result means a grouped unit move holds the visit — a
 // deferral, not a delivery failure: no fallback, no no-channel alert.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null }) {
+// `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
+// claim owner sends under — see visitReminderEmailKey. Null keeps the
+// per-service key.
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // Callers that already minted the reschedule link for their SMS leg pass
@@ -375,7 +378,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -387,16 +390,26 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // Send the email version of an appointment notice after the SMS could not be
 // delivered. Returns true if the email was sent. On no-email-on-file, raises the
 // no-channel admin alert. Best-effort — never throws.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service' }) {
+// `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
+// the email handoff is recorded there as MOVE_HOLD so the notice defers
+// (row unmarked, visit claim released) instead of reading as suppressed.
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
   if (res?.ok) {
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
     return true;
   }
   // Grouped-move hold at the handoff: a deferral, not an unreachable
   // customer — no alert; the caller's unmarked row retries after release.
-  if (res?.held) return false;
+  // Surfaced as MOVE_HOLD (GH codex r5 P1): a bare false here read as
+  // "neither channel reached them" to the reminder cron, which finalized
+  // the visit effect as suppressed and closed the row — every member's
+  // only reminder lost instead of retried after the move.
+  if (res?.held) {
+    if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+    return false;
+  }
   if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
     // No usable channel: the SMS failed and email is either unavailable (no
     // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
@@ -431,7 +444,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, stillOwnsClaim = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -454,7 +467,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return false;
   }
   const ch = apptChannel(channel);
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
+  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey };
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
@@ -564,7 +577,13 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     logger.info(`[appt-remind] ${kind} SMS for ${customerId} held at the send-window boundary — notice deferred`);
     return false;
   }
-  if (!smsOk) await deliverAppointmentEmailFallback(emailArgs);
+  if (!smsOk) {
+    // A successful fallback email IS a real delivery (GH codex r2 P1):
+    // callers that ledger the visit effect must see it, or a failed
+    // finalize would skip the durable close and a sibling could resend.
+    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome });
+    if (fallbackOk && smsOutcome) smsOutcome.fallbackEmailOk = true;
+  }
   return smsOk;
 }
 
@@ -575,17 +594,24 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
 // visit genuinely has no time" (null — fee-free is correct) from "the
 // lookup FAILED" (unresolved — a fee may still apply); the default
 // fail-soft null is unchanged for every existing caller.
+// Pure composer for the row shape above ({ scheduled_date, window_start }):
+// null when either part is missing.
+function composeScheduledApptTime(svc) {
+  if (!svc) return null;
+  const datePart = svc.scheduled_date instanceof Date
+    ? svc.scheduled_date.toISOString().slice(0, 10)
+    : String(svc.scheduled_date || '').slice(0, 10);
+  const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+  return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+}
+
 async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = false } = {}) {
   try {
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('scheduled_date', 'window_start');
     if (!svc) return null;
-    const datePart = svc.scheduled_date instanceof Date
-      ? svc.scheduled_date.toISOString().slice(0, 10)
-      : String(svc.scheduled_date || '').slice(0, 10);
-    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
-    return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
+    return composeScheduledApptTime(svc);
   } catch (err) {
     logger.warn(`[appt-remind] appt-time lookup failed for service ${scheduledServiceId}: ${err.message}`);
     if (throwOnError) throw err;
@@ -1012,7 +1038,11 @@ async function buildServiceLabel(scheduledServiceId, parentName, conn = db) {
   }
 }
 
-async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, strict = false }) {
+// `visitId` (spec §4: the grouped reminder lists both services): widens the
+// sibling selection from exact-slot to same-visit membership — grouped
+// members with overlapping-but-different windows still merge into one
+// label. Absent ⇒ the historical exact-slot selection, unchanged.
+async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, strict = false, visitId = null }) {
   // Rebuild the merged label from the PRISTINE service names of every
   // reminder sharing this customer+slot — never parse a merged label back
   // apart. Real service names contain both list delimiters (e.g. "Rodent
@@ -1028,14 +1058,32 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
   // services only share the 08:00 slot by convention, not by clock time, so
   // an 8 AM owner's texts must never advertise them.
   // Legacy rows with no linked service keep their fallback label.
-  const rows = await conn('appointment_reminders as ar')
-    .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-    .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false, 'ar.windows_preclosed': false })
-    .andWhere(function liveServiceSendableOrLegacy() {
-      this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
-    })
-    .orderBy('ar.created_at', 'asc')
-    .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
+  // Visit present ⇒ MEMBERS ONLY (GH codex r4 P2), sourced from the
+  // visit's own membership on scheduled_services (pre-push codex r8 P1):
+  // a live sibling whose reminder registration failed must still be
+  // advertised by the one grouped notice — the visit effect suppresses
+  // its own reminder. A same-timestamp non-member (another property, a
+  // non-groupable service) never rides the grouped notice: it keeps its
+  // own reminder, unprotected by the visit effect. Sendable + windowed,
+  // the same member predicate visitReminderCopyInputs uses. No visit ⇒
+  // the historical exact-slot merge over reminder rows, unchanged.
+  const rows = visitId
+    ? await conn('scheduled_services as ss')
+      .where('ss.visit_id', visitId)
+      .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .whereNotNull('ss.window_start')
+      .orderBy('ss.window_start', 'asc')
+      .orderBy('ss.id', 'asc')
+      .select('ss.id as scheduled_service_id', 'ss.service_type as label')
+    : await conn('appointment_reminders as ar')
+      .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+      .where({ 'ar.customer_id': customerId, 'ar.cancelled': false, 'ar.windows_preclosed': false })
+      .where('ar.appointment_time', apptTime)
+      .andWhere(function liveServiceSendableOrLegacy() {
+        this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+      })
+      .orderBy('ar.created_at', 'asc')
+      .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
   // Each part must be the same customer-facing label registration stored:
   // parent + add-ons + smsServiceLabel cleanup (buildServiceLabel semantics,
@@ -1106,7 +1154,123 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
 // component ('service' = its no-real-label placeholder — e.g. the
 // appointment moved out from under this scan), and on any error: a
 // reminder with yesterday's label beats no reminder.
-async function liveReminderServiceLabel(row) {
+/**
+ * Close every live member row of the claimed occurrence after the visit's
+ * ONE send. Two resend paths this removes: a finalize that FAILED after a
+ * real send leaves the effect `claimed` and reclaimable once the lease
+ * expires (pre-push codex P1); and an armed sibling row split off the
+ * visit before its own loop iteration (canSplit permits splits after
+ * reminder effects) bypasses the claim entirely and texts the same tier
+ * again (GH codex r6 P2). No armed row, no claim, no duplicate. Each
+ * close is appointment_time-guarded like every other flag write, so a
+ * concurrent move's re-arm is never stomped.
+ */
+async function closeVisitTierRows(visitId, tierCol, tierAtCol, { occurrenceDate = null } = {}) {
+  try {
+    const rows = await db('appointment_reminders as ar')
+      .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+      .where('ss.visit_id', visitId)
+      .where(`ar.${tierCol}`, false)
+      .where('ar.cancelled', false)
+      // Scope to the OCCURRENCE the claim covered (its date rides in the
+      // dedupe key): a visit moved while the send was in flight re-arms
+      // rows for the NEW date, and those must stay armed — this fallback
+      // closes only the occurrence that was actually texted (codex P1).
+      .modify((q) => { if (occurrenceDate) q.whereRaw('ss.scheduled_date::text = ?', [occurrenceDate]); })
+      .select('ar.id', 'ar.appointment_time');
+    for (const row of rows) {
+      await db('appointment_reminders')
+        .where({ id: row.id })
+        .where('appointment_time', row.appointment_time)
+        .update({ [tierCol]: true, [tierAtCol]: new Date() });
+    }
+    logger.info(`[appt-remind] visit ${visitId}: closed ${rows.length} member row(s) for ${tierCol} after the grouped send`);
+  } catch (err) {
+    logger.error(`[appt-remind] visit ${visitId}: durable ${tierCol} close failed after finalize failure — manual check needed: ${err.message}`);
+  }
+}
+
+/**
+ * Copy inputs for the ONE grouped reminder (GH codex r1, two P1s): the
+ * visit owner texts on behalf of every member, so the notice must
+ * advertise the stop's EARLIEST arrival time — whichever member happens to
+ * win the claim — and must carry the card-hold fee disclosure of EVERY
+ * held member (the disclosure is retained as dispute evidence; a non-held
+ * owner must not drop a held sibling's clause). Falls back to the owner
+ * row's own time/line on any read failure — a reminder with the owner's
+ * window beats no reminder.
+ */
+/**
+ * Email idempotency key for the ONE grouped reminder email (GH codex r7
+ * P1): the claim owner's email leg can go out while its SMS leg is held
+ * (quiet hours / move), the claim is then released as retryable, and a
+ * DIFFERENT sibling may own the retry — under the per-service key
+ * (appointment-email's default) that sibling would email the same stop
+ * again. Keyed by the visit-effect dedupe key (visit + tier + occurrence
+ * date) so every member's email leg for the occurrence dedupes together.
+ */
+function visitReminderEmailKey(kind, claimDedupeKey) {
+  return `appointment.reminder_${kind}:visit:${claimDedupeKey}`;
+}
+
+async function visitReminderCopyInputs(visitId, row) {
+  const ownLine = () => require('./estimate-card-holds')
+    .cardHoldReminderLine(row.scheduled_service_id).catch(() => '');
+  const fallback = async () => ({ apptTime: new Date(row.appointment_time), holdLine: await ownLine(), holdNote: null });
+  if (!visitId) return fallback();
+  try {
+    // Member set from scheduled_services — the visit's own membership —
+    // with the reminder row OPTIONAL (GH codex r8 P1): a live sibling whose
+    // reminder registration failed (or is still in the self-heal backlog)
+    // must not vanish from the grouped copy; its time composes from its
+    // own date + window instead, exactly as the recovery paths do.
+    // Sendable members only, mirroring buildMergedServiceLabel (GH codex
+    // r5 P1): a 'rescheduled' pending-rebook sibling keeps its visit_id
+    // and its uncancelled reminder until a new stop is chosen, so its
+    // withdrawn appointment_time must not become the stop's advertised
+    // earliest arrival — the visit effect would then bar the live
+    // sibling from correcting it. Windowless pre-closed placeholders stay
+    // out (they share 08:00 by convention only).
+    const rows = await db('scheduled_services as ss')
+      .leftJoin('appointment_reminders as ar', function reminderRow() {
+        this.on('ar.scheduled_service_id', 'ss.id').andOn('ar.cancelled', db.raw('false'));
+      })
+      .where('ss.visit_id', visitId)
+      .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .whereNotNull('ss.window_start')
+      .select('ss.id as scheduled_service_id', 'ss.scheduled_date', 'ss.window_start', 'ar.appointment_time', 'ar.windows_preclosed');
+    const members = [];
+    for (const m of Array.isArray(rows) ? rows : []) {
+      if (m.windows_preclosed === true) continue;
+      const t = m.appointment_time ? new Date(m.appointment_time) : composeScheduledApptTime(m);
+      if (!(t instanceof Date) || Number.isNaN(t.getTime())) continue;
+      members.push({ scheduled_service_id: m.scheduled_service_id, apptTime: t });
+    }
+    if (!members.length) return fallback();
+    let earliest = members[0].apptTime;
+    for (const m of members) {
+      if (m.apptTime < earliest) earliest = m.apptTime;
+    }
+    const lines = [];
+    const notes = [];
+    for (const m of members) {
+      const line = await require('./estimate-card-holds')
+        .cardHoldReminderLine(m.scheduled_service_id).catch(() => '');
+      if (line && !lines.includes(line)) lines.push(line);
+      // The EMAIL leg renders its own note copy (cardHoldReminderNote) —
+      // aggregated here too, or the grouped email would drop a held
+      // sibling's disclosure (GH codex r2 P1).
+      const note = await require('./estimate-card-holds')
+        .cardHoldReminderNote(m.scheduled_service_id).catch(() => '');
+      if (note && !notes.includes(note)) notes.push(note);
+    }
+    return { apptTime: earliest, holdLine: lines.join(' '), holdNote: notes.join(' ') };
+  } catch {
+    return fallback();
+  }
+}
+
+async function liveReminderServiceLabel(row, { visitId = null } = {}) {
   const stored = smsServiceLabelStored(row.service_type);
   if (!row.scheduled_service_id) return stored;
   try {
@@ -1114,6 +1278,7 @@ async function liveReminderServiceLabel(row) {
       customerId: row.customer_id,
       apptTime: row.appointment_time,
       nextLabel: null,
+      visitId,
       // A partially-failed merge (add-on or estimate-name read down) must
       // not replace a complete persisted label — throw to the stored
       // fallback below instead (codex #3430 r1 P2).
@@ -2708,10 +2873,16 @@ const AppointmentReminders = {
         // customer. Truly terminal states self-heal the row; 'rescheduled' is a
         // pending-rebook marker, so we skip the send but leave the row armed for
         // the rebook (see status-set comments above).
+        // Grouped-visit membership rides on the same guard read: NULL for
+        // every ungrouped/legacy row, which keeps today's path with zero
+        // additional queries (gate on or off — lifecycle seams are
+        // gate-independent).
+        let svcVisitId = null;
         if (r.scheduled_service_id) {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
-            .first('status');
+            .first('status', 'visit_id');
+          svcVisitId = svc?.visit_id || null;
           const svcStatus = String(svc?.status || '').toLowerCase();
           if (REMINDER_BLOCKING_STATUSES.has(svcStatus)) {
             if (SELF_HEAL_TERMINAL_STATUSES.has(svcStatus)) {
@@ -2797,15 +2968,65 @@ const AppointmentReminders = {
             continue;
           }
 
+          // Grouped stop: exactly-once per visit per tier via the
+          // visit_effects claim (spec §4) — taken AFTER every skip/defer
+          // check so a claim exists only when this row would actually send.
+          // 'detached' (a split/move raced the scan) falls back to the
+          // per-row send: over-notify, never silence.
+          const vg72 = svcVisitId ? require('./visit-groups') : null;
+          const claim72 = vg72
+            ? await vg72.claimVisitNotification({ id: r.scheduled_service_id, visit_id: svcVisitId }, 'reminder_72h')
+            : null;
+          if (claim72 && claim72.state === 'taken') {
+            // A sibling already sent/suppressed this tier for the visit —
+            // close only our own row (appointment_time-guarded, same as the
+            // preference skip: 0 rows = moved mid-scan, leave the re-arm).
+            const covered72 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_72h_sent: true, reminder_72h_sent_at: new Date() });
+            logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} covered by visit ${svcVisitId}${covered72 === 0 ? ' — appointment moved during scan; leaving re-armed row' : ''}`);
+            results.skipped++;
+            continue;
+          }
+          if (claim72 && (claim72.state === 'in_flight' || claim72.state === 'error')) {
+            // Another member is mid-send, or the claim state is unknown —
+            // never send, never mark; the next 15-minute tick re-decides
+            // (a stale claim reclaims after the lease).
+            logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — visit claim ${claim72.state}; row left unmarked`);
+            continue;
+          }
+          const ownsVisit72 = Boolean(claim72 && claim72.state === 'owner');
+
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
             if (!customer) { results.skipped++; continue; }
 
-            const day = formatDay(apptTime);
-            const date = formatDate(apptTime);
-            const time = formatTime(apptTime);
+            // Grouped owner copy: the stop's EARLIEST arrival + every
+            // member's card-hold disclosure (GH codex r1).
+            const copy72 = ownsVisit72 ? await visitReminderCopyInputs(svcVisitId, r) : null;
+            const apptCopy72 = copy72 ? copy72.apptTime : apptTime;
+            // The grouped copy reflects the visit's CURRENT earliest slot —
+            // a move that committed during the awaits above may have taken
+            // it outside this tier's band (GH codex r2 P1). Release the
+            // claim as retryable and leave the row unmarked: the re-armed
+            // rows own the new date, under a fresh date-bearing key.
+            if (copy72) {
+              const hoursUntilCopy = (apptCopy72.getTime() - now.getTime()) / 3600000;
+              if (!(hoursUntilCopy > 24.25 && hoursUntilCopy <= 72.25)) {
+                await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', 'retry', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+                logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — grouped slot moved out of the 72h band during the scan; claim released, row left unmarked`);
+                continue;
+              }
+            }
+            const day = formatDay(apptCopy72);
+            const date = formatDate(apptCopy72);
+            const time = formatTime(apptCopy72);
 
-            const serviceLabel = await liveReminderServiceLabel(r);
+            // The visit owner texts on behalf of every sibling — the label
+            // lists them all (spec §4: "appointment page lists both
+            // services"); non-owners keep the exact-slot label.
+            const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit72 ? svcVisitId : null });
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
@@ -2813,18 +3034,29 @@ const AppointmentReminders = {
             // for non-held bookings so the template placeholder resolves
             // clean. Lazy require: estimate-card-holds requires THIS module
             // for appointment times, so a top-level import would cycle.
-            const cardHoldPolicyLine72 = await require('./estimate-card-holds')
-              .cardHoldReminderLine(r.scheduled_service_id);
+            const cardHoldPolicyLine72 = copy72
+              ? copy72.holdLine
+              : await require('./estimate-card-holds').cardHoldReminderLine(r.scheduled_service_id);
             // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the
             // pre-check above passed at 19:59, the clock crossed 20:00
             // mid-flight) back out so the hold defers instead of marking.
+            // Lease renewal at the provider boundary (tracker-path parity,
+            // pre-push codex P1): the prep above (customer, label, links)
+            // can eat the lease — a reclaim replaced our token, so sending
+            // now would duplicate. Renew-or-abstain, row left unmarked.
+            if (ownsVisit72 && !(await vg72.renewNotificationLease(svcVisitId, 'reminder_72h', claim72.token, { dedupeKey: claim72.dedupeKey }))) {
+              logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
+              continue;
+            }
             const smsOutcome72 = {};
             const reached72 = await deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
               customerId: r.customer_id,
               scheduledServiceId: r.scheduled_service_id,
-              apptTime,
+              apptTime: apptCopy72,
+              cardHoldNote: copy72 ? copy72.holdNote : null,
+              emailIdempotencyKey: ownsVisit72 ? visitReminderEmailKey('72h', claim72.dedupeKey) : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsOutcome: smsOutcome72,
@@ -2832,18 +3064,52 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
             });
 
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
             if (!reached72 && (smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome72.blockedCode === 'MOVE_HOLD')) {
+              // Release the visit claim as retryable (effect → failed) so
+              // the next tick reclaims immediately instead of waiting out
+              // the lease; the row itself stays unmarked, as today.
+              if (ownsVisit72) await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', 'retry', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
               logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred, row left unmarked`);
               continue;
+            }
+
+            // Advance the visit ledger with the actual outcome before the
+            // per-row flag. A finalize failure after a REAL send leaves the
+            // effect `claimed` and reclaimable — close every member row as
+            // the durable sent state instead (pre-push codex P1). A failed
+            // finalize on a suppressed outcome needs no fallback: a
+            // lease-expiry resend sends once, never silences. A successful
+            // FALLBACK EMAIL is a real delivery too (GH codex r2 P1).
+            const delivered72 = reached72 || smsOutcome72.fallbackEmailOk === true;
+            // Retryable provider failure with no delivery on either channel
+            // (Twilio 429/5xx/timeout — GH codex r6 P1): the grouped visit
+            // made its ONE attempt through this owner, so a terminal
+            // `suppressed` would silence every member for a blip that the
+            // ungrouped path survives by each row's own attempt. Release
+            // the claim as retryable and leave the row unmarked — the next
+            // tick reclaims and tries again (no-channel alert is 24h-deduped).
+            if (ownsVisit72 && !delivered72 && smsOutcome72.retryable === true) {
+              await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', 'retry', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} — retryable provider failure on the grouped send; claim released, row left unmarked`);
+              continue;
+            }
+            if (ownsVisit72) {
+              await vg72.finalizeVisitNotification(svcVisitId, 'reminder_72h', delivered72 ? 'sent' : 'suppressed', new Date(), claim72.token, { dedupeKey: claim72.dedupeKey });
+              // After a delivery, every member row of the claimed occurrence
+              // closes now — see closeVisitTierRows (finalize-failure
+              // durability + the split-before-own-iteration resend).
+              if (delivered72) {
+                await closeVisitTierRows(svcVisitId, 'reminder_72h_sent', 'reminder_72h_sent_at', { occurrenceDate: claim72.dedupeKey.slice(claim72.dedupeKey.lastIndexOf(':') + 1) });
+              }
             }
 
             // Guard on appointment_time: a concurrent move re-arms this row
@@ -2927,14 +3193,68 @@ const AppointmentReminders = {
             // Best-effort + idempotent per occurrence; an email failure
             // still closes (same as the SMS-only skip, where nothing sends).
             if (apptChannel(channel24) === 'both') {
-              const emailRes = await sendAppointmentNoticeEmail({
-                kind: '24h',
-                customerId: r.customer_id,
-                scheduledServiceId: r.scheduled_service_id,
-                apptTime,
-                serviceLabel: await liveReminderServiceLabel(r),
-              });
-              logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
+              // Grouped stop: the email leg is a customer send too — one
+              // per visit via the same reminder_24h claim.
+              const vgNight = svcVisitId ? require('./visit-groups') : null;
+              const nightClaim = vgNight
+                ? await vgNight.claimVisitNotification({ id: r.scheduled_service_id, visit_id: svcVisitId }, 'reminder_24h')
+                : null;
+              if (nightClaim && (nightClaim.state === 'in_flight' || nightClaim.state === 'error')) {
+                logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim ${nightClaim.state}; row left unmarked`);
+                continue;
+              }
+              if (nightClaim && nightClaim.state === 'taken') {
+                logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} covered by visit ${svcVisitId}`);
+              } else {
+                const ownsNight = Boolean(nightClaim && nightClaim.state === 'owner');
+                const nightLabel = await liveReminderServiceLabel(r, { visitId: ownsNight ? svcVisitId : null });
+                const nightCopy = ownsNight ? await visitReminderCopyInputs(svcVisitId, r) : null;
+                // Tier recheck on the grouped copy (GH codex r3 P1): a
+                // move committed during the awaits above may have taken
+                // the visit off tomorrow — sending now would finalize the
+                // NEW date's effect and silence the correctly timed
+                // reminder when it actually comes due.
+                if (nightCopy && etDateString(nightCopy.apptTime) !== tomorrowET) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — grouped slot moved off tomorrow during the scan; claim released, row left unmarked`);
+                  continue;
+                }
+                // Lease renewal AFTER all copy prep, immediately before the
+                // provider call — see the 72h twin (and codex P1: prep
+                // reads must not eat the lease after renewal).
+                if (ownsNight && !(await vgNight.renewNotificationLease(svcVisitId, 'reminder_24h', nightClaim.token, { dedupeKey: nightClaim.dedupeKey }))) {
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
+                  continue;
+                }
+                const emailRes = await sendAppointmentNoticeEmail({
+                  kind: '24h',
+                  customerId: r.customer_id,
+                  scheduledServiceId: r.scheduled_service_id,
+                  apptTime: nightCopy ? nightCopy.apptTime : apptTime,
+                  serviceLabel: nightLabel,
+                  cardHoldNote: nightCopy ? nightCopy.holdNote : null,
+                  emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
+                });
+                // A move-hold at the email handoff is a DEFERRAL (GH codex
+                // r2 P1): finalizing it terminally would mark the whole
+                // visit's only deliverable leg taken. Release the claim as
+                // retryable, leave the row unmarked, let the post-move
+                // scan re-decide.
+                if (emailRes?.held && ownsNight) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held by a grouped move — claim released, row left unmarked`);
+                  continue;
+                }
+                if (ownsNight) {
+                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', emailRes?.ok ? 'sent' : 'suppressed', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                  // Every member row closes after the delivery — see the
+                  // 24h twin / closeVisitTierRows.
+                  if (emailRes?.ok) {
+                    await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: nightClaim.dedupeKey.slice(nightClaim.dedupeKey.lastIndexOf(':') + 1) });
+                  }
+                }
+                logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
+              }
             }
             const closedWindow24 = await db('appointment_reminders')
               .where({ id: r.id })
@@ -2949,28 +3269,65 @@ const AppointmentReminders = {
             continue;
           }
 
+          // Grouped stop: exactly-once per visit per tier — see the 72h twin.
+          const vg24 = svcVisitId ? require('./visit-groups') : null;
+          const claim24 = vg24
+            ? await vg24.claimVisitNotification({ id: r.scheduled_service_id, visit_id: svcVisitId }, 'reminder_24h')
+            : null;
+          if (claim24 && claim24.state === 'taken') {
+            const covered24 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} covered by visit ${svcVisitId}${covered24 === 0 ? ' — appointment moved during scan; leaving re-armed row' : ''}`);
+            results.skipped++;
+            continue;
+          }
+          if (claim24 && (claim24.state === 'in_flight' || claim24.state === 'error')) {
+            logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — visit claim ${claim24.state}; row left unmarked`);
+            continue;
+          }
+          const ownsVisit24 = Boolean(claim24 && claim24.state === 'owner');
+
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
             if (!customer) { results.skipped++; continue; }
 
-            const time = formatTime(apptTime);
+            // Grouped owner copy — see the 72h twin (GH codex r1).
+            const copy24 = ownsVisit24 ? await visitReminderCopyInputs(svcVisitId, r) : null;
+            const apptCopy24 = copy24 ? copy24.apptTime : apptTime;
+            // Tier recheck on the grouped copy — see the 72h twin.
+            if (copy24 && etDateString(apptCopy24) !== tomorrowET) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — grouped slot moved off tomorrow during the scan; claim released, row left unmarked`);
+              continue;
+            }
+            const time = formatTime(apptCopy24);
 
-            const serviceLabel = await liveReminderServiceLabel(r);
+            const serviceLabel = await liveReminderServiceLabel(r, { visitId: ownsVisit24 ? svcVisitId : null });
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
             // Card-hold fee policy clause — see the 72h twin above.
-            const cardHoldPolicyLine24 = await require('./estimate-card-holds')
-              .cardHoldReminderLine(r.scheduled_service_id);
+            const cardHoldPolicyLine24 = copy24
+              ? copy24.holdLine
+              : await require('./estimate-card-holds').cardHoldReminderLine(r.scheduled_service_id);
             // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD back
             // out — see the 72h twin above.
+            // Lease renewal at the provider boundary — see the 72h twin.
+            if (ownsVisit24 && !(await vg24.renewNotificationLease(svcVisitId, 'reminder_24h', claim24.token, { dedupeKey: claim24.dedupeKey }))) {
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
+              continue;
+            }
             const smsOutcome24 = {};
             const reached24 = await deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
               customerId: r.customer_id,
               scheduledServiceId: r.scheduled_service_id,
-              apptTime,
+              apptTime: apptCopy24,
+              cardHoldNote: copy24 ? copy24.holdNote : null,
+              emailIdempotencyKey: ownsVisit24 ? visitReminderEmailKey('24h', claim24.dedupeKey) : null,
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
@@ -2985,12 +3342,12 @@ const AppointmentReminders = {
                   // legacy) plus an admin edit that reintroduces {time}.
                   async () => {
                     const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
-                    return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
+                    return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
                   },
-                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
               smsOutcome: smsOutcome24,
             });
 
@@ -3000,8 +3357,28 @@ const AppointmentReminders = {
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
             if (!reached24 && (smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome24.blockedCode === 'MOVE_HOLD')) {
+              // Release the visit claim as retryable — see the 72h twin.
+              if (ownsVisit24) await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);
               continue;
+            }
+
+            // Advance the visit ledger before the per-row flag; a failed
+            // finalize after a real send closes every member row as the
+            // durable sent state; a successful fallback email counts as a
+            // real delivery — see the 72h twin.
+            const delivered24 = reached24 || smsOutcome24.fallbackEmailOk === true;
+            // Retryable provider failure, no delivery — see the 72h twin.
+            if (ownsVisit24 && !delivered24 && smsOutcome24.retryable === true) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} — retryable provider failure on the grouped send; claim released, row left unmarked`);
+              continue;
+            }
+            if (ownsVisit24) {
+              await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', delivered24 ? 'sent' : 'suppressed', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
+              if (delivered24) {
+                await closeVisitTierRows(svcVisitId, 'reminder_24h_sent', 'reminder_24h_sent_at', { occurrenceDate: claim24.dedupeKey.slice(claim24.dedupeKey.lastIndexOf(':') + 1) });
+              }
             }
 
             // Same appointment_time guard as the 72h flag above — a
@@ -3162,12 +3539,62 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] Skipping email fallback for cancelled appointment ${scheduledServiceId || customerId}`);
         return;
       }
+      let cardHoldNote = null;
+      let emailIdempotencyKey = null;
       if (reminderRow) {
         apptTime = new Date(reminderRow.appointment_time);
         serviceLabel = smsServiceLabelStored(reminderRow.service_type);
+        // Grouped stop (GH codex r5 P1): the bounced text was the visit's
+        // ONE reminder, sent by the claim owner on behalf of every member
+        // — rebuilding from the owner's row alone would email the owner's
+        // time and service. Rebuild the grouped copy from the CURRENT
+        // visit (earliest sendable member, merged member label, every
+        // held member's disclosure). Best-effort: a dissolved visit falls
+        // through to the per-row copy above; a failed read keeps whatever
+        // was rebuilt before it (each piece beats the owner's own).
+        if ((kind === '72h' || kind === '24h') && scheduledServiceId) {
+          try {
+            const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+            const visit = svc?.visit_id
+              ? await db('service_visits').where({ id: svc.visit_id }).first('id', 'scheduled_date')
+              : null;
+            if (visit) {
+              // The OCCURRENCE the bounced text represented is its own
+              // rendered slot (audit metadata), never the visit's current
+              // date (pre-push codex r8 P1): a late bounce after a unit
+              // move would otherwise email the NEW date's copy under the
+              // new date's key and dedupe away the correctly timed
+              // reminder for that occurrence. Moved since the text ⇒ the
+              // bounced notice is stale; the re-armed rows own the new
+              // date. Every grouped send stamps rendered_slot_ms, so a
+              // missing stamp means an ungrouped send — per-row copy.
+              const slotMs = Number(audit.metadata?.rendered_slot_ms);
+              const textedDate = Number.isFinite(slotMs) ? etDateString(new Date(slotMs)) : null;
+              const visitDate = visit.scheduled_date instanceof Date
+                ? visit.scheduled_date.toISOString().slice(0, 10)
+                : String(visit.scheduled_date || '').slice(0, 10);
+              if (textedDate && textedDate !== visitDate) {
+                logger.info(`[appt-remind] skipping ${kind} email fallback for ${scheduledServiceId} — grouped visit ${visit.id} moved from ${textedDate} to ${visitDate} since the text; the re-armed reminders own the new date`);
+                return;
+              }
+              if (textedDate) {
+                const copy = await visitReminderCopyInputs(visit.id, reminderRow);
+                apptTime = copy.apptTime;
+                cardHoldNote = copy.holdNote;
+                serviceLabel = await liveReminderServiceLabel(reminderRow, { visitId: visit.id });
+                // Same visit-scoped key the direct email leg used, so a
+                // 'both'-channel bounce recovery dedupes against the email
+                // that already went out (GH codex r7 P1).
+                emailIdempotencyKey = visitReminderEmailKey(kind, require('./visit-groups').dedupeKeyFor(visit, `reminder_${kind}`));
+              }
+            }
+          } catch (visitErr) {
+            logger.warn(`[appt-remind] grouped copy rebuild failed for ${scheduledServiceId} — emailing the per-row copy: ${visitErr.message}`);
+          }
+        }
       }
 
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel });
+      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }

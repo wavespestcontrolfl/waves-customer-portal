@@ -12,7 +12,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { gsmSafeName } = require('../services/messaging/gsm-normalize');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
-const { processCancellationRequest } = require('../services/cancellation-processor');
+const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
@@ -65,6 +65,13 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // visits are pulled AND the remaining plan repriced (codex r1 P2: the
     // portal showed the manual-closeout copy while the scoped SMS said done).
     processed: !!(result && result.ok && (result.churned || result.scopedWoundDown)),
+    // The server's ACTUAL churn state, independent of `processed` (codex GH
+    // #3671 r28 P1): the churn write runs FIRST, so a later best-effort
+    // step failing (an in-progress visit needing manual handling) returns
+    // churned:true, ok:false — the account is already inactive and the
+    // portal must refresh its auth snapshot even though the request is
+    // parked for office review.
+    churned: !!(result && result.churned),
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
@@ -225,7 +232,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
           const retry = await processCancellationRequest({
             customerId: req.customer.id,
-            reason: `Portal cancellation request ${dupe.id}`,
+            reason: `${PORTAL_CANCEL_REASON_PREFIX} ${dupe.id}`,
             requestId: dupe.id,
             families: recoveredScope,
           });
@@ -304,7 +311,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
         const retry = await processCancellationRequest({
           customerId: req.customer.id,
-          reason: `Portal cancellation request ${priorCancellation.id}`,
+          reason: `${PORTAL_CANCEL_REASON_PREFIX} ${priorCancellation.id}`,
           requestId: priorCancellation.id,
           families: recoveredScope,
         });
@@ -507,7 +514,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       try {
         cancellationResult = await processCancellationRequest({
           customerId: req.customer.id,
-          reason: `Portal cancellation request ${request.id}`,
+          reason: `${PORTAL_CANCEL_REASON_PREFIX} ${request.id}`,
           requestId: request.id,
           families: scopedFamilies,
         });
@@ -893,6 +900,36 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
         : {}),
       ...(impact ? { impact } : {}),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/requests/restart-plan (C4, GATE_CANCEL_FLOW_V2) — a CANCELLED
+// customer asks to restart. Mints (or reuses) a normal server-priced
+// estimate for the families they cancelled and hands back its /estimate
+// path; the customer reviews and accepts it through the existing public
+// accept flow (card-first, unchanged). Customer-initiated only — nothing is
+// sent. 404 dark; 409 for an account that is not cancelled or that has no
+// plan to restart / cannot be priced online. `authenticate` admits the
+// cancelled customer here through CANCELLED_READ_ROUTES (middleware/auth).
+router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
+    if (req.customerInactive !== true) {
+      return res.status(409).json({ error: 'This plan is not cancelled.', code: 'not_cancelled' });
+    }
+    const { mintRestartEstimate } = require('../services/cancellation-resolution/restart');
+    let minted;
+    try {
+      minted = await mintRestartEstimate({ customer: req.customer });
+    } catch (err) {
+      if (err && err.restartUnavailable) {
+        return res.status(409).json({ error: err.message, code: err.code });
+      }
+      throw err;
+    }
+    res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
   } catch (err) {
     next(err);
   }

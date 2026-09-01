@@ -12429,6 +12429,14 @@ const CallRecordingProcessor = {
                         .onConflict('idempotency_key')
                         .ignore()
                         .returning('*');
+                      // Visit groups (visit-group-scope.md §2): stamp at
+                      // scheduling, inside this savepoint — dispatch-owned
+                      // but NOT office-review (ai_call_pipeline_followup),
+                      // so it is join-eligible; self-refusing otherwise.
+                      // Absent on the idempotency-conflict reuse (no row).
+                      if (fuRow?.id) {
+                        await require('./visit-groups').maybeGroupRow(fuRow.id, { database: sp, createdBy: 'dispatch' });
+                      }
                       return fuRow || null;
                     });
                   } catch (fuErr) {
@@ -12938,6 +12946,12 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
+                  // Visit groups (visit-group-scope.md §2): stamp at
+                  // scheduling — a confirmed phone booking never passes
+                  // through the job-status pending→confirmed regroup hook.
+                  // Absent on the idempotency-conflict reuse branch below
+                  // (the original insert already stamped).
+                  await require('./visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.

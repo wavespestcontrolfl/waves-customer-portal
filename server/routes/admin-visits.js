@@ -22,6 +22,21 @@ router.post('/group', async (req, res, next) => {
     if (serviceIds.length < 2) {
       return res.status(400).json({ error: 'serviceIds needs at least two rows' });
     }
+    // Autopay exclusion — same rule as automatic stamping (spec rev-2:
+    // "autopay customers are not grouped until grouped autopay ships");
+    // fail-closed inside the helper. FAST PATH for a clean 409 message —
+    // the authoritative check re-runs inside createOrJoinVisit under the
+    // customer row lock (pre-push codex P0 TOCTOU), whose refusal maps to
+    // the same visit_group_refused below. Creation-time only:
+    // split/separate on existing visits stays unrestricted.
+    const anchor = await require('../models/db')('scheduled_services')
+      .whereIn('id', serviceIds).first('customer_id');
+    if (!anchor || await VisitGroups.customerExcludedByAutopay(anchor.customer_id)) {
+      return res.status(409).json({
+        error: 'This customer is on autopay — visits are not grouped until grouped autopay ships.',
+        code: 'visit_group_refused',
+      });
+    }
     const visit = await VisitGroups.createOrJoinVisit({
       rows: serviceIds.map((id) => ({ id })),
       createdBy: `admin:${(req.technician && req.technician.id) || 'unknown'}`,

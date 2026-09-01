@@ -324,8 +324,22 @@ async function loadByToken(token) {
       db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
       db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
       db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
-      'c.deleted_at as customer_deleted_at'
+      'c.deleted_at as customer_deleted_at',
+      // C4 (codex GH r4 P1): the account's activity gates every mutation on
+      // this tokenized page — a cancelled customer's portal is read-only,
+      // and a surviving visit's reschedule link must not stay a side door.
+      'c.active as customer_active'
     );
+}
+
+// FAIL CLOSED on the account, not just the appointment (C4, codex GH r4
+// P1): reschedule tokens never expire, so a visit that survived a
+// cancellation keeps a live mutation link after the portal itself went
+// read-only. Only an EXPLICITLY active customer may confirm or move a
+// visit through this route — false, NULL, or an unreadable join all
+// refuse (same explicit-stamp rule as the cancelled-portal middleware).
+function accountInactive(svc) {
+  return svc.customer_active !== true;
 }
 
 // ── "Moved for weather" banner context (GATE_RAINOUT_MOVE_BANNER) ────────
@@ -487,7 +501,9 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = await eligibilityAsync(svc);
+    const elig = accountInactive(svc)
+      ? { ok: false, reason: 'account_inactive' }
+      : await eligibilityAsync(svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -574,7 +590,9 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = await eligibilityAsync(svc);
+    const elig = accountInactive(svc)
+      ? { ok: false, reason: 'account_inactive' }
+      : await eligibilityAsync(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -639,7 +657,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = await eligibilityAsync(svc);
+    const elig = accountInactive(svc)
+      ? { ok: false, reason: 'account_inactive' }
+      : await eligibilityAsync(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -915,6 +935,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 router._test = {
   eligibility,
   eligibilityAsync,
+  accountInactive,
   bookingRange,
   searchParseOpts,
   apptDateStr,

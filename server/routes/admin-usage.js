@@ -76,7 +76,7 @@ const KNOWN_PAGE_KEYS = new Set([
   'banking', 'billing-recovery', 'blog', 'call-recordings', 'communications',
   'compliance', 'content-engine', 'content-registry', 'contracts',
   'credentials', 'customers', 'dashboard', 'data-hygiene', 'design-system',
-  'discounts', 'dispatch', 'document-requests', 'documents', 'email',
+  'discounts', 'dispatch', 'document-requests', 'documents', 'drafts', 'email',
   'equipment', 'equipment-calibration', 'estimates', 'fleet', 'health',
   'inventory', 'invoices', 'knowledge', 'lawn-assessment', 'lawn-assessments',
   'leads', 'more', 'newsletter', 'payers', 'phone-numbers', 'pipeline',

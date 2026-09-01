@@ -2129,6 +2129,16 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (estimate?.price_locked_at) {
     return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
   }
+  // Customer plan-restart quotes are never revised in place (codex GH r17
+  // P1 on #3671): their scope is fixed by the cancellation attempt and
+  // their price is always today's mint (owner ruling — one honorable
+  // price). An edited copy either bricked acceptance (planRestart dropped
+  // wholesale) or, preserved, let a changed composition restart work
+  // outside the cancellation scope; blocking is the only shape that keeps
+  // both invariants.
+  if (String(estimate?.source || '') === 'plan_restart') {
+    return { message: 'This is a customer plan-restart quote — its scope is fixed by the cancellation and it always prices at the current mint. It cannot be edited in place; the customer re-taps "Restart my plan" for a fresh quote.', statusCode: 409 };
+  }
   const status = String(estimate?.status || '');
   if (status === 'sending') {
     return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };

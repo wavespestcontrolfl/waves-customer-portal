@@ -466,6 +466,30 @@ describe('reviseAdminEstimate', () => {
     expect(next2.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
   });
 
+  test('a plan_restart quote refuses in-place revision — scope is the cancellation\'s, price is always the mint\'s (codex GH r16+r17 P1 on #3671)', async () => {
+    // A wholesale rewrite either dropped planRestart (bricked acceptance)
+    // or, force-preserved, let a changed composition restart work outside
+    // the cancellation scope — so the revise gate refuses the source
+    // outright, and the builder preflight surfaces the same message.
+    const restartRow = {
+      ...sentEstimate,
+      source: 'plan_restart',
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        planRestart: { families: ['pest_control'], cancellationCaseId: 'case-3', cancellationRequestId: 'req-3' },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: restartRow });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,

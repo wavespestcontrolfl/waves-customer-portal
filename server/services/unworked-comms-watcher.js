@@ -242,8 +242,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
         SELECT 1 FROM estimates fe
         WHERE fe.customer_id = t.customer_id
-          AND ((COALESCE(fe.source, '') <> 'service_report_cta' AND fe.sent_at > t.created_at)
-               OR (COALESCE(fe.source, '') = 'service_report_cta'
+          -- plan_restart mints share the shape (C4 restart taps publish
+          -- without delivery too — codex GH #3671 r8 P1).
+          AND ((COALESCE(fe.source, '') NOT IN ('service_report_cta', 'plan_restart') AND fe.sent_at > t.created_at)
+               OR (COALESCE(fe.source, '') IN ('service_report_cta', 'plan_restart')
                    AND COALESCE(fe.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
                    AND (fe.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > t.created_at))
       ))

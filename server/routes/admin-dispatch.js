@@ -88,6 +88,7 @@ const {
   TWO_TREATMENT_PACKAGE_KEYS,
   FOLLOWUP_CHILD_INACTIVE_STATUSES,
 } = require('../services/typed-followup-obligation');
+const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -6642,6 +6643,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               svc.time_on_site_correction_seq = bumpedSeq;
             }
           }
+          // Freeze the closeout requirements in force at completion — the
+          // LOCKED row's catalog identity, not the handler-entry svc (same
+          // staleness rule as the tier snapshot below). Null = lookup failed:
+          // freeze nothing, readers keep the live-catalog fallback. An
+          // INCOMPLETE visit freezes nothing either (pre-push codex P1) —
+          // its eventual completion writes the real completion-time freeze,
+          // and first-freeze-wins would otherwise keep this stale one
+          // (mirrors the backfill migration's status='completed' scope).
+          const closeoutRequirementsSnapshot = isIncompleteVisit ? null
+            : await resolveCloseoutRequirementsSnapshotForCompletion({
+              trx,
+              serviceId: svc.id,
+              catalogServiceId: (lockedSvcRow || svc).service_id || null,
+              serviceType: (lockedSvcRow || svc).service_type || null,
+            });
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -6754,6 +6770,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // silently drop (or invent) an owed included treatment
             // (Codex r4).
             ...(followupSuggestion ? { typedFollowupVerdict: followupSuggestion } : {}),
+            // Closeout requirements frozen at completion: a later catalog
+            // edit or rename must not flip this visit's apparent status or
+            // mint attention alerts against closed history
+            // (service-closeout-requirements.js frozenCloseoutRequirements).
+            ...(closeoutRequirementsSnapshot ? { closeoutRequirements: closeoutRequirementsSnapshot } : {}),
           };
           const serviceData = {
             protocol: {
@@ -13477,6 +13498,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       followup_source_service_id: svc.id,
     };
     if (cols.service_id && svc.service_id) insertData.service_id = svc.service_id;
+    // Same address as the source visit — carry its property identity so
+    // the follow-up can join a stop (maybeGroupRow refuses null-property
+    // rows, and a follow-up has no estimate for the linkage regroup —
+    // GH codex #3699 r6 P2).
+    if (cols.property_id && svc.property_id) insertData.property_id = svc.property_id;
     if (cols.zone && svc.zone) insertData.zone = svc.zone;
     if (cols.estimated_duration_minutes && svc.estimated_duration_minutes) insertData.estimated_duration_minutes = svc.estimated_duration_minutes;
     if (cols.estimated_price) insertData.estimated_price = 0;
@@ -13506,7 +13532,15 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
           err.code = 'VISIT_OWNER_CHANGED';
           throw err;
         }
-        return trx('scheduled_services').insert(insertData).returning('*');
+        const inserted = await trx('scheduled_services').insert(insertData).returning('*');
+        // Visit groups (visit-group-scope.md §2): stamp at scheduling —
+        // gate-checked + best-effort + self-refusing inside maybeGroupRow
+        // (savepoint on the trx; a grouping failure never poisons the
+        // follow-up booking).
+        if (inserted && inserted[0]) {
+          await require('../services/visit-groups').maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'dispatch' });
+        }
+        return inserted;
       });
     } catch (err) {
       // Partial unique index on followup_source_service_id — a concurrent

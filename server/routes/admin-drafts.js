@@ -56,10 +56,17 @@ function samePhone(a, b) {
   return Boolean(left && right && left.slice(-10) === right.slice(-10));
 }
 
-async function resolveDraftRecipient(draft) {
+// `preloaded` lets a page-sized caller (GET /) hand over the sms_log row
+// and the draft's own customer row it already fetched in bulk, so a 50-row
+// page costs a fixed number of queries instead of two per draft (Codex
+// #3700 r9 P2). Keys present in `preloaded` are authoritative — a null
+// means "looked up, not found".
+async function resolveDraftRecipient(draft, preloaded = {}) {
   const flags = parseFlags(draft.flags);
   if (draft.sms_log_id) {
-    const smsLog = await db('sms_log').where({ id: draft.sms_log_id }).first();
+    const smsLog = 'smsLog' in preloaded
+      ? preloaded.smsLog
+      : await db('sms_log').where({ id: draft.sms_log_id }).first();
     if (smsLog?.from_phone) {
       return {
         toPhone: smsLog.from_phone,
@@ -70,9 +77,9 @@ async function resolveDraftRecipient(draft) {
     }
   }
 
-  const customer = draft.customer_id
-    ? await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first()
-    : null;
+  const customer = !draft.customer_id ? null
+    : 'customer' in preloaded ? preloaded.customer
+      : await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first();
   const metadataPhone = normalizeE164(flags.toPhone || flags.phone || flags.leadPhone);
   if (metadataPhone) {
     const customerMatches = customer?.phone && samePhone(metadataPhone, customer.phone);
@@ -94,6 +101,33 @@ async function resolveDraftRecipient(draft) {
   }
 
   return { toPhone: null, customerId: draft.customer_id || null, identityTrustLevel: 'phone_provided_unverified' };
+}
+
+// The From number the send path will END UP using for a draft with no
+// inbound sms_log anchor, resolved by the CANONICAL derivation
+// (TwilioService.deriveOutboundNumber — the same code sendSMS runs), fed
+// lane-exact inputs: only campaign approvals pass customerLocationId
+// (nearest_location_id); every other anchorless draft sends with
+// customerId alone (Codex #3700 r2-r5 P1s). Display-only: the deep link
+// pins the number so the composer's hardcoded default cannot override
+// routing; the send path itself is untouched.
+async function derivedOfficeNumber(row, recipientCustomerId, preloadedCustomer = null) {
+  try {
+    const TwilioService = require('../services/twilio');
+    // The preloaded row only stands in for the customer the send path
+    // would look up — never for a different customer the sms_log thread
+    // resolved to.
+    const customer = preloadedCustomer && recipientCustomerId && preloadedCustomer.id === recipientCustomerId
+      ? preloadedCustomer
+      : undefined;
+    return await TwilioService.deriveOutboundNumber({
+      customerLocationId: row.campaign_type ? row.nearest_location_id : undefined,
+      customerId: recipientCustomerId || undefined,
+      customer,
+    }) || null;
+  } catch {
+    return null;
+  }
 }
 
 async function releaseDraftClaim(draftId, fields = {}) {
@@ -596,29 +630,83 @@ async function finalizeDraftSend(draft, updates) {
 router.get('/', async (req, res, next) => {
   try {
     const { status = 'pending', campaign_type: campaignType } = req.query;
+    // Cursor pagination over a LIVE set: an offset would shift under
+    // concurrent inserts/approvals and could return overlapping pages
+    // forever (Codex #3700 r2 P1). The cursor is the last row's ID; its
+    // (created_at, id) position is re-read IN SQL via a subquery so the
+    // timestamp round-trips at full PostgreSQL microsecond precision — a
+    // JS Date cursor truncates to milliseconds and can skip rows inside
+    // the truncated window (r3 P1). Ties on created_at break by id in
+    // both the ORDER BY and the tuple comparison. Draft rows are never
+    // deleted (status transitions only), so the anchor persists.
+    let cursorId = null;
+    if (req.query.before) {
+      cursorId = String(req.query.before);
+      // UUID-shape check BEFORE the lookup: binding a malformed value
+      // against the uuid id column raises 22P02 and turns the intended 400
+      // into a 500 (Codex #3700 r3 P2).
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursorId)) {
+        return res.status(400).json({ error: 'Invalid before cursor' });
+      }
+      const anchor = await db('message_drafts').where({ id: cursorId }).first('id');
+      if (!anchor) return res.status(400).json({ error: 'Invalid before cursor' });
+    }
     let query = db('message_drafts')
       .where(status === 'all' ? {} : { status })
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
-        'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage')
+        'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
+        'customers.nearest_location_id', 'customers.city')
       .orderBy('message_drafts.created_at', 'desc')
+      .orderBy('message_drafts.id', 'desc')
       .limit(50);
+    if (cursorId) {
+      query = query.whereRaw(
+        '(message_drafts.created_at, message_drafts.id) < (SELECT md.created_at, md.id FROM message_drafts md WHERE md.id = ?)',
+        [cursorId],
+      );
+    }
     if (campaignType === 'none') {
       query = query.whereNull('message_drafts.campaign_type');
     } else if (campaignType) {
       query = query.where('message_drafts.campaign_type', campaignType);
     }
     const drafts = await query;
+    const last = drafts.length === 50 ? drafts[drafts.length - 1] : null;
+    const nextCursor = last ? String(last.id) : null;
+
+    // The list must promise the SAME recipient/from the approve path will
+    // use (resolveDraftRecipient: sms_log thread first, then flags, then
+    // customer) — the flags-only guess could name one number while Approve
+    // texts another (Codex #3700 P1). Resolution failure falls back to the
+    // legacy guess rather than dropping the row. Resolution is fed from
+    // ONE sms_log batch read plus the customer columns the page query
+    // already joined, so a full page stays at a fixed query count instead
+    // of two lookups per draft (Codex #3700 r9 P2).
+    const smsLogIds = drafts.map((d) => d.sms_log_id).filter(Boolean);
+    const smsLogs = smsLogIds.length ? await db('sms_log').whereIn('id', smsLogIds) : [];
+    const smsLogById = new Map(smsLogs.map((row) => [String(row.id), row]));
+    const resolved = await Promise.all(drafts.map(async (d) => {
+      const customer = d.customer_id ? { id: d.customer_id, phone: d.phone, city: d.city } : null;
+      const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
+      const r = await resolveDraftRecipient(d, preloaded).catch(() => null);
+      const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId, customer);
+      const fromLabel = fromNumber ? (TWILIO_NUMBERS.findByNumber(fromNumber)?.label || null) : null;
+      return { r, fromNumber, fromLabel };
+    }));
 
     res.json({
-      drafts: drafts.map(d => {
+      drafts: drafts.map((d, i) => {
         const flags = parseFlags(d.flags);
+        const { r, fromNumber, fromLabel } = resolved[i];
         return {
           id: d.id, smsLogId: d.sms_log_id,
           customerId: d.customer_id,
           customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
           customerPhone: d.phone || null,
-          recipientPhone: flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+          recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+          resolvedFromNumber: fromNumber || null,
+          resolvedFromLabel: fromLabel,
           tier: d.waveguard_tier, stage: d.pipeline_stage,
           inboundMessage: d.inbound_message,
           draftResponse: d.draft_response,
@@ -635,6 +723,7 @@ router.get('/', async (req, res, next) => {
         };
       }),
       pendingCount: await db('message_drafts').where({ status: 'pending' }).count('* as count').first().then(r => parseInt(r.count)),
+      nextCursor,
     });
   } catch (err) { next(err); }
 });
@@ -945,15 +1034,27 @@ router.put('/:id/reject', async (req, res, next) => {
     // Scoped to open statuses: an action the approval gate already retired
     // (converted/dismissed) keeps its more specific outcome. Non-click
     // intents have no linked action row and the update is a no-op.
+    // Pending-only, same as approve/revise: with a list surface, concurrent
+    // owner sessions are real — an unconditional update-by-id would relabel
+    // an already-SENT row as rejected and report success.
+    let updated = 0;
     await db.transaction(async (trx) => {
-      await trx('message_drafts').where({ id: req.params.id }).update({
-        status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
-      });
+      updated = await trx('message_drafts')
+        .where({ id: req.params.id, status: 'pending' })
+        .update({
+          status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+        });
+      if (!updated) return;
       await trx('click_followup_actions')
         .where({ draft_id: req.params.id })
         .whereIn('status', ['pending', 'drafted'])
         .update({ status: 'dismissed', updated_at: db.fn.now() });
     });
+    if (!updated) {
+      const existing = await db('message_drafts').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Draft not found' });
+      return res.status(409).json({ error: 'Draft is no longer pending' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -996,19 +1097,25 @@ router.get('/:id', async (req, res, next) => {
         'customers.last_name',
         'customers.phone',
         'customers.waveguard_tier',
-        'customers.pipeline_stage'
+        'customers.pipeline_stage',
+        'customers.nearest_location_id'
       )
       .first();
     if (!d) return res.status(404).json({ error: 'Draft not found' });
 
     const flags = parseFlags(d.flags);
+    // Same resolved recipient/from contract as the list (see GET / above).
+    const r = await resolveDraftRecipient(d).catch(() => null);
+    const singleFrom = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId) || null;
     res.json({
       id: d.id,
       smsLogId: d.sms_log_id,
       customerId: d.customer_id,
       customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
       customerPhone: d.phone || null,
-      recipientPhone: flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+      recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+      resolvedFromNumber: singleFrom,
+      resolvedFromLabel: singleFrom ? (TWILIO_NUMBERS.findByNumber(singleFrom)?.label || null) : null,
       tier: d.waveguard_tier,
       stage: d.pipeline_stage,
       inboundMessage: d.inbound_message,

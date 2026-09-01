@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const Stripe = require('stripe');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isCancelledCustomerRow } = require('../middleware/auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
@@ -88,7 +88,15 @@ router.get('/', async (req, res, next) => {
 
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const paymentMethods = await db('payment_methods')
+    // C4: a cancelled session reaches this read only for the Billing tab's
+    // Auto Pay status banner — it never renders saved methods, so the
+    // saved-method details (brand, last four, expiry, bank) that the
+    // /billing/cards exclusion keeps unreadable must not ride out through
+    // this payload either (codex GH r5 P2). Status scalars only; every
+    // method-shaped field is empty/null below.
+    const cancelledRead = isCancelledCustomerRow(req.customer);
+
+    const paymentMethods = cancelledRead ? [] : await db('payment_methods')
       .where({ customer_id: req.customerId })
       .select(
         'id',
@@ -108,7 +116,7 @@ router.get('/', async (req, res, next) => {
     // so with legacy duplicate defaults the portal could show 1234 while
     // collection charged 5678. Same resolver as stripe.js charge() and the
     // expiry warnings; re-read the full row for the funding/brand fields.
-    const resolvedAutopayMethod = await getChargeableAutopayMethod(customer, db);
+    const resolvedAutopayMethod = cancelledRead ? null : await getChargeableAutopayMethod(customer, db);
     // The resolver returns the pointer row NORMALIZED (is_default:true —
     // charge() honors the pointer regardless of the stored flag); the
     // re-read only adds the display fields, it must not overwrite that
@@ -125,7 +133,7 @@ router.get('/', async (req, res, next) => {
     // Row-hierarchy identity for the Payment Methods list: every row Auto
     // Pay is USING (resolver pick + pointer, expired included) — the same
     // set DELETE /cards/:id refuses under the removal guard.
-    const selectedMethodIds = await getAutopaySelectedMethodIds(customer, db);
+    const selectedMethodIds = cancelledRead ? [] : await getAutopaySelectedMethodIds(customer, db);
     // Mirror customerOnAutopay's ACH-health rule (Codex round-12): when
     // customers.ach_status is non-empty and not 'active'
     // (needs_verification / suspended), collection refuses everything but a
@@ -174,7 +182,7 @@ router.get('/', async (req, res, next) => {
     if (customerAutopayEnabled && !autopayPaused) state = 'active';
     else if (customerAutopayEnabled && autopayPaused) state = 'paused';
 
-    const recentEvents = await getRecent(req.customerId, 10);
+    const recentEvents = cancelledRead ? [] : await getRecent(req.customerId, 10);
 
     res.json({
       state,

@@ -1039,6 +1039,9 @@ async function reserveSlot({
       // customer_id-NULL hold, invisible to the merge-undo's winner-scoped
       // probes; graduation onto a customer happens in commitReservation's
       // caller, which locks.
+      // Visit groups: deliberately NOT stamped — a customer_id-less slot
+      // HOLD is not a customer stop; graduation goes through the
+      // estimate converter, which stamps.
       const [row] = await trx('scheduled_services').insert({
         customer_id: null,
         technician_id: techId,

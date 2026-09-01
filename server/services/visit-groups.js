@@ -150,6 +150,9 @@ function canDissolve(activity) {
 function canSplit(activity) {
   if (!activity) return { ok: false, reason: 'missing' };
   if (String(activity.status) !== 'open') return { ok: false, reason: 'visit_not_open' };
+  // A reminder send is in flight (claimed, inside its lease): the office
+  // retries in a moment — see visitActivity.reminderClaimLive.
+  if (activity.reminderClaimLive) return { ok: false, reason: 'reminder_in_flight' };
   // ANY packet — active, done, or failed — freezes membership: a failed
   // packet can be retried against its recorded items (doc rev 5d).
   if (activity.activePacket || activity.anyPacket) return { ok: false, reason: 'packet_in_flight' };
@@ -340,8 +343,19 @@ function windowedMembersConnected(members) {
 async function visitActivity(visitId, trx = db) {
   const visit = await trx('service_visits').where({ id: visitId }).first();
   if (!visit) return null;
-  const [effects, packets, children] = await Promise.all([
+  const [effects, reminderClaim, packets, children] = await Promise.all([
     trx('visit_effects').where({ visit_id: visitId }).whereNot('status', 'pending').first(),
+    // A reminder tier claimed inside its lease: an owner is mid-send, or
+    // delivered and not yet ledgered/closed (GH codex #3699 r9 P2). A
+    // split in that window would detach an armed row the owner's
+    // post-send member close can no longer see. Lease-bounded, so a
+    // finalize failure that leaves the row `claimed` forever cannot
+    // freeze splits past the lease.
+    trx('visit_effects').where({ visit_id: visitId })
+      .whereIn('effect_type', [...REMINDER_EFFECT_TYPES])
+      .where('status', 'claimed')
+      .where('claimed_at', '>', new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS))
+      .first('id'),
     trx('visit_completion_packets').where({ visit_id: visitId }).select('status'),
     trx('scheduled_services').where({ visit_id: visitId }).select('id'),
   ]);
@@ -357,6 +371,7 @@ async function visitActivity(visitId, trx = db) {
   return {
     status: visit.status,
     effectsStarted: Boolean(effects),
+    reminderClaimLive: Boolean(reminderClaim),
     enRouteAt: visit.en_route_at,
     arrivedAt: visit.arrived_at,
     activePacket: packets.some((p) => ACTIVE_PACKET_STATUSES.includes(String(p.status))),
@@ -418,6 +433,12 @@ async function nextStopSeq(trx, baseKey) {
  * catalog flags) or join them onto an eligible open visit for the stop.
  * Caller checks the gate; this only enforces invariants. Returns the visit.
  */
+const baseKeyFor = (r) => stopBaseKey({
+  propertyId: r.property_id,
+  customerId: r.customer_id,
+  scheduledDate: r.scheduled_date,
+});
+
 async function createOrJoinVisit({ rows, createdBy, trx = null }) {
   if (!Array.isArray(rows) || rows.length < 2) throw new Error('createOrJoinVisit needs >= 2 rows');
   const ids = rows.map((r) => (r && r.id) || r).filter(Boolean);
@@ -448,22 +469,49 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // reschedule between peek and lock surfaces as a mismatch.
     const peek = await loadRows(t, { lock: false });
     if (peek.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
-    const baseKey = stopBaseKey({
-      propertyId: peek[0].property_id,
-      customerId: peek[0].customer_id,
-      scheduledDate: peek[0].scheduled_date,
-    });
-    await lockStop(t, baseKey);
+    const stopCustomerId = peek[0].customer_id;
+    // A STABLE mixed-customer selection is an invalid request, not a race
+    // (GH codex r2 P2): refuse it as not-groupable (the route's 409)
+    // instead of letting the post-lock check spin it through the
+    // VISIT_STOP_MOVED retries into a 500.
+    if (peek.some((r) => String(r.customer_id) !== String(stopCustomerId))) {
+      throw new Error('rows not mutually groupable: rows span two customers');
+    }
+    // Autopay exclusion UNDER the customer row lock (pre-push codex P0 —
+    // TOCTOU): the callers' unlocked pre-checks are fast paths only; the
+    // authoritative check runs here, in the same transaction that creates
+    // or joins the visit. Customer lock taken BEFORE the stop advisory
+    // lock, matching the booking paths' customer → stop-advisory order
+    // (booking.js locks the customer first, then stamps). A concurrent
+    // enrollment either committed first (seen and refused here) or waits
+    // on this row lock until the grouping commits. Enrollment AFTER a
+    // group exists is NOT a double-charge path in Phase 1 (every row
+    // still bills once, per row — see customerExcludedByAutopay); it is
+    // the documented Phase-2 gate-flip precondition, owned by that lane.
+    // FOR NO KEY UPDATE, not FOR UPDATE (pre-push codex r9 P1): the callers'
+    // just-inserted scheduled_services row already holds the customer's
+    // FK KEY SHARE lock, and FOR UPDATE conflicts with KEY SHARE — two
+    // concurrent same-customer bookings would each hold KEY SHARE and
+    // deadlock on the upgrade (one grouping silently skipped). NO KEY
+    // UPDATE does not conflict with KEY SHARE, yet still conflicts with the
+    // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
+    // TOCTOU fix needs is intact.
+    await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
+    if (await customerExcludedByAutopay(stopCustomerId, t)) {
+      throw new Error('rows not mutually groupable: autopay_enrolled');
+    }
+    await lockStop(t, baseKeyFor(peek[0]));
+    const baseKey = baseKeyFor(peek[0]);
 
     const fresh = await loadRows(t, { lock: true });
     if (fresh.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
     const [first] = fresh;
-    const lockedKey = stopBaseKey({
-      propertyId: first.property_id,
-      customerId: first.customer_id,
-      scheduledDate: first.scheduled_date,
-    });
-    if (lockedKey !== baseKey) {
+    const lockedKey = baseKeyFor(first);
+    if (lockedKey !== baseKey
+      // The stop key anchors on property when present, so a customer swap
+      // (merge repoint) could survive the key check — the autopay verdict
+      // above was rendered for stopCustomerId and must not carry over.
+      || fresh.some((r) => String(r.customer_id) !== String(stopCustomerId))) {
       const err = new Error('visit stop moved concurrently — retry');
       err.code = 'VISIT_STOP_MOVED';
       throw err;
@@ -722,6 +770,41 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
  * one untouched row it dissolves too, returning both rows to the legacy
  * per-row path.
  */
+/**
+ * A row leaving a visit (split / split-triggered dissolve) carries the
+ * visit's already-decided reminder tiers with it (GH codex r8 P2): the
+ * owner's send closes every member row afterwards, but a split that lands
+ * between the ledger finalize and that close — or after a worker crash —
+ * leaves the detached row armed, and armed-without-a-visit means the
+ * per-row path texts the same tier again. Reads the ledger for the row's
+ * OWN occurrence date (the dedupe key carries it) and closes the row's
+ * flag for every tier the visit already sent or suppressed; a `failed`
+ * (retryable) tier stays armed — over-notify, never silence. Same
+ * transaction as the detach, so there is no window.
+ */
+const REMINDER_TIER_FLAGS = Object.freeze({
+  reminder_72h: ['reminder_72h_sent', 'reminder_72h_sent_at'],
+  reminder_24h: ['reminder_24h_sent', 'reminder_24h_sent_at'],
+});
+async function carryVisitReminderState(t, visit, rows) {
+  for (const row of rows) {
+    const keys = Object.keys(REMINDER_TIER_FLAGS)
+      .map((effectType) => dedupeKeyFor({ id: visit.id, scheduled_date: row.scheduled_date }, effectType));
+    const decided = await t('visit_effects')
+      .where({ visit_id: visit.id })
+      .whereIn('dedupe_key', keys)
+      .whereIn('status', ['sent', 'suppressed'])
+      .select('effect_type');
+    for (const eff of decided) {
+      const [flag, at] = REMINDER_TIER_FLAGS[eff.effect_type] || [];
+      if (!flag) continue;
+      await t('appointment_reminders')
+        .where({ scheduled_service_id: row.id, cancelled: false, [flag]: false })
+        .update({ [flag]: true, [at]: t.fn.now() });
+    }
+  }
+}
+
 async function splitChild({ visitId, scheduledServiceId, createdBy }) {
   return db.transaction(async (t) => {
     const visit = await t('service_visits').where({ id: visitId }).first();
@@ -739,6 +822,7 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
     if (!child) throw new Error('row is not a member of this visit');
 
     await t('scheduled_services').where({ id: child.id }).update({ visit_id: null });
+    await carryVisitReminderState(t, visit, [child]);
 
     const remaining = await t('scheduled_services')
       .where({ visit_id: visitId })
@@ -748,7 +832,9 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
     if (Number(remaining.n) <= 1) {
       const still = await visitActivity(visitId, t);
       if (canDissolve(still).ok) {
+        const lastMembers = await t('scheduled_services').where({ visit_id: visitId }).select('id', 'scheduled_date');
         await t('scheduled_services').where({ visit_id: visitId }).update({ visit_id: null });
+        await carryVisitReminderState(t, visit, lastMembers);
         await t('service_visits').where({ id: visitId })
           .update({ status: 'dissolved', close_reason: 'operator', closed_at: t.fn.now() });
         dissolved = true;
@@ -1017,99 +1103,176 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * property + date, non-terminal, groupable catalog type, unattached or in
  * one open visit) and groups them with `rowId`.
  */
+/**
+ * TRUE when grouping must be refused for this customer because they are on
+ * autopay (or their autopay state cannot be read — fail closed). Shared by
+ * the automatic stamping path and the office group route.
+ *
+ * WHAT THIS PROTECTS (and what it does not): Phase 1 has NO visit-level
+ * billing — service_visits.payment_intent_id / billing_strategy /
+ * billing_hold have no writers, no money code reads visit_id, and a
+ * grouped member completing through any existing path first dissolves
+ * its open visit (dissolveForLegacyCompletion) and then completes and
+ * bills PER ROW, once each — byte-identical to two ungrouped same-day
+ * services today. So a customer who enrolls in autopay AFTER a group
+ * forms is charged exactly as with no group: once per completed row,
+ * never twice. The exclusion protects the Phase-2 contract (one
+ * visit-level PaymentIntent, per-invoice receipt suppression): groups
+ * must not pre-exist for enrolled customers when that lane ships, and
+ * the enrollment-time refuse/dissolve seam belongs to that lane
+ * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
+ */
+async function customerExcludedByAutopay(customerId, database = db) {
+  try {
+    const customer = await database('customers').where({ id: customerId })
+      .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+    if (!customer) return true;
+    // ENROLLMENT excludes, not current chargeability (pre-push codex P0):
+    // customerOnAutopay returns false during an autopay PAUSE, but a
+    // paused customer is still enrolled — a group formed during the pause
+    // would persist into resumed autopay and the per-row charger would
+    // charge each sibling separately. An explicit enrollment flag refuses
+    // outright; the chargeability predicate then catches legacy rows
+    // (autopay_enabled NULL with a live default autopay method).
+    if (customer.autopay_enabled === true) return true;
+    // Explicitly disabled = unenrolled, regardless of any stale pause stamp.
+    if (customer.autopay_enabled === false) return false;
+    // Legacy NULL-flag rows: ENROLLMENT signals only — never the
+    // chargeability predicate (customerOnAutopay), which returns false for
+    // a pause, an expired card, or a pending ACH even though all three
+    // still represent enrollment (GH codex r3+r4 P1s: the flag survives a
+    // card replacement, and the group would persist into resumed
+    // chargeability). Enrolled = a live pause (only enrolled accounts
+    // pause) OR ANY autopay-enabled method on file, chargeable or not.
+    const { isPaused } = require('./autopay-eligibility');
+    if (isPaused(customer)) return true;
+    const method = await database('payment_methods')
+      .where({ customer_id: customerId, autopay_enabled: true })
+      .first('id');
+    return Boolean(method);
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] autopay-exclusion check failed for customer ${customerId} — refusing to group: ${err.message}`);
+    return true;
+  }
+}
+
 async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
   const { gates } = require('../config/feature-gates');
   if (!gates.visitGroups) return null;
   try {
-    const row = await database('scheduled_services as ss')
-      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-      .where('ss.id', rowId)
-      .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
-        'ss.source_action', 'ss.customer_confirmed',
-        'ss.window_start', 'ss.window_end', 'ss.technician_id',
-        'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
-    if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
-    // Property identity is REQUIRED for automatic grouping (codex #3590
-    // r14): a null-property row (legacy / multi-home parent carrying only
-    // a stamped service address) would match any other null-property row
-    // for the customer that day, folding two addresses into one stop.
-    // Such rows group once property linkage stamps them (the linkage
-    // regroup pass) or by explicit office action.
-    if (!row.property_id) return null;
-    // A placed window is REQUIRED for automatic grouping (codex #3590
-    // r15): windowless overlaps anything, and a windowless row is by
-    // policy an unplaced placeholder (booking-wizard demotion clears the
-    // window + tech for the office). Office placement/explicit grouping
-    // is the path for those rows — as subject AND as partner.
-    if (!row.window_start) return null;
-    if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
-    if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
-    const partnersQ = database('scheduled_services as ss')
-      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-      .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
-      .where('ss.customer_id', row.customer_id)
-      .where('ss.scheduled_date', dateOnly(row.scheduled_date))
-      .whereNot('ss.id', row.id)
-      .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
-      .where('svc.groupable', true)
-      .where('svc.group_family', row.group_family)
-      .whereNotNull('ss.window_start')
-      .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
-      .select('ss.id', 'ss.visit_id');
-    if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
-    else partnersQ.whereNull('ss.property_id');
-    partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
-      'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
-      'ss.source_action', 'ss.customer_confirmed',
-      'svc.groupable', 'svc.group_family');
-    // Every same-stop candidate, deterministically ordered — a cap made
-    // grouping depend on heap order once a customer had more rows than
-    // the cap (codex #3590 r12 P2). The set is bounded by one customer's
-    // one-day, one-property, one-family rows.
-    const partners = await partnersQ.orderBy('ss.window_start', 'asc').orderBy('ss.id', 'asc');
-    if (!partners.length) return null;
-    // Mutually compatible subset (codex r1 P1): one incompatible same-day
-    // row must not poison the whole grouping. Treat the new row as a
-    // pseudo-visit and keep only partners that would join it, then keep at
-    // most ONE attached visit's members (createOrJoinVisit refuses rows
-    // spanning two visits).
-    const pseudoVisit = { ...row, status: 'open' };
-    const compatible = partners.filter((p) => canJoin(p, pseudoVisit).ok
-      && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
-    if (!compatible.length) return null;
-    const attachedVisit = compatible.find((p) => p.visit_id);
-    let subset = attachedVisit
-      ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
-      : compatible;
-    // Technician partition (codex r7 P2): when the new row is unassigned
-    // and partners span two technicians, keep ONE tech's partition
-    // (the attached visit's tech when present, else the first assigned
-    // partner's) plus unassigned partners — otherwise createOrJoinVisit
-    // rejects the whole mixed set and nothing groups.
-    if (!row.technician_id) {
-      const partTechs = [...new Set(subset.map((p) => p.technician_id).filter(Boolean).map(String))];
-      if (partTechs.length > 1) {
-        const keep = (attachedVisit && attachedVisit.technician_id && String(attachedVisit.technician_id))
-          || partTechs[0];
-        subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
-      }
-    }
-    const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
     if (database && database.isTransaction) {
-      // Inside a caller transaction (converter/seeder) the work must run
-      // on that trx (its uncommitted rows are invisible elsewhere), but a
-      // grouping failure must not abort the caller's transaction (25P02
-      // poisons every later statement) — so run inside a SAVEPOINT
-      // (knex nested transaction) and let the catch below swallow the
-      // rolled-back savepoint (codex #3590 r4).
-      return await database.transaction((sp) => createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: sp }));
+      // Inside a caller transaction (booking/converter/seeder) the work
+      // must run on that trx (its uncommitted rows are invisible
+      // elsewhere), but a grouping failure must not abort the caller's
+      // transaction (25P02 poisons every later statement) — so the WHOLE
+      // attempt, reads included, runs inside a SAVEPOINT (knex nested
+      // transaction) and the catch below swallows the rolled-back
+      // savepoint (codex #3590 r4; widened from createOrJoinVisit alone
+      // to the pre-reads + autopay check by the r5 pre-push audit: a
+      // failed SELECT there aborted the caller just the same).
+      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy));
     }
-    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
+    return await groupRowOn(database, rowId, createdBy);
   } catch (err) {
     const logger = require('./logger');
     logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
     return null;
   }
+}
+
+// maybeGroupRow's body on one connection: `database` is either the plain
+// pool (createOrJoinVisit opens its own transaction) or the caller's
+// savepoint (everything, createOrJoinVisit included, runs on it).
+async function groupRowOn(database, rowId, createdBy) {
+  const row = await database('scheduled_services as ss')
+    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+    .where('ss.id', rowId)
+    .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+      'ss.source_action', 'ss.customer_confirmed',
+      'ss.window_start', 'ss.window_end', 'ss.technician_id',
+      'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
+  if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
+  // Property identity is REQUIRED for automatic grouping (codex #3590
+  // r14): a null-property row (legacy / multi-home parent carrying only
+  // a stamped service address) would match any other null-property row
+  // for the customer that day, folding two addresses into one stop.
+  // Such rows group once property linkage stamps them (the linkage
+  // regroup pass) or by explicit office action.
+  if (!row.property_id) return null;
+  // A placed window is REQUIRED for automatic grouping (codex #3590
+  // r15): windowless overlaps anything, and a windowless row is by
+  // policy an unplaced placeholder (booking-wizard demotion clears the
+  // window + tech for the office). Office placement/explicit grouping
+  // is the path for those rows — as subject AND as partner.
+  if (!row.window_start) return null;
+  if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
+  if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
+  // Autopay exclusion (spec rev-2 item: "autopay customers are not
+  // grouped until grouped autopay ships"; owner ruling 2026-08-31) —
+  // see customerExcludedByAutopay for what it protects (the Phase-2
+  // visit-level PI contract; per-row billing today is once per row,
+  // group or not). FAST PATH ONLY — the authoritative check runs inside
+  // createOrJoinVisit under the customer row lock (pre-push codex P0
+  // TOCTOU); this unlocked read just avoids partner queries for a
+  // customer that will be refused anyway. Unit moves of existing visits
+  // never pass through createOrJoinVisit, so later enrollment cannot
+  // break them.
+  if (await customerExcludedByAutopay(row.customer_id, database)) return null;
+  const partnersQ = database('scheduled_services as ss')
+    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+    .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+    .where('ss.customer_id', row.customer_id)
+    .where('ss.scheduled_date', dateOnly(row.scheduled_date))
+    .whereNot('ss.id', row.id)
+    .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
+    .where('svc.groupable', true)
+    .where('svc.group_family', row.group_family)
+    .whereNotNull('ss.window_start')
+    .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
+    .select('ss.id', 'ss.visit_id');
+  if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
+  else partnersQ.whereNull('ss.property_id');
+  partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
+    'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
+    'ss.source_action', 'ss.customer_confirmed',
+    'svc.groupable', 'svc.group_family');
+  // Every same-stop candidate, deterministically ordered — a cap made
+  // grouping depend on heap order once a customer had more rows than
+  // the cap (codex #3590 r12 P2). The set is bounded by one customer's
+  // one-day, one-property, one-family rows.
+  const partners = await partnersQ.orderBy('ss.window_start', 'asc').orderBy('ss.id', 'asc');
+  if (!partners.length) return null;
+  // Mutually compatible subset (codex r1 P1): one incompatible same-day
+  // row must not poison the whole grouping. Treat the new row as a
+  // pseudo-visit and keep only partners that would join it, then keep at
+  // most ONE attached visit's members (createOrJoinVisit refuses rows
+  // spanning two visits).
+  const pseudoVisit = { ...row, status: 'open' };
+  const compatible = partners.filter((p) => canJoin(p, pseudoVisit).ok
+    && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
+  if (!compatible.length) return null;
+  const attachedVisit = compatible.find((p) => p.visit_id);
+  let subset = attachedVisit
+    ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
+    : compatible;
+  // Technician partition (codex r7 P2): when the new row is unassigned
+  // and partners span two technicians, keep ONE tech's partition
+  // (the attached visit's tech when present, else the first assigned
+  // partner's) plus unassigned partners — otherwise createOrJoinVisit
+  // rejects the whole mixed set and nothing groups.
+  if (!row.technician_id) {
+    const partTechs = [...new Set(subset.map((p) => p.technician_id).filter(Boolean).map(String))];
+    if (partTechs.length > 1) {
+      const keep = (attachedVisit && attachedVisit.technician_id && String(attachedVisit.technician_id))
+        || partTechs[0];
+      subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
+    }
+  }
+  const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
+  if (database && database.isTransaction) {
+    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database });
+  }
+  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
 }
 
 // ---- Live transitions: one tap moves the whole stop (doc §3) ---------------
@@ -1173,9 +1336,44 @@ function siblingEligibleFor(toStatus, siblingStatus) {
  * finalize; a reclaim issues a new token, so a stalled former owner can
  * neither send nor finalize over it. null when the row has no visit.
  */
+/**
+ * kind → visit_effects.effect_type. Tracker kinds keep their historical
+ * mapping (anything unrecognized falls back to tracker_arrived, byte-
+ * identical to the old ternary); reminder kinds are the 72h/24h
+ * appointment-reminder rails (spec §4: once per visit via
+ * visit_effects(reminder_72h/24h)).
+ */
+const EFFECT_TYPE_BY_KIND = Object.freeze({
+  en_route: 'tracker_en_route',
+  arrived: 'tracker_arrived',
+  on_site: 'tracker_arrived',
+  reminder_72h: 'reminder_72h',
+  reminder_24h: 'reminder_24h',
+});
+const REMINDER_EFFECT_TYPES = new Set(['reminder_72h', 'reminder_24h']);
+function effectTypeForKind(kind) {
+  return EFFECT_TYPE_BY_KIND[kind] || 'tracker_arrived';
+}
+/**
+ * Dedupe key for a visit-level effect. Tracker kinds keep the historical
+ * `${visitId}:${effectType}` shape (existing prod rows must keep matching).
+ * Reminder kinds carry the visit's DATE: a unit move to a new date yields a
+ * new key, so the moved visit gets exactly one fresh reminder per tier —
+ * without touching the move path's tracker-only effect deletions. Chosen
+ * over a window-bearing key deliberately: membership churn recomputes the
+ * visit window, and a window key would re-text customers on ordinary
+ * joins/leaves. Consequence (documented divergence): a same-date retime
+ * does not re-send an already-sent tier.
+ */
+function dedupeKeyFor(visit, effectType) {
+  return REMINDER_EFFECT_TYPES.has(effectType)
+    ? `${visit.id}:${effectType}:${dateOnly(visit.scheduled_date)}`
+    : `${visit.id}:${effectType}`;
+}
+
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const effectType = effectTypeForKind(kind);
   const logger = require('./logger');
   const token = require('crypto').randomBytes(16).toString('hex');
   try {
@@ -1206,11 +1404,15 @@ async function claimVisitNotification(row, kind) {
       // caller reports the stop incomplete and the next signal retries.
       // sent / suppressed ⇒ 'taken' (this row is covered).
       const leaseCutoff = new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS);
+      // Key computed from the POST-LOCK parent (reminder keys carry the
+      // visit's date — a move that committed while we waited must claim
+      // under the date it actually holds).
+      const dedupeKey = dedupeKeyFor(visit, effectType);
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
           effect_type: effectType,
-          dedupe_key: `${visit.id}:${effectType}`,
+          dedupe_key: dedupeKey,
           status: 'claimed',
           attempts: 0,
           claimed_at: new Date(),
@@ -1225,11 +1427,11 @@ async function claimVisitNotification(row, kind) {
             });
         })
         .returning('id');
-      if (rows && rows.length) return { state: 'owner', token };
+      if (rows && rows.length) return { state: 'owner', token, dedupeKey };
       const existing = await t('visit_effects')
-        .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: `${visit.id}:${effectType}` })
+        .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: dedupeKey })
         .first('status');
-      return { state: existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken', token: null };
+      return { state: existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken', token: null, dedupeKey };
     });
   } catch (err) {
     logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
@@ -1275,16 +1477,19 @@ async function otherLiveMembers(t, visitId, rowId) {
  * step: a failure here leaves the row `claimed`, so the caller reports the
  * stop incomplete instead of advertising a status that was never written.
  */
-async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null) {
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null } = {}) {
+  const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
   const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  // Reminder kinds MUST pass the claim's key (it carries the visit date);
+  // tracker call sites keep the historical default untouched.
+  const key = dedupeKey || `${visitId}:${effectType}`;
   try {
-    await db('visit_effects')
+    return await db('visit_effects')
       .insert({
         visit_id: visitId,
         effect_type: effectType,
-        dedupe_key: `${visitId}:${effectType}`,
+        dedupe_key: key,
         status,
         attempts: 1,
         sent_at: status === 'sent' ? at : null,
@@ -1299,8 +1504,20 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
       .where('visit_effects.status', '<>', 'sent')
       // Only the current claim owner finalizes (codex r10): a stale owner's
       // late finalize never clobbers a reclaimer's row.
-      .modify((q) => { if (token) q.where('visit_effects.claim_token', '=', token); });
-    return { ok: true, effectType, status };
+      .modify((q) => { if (token) q.where('visit_effects.claim_token', '=', token); })
+      .returning('id')
+      .then(async (rows) => {
+        if (rows && rows.length) return { ok: true, effectType, status };
+        // Zero rows finalized (pre-push codex P1): either the row is
+        // already durably `sent` (finalize is then a no-op success), or
+        // ownership changed under us — report ok:false so the caller runs
+        // its durable fallback instead of assuming the ledger advanced.
+        const current = await db('visit_effects')
+          .where({ visit_id: visitId, effect_type: effectType, dedupe_key: key })
+          .first('status');
+        if (current && String(current.status) === 'sent') return { ok: true, effectType, status: 'sent', alreadyFinal: true };
+        return { ok: false, effectType, status, reason: 'claim not finalized (ownership changed)' };
+      });
   } catch (err) {
     require('./logger').warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects finalize failed: ${err.message}`);
     return { ok: false, effectType, status, reason: `effect finalize failed: ${err.message}` };
@@ -1323,12 +1540,12 @@ const NOTIFICATION_CLAIM_LEASE_MS = 10 * 60 * 1000;
  * valid through the send even if the preceding work ate the lease; a
  * reclaim (new token) or a terminal row makes this fail — do not send.
  */
-async function renewNotificationLease(visitId, kind, token) {
+async function renewNotificationLease(visitId, kind, token, { dedupeKey = null } = {}) {
   if (!visitId || !token) return false;
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const effectType = effectTypeForKind(kind);
   try {
     const n = await db('visit_effects')
-      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}`, status: 'claimed', claim_token: token })
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: dedupeKey || `${visitId}:${effectType}`, status: 'claimed', claim_token: token })
       .update({ claimed_at: new Date() });
     return Number(n) > 0;
   } catch (err) {
@@ -1342,12 +1559,12 @@ async function renewNotificationLease(visitId, kind, token) {
  * before slow pre-send work; the send itself is guarded by
  * renewNotificationLease.
  */
-async function notificationLeaseLive(visitId, kind, token) {
+async function notificationLeaseLive(visitId, kind, token, { dedupeKey = null } = {}) {
   if (!visitId || !token) return false;
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const effectType = effectTypeForKind(kind);
   try {
     const row = await db('visit_effects')
-      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}` })
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: dedupeKey || `${visitId}:${effectType}` })
       .first('status', 'claimed_at', 'claim_token');
     // Ours, still claimed, inside the lease — a reclaim replaced the token.
     return Boolean(row && String(row.status) === 'claimed' && row.claimed_at
@@ -1552,7 +1769,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
     // terminal effect — or no visit effect at all (legacy per-row send) —
     // covers the siblings.
     try {
-      const effectType0 = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+      const effectType0 = effectTypeForKind(kind);
       const eff = await db('visit_effects')
         .where({ visit_id: fan.visitId, effect_type: effectType0, dedupe_key: `${fan.visitId}:${effectType0}` })
         .first('status');
@@ -2844,12 +3061,17 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  // Pure key builder, exported for the reminder cron's visit-scoped email
+  // idempotency key (the undelivered-SMS recovery rebuilds it from the
+  // visit row — GH codex #3699 r7 P1).
+  dedupeKeyFor,
   windowedMembersConnected,
   liveStopStartHHMM,
   incompleteMoveMessage,
   appointmentSendHeld,
   createOrJoinVisit,
   maybeGroupRow,
+  customerExcludedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,
@@ -2883,5 +3105,7 @@ module.exports = {
     canSplit,
     isRowVisitBlocked,
     toMinutes,
+    effectTypeForKind,
+    dedupeKeyFor,
   },
 };

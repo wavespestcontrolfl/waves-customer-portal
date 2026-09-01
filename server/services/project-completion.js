@@ -8,6 +8,7 @@ const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-c
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
+const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const {
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
@@ -751,6 +752,7 @@ async function completeProjectBackedService({
       // create a record with the default false identity and no frozen
       // membership provenance (codex r11 P1). Customer read inside this
       // transaction, column-guarded; failure = legacy insert shape.
+      let lockedVisit = null;
       try {
         const customerCols = await trx('customers').columnInfo();
         const snapCust = customerCols.waveguard_tier
@@ -765,10 +767,10 @@ async function completeProjectBackedService({
         // FOR UPDATE, and an update-details reclassify racing this insert
         // would freeze a stale callback identity (codex GH-r4 P2; same rule
         // as the /complete and recap paths).
-        const lockedVisit = await trx('scheduled_services')
+        lockedVisit = await trx('scheduled_services')
           .where({ id: scheduledService.id })
           .forUpdate()
-          .first('id', 'is_callback')
+          .first('id', 'is_callback', 'service_id', 'service_type')
           .catch(() => null);
         Object.assign(insert, completionTierSnapshotFields({
           serviceRecordCols,
@@ -779,8 +781,40 @@ async function completeProjectBackedService({
           isCallback: (lockedVisit || scheduledService).is_callback === true,
         }));
       } catch { /* legacy insert shape — never block a project completion */ }
+      // Freeze the closeout requirements in force at completion (LOCKED
+      // identity, same staleness rule as the tier snapshot). SAVEPOINT-
+      // wrapped inside the helper; null = lookup failed, freeze nothing.
+      const closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+        trx,
+        serviceId: scheduledService.id,
+        catalogServiceId: (lockedVisit || scheduledService).service_id || null,
+        serviceType: (lockedVisit || scheduledService).service_type || null,
+      });
+      if (closeoutSnap && serviceRecordCols.structured_notes) {
+        insert.structured_notes = serializeJsonb({
+          ...parseJsonObject(insert.structured_notes),
+          closeoutRequirements: closeoutSnap,
+        });
+      }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
     } else {
+      // Visit lock FIRST (repo lock order: scheduled_services →
+      // service_records — /complete and recap do the same, and inverting
+      // it can deadlock a concurrent completion), then a FRESH re-read of
+      // the record (GH codex r2 P1): a /complete that committed while we
+      // waited on this lock wrote its own structured_notes freeze, and an
+      // update built from the pre-lock row would serialize stale notes
+      // back over it.
+      const lockedVisit = await trx('scheduled_services')
+        .where({ id: scheduledService.id })
+        .forUpdate()
+        .first('id', 'service_id', 'service_type')
+        .catch(() => null);
+      const freshRecord = await trx('service_records')
+        .where({ id: serviceRecord.id })
+        .first()
+        .catch(() => null);
+      if (freshRecord) serviceRecord = freshRecord;
       const update = buildServiceRecordProjectCompletionUpdate({
         serviceRecord,
         project: { ...project, report_token: token },
@@ -791,11 +825,48 @@ async function completeProjectBackedService({
         reportPath,
         nowValue: trx.fn.now(),
       });
+      let closeoutSnap = null;
+      if (serviceRecordCols.structured_notes
+        && !parseJsonObject(serviceRecord.structured_notes).closeoutRequirements) {
+        // Identity (GH codex r2 P2): a retry on a record that already
+        // completed freezes the RECORD's own historical identity —
+        // update-details may have repointed the scheduled row after the
+        // original completion. A first completion uses the LOCKED row.
+        const identity = (String(serviceRecord.status || '') === 'completed'
+          && (serviceRecord.service_id || serviceRecord.service_type))
+          ? serviceRecord
+          : (lockedVisit || scheduledService);
+        closeoutSnap = await resolveCloseoutRequirementsSnapshotForCompletion({
+          trx,
+          serviceId: scheduledService.id,
+          catalogServiceId: identity.service_id || null,
+          serviceType: identity.service_type || null,
+        });
+      }
       if (Object.keys(update).length) {
         [serviceRecord] = await trx('service_records')
           .where({ id: serviceRecord.id })
           .update(update)
           .returning('*');
+      }
+      // Merge-if-absent requirement freeze: a pre-freeze record completed
+      // again through this path gains a snapshot (frozenAt = now, honest
+      // about its own stamp). ATOMIC guarded jsonb merge on the CURRENT
+      // row value — never a serialization of a pre-lock read — so a
+      // concurrent /complete freeze wins and is never overwritten
+      // (first-freeze-wins; pre-push codex P1).
+      if (closeoutSnap) {
+        const [refreshed] = await trx('service_records')
+          .where({ id: serviceRecord.id })
+          .whereRaw(`(structured_notes -> 'closeoutRequirements') IS NULL`)
+          .update({
+            structured_notes: trx.raw(
+              `COALESCE(structured_notes, '{}'::jsonb) || jsonb_build_object('closeoutRequirements', ?::jsonb)`,
+              [JSON.stringify(closeoutSnap)],
+            ),
+          })
+          .returning('*');
+        if (refreshed) serviceRecord = refreshed;
       }
     }
 

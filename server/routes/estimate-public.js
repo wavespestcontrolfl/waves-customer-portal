@@ -1962,7 +1962,7 @@ const SERVICE_COPY = {
     aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
     askChips: [
       'How long does each visit last?',
-      'Pet & kid safe?',
+      'What precautions should I follow for pets and children?',
       'When does the season start?',
       'What about my pool area?',
     ],
@@ -2026,12 +2026,7 @@ const SERVICE_COPY = {
     aiEyebrow: 'Waves AI',
     aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
     aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
-    askChips: [
-      'What product is used?',
-      'Do I get documentation?',
-      'What warranty is selected?',
-      'When should this be done?',
-    ],
+    askChips: [],
     priceWording: {
       dayLine: "That's about {amount}/day for this quote.",
     },
@@ -2043,7 +2038,7 @@ const SERVICE_COPY = {
     aiBody: 'We priced the Bora-Care borate wood treatment from the measured attic and surface areas and the product application rate.',
     askChips: [
       'What does Bora-Care treat?',
-      'Is Bora-Care safe for pets & kids?',
+      'What precautions should I follow with Bora-Care around pets and children?',
       'What product is used for Bora-Care?',
       'When should this be done?',
     ],
@@ -2066,6 +2061,30 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for lawn care.",
     },
   },
+  wdo_inspection: {
+    headline: "Hey {first}, here's your WDO inspection quote.",
+    aiEyebrow: 'Your inspection',
+    aiTitle: 'Your WDO inspection was prepared for this property',
+    aiBody: 'This quote covers the wood-destroying organism inspection and required Florida reporting for the property shown above.',
+    askChips: [],
+    priceWording: {},
+  },
+  termite_foam: {
+    headline: "Hey {first}, here's your termite foam treatment quote.",
+    aiEyebrow: 'Your treatment plan',
+    aiTitle: 'This quote was prepared for the targeted termite treatment area',
+    aiBody: 'This is a localized foam treatment for the identified termite treatment area, not a recurring pest-control plan.',
+    askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
+    priceWording: {},
+  },
+  trap_only: {
+    headline: "Hey {first}, here's your trap-only monitoring plan.",
+    aiEyebrow: 'Your monitoring plan',
+    aiTitle: 'This trap-only plan was prepared for your property',
+    aiBody: 'The plan separates the initial setup and inspection from the ongoing trap-monitoring service and its scheduled cadence.',
+    askChips: ['What is included in setup?', 'How often are traps checked?', 'What happens if I need an extra callback?', 'How is the monitoring plan billed?'],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',
@@ -2075,7 +2094,7 @@ const SERVICE_COPY = {
       'What is included in this plan?',
       'How do you handle ants?',
       'How does your lawn assessment tech work?',
-      'Are pets and kids safe?',
+      'What precautions should I follow for pets and children?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
@@ -2219,10 +2238,10 @@ const GENERIC_PEST_SERVICE_CHIPS = ['How do you handle ants?', 'Can you treat in
 
 // Safety quick-question shown for any chemical service. Shared so the React
 // data contract surfaces it for roach cleanouts exactly like buildEstimateAskPrompts.
-const SAFETY_ASK_CHIP = 'Are pets and kids safe?';
+const SAFETY_ASK_CHIP = 'What precautions should I follow for pets and children?';
 // Bora-Care-only quotes use a Bora-Care-worded safety chip so it routes to the
 // borate-specific answer instead of the generic label-direction safety copy.
-const BORA_CARE_SAFETY_ASK_CHIP = 'Is Bora-Care safe for pets & kids?';
+const BORA_CARE_SAFETY_ASK_CHIP = 'What precautions should I follow with Bora-Care around pets and children?';
 // Bora-Care service chip — shared between the SSR prompt builder and the React
 // pricing contract so a Bora-Care add-on surfaces it on both paths.
 const BORA_CARE_ASK_CHIP = 'What does Bora-Care treat?';
@@ -3121,7 +3140,7 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || /\bpre\s+slab\b/.test(words)) return 'pre_slab_termiticide';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || raw.includes('slab_pretreat') || /\bpre\s+slab\b|\bslab\s+pre\s?treat\b/.test(words)) return 'pre_slab_termiticide';
   if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -3174,6 +3193,9 @@ function recurringServiceDisplayName(key) {
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'commercial_lawn': return 'Commercial Turf Treatment Program';
     case 'commercial_tree_shrub': return 'Commercial Tree & Shrub';
     case 'commercial_pest': return 'Commercial Pest Control';
@@ -3200,7 +3222,7 @@ function isPreSlabOneTimeItem(item = {}) {
     .join(' ')
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
-  return raw.includes('pre slab')
+  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
     && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
 }
 
@@ -3248,6 +3270,19 @@ function boraCareCustomerCopy() {
   return {
     note: 'Bora-Care is a borate wood treatment applied to the measured attic and surface areas. It treats bare wood for termites, wood-boring beetles, and wood-decay fungi.',
   };
+}
+
+function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|slab pre ?treat/i.test(
+    [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
+  );
+  return recurringRows.some(isRegulatedRow)
+    || oneTimeRows.some((row) => (
+      ['wdo_inspection', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(row))
+      || isRegulatedRow(row)
+    ));
 }
 
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
@@ -5625,7 +5660,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
-  const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
+  const intelligence = isRegulatedCertificateSurface
+    ? null
+    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -5833,7 +5871,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     pestRecurring,
     hasPestOneTime,
   );
-  const estimateAskEnabled = isEstimateAskAnswerable({
+  const estimateAskEnabled = !isRegulatedCertificateSurface && isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
   });
@@ -9113,6 +9151,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
+    // Restart accepts take the STORED offer verbatim (pre-push P0 after GH
+    // r21): the mint prices deterministic defaults and the accept-time
+    // revalidation compares attempt identity + families, not price mix —
+    // honoring body option selections here would let a crafted PUT accept
+    // a one-time mode the mint never offered. Same 409 code as the
+    // mutation-route guard so the portal messages it identically.
+    // selectedFrequency and serviceCadences are validated after bundle
+    // resolution instead (GH r22 P1 + its pre-push follow-on): the
+    // estimate page ALWAYS serializes both — defaults included — so bare
+    // nonempty checks bricked every normal restart accept.
+    if (String(estimate.source || '') === 'plan_restart' && requestedOneTime) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Billing choices are only meaningful for recurring accepts: the
     // converter creates the matching invoice after the slot is confirmed.
     // Reject up front rather than fulfill the request half-way.
@@ -9589,6 +9643,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
     }
+    // Frozen-restart cadence rule (GH r22 P1, relaxing the r21 guard): the
+    // estimate page ALWAYS serializes selectedFrequency — it falls back to
+    // the first offered frequency — so the submitted key is allowed only
+    // when it IS the stored offer's deterministic default; any other key
+    // would accept a cadence/price the mint never offered.
+    if (String(estimate.source || '') === 'plan_restart' && selectedFrequencyKey
+        && selectedFrequencyKey !== String(defaultFrequencyFromList(pricingFrequencies)?.key || '')) {
+      return res.status(409).json({
+        error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+        code: 'restart_quote_frozen',
+      });
+    }
     // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
     // entries carry their own annualPrepayEligible (finalizePricingBundle);
     // that flag decides for the SELECTED tier — the stored-mix rule remains
@@ -9651,6 +9717,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // selected one must not carry prepay past this point.
       if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
+      // Frozen-restart combo rule (pre-push P1 after GH r22): the page
+      // always sends the cadence map for bundled offers — defaults
+      // included — so the map itself can't be rejected. The matched combo
+      // must BE the deterministic default: every non-pest axis key must
+      // equal its section's own default (the same derivation the page's
+      // defaultSelectedForServices uses for the initial selection; the
+      // pest axis rides selectedFrequencyKey, bound to the primary
+      // default above), and — belt on top of identity — the combo's
+      // server-stamped totals must equal the minted row's stored totals.
+      // Totals alone were not enough: equal-priced combos can differ in
+      // composition, and conversion schedules the combo.
+      if (String(estimate.source || '') === 'plan_restart') {
+        const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+        const defaultKeyFor = (axis) => {
+          const section = sections.find((s) => s && s.key === axis);
+          const freqs = Array.isArray(section?.frequencies) ? section.frequencies : [];
+          return String(section?.defaultFrequencyKey || freqs[0]?.key || '');
+        };
+        const comboSelection = selectedCombo.selection || {};
+        const nonDefaultAxis = Object.entries(comboSelection)
+          .some(([axis, key]) => axis !== 'pest_control' && String(key) !== defaultKeyFor(axis));
+        const centsOf = (v) => Math.round(Number(v || 0) * 100);
+        if (nonDefaultAxis
+          || centsOf(selectedCombo.monthly) !== centsOf(estimate.monthly_total)
+          || centsOf(selectedCombo.annual) !== centsOf(estimate.annual_total)) {
+          return res.status(409).json({
+            error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+            code: 'restart_quote_frozen',
+          });
+        }
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the
@@ -10394,6 +10491,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.status = 409;
           throw err;
         }
+      }
+      // Plan-restart accept revalidation (C4 codex GH r4 P1): the restart
+      // mint excludes families with residual live rows, but the published
+      // estimate stays acceptable until expiry — staff restoring a family
+      // or reactivating the account after the mint would let this token
+      // accept a quote containing a now-live recurring rate. Re-run the
+      // churn-stamp + residual-ownership checks under the estimate row lock
+      // taken just above; drifted or unreadable state refuses the accept
+      // (fail closed, 409 with a message the portal renders).
+      if (estimate.source === 'plan_restart') {
+        const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
+        await assertRestartAcceptEligible(trx, estimate);
       }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
@@ -13613,6 +13722,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -13990,6 +14100,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     const term = req.body?.term;
     if (typeof term !== 'string' || !term) {
       return res.status(400).json({ error: 'term is required' });
@@ -14561,6 +14672,7 @@ router.put('/:token/service-opt-out', serviceOptOutLimiter, async (req, res, nex
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Belt-and-braces ahead of the CAS: an accepted estimate's price is frozen
     // and price_locked_at is never cleared.
     if (estimate.price_locked_at) {
@@ -14984,6 +15096,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
+    if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -17482,6 +17595,22 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
     && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
 }
 
+// Restart quotes are FROZEN offers (PR #3671, codex GH r21 P1): the mint
+// prices the cancelled composition at today's list and acceptance
+// revalidates that exact stored offer — the public reprice/mix routes
+// (the tier switch's flat tiered discounts included) would let the
+// customer rewrite the price before accepting it. One honorable price:
+// mutations 409 with a code the portal can message on; the customer
+// re-taps "Restart my plan" for a fresh mint instead.
+function refuseFrozenRestartMutation(estimate, res) {
+  if (String(estimate?.source || '') !== 'plan_restart') return false;
+  res.status(409).json({
+    error: 'This restart quote is fixed as offered. Reopen "Restart my plan" for a current quote.',
+    code: 'restart_quote_frozen',
+  });
+  return true;
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   // A pending or full linkage invalidation kills acceptance the moment the
@@ -17548,6 +17677,12 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
+  // ruling requires every restart price to be a CURRENT recompute — the
+  // customer's path back is the Restart button, which re-prices; an
+  // auto-extension would revive the expired token's frozen dollars with no
+  // recompute in the loop.
+  if (String(estimate.source || '') === 'plan_restart') return false;
   if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
@@ -18419,6 +18554,9 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'bora_care': return 'Bora-Care Wood Treatment Service';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
+    case 'wdo_inspection': return 'WDO Inspection';
+    case 'termite_foam': return 'Termite Foam Treatment';
+    case 'trap_only': return 'Trap-Only Monitoring';
     case 'bundle': return 'Recurring services';
     default: return fallback || recurringServiceDisplayName(category) || 'Service';
   }
@@ -18450,6 +18588,16 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
+  // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:
+  // "not for real-estate transactions — use WDO for those") and stays OFF the
+  // regulated certificate surface; only the WDO report itself maps here.
+  if (service === 'wdo' || service === 'wdo_inspection') return 'wdo_inspection';
+  // Canonical catalog key for the slab pre-treat (completion-lane-registry routes
+  // it to pre_treatment_termite_certificate); the name-based matcher below
+  // covers its "Slab Pre-Treat Termite Service" label.
+  if (service === 'termite_slab_pretreat' || service.includes('slab_pretreat')) return 'pre_slab_termiticide';
+  if (service === 'termite_foam' || service === 'foam_drill') return 'termite_foam';
+  if (service.startsWith('trap_only_')) return 'trap_only';
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || oneTimeItemLooksPestSpecialty(item) || isPestServiceName(name)) return 'pest_control';
   // Bora-Care carries the canonical service key `bora_care`; classify it before
   // the generic termite-install heuristic so an install-worded label
@@ -21950,9 +22098,17 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // sections, so its chip is missing from the section-derived list. Prepend it (so
   // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
   // Waves prompt builder now reads.
-  const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
-    ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
-    : askChipsBase;
+  // Regulated check sees the RAW normalized rows too: the contract's aligned
+  // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
+  // not surface on an FDACS certificate surface (pre-push codex P1).
+  const askChips = hasRegulatedCertificateServiceMix(services, [
+    ...oneTimeBreakdownItems,
+    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+  ])
+    ? []
+    : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
+      ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
+      : askChipsBase;
   // (Breakdown labels were normalized up top, before sections were built —
   // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
@@ -24393,10 +24549,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
+    // Category + regulated-surface decisions see the RAW normalized rows
+    // unioned with the bundle items (same union as the glass scope check
+    // below): alignOneTimeChoiceBreakdown (show_one_time_option) replaces raw
+    // rows with the synthetic choice + preserved pest/Bora add-ons, which
+    // would drop a WDO row and let the AI narrative + Ask bar render on an
+    // FDACS certificate surface (pre-push codex P1).
+    const oneTimeItemsForCategory = [
+      ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+    ];
     const serviceCategory = deriveServiceCategory(
       estimateDataForIntelligence,
       recurringServicesForIntelligence,
-      pricingBundle?.oneTimeBreakdown?.items || []
+      oneTimeItemsForCategory,
+    );
+    const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(
+      recurringServicesForIntelligence,
+      oneTimeItemsForCategory,
     );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
@@ -24416,29 +24586,33 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
       commercialNoSlotAccept,
     });
-    const intelligence = buildWaveGuardIntelligencePayload(
-      {
-        ...estimate,
-        satelliteUrl: estimate.satellite_url || null,
-        tier: estimate.waveguard_tier || null,
-      },
-      estimateDataForIntelligence,
-      { pricingBundle, recurringServices: recurringServicesForIntelligence },
-    );
-    try {
-      const assistantContext = buildEstimateAssistantContext({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        selectedFrequency: '',
-        serviceMode: defaultServiceMode,
-      });
-      intelligence.supportSources = loadPublicEstimateSupportSources({
-        question: 'What is included in this WaveGuard estimate?',
-        context: assistantContext,
-      });
-    } catch (err) {
-      logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+    const intelligence = isRegulatedCertificateSurface
+      ? null
+      : buildWaveGuardIntelligencePayload(
+          {
+            ...estimate,
+            satelliteUrl: estimate.satellite_url || null,
+            tier: estimate.waveguard_tier || null,
+          },
+          estimateDataForIntelligence,
+          { pricingBundle, recurringServices: recurringServicesForIntelligence },
+        );
+    if (intelligence) {
+      try {
+        const assistantContext = buildEstimateAssistantContext({
+          estimate,
+          estData: estimateDataForIntelligence,
+          pricingBundle,
+          selectedFrequency: '',
+          serviceMode: defaultServiceMode,
+        });
+        intelligence.supportSources = loadPublicEstimateSupportSources({
+          question: 'What is included in this WaveGuard estimate?',
+          context: assistantContext,
+        });
+      } catch (err) {
+        logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+      }
     }
 
     const terminalState = (() => {
@@ -24909,11 +25083,26 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
           : (estimate.satellite_url || null),
         intelligence,
+        // The server's regulated-surface decision (WDO / pre-treatment
+        // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
+        // the raw one-time rows BEFORE any breakdown alignment. The React page
+        // consumes this ahead of its own row-based derivation, so a public
+        // breakdown that no longer carries the regulated row cannot resurrect
+        // the Ask bar (codex r5 P1). Present only when true so every other
+        // response stays byte-identical.
+        ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
+        // C4 restart quote (codex GH #3671 r27 P2): the offer is FROZEN —
+        // cadence, add-ons, bond, interior, and opt-out mutations all 409
+        // restart_quote_frozen, and accept refuses a non-default selection —
+        // so the page renders the deterministic default as fixed instead of
+        // offering controls that can only fail. Present only on restart rows
+        // so every other response stays byte-identical.
+        ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
         // What the customer booked (set at accept). Null for legacy accepts +
         // any non-accepted estimate; the accepted recap falls back to the
         // derived mode/frequency when null.
@@ -25100,6 +25289,7 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 // Legacy/textual setup-row recognizer — shared with setup-fee-obligation's
 // snapshot evidence so a frozen legacy row ("WaveGuard Membership Setup")
@@ -25124,6 +25314,7 @@ module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationCol
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServiceMix;
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;

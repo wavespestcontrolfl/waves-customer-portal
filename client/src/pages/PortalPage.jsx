@@ -17,6 +17,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
+import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -4055,6 +4056,10 @@ const APPOINTMENT_CHANNEL_KEYS = [
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
+  // C4: a cancelled account keeps the schedule READS; every notification /
+  // property-preference control writes through blocked routes, so those
+  // sections are hidden rather than shown broken.
+  const cancelledAccount = customer?.cancelled === true;
   const [upcoming, setUpcoming] = useState([]);
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
@@ -4082,12 +4087,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     // itself can fail the load.
     Promise.all([
       api.getSchedule(90),
-      api.getNotificationPrefs()
-        .then(data => ({ data, failed: false }))
-        .catch(() => ({ data: null, failed: true })),
-      api.getPropertyNotificationPrefs()
-        .then(data => ({ data, failed: false }))
-        .catch(() => ({ data: null, failed: true })),
+      // C4: a cancelled account renders no notification settings, so the
+      // prefs reads are skipped entirely (their routes are not widened).
+      cancelledAccount
+        ? Promise.resolve({ data: null, failed: false })
+        : api.getNotificationPrefs()
+          .then(data => ({ data, failed: false }))
+          .catch(() => ({ data: null, failed: true })),
+      cancelledAccount
+        ? Promise.resolve({ data: null, failed: false })
+        : api.getPropertyNotificationPrefs()
+          .then(data => ({ data, failed: false }))
+          .catch(() => ({ data: null, failed: true })),
     ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
       setReservice(schedData.reservice || null);
@@ -4104,7 +4115,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       console.error(err);
       setLoadError(err?.message || 'Could not load your schedule.');
     }).finally(() => setLoading(false));
-  }, []);
+  }, [cancelledAccount]);
 
   useEffect(() => {
     loadSchedule();
@@ -4436,6 +4447,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </span>
       );
     }
+    // C4 (codex GH r4 P1): a cancelled session is read-only — confirming is
+    // a write (its route is not widened for cancelled reads), so no button.
+    // The Confirmed badge above still renders: it is pure status display.
+    if (cancelledAccount) return null;
     const busy = !!confirmingIds[s.id];
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
@@ -4541,13 +4556,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             ))}
           </div>
 
-          {/* Confirm + Reschedule */}
+          {/* Confirm + Reschedule — C4: both are appointment mutations, so a
+              cancelled (read-only) session renders neither control; the
+              tokenized reschedule route refuses inactive accounts
+              server-side too. The Confirmed badge (status display) stays. */}
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
-            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-              ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-              fontSize: 12, position: 'relative',
-            }}>Reschedule</a>
+            {!cancelledAccount && (
+              <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+                ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
+                fontSize: 12, position: 'relative',
+              }}>Reschedule</a>
+            )}
           </div>
         </div>
       </div>
@@ -4586,10 +4606,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           {renderConfirmBtn(s, true)}
-          <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-            ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
-            fontSize: 12, position: 'relative',
-          }}>Reschedule</a>
+          {/* C4: no Reschedule mutation control for a cancelled session. */}
+          {!cancelledAccount && (
+            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+              ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
+              fontSize: 12, position: 'relative',
+            }}>Reschedule</a>
+          )}
         </div>
       </div>
     </div>
@@ -4610,9 +4633,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               Appointment timing, confirmation status, reminders, and reschedule options.
             </div>
           </div>
-          <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 40, flexShrink: 0, ...(compact ? { width: '100%' } : {}) }}>
-            Request Visit
-          </button>
+          {/* Requests create work — a cancelled account (C4) passes no
+              handler and gets no button. */}
+          {onRequestVisit && (
+            <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 40, flexShrink: 0, ...(compact ? { width: '100%' } : {}) }}>
+              Request Visit
+            </button>
+          )}
         </div>
       </section>
 
@@ -4620,13 +4647,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           invent a next-treatment month or mosquito restart the customer's
           plan may not include (tranche-1 truth fix) */}
       {upcomingOnly.length === 0 && (
+        // A cancelled account (C4) can't create requests — every
+        // request-creation route is blocked for this session, so the copy
+        // must not instruct an impossible action (codex GH r14 P2).
         <PortalStatePanel
           icon="leaf"
           eyebrow="Upcoming Visits"
-          title="No upcoming services scheduled"
-          message="Nothing is on your calendar yet. Request a visit and we'll get you scheduled."
-          actionLabel="Request a Visit"
-          onAction={onRequestVisit}
+          title={cancelledAccount ? 'No visits scheduled' : 'No upcoming services scheduled'}
+          message={cancelledAccount
+            ? 'Your plan is cancelled, so no visits are scheduled. Your past service records remain available.'
+            : "Nothing is on your calendar yet. Request a visit and we'll get you scheduled."}
+          actionLabel={cancelledAccount ? undefined : 'Request a Visit'}
+          onAction={cancelledAccount ? undefined : onRequestVisit}
           actionStyle={primaryButton}
         />
       )}
@@ -4701,7 +4733,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       {/* Notification Preferences — when the prefs request failed, say so
           with a retry instead of silently omitting the section (the schedule
           above stays fully usable). */}
-      {prefsError && !prefs && (
+      {prefsError && !prefs && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
@@ -4710,7 +4742,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           </div>
         </section>
       )}
-      {prefs && (
+      {prefs && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
@@ -4899,7 +4931,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </section>
       )}
 
-      {propertyPrefs.length > 0 && (
+      {propertyPrefs.length > 0 && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             {propertyPrefs.length > 1 ? (
@@ -5144,6 +5176,11 @@ const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reo
 
 function BillingTab({ customer, refreshCustomer }) {
   const portalGlass = usePortalGlass();
+  // C4: a cancelled account keeps billing READS (balance, invoices, history,
+  // credits) and the tokenized Pay now hand-off; every management surface
+  // whose writes the middleware now 401s (cards, Auto Pay, credit toggle,
+  // recipients) is hidden rather than shown broken.
+  const cancelledAccount = customer?.cancelled === true;
   const [payments, setPayments] = useState([]);
   // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
   // balance stays on the account until the customer turns this on. Server-
@@ -5282,8 +5319,12 @@ function BillingTab({ customer, refreshCustomer }) {
     Promise.all([
       loadAllPayments(),
       api.getBalance(),
-      api.getCards(),
-      api.getNotificationPrefs().catch(() => null),
+      // C4: the cancelled tab hides Payment Methods and Billing
+      // Preferences, so their reads are skipped — a cancelled session must
+      // not fetch saved-card details it will never render (the cards route
+      // is not widened for cancelled reads either).
+      cancelledAccount ? Promise.resolve({ cards: [] }) : api.getCards(),
+      cancelledAccount ? Promise.resolve(null) : api.getNotificationPrefs().catch(() => null),
       api.getAutopay().catch(() => ({ state: 'unknown', loadError: true })),
     ])
       .then(([payData, balData, cardData, prefsData, autopayData]) => {
@@ -5311,7 +5352,7 @@ function BillingTab({ customer, refreshCustomer }) {
         setLoadError(err?.message || 'Could not load billing details.');
         setLoading(false);
       });
-  }, []);
+  }, [cancelledAccount]);
 
   useEffect(() => {
     loadBilling();
@@ -5804,11 +5845,19 @@ function BillingTab({ customer, refreshCustomer }) {
       bg: subtle, border: '#E7E2D7', icon: 'card',
       badge: 'Auto Pay off', titleColor: B.glassNavy, subtitleColor: B.grayDark,
       title: 'Auto Pay is off',
-      detail: balance?.currentBalance > 0
-        ? (primaryOpenInvoice
-          ? `Balance due: ${money(balance.currentBalance)} — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above. Auto Pay covers future charges automatically once enabled; it does not pay existing balances.`
-          : `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`)
-        : 'Charges will not run automatically unless you enable Auto Pay below.',
+      // Cancelled accounts have no Auto Pay controls to point at — the
+      // copy must not instruct "enable below" when everything below is
+      // hidden (codex GH r8 P2). Read-only status instead; the tokenized
+      // Pay now path stays for any open balance.
+      detail: cancelledAccount
+        ? (balance?.currentBalance > 0
+          ? `Balance due: ${money(balance.currentBalance)}${primaryOpenInvoice ? ` — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above` : ''}. Your plan is cancelled, so nothing runs automatically.`
+          : 'Your plan is cancelled — nothing is billed automatically.')
+        : balance?.currentBalance > 0
+          ? (primaryOpenInvoice
+            ? `Balance due: ${money(balance.currentBalance)} — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above. Auto Pay covers future charges automatically once enabled; it does not pay existing balances.`
+            : `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`)
+          : 'Charges will not run automatically unless you enable Auto Pay below.',
     },
     unknown: {
       bg: subtle, border: '#E7E2D7', icon: 'alert',
@@ -6043,8 +6092,14 @@ function BillingTab({ customer, refreshCustomer }) {
           {[
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
-            { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : cancelledAccount ? 'Plan cancelled' : 'Manage below' },
+            // Cancelled sessions get an EMPTY methods projection by design
+            // (privacy) — "None saved" would falsely claim the retained
+            // methods no longer exist (codex GH r12 P2). Neutral value,
+            // no count claim.
+            ...(cancelledAccount
+              ? [{ label: 'Default method', value: '—', sub: 'Not shown' }]
+              : [{ label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' }]),
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
             {
@@ -6181,6 +6236,7 @@ function BillingTab({ customer, refreshCustomer }) {
         })()}
       </div>
 
+      {!cancelledAccount && (
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 100%' }}>
@@ -6316,6 +6372,7 @@ function BillingTab({ customer, refreshCustomer }) {
           onOpenRequestHandled={() => setAutopayOpenRequest(null)}
         />
       </div>
+      )}
 
       {/* ── Set-default Auto Pay consent modal (checkbox required) ── */}
       {defaultConsentPrompt && (
@@ -6439,7 +6496,7 @@ function BillingTab({ customer, refreshCustomer }) {
               <span>{money(totalCredits)}</span>
             </div>
           )}
-          {(totalCredits > 0 || autoApplyCredit) && (
+          {(totalCredits > 0 || autoApplyCredit) && !cancelledAccount && (
             <div
               data-testid="auto-apply-credit-row"
               style={{
@@ -6572,6 +6629,11 @@ function BillingTab({ customer, refreshCustomer }) {
                       Pay {money(primaryOpenInvoice.amountDue)} now
                     </a>
                   )}
+                  {/* Cancelled accounts have no card management: the setup-
+                      intent route is not on the cancelled allowlist, so this
+                      second entry point must hide with the section (the pay
+                      link above still works — /pay is tokenized). */}
+                  {!cancelledAccount && (
                   <button type="button" onClick={() => {
                     document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     handleAddCard();
@@ -6579,6 +6641,7 @@ function BillingTab({ customer, refreshCustomer }) {
                     minHeight: 36, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
                     background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                   }}>Update Payment Method</button>
+                  )}
                 </div>
               )}
             </div>
@@ -6634,6 +6697,7 @@ function BillingTab({ customer, refreshCustomer }) {
         ))}
       </div>
 
+      {!cancelledAccount && (
       <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Recipients</div>
@@ -6820,6 +6884,7 @@ function BillingTab({ customer, refreshCustomer }) {
         </button>
         </>}
       </div>
+      )}
     </div>
   );
 }
@@ -9906,7 +9971,7 @@ function PlanStationMap({ map }) {
   );
 }
 
-function MyPlanTab({ customer, focusService, onOpenRequest }) {
+function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -9930,7 +9995,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
   const [showTierExplorer, setShowTierExplorer] = useState(false);
-  const lawnHealth = useLawnHealth(customer.id);
+  // C4: /api/lawn-health is deliberately NOT a cancelled read — a null id
+  // disables the hook so the default Plan tab mount doesn't 401 into the
+  // API client's retry traffic for data the cancelled panel never renders
+  // (codex GH r17 P2).
+  const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id);
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as
@@ -9978,14 +10047,18 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     });
   }, []);
 
+  // C4: a cancelled account renders the cancelled panel below — none of the
+  // live-plan reads are needed (and the station map is not a cancelled read).
+  const cancelledAccount = customer?.cancelled === true;
   useEffect(() => {
+    if (cancelledAccount) return;
     loadPlan();
     api.getAutopay().then(d => {
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
-  }, [loadPlan]);
+  }, [loadPlan, cancelledAccount]);
 
   const serviceMatches = (svcId, service = {}) => {
     // Server-resolved family wins when present (codex #3591 r58 P1):
@@ -10321,6 +10394,18 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     minHeight: 36,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
+
+  // C4: the cancelled state replaces every live plan card (and the cancel
+  // flow) — one "Restart my plan" action that lands on a fresh estimate.
+  if (cancelledAccount) {
+    return (
+      <CancelledPlanPanel
+        customer={customer}
+        compact={compact}
+        styles={{ card, muted, subtle, sectionTitle, primaryButton, secondaryButton }}
+      />
+    );
+  }
 
   if (planStatus !== 'ready') {
     return (
@@ -10800,7 +10885,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
             </section>
           )}
 
-          {hasCancellableAccount && (
+          {hasCancellableAccount && !cancelledAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
             {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
@@ -10809,6 +10894,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
               tierName={tierName}
               compact={compact}
               onOpenRequest={onOpenRequest}
+              refreshCustomer={refreshCustomer}
               styles={{ muted, subtle, primaryButton, secondaryButton, smallLinkButton }}
             />
           </section>
@@ -13254,7 +13340,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               // Stored documents without a file: the server returns
               // downloadUrl: null / shareable: false and rejects /share with
               // 409 — don't offer actions that can only fail.
-              const canShare = doc.shareable !== false;
+              // C4: a link-less doc's share mints via POST /documents/share
+              // — not a cancelled read, so the button would only 401. Docs
+              // with their own view URL share without the API and stay.
+              const canShare = doc.shareable !== false
+                && !(customer?.cancelled === true && !doc.viewUrl && !doc.isProjectReport);
               const canDownload = !!(canOpen || doc.downloadUrl || (doc.isAutoGenerated && doc.linkedServiceRecordId));
               const meta = [
                 formatDate(doc),
@@ -14473,9 +14563,13 @@ const MORE_TABS = [
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
+// C4: the read-only surfaces a cancelled customer keeps — plan (cancelled
+// state + restart), visit history, billing (pay what is owed), documents.
+// Everything else needs an active plan and its reads are not widened.
+const CANCELLED_TABS = ['plan', 'visits', 'billing', 'documents'];
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
-function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
   const button = (t, onClick, isActive) => (
     <button
       key={t.id}
@@ -14520,17 +14614,17 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
       boxSizing: 'border-box',
     }}>
-      {PRIMARY_TABS.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
+      {tabs.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
       {button(
         { id: 'more', label: 'More', icon: 'more' },
         onOpenMore,
-        moreActive || MORE_TABS.some(m => m.id === activeTab),
+        moreActive || moreTabs.some(m => m.id === activeTab),
       )}
     </nav>
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MORE_TABS }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -14613,7 +14707,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         </div>
 
         <section data-glass="soft" style={{ ...card, padding: 8, marginBottom: 10 }}>
-          {MORE_TABS.map(t => {
+          {tabs.map(t => {
             const isActive = activeTab === t.id;
             return (
               <button key={t.id} onClick={() => onSelect(t.id)} style={{
@@ -14659,12 +14753,18 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
           }}>
             <a data-glass-accent="" href="tel:+19412975749" onClick={onClose} style={supportActionStyle}>Call</a>
             <a data-glass-accent="" href="sms:+19412975749" onClick={onClose} style={supportActionStyle}>Text</a>
-            <button data-glass-accent="" type="button" onClick={() => { onRequest?.(); onClose(); }} style={supportActionStyle}>
-              Request
-            </button>
-            <button data-glass-accent="" type="button" onClick={() => { onChat?.(); onClose(); }} style={supportActionStyle}>
-              Chat
-            </button>
+            {/* Request + Chat create work / need an active plan — a cancelled
+                account (C4) passes neither, so only Call / Text remain. */}
+            {onRequest && (
+              <button data-glass-accent="" type="button" onClick={() => { onRequest(); onClose(); }} style={supportActionStyle}>
+                Request
+              </button>
+            )}
+            {onChat && (
+              <button data-glass-accent="" type="button" onClick={() => { onChat(); onClose(); }} style={supportActionStyle}>
+                Chat
+              </button>
+            )}
           </div>
         </section>
       </div>
@@ -15025,6 +15125,10 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 export default function PortalPage() {
   const { customer, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
   const isMobileShell = useIsMobile(900);
+  // C4: /auth/me reports `cancelled` for a churned account admitted under
+  // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
+  // cancelled banner, and hides every action that creates work.
+  const cancelledAccount = customer?.cancelled === true;
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
   // Returns [tabId, visitsSubTab, openRequest, planService]. Legacy
@@ -15046,7 +15150,13 @@ export default function PortalPage() {
       return [tab, 'upcoming', false, planService];
     } catch { return ['dashboard', 'upcoming', false, null]; }
   })();
-  const [activeTab, setActiveTab] = useState(initialTab);
+  // C4: a cancelled session must never MOUNT a blocked tab — Dashboard's
+  // first-commit fetches (lawn health, property score, referrals…) would
+  // 401 and churn the refresh token before the redirect effect runs. Clamp
+  // synchronously; the effect below still handles later customer changes.
+  const [activeTab, setActiveTab] = useState(
+    cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
+  );
   // Which My Plan service row to open expanded on the next Plan mount —
   // deep-link above or the home lawn teaser; nav clicks reset it.
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
@@ -15056,7 +15166,7 @@ export default function PortalPage() {
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
-  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest);
+  const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest && !cancelledAccount);
   // Tab navigation writes the URL and back/forward adopts it, so a refresh
   // returns to the same tab (the deep-link parser above already reads
   // ?tab=) and the browser Back button walks portal tabs instead of
@@ -15102,10 +15212,15 @@ export default function PortalPage() {
       // so the URL and the rendered sub-tab can never disagree on refresh.
       if (urlTab === 'visits') setVisitsSubTab('upcoming');
     }
+    // Cancelled: clamp WHILE adopting the URL, not a commit later — without
+    // this a disallowed deep link (?tab=property, ?tab=refer) mounts the
+    // blocked tab and fires its 401'ing reads before the redirect effect
+    // catches up (codex GH r8 P2).
+    if (cancelledAccount && !CANCELLED_TABS.includes(urlTab)) urlTab = 'plan';
     const svc = params.get('service');
     setPlanFocusService(urlTab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null);
     setActiveTab(prev => (prev === urlTab ? prev : urlTab));
-  }, [location.search]);
+  }, [location.search, cancelledAccount]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
@@ -15128,7 +15243,18 @@ export default function PortalPage() {
     const target = SERVICE_CATALOG.some(s => s.id === svcId) ? `/?tab=plan&service=${svcId}` : '/?tab=plan';
     if (window.location.pathname + window.location.search !== target) navigate(target);
   };
-  const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
+  const cancelledPrimaryTabs = PRIMARY_TABS.filter(t => CANCELLED_TABS.includes(t.id));
+  const cancelledMoreTabs = MORE_TABS.filter(t => CANCELLED_TABS.includes(t.id));
+  const headerNavItems = cancelledAccount
+    ? [...cancelledPrimaryTabs, ...cancelledMoreTabs]
+    : [...PRIMARY_TABS, ...MORE_TABS];
+  // A cancelled account never lands on a tab it cannot read — Home (and any
+  // deep link outside CANCELLED_TABS) redirects to the cancelled plan page.
+  useEffect(() => {
+    if (!cancelledAccount || CANCELLED_TABS.includes(activeTab)) return;
+    setActiveTab('plan');
+    syncTabUrl('plan');
+  }, [cancelledAccount, activeTab]);
   const headerNavButton = (tab) => {
     const isActive = activeTab === tab.id;
     return (
@@ -15245,7 +15371,7 @@ export default function PortalPage() {
     }
   };
   const activePropertyAddress = formatPropertyAddress(customer);
-  const accountMenuItems = [
+  const accountMenuItems = (cancelledAccount ? (items) => items.filter(i => CANCELLED_TABS.includes(i.tab)) : (items) => items)([
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
     { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
     { icon: 'calendar', label: 'Visits', sub: 'Upcoming and completed service', tab: 'visits', action: () => switchTab('visits') },
@@ -15254,12 +15380,16 @@ export default function PortalPage() {
     { icon: 'document', label: 'Documents', sub: 'Reports and agreements', tab: 'documents', action: () => switchTab('documents') },
     { icon: 'house', label: 'My Property', sub: 'Property profile and notes', tab: 'property', action: () => switchTab('property') },
     { icon: 'bulb', label: 'Learn', sub: 'Tips, local alerts, and FAQ', tab: 'learn', action: () => switchTab('learn') },
-  ];
+  ]);
   const accountSupportActions = [
     { icon: 'phone', label: 'Call', href: 'tel:+19412975749' },
     { icon: 'chat', label: 'Text', href: 'sms:+19412975749' },
-    { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
-    { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
+    // Request + Chat need an active plan (C4): a cancelled account keeps
+    // Call / Text only.
+    ...(cancelledAccount ? [] : [
+      { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
+      { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
+    ]),
   ];
   // Rate-the-app: inside the native shell an https store URL is a webview
   // navigation that strands the SPA (same trap as window.open — F-017), so
@@ -15319,7 +15449,9 @@ export default function PortalPage() {
             renders as a glass card above the Waves AI bar in the content
             column. Mobile keeps the bottom nav untouched. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
-          {!isMobileShell && (
+          {/* The header Request button creates work — hidden for a cancelled
+              account (C4), which keeps Call / Text in the account menu. */}
+          {!isMobileShell && !cancelledAccount && (
             <button
               type="button"
               onClick={() => setShowReportIssue(true)}
@@ -15346,7 +15478,10 @@ export default function PortalPage() {
               Request
             </button>
           )}
-          <NotificationBell type="customer" />
+          {/* The bell polls /customer-notifications/unread-count every 30s —
+              not a cancelled read, so mounting it for a cancelled session
+              would burn the refresh-token allowance on guaranteed 401s. */}
+          {!cancelledAccount && <NotificationBell type="customer" />}
           <div ref={menuRef} style={{ position: 'relative' }}>
             <button
               type="button"
@@ -15753,6 +15888,9 @@ export default function PortalPage() {
             Learn — renders as a glass card right above the Waves AI bar
             instead of inside the sticky top bar. Desktop only; the mobile
             shell keeps its bottom nav. data-glass is inert without glass. */}
+        {cancelledAccount && (
+          <CancelledBanner cancelledAt={customer.cancelledAt} onOpenBilling={() => switchTab('billing')} />
+        )}
         {!isMobileShell && (
           <nav aria-label="Customer portal" data-glass="card" style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -15772,16 +15910,16 @@ export default function PortalPage() {
             {headerNavItems.map(headerNavButton)}
           </nav>
         )}
-        <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
-        {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} />}
+        {!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
-        }} onRequestVisit={() => setShowReportIssue(true)} />}
+        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
@@ -15796,6 +15934,8 @@ export default function PortalPage() {
           onSelect={switchTab}
           onOpenMore={() => setShowMoreSheet(true)}
           moreActive={showMoreSheet}
+          tabs={cancelledAccount ? cancelledPrimaryTabs : PRIMARY_TABS}
+          moreTabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
       {isMobileShell && showMoreSheet && (
@@ -15803,8 +15943,9 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
-          onRequest={() => setShowReportIssue(true)}
-          onChat={() => setShowChat(true)}
+          onRequest={cancelledAccount ? null : () => setShowReportIssue(true)}
+          onChat={cancelledAccount ? null : () => setShowChat(true)}
+          tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
 

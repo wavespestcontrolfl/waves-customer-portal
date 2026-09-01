@@ -4,9 +4,28 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
+
+describe('regulated certificate estimate surfaces', () => {
+  it('detects a pre-slab line inside a mixed pest estimate', () => {
+    expect(estimateHasRegulatedCertificateSurface(
+      'bundle',
+      [{ key: 'pest_control', name: 'Pest Control' }],
+      [{ service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment' }],
+    )).toBe(true);
+  });
+
+  it('honors the server decision when the public breakdown no longer carries the regulated row', () => {
+    // show_one_time_option alignment shape: category bundle, synthetic pest
+    // choice row only — the WDO row is gone from the rows the client sees.
+    const alignedRows = [{ service: 'one_time_pest', label: 'One-Time Pest Control' }];
+    const pest = [{ key: 'pest_control', name: 'Pest Control' }];
+    expect(estimateHasRegulatedCertificateSurface('bundle', pest, alignedRows)).toBe(false);
+    expect(estimateHasRegulatedCertificateSurface('bundle', pest, alignedRows, true)).toBe(true);
+  });
+});
 
 describe('EstimateAskBar', () => {
   it('uses provided service-aware chips instead of the default prompts', () => {
@@ -59,6 +78,33 @@ describe('ServiceSection', () => {
 
     expect(screen.queryByText('How often?')).not.toBeInTheDocument();
     expect(screen.getByText('Skip parts you don\'t need')).toBeInTheDocument();
+  });
+
+  it('renders a frozen restart quote as fixed — cadence text, no pills, no add-on toggles', () => {
+    const quarterly = { ...baseFrequency, key: 'quarterly', label: 'Quarterly', monthly: 40, annual: 480 };
+    render(
+      <ServiceSection
+        section={{
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [baseFrequency, quarterly],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="quarterly"
+        selectedAddOns={new Set(['interior_spray'])}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: true, showWaveGuardTierUi: true }}
+        waveGuardTier="Bronze"
+        frozen
+      />,
+    );
+
+    expect(screen.queryByText('How often?')).not.toBeInTheDocument();
+    expect(screen.queryByText('Skip parts you don\'t need')).not.toBeInTheDocument();
+    expect(screen.getByTestId('frozen-cadence')).toHaveTextContent('Quarterly');
   });
 
   it('does not render pest add-ons for non-pest sections', () => {
@@ -359,6 +405,25 @@ describe('ServiceSection', () => {
 });
 
 describe('OneTimeBreakdownCard', () => {
+  it('presents trap-only recurring monitoring as a monitoring plan', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 694, items: [
+      { service: 'trap_only_retainer', label: 'Standard Trap-Only Monitoring Retainer', amount: 495 },
+      { service: 'trap_only_setup', label: 'Trap-Only Setup / Inspection', amount: 199 },
+    ] }} />);
+    expect(screen.getByText('Trap-only monitoring plan')).toBeInTheDocument();
+    expect(screen.queryByText('One-time services')).not.toBeInTheDocument();
+  });
+
+  it('uses customer-friendly labels for WDO and termite foam keys', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 305, items: [
+      { service: 'wdo_inspection', label: 'wdo_inspection', amount: 125 },
+      { service: 'termite_foam', label: 'Termidor Foam Spot Treatment', amount: 180 },
+    ] }} />);
+    expect(screen.getByText('WDO Inspection')).toBeInTheDocument();
+    expect(screen.getByText('Termite Foam Treatment')).toBeInTheDocument();
+    expect(screen.queryByText('wdo_inspection')).not.toBeInTheDocument();
+  });
+
   it('shows quote-required specialty reasons instead of only the blocked price', () => {
     render(
       <OneTimeBreakdownCard
