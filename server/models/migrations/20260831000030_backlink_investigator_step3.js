@@ -15,6 +15,12 @@
  * `currency_attestation_id` (§3.2) is deliberately NOT added here — its FK
  * target `seo_link_currency_attestations` is a step-4 owner-flow table.
  *
+ * Also adds the investigator's failure-backoff pair to seo_link_domains:
+ *   - investigate_after — a failed investigation defers the domain
+ *     (exponential backoff) instead of re-spending two model calls hourly.
+ *   - investigate_failures — consecutive-failure counter; the ceiling parks
+ *     the domain as `watching` for the recheck cadence.
+ *
  * Enum literals below are FROZEN copies of services/seo/link-registry.js —
  * server/tests/backlink-investigator-step3-migration.test.js pins them equal.
  * A changed enum is a NEW migration that swaps the CHECK, never an edit here.
@@ -42,9 +48,20 @@ exports.up = async function up(knex) {
     });
     await knex.raw(check('seo_link_acquisition_paths', 'seo_link_acquisition_paths_fee_scope_check', inSet('fee_scope', FEE_SCOPES, { nullable: true })));
   }
+  if (await knex.schema.hasTable('seo_link_domains')) {
+    const domCols = await knex('seo_link_domains').columnInfo();
+    if (!domCols.investigate_after) {
+      await knex.schema.alterTable('seo_link_domains', (t) => {
+        t.timestamp('investigate_after');
+        t.integer('investigate_failures').notNullable().defaultTo(0);
+      });
+    }
+  }
 };
 
 exports.down = async function down(knex) {
+  await knex.raw('ALTER TABLE seo_link_domains DROP COLUMN IF EXISTS investigate_failures');
+  await knex.raw('ALTER TABLE seo_link_domains DROP COLUMN IF EXISTS investigate_after');
   await knex.raw('ALTER TABLE seo_link_acquisition_paths DROP COLUMN IF EXISTS fee_scope');
   await knex.raw('ALTER TABLE seo_link_acquisition_paths DROP COLUMN IF EXISTS currency');
 };

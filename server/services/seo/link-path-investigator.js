@@ -36,7 +36,7 @@ const { fetchPage } = require('./contact-finder');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 const { parsePriceTextCents } = require('../price-scan/extract');
 const { WAVES_CONTEXT } = require('./prospect-scorer');
-const { validateInvestigation, INVESTIGATION_SCHEMA } = require('./link-path-investigation-schema');
+const { validateInvestigation, INVESTIGATION_SCHEMA, URL_REQUIRED_ACQUISITION_TYPES } = require('./link-path-investigation-schema');
 const registry = require('./link-registry');
 
 const LOCK_KEY = 'link-path-investigator';
@@ -60,6 +60,12 @@ const SUBMISSION_VERIFY_BUDGET = 3;
 const PAGE_EXCERPT_CHARS = 6000;
 const REINVESTIGATE_AFTER_DAYS = 90;
 const WATCH_RECHECK_DAYS = 30;
+// Failure backoff: 6h · 12h · 24h · 48h · 96h, then the ceiling parks the
+// domain as `watching` — a persistently failing domain never burns two model
+// calls every hour and never crowds new domains out of the batch.
+const INVESTIGATE_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
+const INVESTIGATE_BACKOFF_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_INVESTIGATE_FAILURES = 6;
 const LLM_TIMEOUT_MS = 60000;
 
 // §5 fixed probe list, tried in order after the evidence-bearing candidates.
@@ -293,7 +299,9 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     }
   };
   const seedFirst = (q) => q.orderByRaw("CASE WHEN discovery_priority = 'owner_seed' THEN 0 ELSE 1 END").orderBy('created_at', 'asc').limit(limit);
-  take(await seedFirst(db('seo_link_domains').whereIn('agent_state', CLAIMABLE_STATES).select('*')), true);
+  take(await seedFirst(db('seo_link_domains').whereIn('agent_state', CLAIMABLE_STATES)
+    .where((b) => b.whereNull('investigate_after').orWhere('investigate_after', '<=', now))
+    .select('*')), true);
   if (out.length < limit) {
     take(await seedFirst(db('seo_link_domains').where('agent_state', 'watching').where('watch_recheck_at', '<=', now).select('*')), true);
   }
@@ -484,6 +492,31 @@ function canonicalizeTerms(html) {
     .trim();
 }
 
+/**
+ * A failed claim-state investigation defers the domain with exponential
+ * backoff instead of leaving it first in line for the next hourly sweep; the
+ * failure ceiling parks it as `watching` on the normal recheck cadence.
+ * Best-effort — a defer that itself fails only costs backoff, never data.
+ */
+async function deferFailedDomain(db, domain, now) {
+  try {
+    const failures = (Number(domain.investigate_failures) || 0) + 1;
+    const patch = { investigate_failures: failures, updated_at: now };
+    if (failures >= MAX_INVESTIGATE_FAILURES) {
+      patch.agent_state = 'watching';
+      patch.watch_recheck_at = new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000);
+      patch.investigate_after = null;
+      patch.score_reasons = `parked: ${failures} consecutive investigation failures`;
+    } else {
+      patch.investigate_after = new Date(now.getTime() + Math.min(INVESTIGATE_BACKOFF_BASE_MS * 2 ** (failures - 1), INVESTIGATE_BACKOFF_MAX_MS));
+    }
+    // Only while the claim still stands — never overwrite a newer owner/lane state.
+    await db('seo_link_domains').where({ id: domain.id, agent_state: 'investigating' }).update(patch);
+  } catch (err) {
+    logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The job
 // ---------------------------------------------------------------------------
@@ -571,7 +604,8 @@ async function investigatePaths(db, {
         out.llmCalls += res.calls || 1;
         if (!res.ok) {
           out.failed.push({ id: domain.id, domain: host, reason: res.reason });
-          continue; // stays `investigating`; a later sweep retries
+          if (claimState) await deferFailedDomain(db, domain, now); // backoff, never an hourly re-spend
+          continue;
         }
         const verdict = res.data;
         const validIds = new Set(existingPaths.map((p) => p.id));
@@ -593,8 +627,11 @@ async function investigatePaths(db, {
             }
             // A stripped submission URL is a REJECTED claim, not a genuinely
             // URL-less outreach path — it must not keep its model confidence
-            // and ride the null-URL exemption into best_path_id.
+            // and ride the null-URL exemption into best_path_id. The same
+            // holds for a site-executed type with no URL at all (the schema
+            // demands one; this is the belt for drift).
             if (clean.offhost.submission_url) clean.submissionUnverified = 'offhost_submission_url';
+            else if (!clean.submission_url && URL_REQUIRED_ACQUISITION_TYPES.includes(clean.acquisition_type)) clean.submissionUnverified = 'missing_submission_url';
             return clean;
           });
 
@@ -719,7 +756,7 @@ async function investigatePaths(db, {
           const best = ranked.length ? ranked[0].p : null;
           const { score, reasons } = scoreDomain(domain, best);
           const watchNote = claimState && verdict.verdict === 'watching' && verdict.watch_reason ? ` · watching: ${verdict.watch_reason}` : '';
-          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now };
+          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: null };
           if (claimState) {
             // The schema requires a qualified verdict to contain an
             // executable, positive-confidence path, so `best` exists here in
@@ -746,6 +783,7 @@ async function investigatePaths(db, {
       } catch (err) {
         logger.error(`[link-investigator] ${domain.domain}: ${err.message}`);
         out.failed.push({ id: domain.id, domain: domain.domain, reason: `error: ${err.message}` });
+        if (claimState) await deferFailedDomain(db, domain, now);
       }
     }
     return out;
@@ -765,6 +803,7 @@ module.exports = {
     deriveCurrency, centsFor, candidateUrls, hostBound, verifyPriceEvidence, buildPrompt, investigateWithModel,
     selectTargets, pathRowFrom, upsertPath, changedInputs, scoreDomain, pathValue,
     canonicalizeTerms, batchSize, SYSTEM_PROMPT, TYPE_WEIGHT,
+    deferFailedDomain, MAX_INVESTIGATE_FAILURES, INVESTIGATE_BACKOFF_BASE_MS,
     PAYMENT_INPUTS, COMMUNICATION_INPUTS, EXECUTION_INPUTS, CLAIMABLE_STATES,
   },
 };

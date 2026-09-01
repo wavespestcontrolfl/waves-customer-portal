@@ -105,6 +105,17 @@ describe('investigator output schema', () => {
     expect(validateInvestigation(good({ verdict: 'not_reproducible', paths: [goodPath({ acquisition_type: 'unknown' })] })).valid).toBe(true);
   });
 
+  test('site-executed types REQUIRE a submission URL; outreach types may go without (Codex r11 P1)', () => {
+    const S = require('../services/seo/link-path-investigation-schema');
+    for (const t of S.URL_REQUIRED_ACQUISITION_TYPES) {
+      const paid = R.PAID_ACQUISITION_TYPES.includes(t);
+      const p = goodPath({ acquisition_type: t, payment_required: paid, fee_scope: paid ? 'per_location' : null, submission_url: null });
+      expect({ t, valid: validateInvestigation(good({ paths: [p] })).valid }).toEqual({ t, valid: false });
+    }
+    const outreach = goodPath({ acquisition_type: 'resource_outreach', link_type: 'resource', submission_url: null });
+    expect(validateInvestigation(good({ paths: [outreach] })).valid).toBe(true);
+  });
+
   test('verdicts: watching requires a reason; qualified requires ≥1 path; not_reproducible may have none', () => {
     expect([...VERDICTS]).toEqual(['qualified', 'not_reproducible', 'watching']);
     expect(validateInvestigation(good({ verdict: 'watching', watch_reason: null })).valid).toBe(false);

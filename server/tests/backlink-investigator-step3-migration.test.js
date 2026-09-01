@@ -12,7 +12,7 @@ const MIG = path.join(__dirname, '..', 'models/migrations/20260831000030_backlin
 const migration = require(MIG);
 const R = require('../services/seo/link-registry');
 
-function fakeKnex({ existing = ['seo_link_acquisition_paths'], pathColumns = {} } = {}) {
+function fakeKnex({ existing = ['seo_link_acquisition_paths', 'seo_link_domains'], columns = {} } = {}) {
   const raws = [];
   const altered = {};
   const table = (cb) => {
@@ -28,7 +28,7 @@ function fakeKnex({ existing = ['seo_link_acquisition_paths'], pathColumns = {} 
     cb(t);
     return cols;
   };
-  const knex = Object.assign(jest.fn(() => ({ columnInfo: async () => pathColumns })), {
+  const knex = Object.assign(jest.fn((name) => ({ columnInfo: async () => columns[name] || {} })), {
     raw: jest.fn(async (sql) => { raws.push(String(sql)); return {}; }),
     schema: {
       hasTable: jest.fn(async (name) => existing.includes(name)),
@@ -76,14 +76,24 @@ describe('up()', () => {
     ]);
   });
 
+  test('investigator backoff pair on seo_link_domains: nullable investigate_after + counter NOT NULL DEFAULT 0', async () => {
+    const knex = fakeKnex();
+    await migration.up(knex);
+    const cols = knex._altered.seo_link_domains;
+    expect(cols.map((c) => [c.method, c.args[0]])).toEqual([['timestamp', 'investigate_after'], ['integer', 'investigate_failures']]);
+    expect(hasMod(colOf(cols, 'investigate_after'), 'notNullable')).toBe(false);
+    expect(hasMod(colOf(cols, 'investigate_failures'), 'notNullable')).toBe(true);
+    expect(hasMod(colOf(cols, 'investigate_failures'), 'defaultTo', [0])).toBe(true);
+  });
+
   test('idempotent: existing columns are not re-added and no CHECK is re-added', async () => {
-    const knex = fakeKnex({ pathColumns: { currency: {}, fee_scope: {} } });
+    const knex = fakeKnex({ columns: { seo_link_acquisition_paths: { currency: {}, fee_scope: {} }, seo_link_domains: { investigate_after: {}, investigate_failures: {} } } });
     await migration.up(knex);
     expect(knex.schema.alterTable).not.toHaveBeenCalled();
     expect(knex._raws).toEqual([]);
   });
 
-  test('missing table (fresh DB mid-chain): no-op, never throws', async () => {
+  test('missing tables (fresh DB mid-chain): no-op, never throws', async () => {
     const knex = fakeKnex({ existing: [] });
     await migration.up(knex);
     expect(knex.schema.alterTable).not.toHaveBeenCalled();
@@ -92,10 +102,12 @@ describe('up()', () => {
 });
 
 describe('down()', () => {
-  test('drops both columns, fee_scope first, IF EXISTS both ways', async () => {
+  test('drops all four columns, dependents first, IF EXISTS throughout', async () => {
     const knex = fakeKnex();
     await migration.down(knex);
     expect(knex._raws).toEqual([
+      'ALTER TABLE seo_link_domains DROP COLUMN IF EXISTS investigate_failures',
+      'ALTER TABLE seo_link_domains DROP COLUMN IF EXISTS investigate_after',
       'ALTER TABLE seo_link_acquisition_paths DROP COLUMN IF EXISTS fee_scope',
       'ALTER TABLE seo_link_acquisition_paths DROP COLUMN IF EXISTS currency',
     ]);

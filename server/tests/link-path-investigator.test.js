@@ -71,6 +71,22 @@ function makeDb(seed = {}) {
     };
     const q = {
       where(a, b, c) {
+        if (typeof a === 'function') {
+          // grouped where: OR-combined like knex's callback builder
+          const preds = [];
+          const sub = {
+            whereNull(col) { preds.push((row, get) => get(row, col) == null); return sub; },
+            orWhere(col, op, val) {
+              preds.push(val === undefined
+                ? (row, get) => get(row, col) === op
+                : (row, get) => (op === '<=' ? get(row, col) <= val : op === '<' ? get(row, col) < val : get(row, col) === val));
+              return sub;
+            },
+          };
+          a(sub);
+          state.preds.push((row, get) => preds.some((p) => p(row, get)));
+          return q;
+        }
         if (typeof a === 'object') state.preds.push((row, get) => Object.entries(a).every(([k, v]) => get(row, k) === v));
         else if (c !== undefined) state.preds.push((row, get) => (b === '<=' ? get(row, a) <= c : b === '<' ? get(row, a) < c : get(row, a) === c));
         else state.preds.push((row, get) => get(row, a) === b);
@@ -380,7 +396,40 @@ describe('full run', () => {
     expect(r.llmCalls).toBe(2);
     expect(r.investigated).toBe(0);
     expect(r.failed).toEqual([expect.objectContaining({ id: d.id, reason: expect.stringContaining('llm_invalid') })]);
-    expect(db._tables.seo_link_domains[0].agent_state).toBe('investigating'); // retried by a later sweep
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('investigating'); // retried by a later sweep…
+    // …but DEFERRED, never first in line again next hour (Codex r11 P1)
+    expect(dom.investigate_failures).toBe(1);
+    expect(dom.investigate_after).toEqual(new Date(NOW.getTime() + _internals.INVESTIGATE_BACKOFF_BASE_MS));
+  });
+
+  test('a deferred domain is not selected until due; the failure ceiling parks it watching (Codex r11 P1)', async () => {
+    const { selectTargets } = _internals;
+    const deferred = domainRow({ domain: 'deferred.com', agent_state: 'investigating', investigate_after: new Date('2026-09-01') });
+    const due = domainRow({ domain: 'due.com', agent_state: 'investigating', investigate_after: new Date('2026-08-30') });
+    const db = makeDb({ seo_link_domains: [deferred, due] });
+    const targets = await selectTargets(db, { limit: 10, now: NOW });
+    expect(targets.map((t) => t.domain.domain)).toEqual(['due.com']);
+
+    // ceiling: the next failure parks the domain on the watching cadence
+    const atCeiling = domainRow({ domain: 'broken.com', agent_state: 'investigating', investigate_failures: 5 });
+    const db2 = makeDb({ seo_link_domains: [atCeiling] });
+    await investigatePaths(db2, runOpts(db2, { llmDispatch: async () => ({ ok: false, reason: 'anthropic_500' }) }));
+    const dom = db2._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    expect(dom.watch_recheck_at).toEqual(new Date(NOW.getTime() + 30 * 24 * 60 * 60 * 1000));
+    expect(dom.investigate_after).toBeNull();
+    expect(dom.score_reasons).toMatch(/6 consecutive investigation failures/);
+  });
+
+  test('a successful investigation resets the failure backoff', async () => {
+    const d = domainRow({ agent_state: 'investigating', investigate_failures: 3, investigate_after: new Date('2026-08-30') });
+    const db = makeDb({ seo_link_domains: [d] });
+    await investigatePaths(db, runOpts(db));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('qualified');
+    expect(dom.investigate_failures).toBe(0);
+    expect(dom.investigate_after).toBeNull();
   });
 
   test('repair retry succeeding on the second call still investigates', async () => {

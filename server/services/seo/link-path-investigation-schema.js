@@ -30,6 +30,15 @@ const EXECUTABLE_ACQUISITION_TYPES = Object.freeze(
   ACQUISITION_TYPES.filter((t) => t !== 'unknown' && t !== 'not_reproducible'),
 );
 
+// Types that execute THROUGH a site (form, listing, checkout, claim flow) —
+// they are meaningless without a submission URL. Outreach-shaped types
+// (resource/editorial outreach, partnership) contact a person and may
+// legitimately carry none.
+const URL_REQUIRED_ACQUISITION_TYPES = Object.freeze([
+  'self_service_free', 'self_service_account', 'paid_listing', 'membership',
+  'association', 'sponsorship', 'vendor_registration', 'business_claim', 'content_submission',
+]);
+
 const nullable = (schema) => ({ anyOf: [schema, { type: 'null' }] });
 const nullableEnum = (values) => nullable({ type: 'string', enum: [...values] });
 const nullableString = (maxLength) => nullable({ type: 'string', maxLength });
@@ -116,6 +125,11 @@ const PATH_SCHEMA = {
       then: { properties: { fee_scope: { type: 'string', enum: [...FEE_SCOPES] } } },
       else: { properties: { fee_scope: { type: 'null' } } },
     },
+    // A site-executed type without a submission URL is not a path.
+    {
+      if: { properties: { acquisition_type: { enum: [...URL_REQUIRED_ACQUISITION_TYPES] } } },
+      then: { properties: { submission_url: { type: 'string', minLength: 1 } } },
+    },
     // §3.2 type consistency (the §6.3 validity step re-asserts this in step 4).
     {
       if: { properties: { acquisition_type: { enum: ['paid_listing', 'membership', 'association', 'sponsorship'] } } },
@@ -179,4 +193,4 @@ function validateInvestigation(data) {
   };
 }
 
-module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, validateInvestigation };
+module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, URL_REQUIRED_ACQUISITION_TYPES, validateInvestigation };
