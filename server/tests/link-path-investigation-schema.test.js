@@ -116,6 +116,22 @@ describe('investigator output schema', () => {
     expect(validateInvestigation(good({ paths: [outreach] })).valid).toBe(true);
   });
 
+  test('send-accepted terms force send-first ordering — the deadlock combination is rejected (plan L788, Codex PR r1 P1)', () => {
+    const deadlock = goodPath({ terms_accepted_by_send: true, execution_after_send: false, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    expect(validateInvestigation(good({ paths: [deadlock] })).valid).toBe(false);
+    const sendFirst = goodPath({ terms_accepted_by_send: true, execution_after_send: true, legal_attestation: true, legal_terms_url: 'https://example.com/terms' });
+    expect(validateInvestigation(good({ paths: [sendFirst] })).valid).toBe(true);
+  });
+
+  test('a not_reproducible verdict may carry evidence entries but never a positive-confidence executable path (Codex PR r1 P1)', () => {
+    const executable = goodPath();
+    expect(validateInvestigation(good({ verdict: 'not_reproducible', paths: [executable] })).valid).toBe(false);
+    const deadEnd = goodPath({ acquisition_type: 'unknown' });
+    const zeroConf = goodPath({ confidence: 0 });
+    expect(validateInvestigation(good({ verdict: 'not_reproducible', paths: [deadEnd, zeroConf] })).valid).toBe(true);
+    expect(validateInvestigation(good({ verdict: 'not_reproducible', paths: [] })).valid).toBe(true);
+  });
+
   test('verdicts: watching requires a reason; qualified requires ≥1 path; not_reproducible may have none', () => {
     expect([...VERDICTS]).toEqual(['qualified', 'not_reproducible', 'watching']);
     expect(validateInvestigation(good({ verdict: 'watching', watch_reason: null })).valid).toBe(false);

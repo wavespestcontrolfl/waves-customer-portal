@@ -47,12 +47,14 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (req, res, next) => next(),
 }));
 jest.mock('../services/seo/link-registry-intake', () => ({ intake: jest.fn(), resolveIntakeItems: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/seo/link-path-investigator', () => ({
   investigatePaths: jest.fn(async () => ({ gated: true, selected: 7, investigated: 0 })),
 }));
 
 const router = require('../routes/admin-backlink-agent-v2');
 const { investigatePaths } = require('../services/seo/link-path-investigator');
+const { isEnabled } = require('../config/feature-gates');
 
 function handler(method, routePath) {
   const layer = router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -85,6 +87,16 @@ describe('POST /registry/jobs/investigate', () => {
     const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'nuke' } });
     expect(r.status).toBe(404);
     expect(r.body.error).toMatch(/investigate/);
+  });
+  test('a live gated-on run starts in the background and responds immediately (Codex PR r1 P1)', async () => {
+    isEnabled.mockReturnValue(true);
+    let resolveRun;
+    investigatePaths.mockReturnValueOnce(new Promise((res) => { resolveRun = res; }));
+    const r = await call(handler('post', '/registry/jobs/:job'), { params: { job: 'investigate' }, body: {} });
+    expect(r.body).toEqual({ job: 'investigate', started: true }); // did NOT wait for the run
+    expect(investigatePaths).toHaveBeenCalledWith(expect.anything(), { dryRun: false });
+    resolveRun({ selected: 1, investigated: 1, qualified: 1, watching: 0, notReproducible: 0, pathRefreshes: 0, pathsWritten: 1, failed: [], fetches: 3, llmCalls: 1 });
+    isEnabled.mockReturnValue(false);
   });
 });
 
@@ -151,5 +163,9 @@ describe('PATCH /registry/:id', () => {
     expect(mockState.updates[1].patch.watch_recheck_at).toBeNull();
     const ro = await call(patch(), { params: { id: 'd1' }, body: { action: 'reopen' } });
     expect(ro.body.agent_state).toBe('investigating');
+    // an explicit Reopen is a fresh mandate: the failure backoff is cleared (Codex PR r1 P2)
+    expect(mockState.updates[2].patch.investigate_after).toBeNull();
+    expect(mockState.updates[2].patch.investigate_failures).toBe(0);
+    expect(mockState.updates[0].patch.investigate_after).toBeUndefined(); // watch/reject leave the backoff alone
   });
 });

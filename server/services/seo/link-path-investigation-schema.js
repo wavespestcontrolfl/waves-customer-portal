@@ -130,6 +130,14 @@ const PATH_SCHEMA = {
       if: { properties: { acquisition_type: { enum: [...URL_REQUIRED_ACQUISITION_TYPES] } } },
       then: { properties: { submission_url: { type: 'string', minLength: 1 } } },
     },
+    // §6.3 deadlock rule (plan L788): send-accepted terms force send-first
+    // ordering — submit-first (execution_after_send=false) with
+    // terms_accepted_by_send=true would make the submit require an
+    // acceptance only the post-submit late send performs.
+    {
+      if: { properties: { terms_accepted_by_send: { const: true } } },
+      then: { properties: { execution_after_send: { const: true } } },
+    },
     // §3.2 type consistency (the §6.3 validity step re-asserts this in step 4).
     {
       if: { properties: { acquisition_type: { enum: ['paid_listing', 'membership', 'association', 'sponsorship'] } } },
@@ -155,6 +163,29 @@ const INVESTIGATION_SCHEMA = {
     {
       if: { properties: { verdict: { const: 'watching' } } },
       then: { properties: { watch_reason: { type: 'string', minLength: 1 } } },
+    },
+    // A not_reproducible verdict asserts NO path exists — it may carry
+    // evidence entries (dead-end types, zero confidence) but never a
+    // positive-confidence executable path beside the assertion.
+    {
+      if: { properties: { verdict: { const: 'not_reproducible' } } },
+      then: {
+        properties: {
+          paths: {
+            type: 'array',
+            not: {
+              contains: {
+                type: 'object',
+                required: ['acquisition_type', 'confidence'],
+                properties: {
+                  acquisition_type: { enum: [...ACQUISITION_TYPES.filter((t) => t !== 'unknown' && t !== 'not_reproducible')] },
+                  confidence: { type: 'number', exclusiveMinimum: 0 },
+                },
+              },
+            },
+          },
+        },
+      },
     },
     // A qualified domain must show at least one EXECUTABLE path with real
     // confidence — a verdict backed only by unknown/not_reproducible or

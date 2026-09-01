@@ -283,7 +283,21 @@ const REGISTRY_JOBS = Object.freeze({
   enrich: (opts) => require('../services/seo/link-registry-enrich').enrichDomains(db, { dryRun: opts.dryRun, limit: opts.limit || 200, force: opts.force === true }),
   // Step 3: fetches + one WORKHORSE call per domain; gated by
   // GATE_LINK_INVESTIGATOR inside the service (reports `gated: true` when off).
-  investigate: (opts) => require('../services/seo/link-path-investigator').investigatePaths(db, { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) }),
+  // A LIVE run can hold a request open for many minutes (per domain: up to 8
+  // page fetches + a 60s model call + retries), so it is started in the
+  // background and the response returns immediately — the service's own
+  // session lock serializes runs (a second click reports the held lease via
+  // the next run's `skipped`), and the summary lands in the server log.
+  // dryRun and the gated case are fast and stay synchronous.
+  investigate: (opts) => {
+    const svc = require('../services/seo/link-path-investigator');
+    const args = { dryRun: opts.dryRun, ...(opts.limit ? { limit: opts.limit } : {}) };
+    if (opts.dryRun || !isEnabled('linkInvestigator')) return svc.investigatePaths(db, args);
+    svc.investigatePaths(db, args)
+      .then((r) => logger.info(`[link-investigator] admin run: ${r.skipped ? `SKIPPED (${r.skipped}) ` : ''}selected ${r.selected} investigated ${r.investigated} (qualified ${r.qualified} watching ${r.watching} not_reproducible ${r.notReproducible} refreshes ${r.pathRefreshes}) paths ${r.pathsWritten} failed ${r.failed.length} fetches ${r.fetches} llm ${r.llmCalls}`))
+      .catch((err) => logger.error(`[link-investigator] admin run failed: ${err.message}`));
+    return Promise.resolve({ started: true });
+  },
 });
 router.post('/registry/jobs/:job', async (req, res, next) => {
   try {
@@ -352,6 +366,9 @@ router.patch('/registry/:id', async (req, res, next) => {
     const now = new Date();
     const patch = { agent_state: nextState, updated_at: now };
     patch.watch_recheck_at = nextState === 'watching' ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+    // An explicit Reopen is a fresh mandate: clear the failure backoff so the
+    // very next sweep picks the domain up instead of honoring a stale defer.
+    if (action === 'reopen') { patch.investigate_after = null; patch.investigate_failures = 0; }
     // Guard is IN the update: a lane can move the row to acquiring/acquired
     // between read and write, so the condition rides the UPDATE and a zero
     // count means the race (or a delete) was lost — never overwrite it.

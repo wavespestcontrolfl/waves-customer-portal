@@ -278,9 +278,19 @@ describe('selector (§5 — path-based, not only domain-based)', () => {
     const path = { id: uid(), domain_id: acquiredBaseline.id, path_key: 'unknown:-', superseded_by: null, last_investigated_at: null };
     const db = makeDb({ seo_link_domains: [seed, older, watchingDue, watchingNotDue, acquiredBaseline], seo_link_acquisition_paths: [path] });
     const targets = await selectTargets(db, { limit: 10, now: NOW });
+    // owner seed first, then the merged claim pool by created_at (due.com is
+    // older than older.com), then the state-less refresh
     expect(targets.map((t) => [t.domain.domain, t.claimState])).toEqual([
-      ['seed.com', true], ['older.com', true], ['due.com', true], ['acquired.com', false],
+      ['seed.com', true], ['due.com', true], ['older.com', true], ['acquired.com', false],
     ]);
+  });
+
+  test('an owner-seed watching-due domain jumps a full page of normal new rows (Codex PR r1 P2)', async () => {
+    const normals = Array.from({ length: 5 }, (_, i) => domainRow({ domain: `n${i}.com`, created_at: new Date('2026-08-02') }));
+    const seedWatch = domainRow({ domain: 'seedwatch.com', agent_state: 'watching', discovery_priority: 'owner_seed', watch_recheck_at: new Date('2026-08-30') });
+    const db = makeDb({ seo_link_domains: [...normals, seedWatch] });
+    const targets = await selectTargets(db, { limit: 3, now: NOW });
+    expect(targets[0].domain.domain).toBe('seedwatch.com');
   });
   test('explicit domainIds bypass the queue; acquired ids are path refreshes', async () => {
     const a = domainRow({ domain: 'a.com' });
@@ -521,7 +531,11 @@ describe('full run', () => {
     const placement = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect' };
     const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath], seo_link_prospects: [placement] });
     const replacing = modelPath({ replaces_path_id: oldPath.id });
-    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
+    // deterministic predecessor evidence: the old URL is GONE this pass
+    const goneFetch = async (url, opts) => (url.includes('/old-join')
+      ? { status: 404, finalUrl: url, html: null, blocked: false }
+      : okFetch(url));
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
     expect(r.superseded).toBe(1);
     const old = db._tables.seo_link_acquisition_paths.find((p) => p.id === oldPath.id);
     const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
@@ -650,7 +664,10 @@ describe('full run', () => {
     const placement = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect' };
     const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath, existingReplacement], seo_link_prospects: [placement] });
     const replacing = modelPath({ replaces_path_id: oldPath.id }); // same key as existingReplacement → update branch
-    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
+    const goneFetch = async (url) => (url.includes('/old-join')
+      ? { status: 410, finalUrl: url, html: null, blocked: false }
+      : okFetch(url));
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
     expect(r.superseded).toBe(1);
     const old = db._tables.seo_link_acquisition_paths.find((p) => p.id === oldPath.id);
     expect(old.superseded_by).toBe(existingReplacement.id);
@@ -730,6 +747,80 @@ describe('full run', () => {
     await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf(paths) }) }));
     const termsCalls = fetcher.mock.calls.filter(([u]) => u.includes('/terms')).length;
     expect(termsCalls).toBe(investigator.TERMS_FETCH_BUDGET);
+  });
+
+  test('a hallucinated replaces_path_id of a LIVE path is rejected — supersession needs deterministic evidence (Codex PR r1 P1)', async () => {
+    const d = domainRow();
+    const livePath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
+      path_key: 'paid_listing:https://example.com/old-join', superseded_by: null, baseline: false, confidence: 0.5,
+      last_investigated_at: null, revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: livePath.id, status: 'prospect' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [livePath], seo_link_prospects: [placement] });
+    // every page (the predecessor's included) loads FINE — no gone/redirect evidence
+    const replacing = modelPath({ replaces_path_id: livePath.id });
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
+    expect(r.superseded).toBe(0);
+    const old = db._tables.seo_link_acquisition_paths.find((p) => p.id === livePath.id);
+    expect(old.superseded_by).toBeNull();
+    expect(db._tables.seo_link_prospects[0].path_id).toBe(livePath.id); // placements never repointed
+    const written = db._tables.seo_link_acquisition_paths.find((p) => p.id !== livePath.id);
+    expect(JSON.parse(written.investigation).replaces_rejected).toMatchObject({ id: livePath.id });
+  });
+
+  test('a predecessor redirecting to the successor URL IS deterministic supersession evidence', async () => {
+    const d = domainRow();
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/old-join',
+      path_key: 'paid_listing:https://example.com/old-join', superseded_by: null, baseline: false, confidence: 0.5,
+      last_investigated_at: null, revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath] });
+    const redirectFetch = async (url) => (url.includes('/old-join')
+      ? { status: 200, finalUrl: 'https://example.com/join', html: '<html>Join for USD 95 / year</html>', blocked: false, truncated: false }
+      : okFetch(url));
+    const replacing = modelPath({ replaces_path_id: oldPath.id });
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: redirectFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([replacing]) }) }));
+    expect(r.superseded).toBe(1);
+    expect(db._tables.seo_link_acquisition_paths.find((p) => p.id === oldPath.id).superseded_by).toBeTruthy();
+  });
+
+  test('a state-less refresh still retires a COVERED omitted path — path truth is lane-independent (Codex PR r1 P1)', async () => {
+    const d = domainRow({ agent_state: 'acquired', best_path_id: null });
+    const stalePath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join',
+      path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.7,
+      last_investigated_at: new Date('2026-05-01'), investigation: JSON.stringify({}),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [stalePath] });
+    // the page loads (covered) but the model reports a DIFFERENT path only
+    const other = modelPath({ acquisition_type: 'business_claim', submission_url: 'https://example.com/register', payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([other]) }) }));
+    const stale = db._tables.seo_link_acquisition_paths.find((p) => p.id === stalePath.id);
+    expect(stale.confidence).toBe(0);
+    expect(JSON.parse(stale.investigation).disproven_at).toBeTruthy();
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('acquired'); // aggregate stays lane-owned
+  });
+
+  test('a failed state-less refresh backs off too, without touching the lane-owned state (Codex PR r1 P1)', async () => {
+    const d = domainRow({ agent_state: 'acquired' });
+    const baseline = {
+      id: uid(), domain_id: d.id, acquisition_type: 'unknown', submission_url: null, baseline: true,
+      path_key: 'unknown:-', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [baseline] });
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: false, reason: 'empty_json' }) }));
+    expect(r.failed).toHaveLength(1);
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('acquired'); // never re-parked
+    expect(dom.investigate_failures).toBe(1);
+    expect(dom.investigate_after).toEqual(new Date(NOW.getTime() + _internals.INVESTIGATE_BACKOFF_BASE_MS));
+    // and the selector honors the deferral for refresh targets
+    const again = await _internals.selectTargets(db, { limit: 10, now: NOW });
+    expect(again).toHaveLength(0);
   });
 
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {

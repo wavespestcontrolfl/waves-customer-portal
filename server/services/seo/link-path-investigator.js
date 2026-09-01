@@ -303,19 +303,30 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     }
   };
   const seedFirst = (q) => q.orderByRaw("CASE WHEN discovery_priority = 'owner_seed' THEN 0 ELSE 1 END").orderBy('created_at', 'asc').limit(limit);
-  take(await seedFirst(db('seo_link_domains').whereIn('agent_state', CLAIMABLE_STATES)
-    .where((b) => b.whereNull('investigate_after').orWhere('investigate_after', '<=', now))
-    .select('*')), true);
-  if (out.length < limit) {
-    take(await seedFirst(db('seo_link_domains').where('agent_state', 'watching').where('watch_recheck_at', '<=', now).select('*')), true);
-  }
+  const backoffDue = (col = 'investigate_after') => (b) => b.whereNull(col).orWhere(col, '<=', now);
+  // Owner seeds jump the queue ACROSS the claim-state buckets (§5): both
+  // pools are read, merged, and re-ranked before truncation — an owner-seed
+  // domain due for its watch recheck is never starved by a full page of
+  // normal `new` rows.
+  const [fresh, watchingDue] = await Promise.all([
+    seedFirst(db('seo_link_domains').whereIn('agent_state', CLAIMABLE_STATES).where(backoffDue()).select('*')),
+    seedFirst(db('seo_link_domains').where('agent_state', 'watching').where('watch_recheck_at', '<=', now).where(backoffDue()).select('*')),
+  ]);
+  const claimPool = [...(fresh || []), ...(watchingDue || [])].sort((a, b) => {
+    const seed = (d) => (d.discovery_priority === 'owner_seed' ? 0 : 1);
+    return seed(a) - seed(b) || (new Date(a.created_at) - new Date(b.created_at));
+  });
+  take(claimPool, true);
   const notSeen = (q) => ([...seen].length ? q.whereNotIn('d.id', [...seen]) : q);
   if (out.length < limit) {
     // Never-investigated active paths (baseline imports on acquired domains
     // included, §5): refreshed WITHOUT touching the domain's aggregate state.
+    // The failure backoff applies here too — a repeatedly failing refresh
+    // target is deferred, never re-picked every hourly sweep.
     const rows = await notSeen(db('seo_link_domains as d')
       .join('seo_link_acquisition_paths as p', 'p.domain_id', 'd.id')
-      .whereNull('p.superseded_by').whereNull('p.last_investigated_at'))
+      .whereNull('p.superseded_by').whereNull('p.last_investigated_at')
+      .where(backoffDue('d.investigate_after')))
       .groupBy('d.id')
       .select('d.*')
       .orderByRaw("CASE WHEN d.discovery_priority = 'owner_seed' THEN 0 ELSE 1 END")
@@ -327,7 +338,8 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
     const cutoff = new Date(now.getTime() - REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000);
     const rows = await notSeen(db('seo_link_domains as d')
       .join('seo_link_acquisition_paths as p', 'p.domain_id', 'd.id')
-      .whereNull('p.superseded_by').where('p.last_investigated_at', '<', cutoff))
+      .whereNull('p.superseded_by').where('p.last_investigated_at', '<', cutoff)
+      .where(backoffDue('d.investigate_after')))
       .groupBy('d.id')
       .select('d.*')
       .orderByRaw('MIN(p.last_investigated_at) asc')
@@ -502,20 +514,24 @@ function canonicalizeTerms(html) {
  * failure ceiling parks it as `watching` on the normal recheck cadence.
  * Best-effort — a defer that itself fails only costs backoff, never data.
  */
-async function deferFailedDomain(db, domain, now) {
+async function deferFailedDomain(db, domain, now, { claim = true } = {}) {
   try {
     const failures = (Number(domain.investigate_failures) || 0) + 1;
     const patch = { investigate_failures: failures, updated_at: now };
-    if (failures >= MAX_INVESTIGATE_FAILURES) {
+    if (claim && failures >= MAX_INVESTIGATE_FAILURES) {
       patch.agent_state = 'watching';
       patch.watch_recheck_at = new Date(now.getTime() + WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000);
       patch.investigate_after = null;
       patch.score_reasons = `parked: ${failures} consecutive investigation failures`;
     } else {
+      // Refresh targets (lane-owned aggregate states) never get re-parked —
+      // only deferred: the backoff caps at the max interval instead.
       patch.investigate_after = new Date(now.getTime() + Math.min(INVESTIGATE_BACKOFF_BASE_MS * 2 ** (failures - 1), INVESTIGATE_BACKOFF_MAX_MS));
     }
-    // Only while the claim still stands — never overwrite a newer owner/lane state.
-    await db('seo_link_domains').where({ id: domain.id, agent_state: 'investigating' }).update(patch);
+    // Compare-and-set on the state this run observed — a claim defers only
+    // while `investigating` stands; a refresh defers only while the domain
+    // still holds its lane-owned state. Never overwrite a newer state.
+    await db('seo_link_domains').where({ id: domain.id, agent_state: claim ? 'investigating' : domain.agent_state }).update(patch);
   } catch (err) {
     logger.error(`[link-investigator] defer failed for ${domain.domain}: ${err.message}`);
   }
@@ -583,6 +599,7 @@ async function investigatePaths(db, {
         const urls = candidateUrls(host, { touches, competitorUrls: (competitorRows || []).map((r) => r.source_url), existingPaths });
         const pages = [];
         const fetchErrors = [];
+        const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
         for (const url of urls) {
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) break;
           out.fetches += 1;
@@ -590,6 +607,7 @@ async function investigatePaths(db, {
           const finalUrl = (page && page.finalUrl) || url;
           if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
             const text = canonicalizeTerms(page.html);
+            redirectMap.set(registry.normalizeSubmissionUrl(url), registry.normalizeSubmissionUrl(finalUrl));
             // html/text stay only for THIS domain's evidence verification —
             // never persisted, never prompted beyond the excerpt.
             pages.push({ url: finalUrl, status: page.status, excerpt: text.slice(0, PAGE_EXCERPT_CHARS), text, html: page.html });
@@ -609,7 +627,7 @@ async function investigatePaths(db, {
         out.llmCalls += res.calls || 1;
         if (!res.ok) {
           out.failed.push({ id: domain.id, domain: host, reason: res.reason });
-          if (claimState) await deferFailedDomain(db, domain, now); // backoff, never an hourly re-spend
+          await deferFailedDomain(db, domain, now, { claim: claimState }); // backoff, never an hourly re-spend
           continue;
         }
         const verdict = res.data;
@@ -620,7 +638,9 @@ async function investigatePaths(db, {
         // anything is fetched or persisted: the model read untrusted pages, so
         // an off-host submission/terms URL (prompt injection, hallucination)
         // is moved into the evidence and never becomes an executable target.
-        const writable = (verdict.paths || [])
+        // Belt for the schema's not_reproducible rule: that verdict asserts no
+        // path exists, so nothing under it is ever written as a row.
+        const writable = (verdict.verdict === 'not_reproducible' ? [] : (verdict.paths || []))
           .filter((p) => p.acquisition_type !== 'not_reproducible' && p.acquisition_type !== 'unknown')
           .map((p) => {
             const clean = { ...p, offhost: {} };
@@ -715,9 +735,28 @@ async function investigatePaths(db, {
               ...(p.submissionUnverified ? { submission_verification: p.submissionUnverified } : {}),
               ...(Object.keys(p.offhost).length ? { offhost_urls: p.offhost } : {}),
             };
+            // Supersession needs DETERMINISTIC predecessor evidence, never the
+            // model's word alone (the ids ride the prompt, and prompt content
+            // is derived from untrusted pages): the predecessor's own URL must
+            // have come back 404/410 this pass, or its fetch must have
+            // redirected to the reported successor URL. Anything else keeps
+            // both paths and records the rejected claim in the evidence.
+            let replaces = null;
+            if (p.replaces_path_id && validIds.has(p.replaces_path_id)) {
+              const pred = existingPaths.find((e) => e.id === p.replaces_path_id);
+              const predKey = pred && pred.submission_url ? registry.normalizeSubmissionUrl(pred.submission_url) : null;
+              const gone = !!predKey && fetchErrors.some((f) => registry.normalizeSubmissionUrl(f.url) === predKey && /^status_(404|410)$/.test(f.reason));
+              const redirectedTo = predKey ? redirectMap.get(predKey) : null;
+              const redirected = !!redirectedTo && !!p.submission_url && redirectedTo === registry.normalizeSubmissionUrl(p.submission_url) && redirectedTo !== predKey;
+              if (gone || redirected) {
+                replaces = p.replaces_path_id;
+                evidence.replaces_evidence = gone ? 'predecessor_url_gone' : 'predecessor_redirected_to_successor';
+              } else {
+                evidence.replaces_rejected = { id: p.replaces_path_id, reason: 'no_deterministic_predecessor_evidence' };
+              }
+            }
             const row = pathRowFrom({ ...p, ...verified }, { legalTermsHash: p.legal_terms_url ? termsHashByUrl.get(p.legal_terms_url) : null, now, evidence });
             if (p.submissionUnverified) row.confidence = 0; // exists only as a claim until a pass observes the URL
-            const replaces = p.replaces_path_id && validIds.has(p.replaces_path_id) ? p.replaces_path_id : null;
             const id = await upsertPath(trx, domain.id, row, { replacesPathId: replaces, now });
             if (id) {
               writtenIds.push(id);
@@ -751,8 +790,12 @@ async function investigatePaths(db, {
           // stamping rule below, so a negative verdict retires it too. A
           // path outside fetch coverage (budget, fetch error) is preserved
           // untouched: absence of evidence never disproves it. Baselines are
-          // descriptive and stay; superseded rows were handled.
-          if (claimState) {
+          // descriptive and stay; superseded rows were handled. Path-level
+          // truth is LANE-INDEPENDENT: the same rule applies on state-less
+          // refreshes (a 90-day-stale path on an acquired domain whose page
+          // no longer shows it must retire, not hide freshly stamped) —
+          // only the aggregate agent_state below stays claim-owned.
+          {
             const stale = (await trx('seo_link_acquisition_paths')
               .where({ domain_id: domain.id, baseline: false }).whereNull('superseded_by')
               .whereNotIn('id', writtenIds.length ? writtenIds : ['00000000-0000-0000-0000-000000000000'])
@@ -802,7 +845,7 @@ async function investigatePaths(db, {
       } catch (err) {
         logger.error(`[link-investigator] ${domain.domain}: ${err.message}`);
         out.failed.push({ id: domain.id, domain: domain.domain, reason: `error: ${err.message}` });
-        if (claimState) await deferFailedDomain(db, domain, now);
+        await deferFailedDomain(db, domain, now, { claim: claimState });
       }
     }
     return out;

@@ -2938,6 +2938,7 @@ function BacklinkRegistryCard() {
   const [rows, setRows] = useState([]);
   const [stateFilter, setStateFilter] = useState("");
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -2946,15 +2947,16 @@ function BacklinkRegistryCard() {
   const [runResult, setRunResult] = useState(null);
   const [error, setError] = useState(null);
 
-  const load = async (state = stateFilter, q = search) => {
+  const load = async (state = stateFilter, q = search, p = page) => {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ limit: 50 });
+      const params = new URLSearchParams({ limit: 50, page: p });
       if (state) params.set("agent_state", state);
       if (q.trim()) params.set("q", q.trim());
       const r = await adminFetch(`/admin/backlink-agent/registry?${params}`);
       setRows(r?.items || []);
+      setPage(p);
     } catch (e) {
       setError(e?.message || "Registry load failed");
     } finally {
@@ -3089,7 +3091,9 @@ function BacklinkRegistryCard() {
               ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
               : runResult.dryRun
                 ? `Preview: ${runResult.selected} selected, ~${runResult.wouldFetch ?? 0} fetches, ${runResult.wouldCall ?? 0} model calls`
-                : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}
+                : runResult.started
+                  ? "Investigator started in the background — runs are serialized; refresh the table to see results."
+                  : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}
         </div>
       )}
       <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
@@ -3097,7 +3101,7 @@ function BacklinkRegistryCard() {
           value={stateFilter}
           onChange={(e) => {
             setStateFilter(e.target.value);
-            load(e.target.value, search);
+            load(e.target.value, search, 1);
           }}
           style={{
             padding: "8px 10px",
@@ -3118,7 +3122,7 @@ function BacklinkRegistryCard() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && load(stateFilter, search)}
+          onKeyDown={(e) => e.key === "Enter" && load(stateFilter, search, 1)}
           placeholder="Search domain…"
           style={{
             flex: 1,
@@ -3131,7 +3135,7 @@ function BacklinkRegistryCard() {
             fontSize: 13,
           }}
         />
-        <button onClick={() => load(stateFilter, search)} disabled={loading} style={smallBtn(loading)}>
+        <button onClick={() => load(stateFilter, search, 1)} disabled={loading} style={smallBtn(loading)}>
           {loading ? "Loading…" : "Search"}
         </button>
       </div>
@@ -3250,6 +3254,31 @@ function BacklinkRegistryCard() {
             ))}
           </tbody>
         </table>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          alignItems: "center",
+          gap: 8,
+          marginTop: 10,
+        }}
+      >
+        <button
+          onClick={() => load(stateFilter, search, page - 1)}
+          disabled={loading || page <= 1}
+          style={smallBtn(loading || page <= 1)}
+        >
+          Prev
+        </button>
+        <span style={{ fontSize: 12, color: D.muted }}>Page {page}</span>
+        <button
+          onClick={() => load(stateFilter, search, page + 1)}
+          disabled={loading || rows.length < 50}
+          style={smallBtn(loading || rows.length < 50)}
+        >
+          Next
+        </button>
       </div>
     </Card>
   );
