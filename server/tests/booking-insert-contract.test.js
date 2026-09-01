@@ -449,7 +449,10 @@ function statementPrefix(source, refIndex) {
 // LATER statement: every subsequent `<alias>.insert(` in the file is a
 // site (GH Codex #3702 r4 P2; table-last aliases r7 P2).
 function chaseAlias(source, refIndex, site, statementText = statementPrefix(source, refIndex)) {
-  const assign = /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/.exec(statementText);
+  // The binding is the statement's LHS: a declaration OR a plain
+  // assignment to a bare identifier (`visits = trx(…)` — pre-push Codex
+  // r8 P1). Property targets (`this.visits = …`) can't be chased by name.
+  const assign = /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])/.exec(statementText);
   if (!assign) return;
   const alias = assign[1];
   const aliasRe = new RegExp(`\\b${alias}\\s*\\.\\s*insert\\s*\\(`, 'g');
@@ -579,6 +582,8 @@ describe('booking insert-site contract', () => {
     // A builder captured in a variable is followed through the alias
     // (GH Codex r4 P2 — the fluent-chain-only scan missed it).
     expect(collectInsertSites("const visits = trx('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
+    // …a plain assignment binds the alias too (pre-push r8 P1)…
+    expect(collectInsertSites("let visits;\nvisits = trx('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
     // …including an alias captured through the table-last forms (r7 P2).
     expect(collectInsertSites("const visits = trx.table('scheduled_services');\nawait doStuff();\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
     expect(collectInsertSites("const visits = trx\n  .into('scheduled_services');\nawait visits.insert(data);")).toEqual(["await alias:visits.insert(data"]);
