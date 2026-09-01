@@ -2430,7 +2430,16 @@ async function acceptTimeUnifiedSetupFeeDecision(database, { customerId = null, 
   }
   if (!(Array.isArray(recurringServices) && recurringServices.length > 0)) return false;
   if (estimateOperatorSetupFeeWaived(data)) return false;
-  if (frozenRodentBaitSetupAmount(data) > 0) return null;
+  // COMMERCIAL stays outside the unified rule entirely (same boundary as
+  // the quote basis): commercial coverage is never member-waived (owner
+  // ruling 2026-08-29) and its setup/manual pricing keeps legacy handling.
+  const hasCommercialRecurring = recurringServices.some((svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_'));
+  if (hasCommercialRecurring || estimateRodentBaitIsCommercial(data)) return null;
+  // A rodent_bait_setup line on a no-freeze estimate is the fee's
+  // DISCLOSURE VEHICLE, not an exemption (audit r17 P0): the decision
+  // still runs — an existing customer (active rodent-only included) is
+  // waived, and the billing sites stand the rodent line down on a false.
+  // The line's amount already prices at the unified knob gate-on (r13).
   const verdict = await decideUnifiedSetupFee(database, { customerId });
   return Number(verdict.amount) > 0;
 }
@@ -5977,8 +5986,15 @@ const EstimateConverter = {
       // acceptUnifiedDecision was decided ABOVE, before any rows were
       // written (audit r6 P0 — a post-seeding read self-waives via the
       // just-created series). null = legacy predicate governs.
+      // A rodent_bait_setup line is the fee's disclosure vehicle on
+      // no-freeze rodent estimates (audit r17 P0): when the decision is
+      // non-null and the line rides, the LINE carries the fee — the
+      // membership-style setup line must not also bill.
+      const rodentLineCarriesFee = frozenRodentBaitSetupAmount(estimateData) > 0;
       const setupFeeApplies = billingTerm === 'standard'
-        ? (acceptUnifiedDecision ?? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData }))
+        ? ((acceptUnifiedDecision !== null && rodentLineCarriesFee)
+          ? false
+          : (acceptUnifiedDecision ?? shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })))
         : false;
       // Frozen wizard disclosure — single resolver shared with public
       // acceptance (frozenSetupFeeAmount below), so every charging path
@@ -6019,7 +6035,10 @@ const EstimateConverter = {
           // The pre-seeding locked decision governs (frozen-positive quotes
           // route through its accept-time dedupe too — audit r10 P0);
           // amount is frozen-first.
-          const prepayUnifiedSetupAmount = acceptUnifiedDecision === true
+          // When the rodent line carries the fee (no-freeze rodent
+          // estimate, decision non-null), the unified line stands down —
+          // one vehicle, never both (audit r17 P0).
+          const prepayUnifiedSetupAmount = acceptUnifiedDecision === true && !rodentLineCarriesFee
             ? unifiedAcceptSetupFeeAmount(estimateData)
             : 0;
           const prepayLineDescription = commercialOnlyRecurring
@@ -6103,7 +6122,12 @@ const EstimateConverter = {
           // line; annual-prepay-renewals' seeded-visit fallback subtracts
           // setup lines before dividing by visits (setup is not per-visit
           // coverage money).
-          const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
+          // A unified WAIVE stands the rodent disclosure line down too
+          // (audit r17 P0 — an existing customer's rodent estimate bills
+          // no setup on any vehicle); decision null keeps legacy billing.
+          const prepayRodentSetupAmount = acceptUnifiedDecision === false
+            ? 0
+            : frozenRodentBaitSetupAmount(estimateData);
           const inv = await InvoiceService.create({
             database,
             customerId,
@@ -6499,7 +6523,8 @@ const EstimateConverter = {
       // silently forgiving the setup. Fail closed: inside the accept
       // transaction, a ledger failure fails the accept rather than minting a
       // prepay whose setup could never be restored.
-      if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0) {
+      if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0
+        && acceptUnifiedDecision !== false) {
         const { authoritativeServiceKey, recordSetupFeeClaimForInvoice, assertFrozenRodentSetupStillOwed } = require('./secure-appointment-plans');
         // Gained-family recheck under the customer-row lock (codex #3591
         // r79 P1): a qualifying booking that committed since the unlocked
@@ -6542,7 +6567,7 @@ const EstimateConverter = {
       // rodent claim above by construction (the unified decision is null
       // whenever a rodent setup line rides), and recordSetupFeeClaimFor-
       // Invoice is idempotent on the invoice id.
-      if (draftInvoiceId && acceptUnifiedDecision === true) {
+      if (draftInvoiceId && acceptUnifiedDecision === true && !rodentLineCarriesFee) {
         const { recordSetupFeeClaimForInvoice } = require('./secure-appointment-plans');
         const unifiedRoots = await database('scheduled_services')
           .where({ source_estimate_id: estimateId, customer_id: customerId })

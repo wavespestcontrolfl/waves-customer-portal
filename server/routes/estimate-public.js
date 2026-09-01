@@ -9785,22 +9785,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // acknowledged total must include it or the exact-total check
         // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
         // #3591 r16 P1). Same frozen resolver the converter bills from.
-        const acknowledgedRodentSetup = converter.frozenRodentBaitSetupAmount(estData);
         // The UNIFIED fee rides the prepay invoice too (audit r15 P0) — the
         // acknowledged total must carry the same figure the converter will
         // bill: the frozen amount, or the pre-lock live decision for
         // no-freeze staff/AI/call estimates (a rare cross-accept race here
         // resolves as a retryable PREPAY_QUOTE_STALE, never a silent
-        // mismatch). Unified quotes are never commercial, so the tax blend
-        // stays rodent-only.
-        const acknowledgedUnifiedSetup = await (async () => {
-          const dec = await converter.acceptTimeUnifiedSetupFeeDecision(db, {
-            customerId: acceptResolvedCustomerId,
-            recurringServices: recurringSvcList,
-            estimateData: estData,
-          });
-          return dec === true ? converter.unifiedAcceptSetupFeeAmount(estData) : 0;
-        })();
+        // mismatch). One vehicle, never both (audit r17 P0): a non-null
+        // decision with a rodent line acknowledges the LINE; a false
+        // stands both down. Unified quotes are never commercial, so the
+        // tax blend stays rodent-only.
+        const acknowledgedDec = await converter.acceptTimeUnifiedSetupFeeDecision(db, {
+          customerId: acceptResolvedCustomerId,
+          recurringServices: recurringSvcList,
+          estimateData: estData,
+        });
+        const acknowledgedRodentSetup = acknowledgedDec === false
+          ? 0
+          : converter.frozenRodentBaitSetupAmount(estData);
+        const acknowledgedUnifiedSetup = acknowledgedDec === true && !(acknowledgedRodentSetup > 0)
+          ? converter.unifiedAcceptSetupFeeAmount(estData)
+          : 0;
         const base = Math.round((resolved.amount + acknowledgedRodentSetup + acknowledgedUnifiedSetup) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
@@ -11131,15 +11135,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // dedupe; this mint runs BEFORE any conversion seeding, so the
         // probe never reads this accept's own rows). Amount frozen-first.
         // Hoisted so the claim ledger below records the same figure.
-        const invoiceModeUnifiedSetup = await (async () => {
-          if (treatAsOneTime) return 0;
+        const invoiceModeEstData = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
+        // null = no unified decision applies (gate off, no frozen quote —
+        // legacy billing governs); true/false = the decide-once verdict.
+        const invoiceModeUnifiedDecision = await (async () => {
+          if (treatAsOneTime) return null;
           const EstimateConverterMod = require('../services/estimate-converter');
-          const d = (nextEstimateData && typeof nextEstimateData === 'object' ? nextEstimateData : acceptedEstDataForPricing) || {};
           // A decision is only possible gate-on or for an already-frozen
-          // positive unified quote — otherwise return 0 WITHOUT locking,
+          // positive unified quote — otherwise abstain WITHOUT locking,
           // keeping gate-off accepts byte-identical.
-          const frozenPositiveUnified = d?.setupFeeQuote?.kind === 'unified' && Number(d?.setupFeeQuote?.amount) > 0;
-          if (!frozenPositiveUnified && !require('../services/unified-setup-fee').unifiedSetupFeeEnabled()) return 0;
+          const frozenPositiveUnified = invoiceModeEstData?.setupFeeQuote?.kind === 'unified' && Number(invoiceModeEstData?.setupFeeQuote?.amount) > 0;
+          if (!frozenPositiveUnified && !require('../services/unified-setup-fee').unifiedSetupFeeEnabled()) return null;
           // Serialize with every other setup-fee decision for this customer
           // (audit r14 P0): same lock ORDER as convertEstimate — the
           // property-preferences advisory key FIRST, then the customer row
@@ -11150,13 +11156,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ['property-preferences', String(customerId)],
           );
           await trx('customers').where({ id: customerId }).forUpdate().first('id');
-          const dec = await EstimateConverterMod.acceptTimeUnifiedSetupFeeDecision(trx, {
+          return EstimateConverterMod.acceptTimeUnifiedSetupFeeDecision(trx, {
             customerId,
             recurringServices: recurringSvcList,
-            estimateData: d,
+            estimateData: invoiceModeEstData,
           });
-          return dec === true ? EstimateConverterMod.unifiedAcceptSetupFeeAmount(d) : 0;
         })();
+        // One vehicle, never both (audit r17 P0): a rodent line carries the
+        // fee when present; the unified line rides only without one.
+        const invoiceModeRodentLineFee = treatAsOneTime
+          ? 0
+          : require('../services/estimate-converter').frozenRodentBaitSetupAmount(invoiceModeEstData);
+        const invoiceModeUnifiedSetup = invoiceModeUnifiedDecision === true && !(invoiceModeRodentLineFee > 0)
+          ? require('../services/estimate-converter').unifiedAcceptSetupFeeAmount(invoiceModeEstData)
+          : 0;
         const invoiceDraft = buildEstimateInvoiceModeDraft({
           estimate,
           estData: acceptedEstDataForPricing,
@@ -11177,7 +11190,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,
-          rodentSetupAmount: treatAsOneTime
+          // A unified WAIVE stands the rodent disclosure line down too
+          // (audit r17 P0); decision null keeps legacy billing.
+          rodentSetupAmount: (treatAsOneTime || invoiceModeUnifiedDecision === false)
             ? 0
             : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
           unifiedSetupAmount: invoiceModeUnifiedSetup,
@@ -11236,7 +11251,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // setup as its own line, so a later void/refund of a renamed or
         // repriced invoice must still restore the obligation onto the
         // accepted rodent root.
-        const invoiceModeRodentSetup = treatAsOneTime
+        const invoiceModeRodentSetup = (treatAsOneTime || invoiceModeUnifiedDecision === false)
           ? 0
           : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing);
         if (invoiceModeRodentSetup > 0) {
@@ -11583,11 +11598,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               recurringServices: conversionRecurringServices,
               estimateData: conversionEstData,
             });
-          const setupFeeApplies = acceptUnifiedDecision
-            ?? EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
-              recurringServices: conversionRecurringServices,
-              estimateData: conversionEstData,
-            });
+          // A rodent line is the fee's disclosure vehicle when the decision
+          // is non-null (audit r17 P0): the line bills, the membership-style
+          // setup line stands down; a false stands BOTH down.
+          const conversionRodentLineFee = EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
+          const setupFeeApplies = (acceptUnifiedDecision !== null && conversionRodentLineFee > 0)
+            ? false
+            : (acceptUnifiedDecision
+              ?? EstimateConverter.shouldIncludeWaveGuardSetupFeeForRecurring({
+                recurringServices: conversionRecurringServices,
+                estimateData: conversionEstData,
+              }));
           // allowFallback:false matches the allowFirstApplicationFallback the
           // old converter call passed — an explicit amount or nothing.
           const standardFirstApplicationAmount = EstimateConverter.resolveFirstApplicationAmount({
@@ -11608,7 +11629,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // A one-time selection schedules NO rodent plan — its setup must
           // not mint (codex #3591 r59 P1); the recurring conversion path is
           // the only one that owes it.
-          const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
+          // A unified WAIVE stands the rodent disclosure line down too
+          // (audit r17 P0); decision null keeps legacy billing.
+          const acceptedRodentSetupAmount = (treatAsOneTime || acceptUnifiedDecision === false)
+            ? 0
+            : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
           if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];

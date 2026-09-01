@@ -231,7 +231,10 @@ describe('decide-once enforcement on the billing/handoff paths (pre-push audit P
     // the rodent setup line, governed by the pre-seeding locked decision
     // (frozen-positive quotes route through its one-fee-per-account
     // dedupe), amount frozen-first.
-    expect(src).toMatch(/prepayUnifiedSetupAmount = acceptUnifiedDecision === true\s*\n\s*\? unifiedAcceptSetupFeeAmount\(estimateData\)/);
+    expect(src).toMatch(/prepayUnifiedSetupAmount = acceptUnifiedDecision === true && !rodentLineCarriesFee\s*\n\s*\? unifiedAcceptSetupFeeAmount\(estimateData\)/);
+    // One vehicle, never both: a unified WAIVE also stands the rodent
+    // disclosure line down (audit r17 P0).
+    expect(src).toMatch(/prepayRodentSetupAmount = acceptUnifiedDecision === false\s*\n\s*\? 0/);
     expect(src).toMatch(/prepayUnifiedSetupAmount > 0 \? \[\{\s*description: 'Setup Fee — one-time \(billed with prepay\)'/);
     // The frozen-positive dedupe exists and can only WAIVE — three probes
     // (live series, consumable stamp, live claims-ledger row) then true.

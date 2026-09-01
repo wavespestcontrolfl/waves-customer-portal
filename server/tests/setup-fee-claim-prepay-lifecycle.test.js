@@ -924,7 +924,10 @@ describe('source contracts — where the lifecycle is wired', () => {
   });
 
   test('the estimate-accept prepay ledgers the billed rodent setup on the scheduled rodent root, inside the accept transaction (codex #3591 r37 P1)', () => {
-    expect(converter).toMatch(/if \(billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount\(estimateData\) > 0\) \{/);
+    // A unified-gate WAIVE (acceptUnifiedDecision === false) stands the
+    // rodent ledger down with the line (GATE_UNIFIED_SETUP_FEE audit r17);
+    // decision null keeps the legacy behavior this test pins.
+    expect(converter).toMatch(/if \(billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount\(estimateData\) > 0\s*\n\s*&& acceptUnifiedDecision !== false\) \{/);
     expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot \? rodentRoot\.id : null,/);
     // …and the restore resolves an anchor-less record from the term's source estimate (codex #3591 r39 P1).
     const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
