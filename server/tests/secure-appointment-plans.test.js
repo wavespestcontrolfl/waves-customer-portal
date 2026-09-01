@@ -246,6 +246,13 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
     expect(updates).toEqual([]);
     delete mockTableHandlers.setup_fee_claims;
+    // A LOST clear CAS (a completion claimed the stamp mid-waiver) is a
+    // CONFLICT, never a reported waiver (codex #3591 r87 P1) — the fresh
+    // re-read still shows a stamp, so the resolver throws into the
+    // callers' fail-closed handling instead of returning 0 while the
+    // completion invoices the setup.
+    mockTableHandlers.scheduled_services.update = () => 0;
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).rejects.toThrow(/changed mid-waiver/);
   });
 
   test('an UNRELATED per_application lane (palm) does not hide the rodent disclosure page; non-rodent visits stay hidden (codex #3591 r49 P1)', async () => {

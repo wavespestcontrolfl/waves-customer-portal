@@ -340,8 +340,19 @@ async function directRodentSetupForRow(database, row) {
           .update({ pending_setup_fee: null, updated_at: new Date() });
         if (cleared === 1) {
           logger.info(`[secure-plans] booking-time setup stamp on series ${anchor.id} waived by a family gained since booking — stamp cleared before disclosure`);
+          return 0;
         }
-        return 0;
+        // The CAS lost (codex #3591 r87 P1): a completion claimed the
+        // stamp (negative) or the value changed between the waiver probe
+        // and the clear — reporting "waived" while that completion
+        // invoices the setup would still charge the fee the gained family
+        // waives. Re-read: a stamp that is genuinely GONE is a settled
+        // clear (someone else waived or retired it); anything else is a
+        // conflict — throw so the callers' existing fail-closed handling
+        // retries after the in-flight claim settles.
+        const freshAnchor = await database('scheduled_services').where({ id: anchor.id }).first('id', 'pending_setup_fee');
+        if (freshAnchor?.pending_setup_fee == null) return 0;
+        throw new Error(`series ${anchor.id}: setup stamp changed mid-waiver (now ${freshAnchor.pending_setup_fee}) — retry after the in-flight claim settles`);
       }
     }
     return frozen;
