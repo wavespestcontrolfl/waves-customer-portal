@@ -15,7 +15,7 @@ const {
   staffOfferedKeys,
   currentlyOptedOutKeys,
 } = require('../services/estimate-service-opt-out');
-const { optOutImpact } = require('../routes/estimate-public');
+const { optOutImpact, recurringServiceKeysOf } = require('../routes/estimate-public');
 
 const requestOnly = () => ({
   engineRequest: {
@@ -152,5 +152,17 @@ describe('optOutImpact in add mode', () => {
     });
     expect(impact.disclosures.find((d) => d.code === 'waveguard_tier_change').message).toMatch(/^Adding Mosquito back moves/);
     expect(impact.disclosures.find((d) => d.code === 'restored_per_application').message).toBe('Mosquito comes back at $60.00 per application.');
+  });
+});
+
+describe('recurringServiceKeysOf — the "did the requested line join" check', () => {
+  it('keys rows the way every renderer does, so an incidental extra row never passes as the add', () => {
+    const before = { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] } };
+    const after = { recurring: { services: [{ service: 'pest_control' }, { name: 'Mosquito Program' }] } };
+    expect(recurringServiceKeysOf(before)).toEqual(new Set(['pest_control']));
+    expect(recurringServiceKeysOf(after)).toEqual(new Set(['pest_control', 'mosquito']));
+    const supplementalOnly = { recurring: { services: [{ service: 'pest_control' }, { name: 'Palm Injection' }] } };
+    expect(recurringServiceKeysOf(supplementalOnly).has('mosquito')).toBe(false);
+    expect(recurringServiceKeysOf(null).size).toBe(0);
   });
 });

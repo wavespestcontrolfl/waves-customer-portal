@@ -14433,6 +14433,12 @@ function optOutPrepayRate(result, estData) {
 // no pricing rows) must not shadow a populated engineResult, and a removal
 // with NO trustworthy before-state fails closed at the route (pre-push codex
 // P0 on 9389704). Mapping errors propagate; the route refuses.
+// Normalized section keys of a result's recurring rows — the add rail's
+// "did the requested line actually join" check.
+function recurringServiceKeysOf(result) {
+  const rows = Array.isArray(result?.recurring?.services) ? result.recurring.services : [];
+  return new Set(rows.filter((r) => r && typeof r === 'object').map((r) => recurringServiceKey(r)));
+}
 function optOutResultHasPricingRows(result) {
   if (!result || typeof result !== 'object') return false;
   if (Array.isArray(result?.recurring?.services) && result.recurring.services.length) return true;
@@ -14843,12 +14849,15 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     }
 
     const afterResult = reprice.serverResult;
-    // An add the engine silently declined to price (no new recurring row —
-    // e.g. no turf basis after all) must fail closed, never persist a no-op
-    // "add" the customer then believes is on their plan.
+    // An add the engine declined to price (e.g. no turf basis after all) must
+    // fail closed, never persist a no-op "add" the customer then believes is
+    // on their plan. The REQUESTED line itself must be newly present, keyed
+    // by the same normalizer every renderer uses — a row count would pass on
+    // any incidental supplemental row (pre-push codex P0).
     if (mode === 'add') {
-      const rowsOf = (r) => (Array.isArray(r?.recurring?.services) ? r.recurring.services.length : 0);
-      if (rowsOf(afterResult) <= rowsOf(beforeResult)) {
+      const beforeKeys = recurringServiceKeysOf(beforeResult);
+      const afterKeys = recurringServiceKeysOf(afterResult);
+      if (beforeKeys.has(serviceKey) || !afterKeys.has(serviceKey)) {
         return { status: 409, body: ({ error: 'add_unavailable' }) };
       }
     }
@@ -25286,6 +25295,7 @@ module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.optOutImpact = optOutImpact;
 module.exports.applyServiceMixChange = applyServiceMixChange;
+module.exports.recurringServiceKeysOf = recurringServiceKeysOf;
 module.exports.resolveOptOutBeforeResult = resolveOptOutBeforeResult;
 module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
