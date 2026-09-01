@@ -1294,6 +1294,90 @@ describe('scanner semantics — fail closed (virtual app fixtures)', () => {
     expect(res.problems.some((p) => p.includes('unanalysed function'))).toBe(true);
   });
 
+  test("a directly required factory app (require('express')()) is caught by the appOnly check", () => {
+    const res = new Scanner({
+      appFile: 'server/index.js',
+      registry: { ...REGISTRY, routerConsumers: [{ name: 'createServer', module: 'http', appOnly: true }] },
+      files: {
+        'server/index.js': app([
+          "const http = require('http');",
+          "const live = require('express')();",
+          "live.get('/leak', (req, res) => res.json({}));",
+          'http.createServer(live);',
+        ].join('\n')),
+      },
+    }).scan();
+    expect(res.problems.some((p) => p.includes('reviewed to receive only the app'))).toBe(true);
+  });
+
+  test('a middleware array mutated through an ALIAS is tainted like a direct mutation', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "const { guardA } = require('../middleware/a');",
+        'const chain = [guardA];',
+        'const alias = chain;',
+        'alias.unshift((req, res) => res.json({ secret: 1 }));',
+        "router.get('/leak', chain, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // The alias mutates the same array object — the guard is never credited.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/x/leak']);
+  });
+
+  test('an optional-call registration on a REQUIRED router routes through the external sweep', () => {
+    const res = scanOf({
+      'server/index.js': app([
+        "require('./services/installer');",
+        "app.use('/api/x', require('./routes/x'));",
+      ].join('\n')),
+      'server/routes/x.js': [
+        "const router = require('express').Router();",
+        "router.get('/thing', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+      'server/services/installer.js': [
+        "const shared = require('../routes/x');",
+        "shared?.get('/leak', (req, res) => res.json({}));",
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('outside the owning module'))).toBe(true);
+  });
+
+  test('a reassigned router binding is a reported problem, never a guarded route', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const { guardA } = require('../middleware/a');",
+        "let router = require('express').Router();",
+        'router.use(guardA);',
+        "router = require('express').Router();",
+        "router.get('/leak', (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    expect(res.problems.some((p) => p.includes('assigned more than once'))).toBe(true);
+  });
+
+  test('a mutated imported guard property is refused credit AND reported', () => {
+    const res = scanOf({
+      'server/index.js': app("app.use('/api/x', require('./routes/x'));"),
+      'server/routes/x.js': [
+        "const auth = require('../middleware/a');",
+        "const router = require('express').Router();",
+        'auth.guardA = (req, res, next) => next();',
+        "router.get('/leak', auth.guardA, (req, res) => res.json({}));",
+        'module.exports = router;',
+      ].join('\n'),
+    });
+    // The overwritten export is never credited (route stays public) and the
+    // write itself is rejected.
+    expect(res.publicRoutes.map((r) => `${r.method} ${r.path}`)).toContain('GET /api/x/leak');
+    expect(res.problems.some((p) => p.includes('overwriting a registered guard'))).toBe(true);
+  });
+
   test("a computed string-literal verb (router['get']) registers like the plain form", () => {
     const res = scanOf({
       'server/index.js': app("app.use('/api/x', require('./routes/x'));"),

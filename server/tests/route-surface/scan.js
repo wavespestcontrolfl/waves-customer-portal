@@ -233,6 +233,7 @@ class ModuleAnalysis {
     this.enumScopes = []; // { name, values, start, end } — lexical loop scopes
     this.exportProps = new Map(); // module.exports.<name> = <ident|false>
     this.directExternalRegs = []; // require('./x').<verb>() registrations
+    this.importMemberWrites = []; // auth.guardA = ... on a require() binding
     this.bindingWrites = new Map(); // name -> count of value-bearing writes
     this.reassignedNames = new Set(); // written more than once — ambiguous
     const callsWithIdentifierArgs = [];
@@ -416,6 +417,14 @@ class ModuleAnalysis {
     for (const [name, b] of this.bindings) {
       if (b.kind === 'alias' && this.routers.has(this.canonName(name))) this.routers.add(name);
     }
+    // A router/app binding assigned MORE THAN ONCE collapses two instances
+    // under one identifier: guards installed on the first instance would be
+    // credited to routes on the exported replacement. Never model it.
+    for (const name of this.routers) {
+      if (this.reassignedNames.has(name)) {
+        this.problems.push(`${this.file}: router/app binding ${name} is assigned more than once — guards on one instance do not protect routes on another; use distinct names`);
+      }
+    }
     // `holder.api = router` — extend the modeled object's props; a router
     // assigned into a shape the scanner cannot model is rejected. A property
     // written MORE THAN ONCE is ambiguous (which value a later reference
@@ -434,6 +443,16 @@ class ModuleAnalysis {
     for (const a of memberAssignments) {
       const base = this.resolveMemberChain(a.objectNode);
       const b = base ? this.bindings.get(base) : null;
+      // Writing a property of a REQUIRED module mutates shared CommonJS
+      // state (`auth.guardA = noop` rewrites the export every consumer
+      // sees) — recorded so credit is refused and the sweep can reject
+      // overwrites of registered guards.
+      if (b && (b.kind === 'require' || b.kind === 'requireMember') && b.module !== null) {
+        this.importMemberWrites.push({ module: b.module, prop: a.prop, loc: this.loc(a.node) });
+      } else if (!base && isRequireCall(a.objectNode)) {
+        const mod = resolveModulePath(this.file, a.objectNode.arguments[0].value);
+        if (mod) this.importMemberWrites.push({ module: mod, prop: a.prop, loc: this.loc(a.node) });
+      }
       if (b && b.kind === 'object' && a.right.type === 'Identifier') {
         bumpProp(`${base}.${a.prop}`);
         if (!this.reassignedProps.has(`${base}.${a.prop}`)) b.props.set(a.prop, a.right.name);
@@ -454,6 +473,7 @@ class ModuleAnalysis {
         this.problems.push(`${this.loc(a.node)}: assignment to ${base}.${a.prop} — overwriting a router/app registration method is not supported by the scanner`);
       }
     }
+    this.mutatedImportMembers = new Set(this.importMemberWrites.map((w) => `${w.module}#${w.prop}`));
     this.externalRouterRegs = [...this.directExternalRegs]; // registrations on OTHER modules' routers
     for (const r of this.registrations) {
       if (r.objectNode) r.object = this.resolveMemberChain(r.objectNode) || '<member>';
@@ -478,6 +498,22 @@ class ModuleAnalysis {
       const base = this.resolveMemberChain(call.callee.object);
       if (base && (this.routers.has(base) || APP_IDENTIFIERS.has(base))) {
         this.problems.push(`${this.loc(call)}: optional-call registration on ${base} (?. syntax) is not supported by the scanner — use a plain ${base}.<verb>()/use()`);
+        continue;
+      }
+      // `shared?.get('/leak', h)` where shared = require('../routes/x'):
+      // the router exists at runtime, so Express registers the route — route
+      // the call through the external-mutation sweep like the plain spelling.
+      const prop = !call.callee.computed && call.callee.property.type === 'Identifier'
+        ? call.callee.property.name : null;
+      if (!prop || !(VERBS.has(prop) || ['use', 'route', 'param'].includes(prop))) continue;
+      const ob = base ? this.cleanBinding(base) : null;
+      if (ob && (ob.kind === 'require' || ob.kind === 'requireMember') && ob.module !== null) {
+        this.externalRouterRegs.push({
+          module: ob.module,
+          name: ob.kind === 'requireMember' ? ob.name : null,
+          method: prop,
+          loc: this.loc(call),
+        });
       }
     }
     // A router tucked into an object literal the scanner did NOT model (a
@@ -492,8 +528,14 @@ class ModuleAnalysis {
     // chain[0] = mw) no longer matches what the scanner sees — refuse it.
     this.mutatedArrays = new Set();
     for (const n of mutatedNames) {
-      const b = this.bindings.get(n);
-      if (b && b.kind === 'array') this.mutatedArrays.add(n);
+      // Mutation through an ALIAS (`const alias = chain; alias.unshift(mw)`)
+      // mutates the same array object — taint the canonical binding too.
+      const canon = this.canonName(n);
+      const b = this.bindings.get(canon);
+      if (b && b.kind === 'array') {
+        this.mutatedArrays.add(n);
+        this.mutatedArrays.add(canon);
+      }
     }
     // Only an argument of a REGISTRATION call on a known router/app is a
     // handler array classify() will flatten; an array passed to any other
@@ -729,6 +771,8 @@ class ModuleAnalysis {
   isAppFactory(node) {
     if (!node || node.type !== 'CallExpression' || node.arguments.length) return false;
     const c = node.callee;
+    // Direct factory spelling: `require('express')()`.
+    if (isRequireCall(c)) return c.arguments[0].value === 'express';
     if (c.type !== 'Identifier') return false;
     const b = this.cleanBinding(c.name);
     return Boolean(b && b.kind === 'require' && b.module === null && b.spec === 'express');
@@ -1014,6 +1058,10 @@ class ModuleAnalysis {
         const b = this.bindings.get(canon);
         if (!b) return [{ type: 'opaque', desc: `unbound identifier ${node.name}` }];
         if (b.kind === 'requireMember') {
+          if (b.module !== null && this.mutatedImportMembers.has(`${b.module}#${b.name}`)) {
+            // A consumer overwrote this export — never credit the mutated name.
+            return [{ type: 'opaque', desc: `${node.name} (imported export ${b.name} overwritten in ${this.file})` }];
+          }
           const g = registry.lookup(b.module, b.name);
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
           if (registry.lookupPassthrough(b.module, b.name)) return [{ type: 'passthrough', name: b.name }];
@@ -1141,6 +1189,10 @@ class ModuleAnalysis {
           return [{ type: 'opaque', desc: `${this.src.slice(node.start, node.end)} — unreviewed package export` }];
         }
         if (mod) {
+          if (this.mutatedImportMembers.has(`${mod}#${node.property.name}`)) {
+            // A consumer overwrote this export — never credit the mutated name.
+            return [{ type: 'opaque', desc: `${this.src.slice(node.start, node.end)} (imported export overwritten in ${this.file})` }];
+          }
           const g = registry.lookup(mod, node.property.name);
           if (g && !g.factory) return [{ type: 'guard', name: g.name, exempts: g.exempts }];
           if (registry.lookupPassthrough(mod, node.property.name)) return [{ type: 'passthrough', name: node.property.name }];
@@ -1342,6 +1394,13 @@ class Scanner {
         }
         if (targetsRouter) {
           this.problems.push(`${x.loc}: ${x.method}() on the router exported by ${x.module} — routes registered outside the owning module bypass its guard ordering; register them in ${x.module}`);
+        }
+      }
+      // A consumer overwriting a REGISTERED guard/passthrough export rewrites
+      // what every other importer receives — reject the write itself.
+      for (const w of m.importMemberWrites || []) {
+        if (this.registry.lookup(w.module, w.prop) || this.registry.lookupPassthrough(w.module, w.prop)) {
+          this.problems.push(`${w.loc}: assignment to ${w.module} export '${w.prop}' — overwriting a registered guard/passthrough is not supported by the scanner`);
         }
       }
     };
