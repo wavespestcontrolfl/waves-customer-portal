@@ -58,17 +58,23 @@ describeOrSkip('20260831000080 closeout snapshot backfill (DB-backed)', () => {
       // Post-completion reclassify (GH codex r1 P1): the scheduled row was
       // repointed to another service AFTER completion — the backfill must
       // freeze the RECORD's historical identity, not the replacement's.
+      // …and the repointed row carries a real catalog service_id, so a
+      // mixed-tuple resolve (ss.service_id + sr.service_type) would win on
+      // the id and freeze the replacement's requirements (pre-push P1: the
+      // record identity must be ONE tuple).
+      const anyCatalogRow = await trx('services').first('id');
       const [reclassified] = await trx('scheduled_services').insert({
         customer_id: customerId,
         scheduled_date: '2026-08-01',
         service_type: 'Monthly Mosquito Treatment', // the post-completion repoint
+        service_id: anyCatalogRow ? anyCatalogRow.id : null,
         status: 'completed',
       }).returning('id');
       const reclassifiedRecord = await insertRecord({
         status: 'completed',
         structured_notes: null,
         scheduled_service_id: reclassified.id || reclassified,
-        service_type: 'WDO Inspection Service', // what actually completed
+        service_type: 'WDO Inspection Service', // what actually completed (type-only identity)
       });
 
       await migration.up(trx);
@@ -99,9 +105,11 @@ describeOrSkip('20260831000080 closeout snapshot backfill (DB-backed)', () => {
       // Incomplete records are out of scope — their eventual completion
       // writes the real freeze.
       expect(await notesOf(incomplete)).toBeNull();
-      // Record identity wins over the repointed scheduled row: WDO
-      // inference (no application log, 2 photos), never the mosquito
-      // treatment's (application log required).
+      // Record identity wins over the repointed scheduled row AS ONE
+      // TUPLE: the snapshot resolves the RECORD's type (by name against
+      // the catalog when a row matches) — WDO's verdict (no application
+      // log, 2 photos), never the replacement's, and never the repointed
+      // row's borrowed service_id.
       expect((await notesOf(reclassifiedRecord)).closeoutRequirements).toMatchObject({
         serviceName: 'WDO Inspection Service',
         requiresApplicationLog: false,

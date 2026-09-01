@@ -40,11 +40,15 @@ exports.up = async function up(knex) {
     // The HISTORICAL record's own identity wins (GH codex r1 P1):
     // update-details can repoint the scheduled row's service_id/service_type
     // after completion (admin-dispatch.js documents the repoint), and this
-    // backfill must freeze the service that actually completed — the
-    // scheduled row is only the fallback for legacy records carrying none.
+    // backfill must freeze the service that actually completed. The
+    // identity is ONE TUPLE (pre-push P1 follow-up): a record carrying only
+    // service_type must not borrow the repointed row's service_id — the
+    // resolver prioritizes id, so a mixed tuple would freeze the
+    // replacement's requirements. The scheduled row is the fallback only
+    // when the record carries NEITHER field.
     .distinct(
-      knex.raw('COALESCE(sr.service_id, ss.service_id) AS service_id'),
-      knex.raw('COALESCE(sr.service_type, ss.service_type) AS service_type'),
+      knex.raw('CASE WHEN sr.service_id IS NOT NULL OR sr.service_type IS NOT NULL THEN sr.service_id ELSE ss.service_id END AS service_id'),
+      knex.raw('CASE WHEN sr.service_id IS NOT NULL OR sr.service_type IS NOT NULL THEN sr.service_type ELSE ss.service_type END AS service_type'),
     );
 
   const frozenAt = new Date().toISOString();
@@ -84,8 +88,8 @@ exports.up = async function up(knex) {
             LEFT JOIN scheduled_services ss ON sr2.scheduled_service_id = ss.id
            WHERE sr2.status = 'completed'
              AND (sr2.structured_notes -> 'closeoutRequirements') IS NULL
-             AND COALESCE(sr2.service_id, ss.service_id) IS NOT DISTINCT FROM :serviceId
-             AND COALESCE(sr2.service_type, ss.service_type) IS NOT DISTINCT FROM :serviceType
+             AND (CASE WHEN sr2.service_id IS NOT NULL OR sr2.service_type IS NOT NULL THEN sr2.service_id ELSE ss.service_id END) IS NOT DISTINCT FROM :serviceId
+             AND (CASE WHEN sr2.service_id IS NOT NULL OR sr2.service_type IS NOT NULL THEN sr2.service_type ELSE ss.service_type END) IS NOT DISTINCT FROM :serviceType
         ) target
         WHERE sr.id = target.id`,
       {
