@@ -306,6 +306,9 @@ function parseApplicationAreas(value) {
     .map((part) => part.trim())
     .filter(Boolean);
 }
+export function completionAreasForTypedFindings({ typedOwnsAreas, typedAreas, genericAreas }) {
+  return typedOwnsAreas ? parseApplicationAreas(typedAreas) : (genericAreas || []);
+}
 // Chip choices = this visit's treated-area chips, plus any already-selected
 // area that is no longer chipped at the visit level. Keeping stale
 // selections visible (instead of hiding them like the old <select> did)
@@ -10741,6 +10744,11 @@ export function CompletionPanel({
   }, [service?.id, sprayEvidenceInForm]);
   const typedFindingsOwnAreas = (typedFindingsSchema?.fields || [])
     .some((field) => field?.key === "areas_treated");
+  const completionAreasServiced = completionAreasForTypedFindings({
+    typedOwnsAreas: typedFindingsOwnAreas,
+    typedAreas: findingsValues.areas_treated,
+    genericAreas: areasServiced,
+  });
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
     || [
@@ -13585,7 +13593,7 @@ export function CompletionPanel({
             applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
-            (areasServiced.length === 1 ? areasServiced[0] : null),
+            (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
@@ -13649,7 +13657,7 @@ export function CompletionPanel({
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
         // so we no longer post the same list under both keys.
-        areasServiced,
+        areasServiced: completionAreasServiced,
         // Bait station pins + this visit's statuses (station-map-v1).
         // Statuses post for EVERY active station — 'ok' is the zero-tap
         // default, so an untouched map still records a full check. Shapes

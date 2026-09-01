@@ -19,7 +19,10 @@
 // - Perimeter methods are the exterior applications carrying the
 //   FS 482.2265 posted-notice duty — 'Not applicable' is a contradiction
 //   there, not an answer.
-const TERMITE_LIQUID_DILUTION_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Rodding', 'Wood treatment'];
+const TERMITE_LIQUID_DILUTION_METHODS = [
+  'Spot treatment', 'Liquid perimeter', 'Trenching', 'Rodding',
+  'Foam / void injection', 'Drill-and-inject', 'Wood treatment',
+];
 const TERMITE_NON_DILUTION_METHODS = ['Bait station setup', 'Cartridge replacement', 'Other'];
 const TERMITE_PERIMETER_METHODS = ['Liquid perimeter', 'Trenching', 'Rodding'];
 

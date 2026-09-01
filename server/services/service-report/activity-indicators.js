@@ -1190,6 +1190,16 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (String(values.evidence_level) === 'No active signs observed' && activeEvidence.length) {
       errors.push('"No active signs observed" contradicts live bed bugs or eggs recorded in evidence');
     }
+    if (String(values.treatment_method) === 'Inspection / monitoring only') {
+      const inspectionOnlyWork = new Set([
+        'Encasement recommended', 'Interceptors installed', 'Adjacent rooms inspected',
+      ]);
+      const treatmentWork = list(values.work_completed)
+        .filter((item) => !inspectionOnlyWork.has(item));
+      if (treatmentWork.length) {
+        errors.push('Inspection / monitoring only cannot be combined with treatment work');
+      }
+    }
   }
   if (type === 'one_time_pest_treatment') {
     const pests = list(values.pests_observed);

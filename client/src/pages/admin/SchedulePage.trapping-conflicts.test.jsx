@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { typedFieldValueConflicts } from "./SchedulePage.jsx";
+import {
+  completionAreasForTypedFindings,
+  typedFieldValueConflicts,
+} from "./SchedulePage.jsx";
 
 // Initial-setup constraints mirrored pre-submit (codex P2 r14, PR #3159):
 // the server's validateTypedFindings rejections must surface as the inline
@@ -57,6 +60,16 @@ describe("termite posted-notice pre-submit mirror", () => {
     });
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]).toContain("exterior/perimeter treatments require the posted notice");
+  });
+});
+
+describe("typed area ownership", () => {
+  it("promotes the typed areas into the canonical completion scope", () => {
+    expect(completionAreasForTypedFindings({
+      typedOwnsAreas: true,
+      typedAreas: "Exterior perimeter, Garage",
+      genericAreas: [],
+    })).toEqual(["Exterior perimeter", "Garage"]);
   });
 });
 

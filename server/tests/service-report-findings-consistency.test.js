@@ -1,4 +1,8 @@
-const { PROJECT_TYPES, TERMITE_PERIMETER_METHODS } = require('../services/project-types');
+const {
+  PROJECT_TYPES,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+} = require('../services/project-types');
 const { validateTypedFindings } = require('../services/service-report/activity-indicators');
 
 function validate(type, values) {
@@ -39,6 +43,7 @@ describe('editable service-report findings consistency', () => {
     ['mosquito_event', { activity_level: 'None observed', activity_locations: 'Backyard' }],
     ['bed_bug', { evidence_level: 'No active signs observed', evidence_observed: 'Live bed bugs' }],
     ['bed_bug', { evidence_observed: 'No visible evidence, Cast skins' }],
+    ['bed_bug', { treatment_method: 'Inspection / monitoring only', work_completed: 'Crack & crevice treatment' }],
     ['one_time_pest_treatment', { pests_observed: 'No pest activity observed, Fire ants' }],
     ['one_time_pest_treatment', { evidence_observed: 'No evidence observed, Live pests observed' }],
     ['one_time_pest_treatment', { work_completed: 'Inspection / identification only, Bait placement' }],
@@ -69,6 +74,12 @@ describe('editable service-report findings consistency', () => {
 
   test('rodding carries the termite perimeter posted-notice classification', () => {
     expect(TERMITE_PERIMETER_METHODS).toContain('Rodding');
+  });
+
+  test('liquid termite injection methods require dilution details', () => {
+    expect(TERMITE_LIQUID_DILUTION_METHODS).toEqual(expect.arrayContaining([
+      'Foam / void injection', 'Drill-and-inject',
+    ]));
   });
 
   test('general one-time pest work uses controlled, field-accurate protocol choices', () => {
