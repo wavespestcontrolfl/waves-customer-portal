@@ -776,9 +776,22 @@ function blankNonRenderedCode(src: string): string {
     // (CommonMark) — "Paragraph\n2. text" is continuation text and must
     // not open a phantom container that unblanks following code.
     if (marker && /\d/.test(marker[0]) && !/^ *1[.)]/.test(line) && !prevBlankOrCode && listCols.length === 0) marker = null;
+    // An interrupting block (heading/blockquote/thematic break) ends the
+    // list with no blank line needed (Codex #504 r29).
+    if (!blank && /^ {0,3}(?:#{1,6}\s|>|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(line)) { listCols.length = 0; marker = null; }
     if (marker && marker[1].length <= col() + 3 && eIndent < col() + 4) {
       while (listCols.length && listCols[listCols.length - 1] > marker[1].length) listCols.pop();
-      listCols.push(marker[0].length);
+      // Markers sharing a line ("- - item") nest — stack every column
+      // (Codex #504 r29).
+      let colBase = 0;
+      let mm: RegExpMatchArray | null = marker;
+      let rest = line;
+      while (mm) {
+        colBase += mm[0].length;
+        listCols.push(colBase);
+        rest = rest.slice(mm[0].length);
+        mm = rest.match(/^(?:[-*+]|\d{1,9}[.)])\s+/);
+      }
     } else if (!blank && eIndent < col() && prevBlankOrCode) {
       while (listCols.length && listCols[listCols.length - 1] > eIndent) listCols.pop();
     }
@@ -809,6 +822,57 @@ function blankNonRenderedComments(src: string): string {
   return out.join('');
 }
 
+// Standard JS string-escape decoder — returns the REAL runtime value so
+// validation never judges a different string than JS produces; null for
+// escapes outside the supported set (legacy octal) so those stay opaque
+// (Codex #3646 r26).
+function decodeJsStaticString(raw: string): string | null {
+  let out = '';
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw[i];
+    if (c !== '\\') { out += c; continue; }
+    const n = raw[i + 1];
+    i += 1;
+    if (n === undefined) return null;
+    if (n === 'n') out += '\n';
+    else if (n === 't') out += '\t';
+    else if (n === 'r') out += '\r';
+    else if (n === 'b') out += '\b';
+    else if (n === 'f') out += '\f';
+    else if (n === 'v') out += '\v';
+    else if (n === '0' && !/[0-9]/.test(raw[i + 1] || '')) out += '\0';
+    else if (n === 'x') {
+      const hex = raw.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return null;
+      out += String.fromCharCode(parseInt(hex, 16)); i += 2;
+    } else if (n === 'u') {
+      if (raw[i + 1] === '{') {
+        const close = raw.indexOf('}', i + 2);
+        const hex = close === -1 ? '' : raw.slice(i + 2, close);
+        if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) return null;
+        out += String.fromCodePoint(parseInt(hex, 16)); i = close;
+      } else {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+        out += String.fromCharCode(parseInt(hex, 16)); i += 4;
+      }
+    } else if (/[1-9]/.test(n)) return null; // legacy octal — unsupported
+    else if (n === '\n') { /* line continuation */ }
+    else out += n; // identity escape
+  }
+  return out;
+}
+
+// The static string VALUE of a {'…'}/{"…"} expression, JS-decoded; null
+// for anything else (dynamic, unsupported escapes).
+function staticExprString(expr: string | null): string | null {
+  if (!expr) return null;
+  const m = STATIC_EXPR_STRING_RE.exec(expr);
+  if (!m) return null;
+  return decodeJsStaticString(m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : ''));
+}
+const STATIC_EXPR_STRING_RE = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$/;
+
 // Keywords after which a `/` starts a REGEX, not division (return /x/,
 // case /x/: …) — the last-identifier check both lexers share.
 const REGEX_ALLOWING_KEYWORDS = new Set(['return', 'throw', 'case', 'typeof', 'void', 'delete', 'in', 'of', 'do', 'else', 'instanceof', 'yield', 'await', 'new', 'break', 'continue']);
@@ -825,7 +889,7 @@ const OBJECT_CONTEXT_KEYWORDS = new Set(['return', 'case', 'typeof', 'void', 'de
 // brace is not syntax; operator-position `/` starts one, char-class
 // aware), and // and /* */ comments.
 function closeOfExpressionAt(src: string, i: number): number {
-  let depth = 0; let q: string | null = null; let prevSig = ''; let word = ''; let wordDot = false;
+  let depth = 0; let q: string | null = null; let prevSig = ''; let word = ''; let wordDot = false; let prevWord = ''; let pendingWordBreak = false;
   const parenCtl: boolean[] = [];
   // Brace KINDS: a statement block's `}` returns to statement position (a /
   // after `if (ok) {}` is a regex); an object literal's `}` is an operand
@@ -851,9 +915,9 @@ function closeOfExpressionAt(src: string, i: number): number {
     }
     if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; if (depth === 0) return j; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
-    if (c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // obj.if(…) is a member CALL, not control flow
+    if (c === '(') { parenCtl.push((CONTROL_FLOW_KEYWORDS.has(word) && !wordDot) || (word === 'await' && prevWord === 'for')); prevSig = '('; word = ''; continue; } // obj.if(…) is a member CALL, not control flow
     if (c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
-    if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY, not the keyword — a / after it is division
+    if (/[A-Za-z0-9_$]/.test(c)) { if (pendingWordBreak) { prevWord = word; word = ''; pendingWordBreak = false; } if (word === '') wordDot = prevSig === '.'; word += c; } else if (/\s/.test(c)) { if (word) pendingWordBreak = true; } else { word = ''; prevWord = ''; pendingWordBreak = false; } // whitespace completes a word (for await); obj.return is a property
     if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener
   }
   return -1;
@@ -941,7 +1005,7 @@ function blankExpressionStrings(src: string): string {
   // opaque (title="{" must not open an expression — its brace once paired
   // a later real prop quote and blanked a counted component's opener:
   // fail open); in prose only braces matter.
-  let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false;
+  let inTag = false; let attrQ: string | null = null; let word = ''; let wordDot = false; let prevWord = ''; let pendingWordBreak = false;
   const parenCtl: boolean[] = [];
   const braceKind: boolean[] = []; // true = object literal (see closeOfExpressionAt)
   const objectContext = () => '=([,:?&|!+-*%~^<'.includes(prevSig) || (OBJECT_CONTEXT_KEYWORDS.has(word) && !wordDot);
@@ -965,7 +1029,7 @@ function blankExpressionStrings(src: string): string {
     }
     if (c === '{') { braceKind.push(objectContext()); depth += 1; prevSig = '{'; word = ''; continue; }
     if (c === '}') { depth -= 1; prevSig = braceKind.pop() ? '}' : ';'; word = ''; continue; }
-    if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
+    if (depth > 0 && c === '(') { parenCtl.push((CONTROL_FLOW_KEYWORDS.has(word) && !wordDot) || (word === 'await' && prevWord === 'for')); prevSig = '('; word = ''; continue; } // member calls are not control flow
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
       if (c === '"' || c === "'" || c === '`') {
@@ -1001,7 +1065,7 @@ function blankExpressionStrings(src: string): string {
         }
         if (closed > 0) { for (let k = i + 1; k < closed; k += 1) if (out[k] !== '\n') out[k] = ' '; i = closed; prevSig = '/'; continue; }
       }
-      if (/[A-Za-z0-9_$]/.test(c)) { if (word === '') wordDot = prevSig === '.'; word += c; } else if (!/\s/.test(c)) word = ''; // obj.return is a PROPERTY — division follows it
+      if (/[A-Za-z0-9_$]/.test(c)) { if (pendingWordBreak) { prevWord = word; word = ''; pendingWordBreak = false; } if (word === '') wordDot = prevSig === '.'; word += c; } else if (/\s/.test(c)) { if (word) pendingWordBreak = true; } else { word = ''; prevWord = ''; pendingWordBreak = false; } // whitespace completes a word; obj.return is a property
       if (!/\s/.test(c)) prevSig = (c === '+' || c === '-') && prevSig === c ? ')' : c; // ++/-- end an operand: the / after n++ is DIVISION, not a regex opener; a / after return/throw/case/… IS one (word check above)
     }
   }
@@ -1472,7 +1536,19 @@ export function validateAffiliateUsage(
   // Tailwind's statically-hidden utilities (class="hidden" / "invisible" /
   // "sr-only") hide just as surely as the attribute.
   structural = blankBalancedElements(structural, (attrs) => {
-    const cls = /\bclass(?:Name)?\s*=\s*(["'])([^"']*)\1/i.exec(attrs)?.[2] || '';
+    // class/className read via the balanced walk: a quoted literal OR an
+    // escape-free static string expression ({'hidden'}) both resolve; a
+    // dynamic class keeps the wrapper visible (historic posture), and
+    // unparseable attrs fail closed (Codex #504 r29).
+    const walked = walkJsxAttrs(attrs);
+    if (!walked.ok) return true;
+    let cls: string | null = null;
+    for (const a of walked.list) {
+      const n = a.name.toLowerCase();
+      if (n !== 'class' && n !== 'classname') continue;
+      cls = a.literal !== null ? a.literal : staticExprString(a.expr);
+    }
+    if (cls === null) return false;
     if (!/(?:^|\s)(?:hidden|invisible|sr-only)(?=\s|$)/.test(cls)) return false;
     // Responsively-visible wrappers (class="hidden md:block") stay: mask
     // only elements hidden at EVERY breakpoint.
@@ -1849,8 +1925,9 @@ function parseJsxProps(attrs: string): {
       // JS escape semantics ("\0" is NUL, not "0") are not implemented here
       // — an escape-bearing string stays UNVALIDATED rather than validating
       // a different value (Codex #504 r26).
-      if (raw.includes('\\')) { expressions.add(propName); continue; }
-      simple[propName] = raw; continue;
+      const decoded = decodeJsStaticString(raw);
+      if (decoded === null) { expressions.add(propName); continue; }
+      simple[propName] = decoded; continue;
     }
     const parsed = body === null ? undefined : tryParseStaticJson(body);
     if (parsed !== undefined) {
@@ -1956,11 +2033,27 @@ function tryParseStaticJson(body: string): { value: unknown } | undefined {
           out += ch;
         }
       }
-      // Ordinary JS identifier keys ({ name: 'x' }) become quoted JSON keys
-      // (Codex #3646 r25) — applied outside strings (the walk above already
-      // normalized every string to double quotes).
-      const keyed = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
-      return { value: JSON.parse(keyed.replace(/,\s*([\]}])/g, '$1')) };
+      // Ordinary JS identifier keys become quoted JSON keys — applied only
+      // OUTSIDE string spans so text inside a value ({foo: x} in a name)
+      // is never rewritten (Codex #504 r29). Trailing commas dropped the
+      // same way.
+      const segs: string[] = [];
+      let seg = '';
+      let inStr = false;
+      for (let k = 0; k < out.length; k += 1) {
+        const ch2 = out[k];
+        if (inStr) {
+          seg += ch2;
+          if (ch2 === '\\') { seg += out[k + 1] ?? ''; k += 1; continue; }
+          if (ch2 === '"') { inStr = false; segs.push(seg); seg = ''; }
+          continue;
+        }
+        if (ch2 === '"') { segs.push(seg); seg = ch2; inStr = true; continue; }
+        seg += ch2;
+      }
+      segs.push(seg);
+      const keyed = segs.map((sgm) => (sgm.startsWith('"') ? sgm : sgm.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":').replace(/,\s*([\]}])/g, '$1'))).join('');
+      return { value: JSON.parse(keyed) };
     } catch {
       return undefined;
     }

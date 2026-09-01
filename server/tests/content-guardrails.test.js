@@ -805,6 +805,20 @@ describe('affiliate-link gate (owner monetization pilot 2026-08-31, registry/com
     });
   });
 
+  test('escape decoding; SpiderIdBoard citations via exact required sources (Codex #3646 r26)', () => {
+    const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;
+    const codesOf = (r, code) => r.findings.filter((f) => f.code === code).length;
+    // Hex escapes decode: the runtime value is judged.
+    expect(codesOf(guardrails.evaluate({ body: wrap("<InlineCTA tel={'not\\x2da\\x2dphone'} />"), frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true }), 'INVALID_INLINECTA_PROPS')).toBeGreaterThan(0);
+    // A species board citing an EXACT brief-required source passes the
+    // outbound gate; the same URL without the requirement stays P0.
+    const board = wrap('<SpiderIdBoard species={[{"name":"Wolf","risk":"nuisance","where":"x","hunt":"y","eggSac":"z","source":{"label":"UF/IFAS","url":"https://edis.ifas.ufl.edu/topic"}}]} />');
+    const withReq = guardrails.evaluate({ body: board, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true, requiredSourceUrls: ['https://edis.ifas.ufl.edu/topic'] });
+    expect(codesOf(withReq, 'DISALLOWED_EXTERNAL_LINK')).toBe(0);
+    const withoutReq = guardrails.evaluate({ body: board, frontmatter: { post_type: 'protocol' } }, { targetIsBlog: true });
+    expect(codesOf(withoutReq, 'DISALLOWED_EXTERNAL_LINK')).toBeGreaterThan(0);
+  });
+
   test('lexer-aware spreads; unterminated invocations; JS keys; attr headings; attr URL text (Codex #3646 r25)', () => {
     withAffiliateEnv(() => {
       const wrap = (tag) => `Intro.\n\n## Section\n\n${tag}\n\nMore prose.`;

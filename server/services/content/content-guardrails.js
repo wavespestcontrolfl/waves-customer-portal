@@ -1582,6 +1582,9 @@ function normalizeSourceUrl(u) {
 // The EXACT URLs a brief named. Compared whole, so naming a citation page
 // never widens to its host — an operator asking for one document does not
 // authorize everything that domain can serve.
+// The 64 chars before an index (attr-name lookback for expression props).
+function s0(text, idx) { return text.slice(Math.max(0, idx - 64), idx); }
+
 function allowedExactSourceUrls(requiredSourceUrls = []) {
   const urls = new Set();
   for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
@@ -2044,14 +2047,49 @@ const INLINE_CTA_TEL_RE = /^(?:tel:)?\+?[\d\-().\s]{7,20}$/;
 // The real string value of a STATIC quoted string expression
 // ({'x'} / {"x"}) — null for anything else. tel={'not-a-phone'} carries a
 // value the schemas must see (astro parseJsxProps parity, Codex #3646 r23).
+// Standard JS string-escape decoder (astro decodeJsStaticString parity —
+// Codex #3646 r26): the schemas judge the RUNTIME value; legacy octal
+// stays opaque (null).
+function decodeJsStaticString(raw) {
+  let out = '';
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw[i];
+    if (c !== '\\') { out += c; continue; }
+    const n = raw[i + 1];
+    i += 1;
+    if (n === undefined) return null;
+    if (n === 'n') out += '\n';
+    else if (n === 't') out += '\t';
+    else if (n === 'r') out += '\r';
+    else if (n === 'b') out += '\b';
+    else if (n === 'f') out += '\f';
+    else if (n === 'v') out += '\v';
+    else if (n === '0' && !/[0-9]/.test(raw[i + 1] || '')) out += '\0';
+    else if (n === 'x') {
+      const hex = raw.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return null;
+      out += String.fromCharCode(parseInt(hex, 16)); i += 2;
+    } else if (n === 'u') {
+      if (raw[i + 1] === '{') {
+        const close = raw.indexOf('}', i + 2);
+        const hex = close === -1 ? '' : raw.slice(i + 2, close);
+        if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) return null;
+        out += String.fromCodePoint(parseInt(hex, 16)); i = close;
+      } else {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+        out += String.fromCharCode(parseInt(hex, 16)); i += 4;
+      }
+    } else if (/[1-9]/.test(n)) return null; // legacy octal
+    else if (n === '\n') { /* line continuation */ }
+    else out += n; // identity escape
+  }
+  return out;
+}
 function staticStringOfExpr(expr) {
   const m = /^\{\s*'((?:[^'\\]|\\.)*)'\s*\}$|^\{\s*"((?:[^"\\]|\\.)*)"\s*\}$/.exec(String(expr || ''));
   if (!m) return null;
-  const raw = m[1] !== undefined ? m[1] : m[2];
-  // JS escape semantics (\0 is NUL) are not implemented — escape-bearing
-  // strings stay unvalidated rather than validating a different value.
-  if (raw.includes('\\')) return null;
-  return raw;
+  return decodeJsStaticString(m[1] !== undefined ? m[1] : m[2]);
 }
 
 // Every attribute name with its quoted-literal value (null when
@@ -2852,7 +2890,25 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an executable MDX expression — generated posts may carry only literal component props and comments. Write content as Markdown.');
       }
       if (/:\/\//.test(expr)) {
-        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations. Write the link as Markdown.');
+        // EXCEPTION (Codex #3646 r26): a LITERAL component prop may carry
+        // brief-required citation URLs (the SpiderIdBoard source.url
+        // contract). Allowed ONLY when every :// belongs to an https URL
+        // that is an EXACT brief-required source and no affiliate material
+        // rides along; anything else keeps the P0.
+        const exprExact = allowedExactSourceUrls(requiredSourceUrls);
+        const exprUrls = expr.match(new RegExp(ABSOLUTE_URL_RE.source, 'gi')) || [];
+        const schemeHits = (expr.match(/:\/\//g) || []).length;
+        // ONLY the species data prop qualifies — an expression on src/href/
+        // any other prop stays as live as ever (r14 ruling preserved).
+        const attrName = (/([A-Za-z_][\w-]*)\s*=\s*$/.exec(s0(body, i)) || [])[1] || '';
+        const citationOnly = attrName === 'species'
+          && exprUrls.length > 0
+          && exprUrls.length === schemeHits
+          && !containsAffiliateMaterial(expr)
+          && exprUrls.every((u) => /^https:\/\//i.test(u) && exprExact.has(normalizeSourceUrl(u.replace(/[.,;:!?"']+$/, '')) || '\u0000'));
+        if (!citationOnly) {
+          return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations (a literal component prop may cite ONLY exact brief-required source URLs). Write other links as Markdown.');
+        }
       }
       i = j;
     }
@@ -6206,6 +6262,7 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  blankComments,
   blankNonRenderedMarkdownWithDepths,
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.

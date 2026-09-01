@@ -3527,9 +3527,12 @@ async function publishRefresh(draft, brief = {}) {
   // P1). Fail the publish; the page migrates to .mdx through the new-post
   // lane's migration path, not a refresh.
   if (!refreshMdx) {
-    const rendered = newBody
-      .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
-      .replace(/<!--[\s\S]*?-->/g, ' ');
+    // The SHARED guardrails blanker (fences with CommonMark delimiter
+    // rules, indented code, inline spans, comments) — an ad-hoc regex
+    // false-flagged component text preserved inside legacy code blocks
+    // (Codex #3646 r26).
+    const guardrailsMod = require('../content/content-guardrails');
+    const rendered = guardrailsMod.blankNonRenderedMarkdown(guardrailsMod.blankComments(newBody));
     const comp = rendered.match(/<([A-Z][A-Za-z0-9]*)(?=[\s/>])/);
     if (comp) {
       const err = new Error(`refresh target ${filePath} is a legacy .md file — an MDX component (<${comp[1]}>) cannot render there; migrate the page to .mdx first or drop the component`);
