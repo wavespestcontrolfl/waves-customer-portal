@@ -200,6 +200,16 @@ function builderFor(table) {
   b.whereIn = jest.fn((c, vals) => { conds.push((r) => vals.includes(r[col(c)])); return b; });
   b.whereNull = jest.fn((c) => { conds.push((r) => r[col(c)] == null); return b; });
   b.whereBetween = jest.fn((c, [lo, hi]) => { conds.push((r) => r[col(c)] >= lo && r[col(c)] <= hi); return b; });
+  // resolveReviewBell matches the bell by its metadata dedupeKey.
+  b.whereRaw = jest.fn((sql, bindings) => {
+    if (!/metadata\s*->>\s*'dedupeKey'/.test(String(sql))) throw new Error(`fake db: unsupported whereRaw ${sql}`);
+    const v = Array.isArray(bindings) ? bindings[0] : bindings;
+    conds.push((r) => {
+      const m = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+      return m.dedupeKey === v;
+    });
+    return b;
+  });
   for (const method of ['leftJoin', 'orderBy', 'limit', 'offset']) b[method] = jest.fn(() => b);
   b.select = jest.fn(async () => rows());
   b.first = jest.fn(async () => rows()[0] || null);
@@ -967,6 +977,48 @@ describe('POST /:id/cancel-plan', () => {
       expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ keepThrough: '2027-02-28' }));
       expect(body.prepayDisposition).toBe('end_at_term');
       expect(body.prepayTermOutcome).toBe('ends_at_term');
+    }));
+
+    test('the repair PREVIEW inherits the accepted boundary too — a fingerprinted retry from defaults commits instead of dying on preview_changed', () => withServer(async (baseUrl) => {
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: {
+          scope: [], waiveLateFee: false, sendConfirmation: true,
+          effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term',
+        } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      // The preview from dialog DEFAULTS must display/fingerprint the
+      // accepted end-of-coverage plan, not an immediate cancel.
+      const preview = await (await post(baseUrl, '/cancel-plan/preview', {})).json();
+      expect(preview.effectiveOn).toBe('2027-02-28');
+      expect(preview.prepay).toEqual(expect.objectContaining({ disposition: 'end_at_term' }));
+      // …and the fingerprinted round-trip commits (no preview_changed).
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+      const res = await postCancel(baseUrl, {});
+      expect(res.status).toBe(200);
+      expect((await res.json()).prepayTermOutcome).toBe('ends_at_term');
+    }));
+
+    test('a clean repair resolves the earlier needs-review bell — staff are not re-sent into follow-up that is done', () => withServer(async (baseUrl) => {
+      mockState.service_requests = [{
+        id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel plan (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'now', prepayDisposition: null } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.notifications = [{
+        id: 'n-1', recipient_type: 'admin', read_at: null,
+        metadata: JSON.stringify({ dedupeKey: 'admin_cancel_review:req-9', requestId: 'req-9' }),
+      }];
+      mockState.annual_prepay_terms = [];
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED });
+      const body = await (await postCancel(baseUrl, {})).json();
+      expect(body.processed).toBe(true);
+      expect(body.errors).toEqual([]);
+      expect(mockState.service_requests[0].status).toBe('resolved');
+      expect(mockState.notifications[0].read_at).not.toBeNull();
     }));
 
     test('now + refund: coverage cancelled, refund RECORDED on the case + office task — nothing refunded automatically', () => withServer(async (baseUrl) => {

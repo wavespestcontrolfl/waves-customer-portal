@@ -299,6 +299,10 @@ function cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFee
     // The dialog shows the open balance beside the cancel — a payment or
     // new invoice during the window changes what the operator approved.
     openBalance: impact ? (impact.openBalance ?? null) : null,
+    // The displayed retrieval promise: a station added or removed between
+    // preview and confirm changes whether staff get a pull task — a fact
+    // the card disclosed, so it must trip preview_changed like every other.
+    termiteRental: impact ? impact.termiteRental === true : null,
     visitsPulled: impact ? (impact.visitsCancelled ?? null) : null,
     // Stable visit identities: a reschedule, or one visit completing while
     // another appears, keeps the count identical — the ids+dates don't.
@@ -588,6 +592,22 @@ async function decideTermCancel(term, actorUserId, notes) {
   return { verified: false, fresh: false, conflictingDecision: reread ? reread.renewal_decision || null : null };
 }
 
+// A clean close means every earlier failure was repaired — the unread
+// "needs review" bell for this request must not keep sending staff into
+// follow-up that is already done. Best-effort: a missed stamp leaves a
+// stale bell, never a lost cancel.
+async function resolveReviewBell(requestId) {
+  try {
+    await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereNull('read_at')
+      .whereRaw("metadata->>'dedupeKey' = ?", [`admin_cancel_review:${requestId}`])
+      .update({ read_at: new Date() });
+  } catch (bellErr) {
+    logger.warn(`[admin-cancellation] review-bell resolve failed for request ${requestId}: ${bellErr.message}`);
+  }
+}
+
 function customerSummary(customer) {
   return {
     id: customer.id,
@@ -626,6 +646,13 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
       const requestMeta = requestCancelPlanMeta(acceptance);
       if (requestMeta && requestMeta.waiveLateFee === true) input.waiveLateFee = true;
       if (requestMeta && requestMeta.sendConfirmation === false) input.sendConfirmation = false;
+      // The accepted boundary and disposition inherit here too, BEFORE
+      // resolvePrepay — the commit runs under them, so a preview from
+      // dialog defaults would display and fingerprint an immediate
+      // cancel/refund the commit then rejects as preview_changed,
+      // leaving the repair unreachable.
+      if (requestMeta && requestMeta.effectiveDate) input.effectiveDate = requestMeta.effectiveDate;
+      if (requestMeta && 'prepayDisposition' in requestMeta) input.prepayDisposition = requestMeta.prepayDisposition || null;
       if (!input.waiveLateFee) {
         try {
           const priorCase = await db('cancellation_cases')
@@ -1083,6 +1110,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
               try {
                 const closed = await db('service_requests').where({ id: reqRow.id, status: 'new' })
                   .update({ status: 'resolved', updated_at: new Date() });
+                if (closed) await resolveReviewBell(reqRow.id);
                 if (!closed) {
                   // Same affected-row check as the commit path: a zero-row
                   // close with the row still 'new' is a LOST close, not a
@@ -1568,6 +1596,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       const closed = await db('service_requests').where({ id: request.id })
         .update({ status: 'resolved', updated_at: new Date() });
       if (!closed) throw new Error('acceptance close updated zero rows');
+      await resolveReviewBell(request.id);
     } catch (closeErr) {
       // A stale 'new' acceptance would hand the NEXT cancellation in 24h
       // this request/case and its dedupe keys — a lost close is a
