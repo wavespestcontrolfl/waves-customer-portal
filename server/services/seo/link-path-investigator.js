@@ -1398,7 +1398,9 @@ async function investigatePaths(db, {
             if (p.replaces_path_id && validIds.has(p.replaces_path_id)) {
               const pred = existingPaths.find((e) => e.id === p.replaces_path_id);
               const predKey = pred && pred.submission_url ? registry.normalizeSubmissionUrl(pred.submission_url) : null;
-              const gone = !!predKey && fetchErrors.some((f) => registry.normalizeSubmissionUrl(f.url) === predKey && /^status_(404|410)$/.test(f.reason));
+              // the RECONCILED disproof set — an apex 404 answered by a working
+              // www/http fallback is not a dead predecessor
+              const gone = !!predKey && goneKeys.has(predKey);
               const redirectedTo = predKey ? redirectMap.get(predKey) : null;
               const redirected = !!redirectedTo && !!p.submission_url && redirectedTo === registry.normalizeSubmissionUrl(p.submission_url) && redirectedTo !== predKey;
               // A dead predecessor alone never repoints placements onto a

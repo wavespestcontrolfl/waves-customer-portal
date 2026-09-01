@@ -74,7 +74,7 @@ describe('investigator output schema', () => {
     expect(validateInvestigation(good({ paths: [goodPath({ link_type: 'forum' })] })).valid).toBe(false); // not in CLAIMABLE_LINK_TYPES
     for (const t of R.ACQUISITION_TYPES) {
       const paid = R.PAID_ACQUISITION_TYPES.includes(t);
-      const p = goodPath({ acquisition_type: t, payment_required: paid, fee_scope: paid ? 'per_location' : null });
+      const p = goodPath({ acquisition_type: t, payment_required: paid, fee_scope: paid ? 'per_location' : null, link_type: R.OUTREACH_ACQUISITION_TYPES.includes(t) ? 'resource' : 'directory' }); // lane follows the type (r22)
       // dead-end types are valid path OBJECTS but cannot alone back a qualified verdict
       const verdict = ['unknown', 'not_reproducible'].includes(t) ? 'not_reproducible' : 'qualified';
       expect({ t, valid: validateInvestigation(good({ verdict, paths: [p] })).valid }).toEqual({ t, valid: true });
@@ -152,5 +152,16 @@ describe('investigator output schema', () => {
   test('unknown top-level or path fields are rejected (additionalProperties: false)', () => {
     expect(validateInvestigation({ ...good(), extra: 1 }).valid).toBe(false);
     expect(validateInvestigation(good({ paths: [goodPath({ price_cents: 100 })] })).valid).toBe(false);
+  });
+
+  test('lane consistency: outreach types take outreach lanes, site-executed types take signup lanes (Codex PR r22 P1)', () => {
+    const { SIGNUP_LINK_TYPES, OUTREACH_LINK_TYPES } = require('../services/seo/link-path-investigation-schema');
+    const worker = require('../services/seo/link-prospect-worker');
+    expect([...SIGNUP_LINK_TYPES]).toEqual(worker.SIGNUP_TYPES); // the schema's lanes mirror the executor routing exactly
+    expect([...OUTREACH_LINK_TYPES]).toEqual(worker.OUTREACH_TYPES);
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'membership', payment_required: true, fee_scope: 'per_location', link_type: 'editorial' })] })).valid).toBe(false); // would hand a membership form to the outreach worker
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'resource_outreach', submission_url: null, payment_required: false, fee_scope: null, link_type: 'directory' })] })).valid).toBe(false); // would hand an outreach to the signup runner
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'resource_outreach', submission_url: null, payment_required: false, fee_scope: null, link_type: 'resource' })] })).valid).toBe(true);
+    expect(validateInvestigation(good({ paths: [goodPath({ acquisition_type: 'membership', payment_required: true, fee_scope: 'per_location', link_type: 'directory' })] })).valid).toBe(true);
   });
 });

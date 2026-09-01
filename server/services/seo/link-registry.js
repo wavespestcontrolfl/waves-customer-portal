@@ -383,21 +383,55 @@ const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type']
  *     then no runner may lease it (claim() filters on the policy). Fail
  *     closed — never a synthesized policy from an incomplete signal.
  */
-function movePatch(target, now) {
+const OUTREACH_LANES = new Set(['editorial', 'resource', 'guest_post', 'haro']);
+// Outreach state that is IN FLIGHT or AMBIGUOUS: a placement carrying it
+// never changes lanes (a send may still be executing, or needs human
+// reconciliation) — it keeps the retired path, which nothing can claim.
+const OUTREACH_LOCKED = new Set(['sending', 'sent', 'send_error']);
+const PLACEMENT_MOVE_COLUMNS = ['id', 'path_id', 'link_type', 'outreach_status', 'outreach_sent_at'];
+
+/**
+ * The patch that moves ONE placement onto `target`, or null when the move
+ * must be refused. Lane change rules: a placement leaving the outreach lane
+ * resets SAFE outreach state — an unsent draft (`drafted`) is cleared with
+ * its token, so the approval queue never surfaces a draft for a route that
+ * no longer exists and the worker's lane-independent outreach filter never
+ * strands the row; a locked state (sending / sent / send_error, or a sent
+ * stamp) refuses the move outright.
+ */
+function movePatch(row, target, now) {
   const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
   if (target.submission_url) patch.target_url = target.submission_url;
-  if (target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type)) patch.link_type = target.link_type;
+  const nextLane = target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type) ? target.link_type : null;
+  if (nextLane && nextLane !== row.link_type) {
+    if (OUTREACH_LANES.has(row.link_type) && !OUTREACH_LANES.has(nextLane)) {
+      if (OUTREACH_LOCKED.has(row.outreach_status) || row.outreach_sent_at) return null;
+      if (row.outreach_status === 'drafted') {
+        Object.assign(patch, { outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
+      }
+    }
+    patch.link_type = nextLane;
+  }
   return patch;
 }
 
 async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
-  const move = (where, target) => where.whereNull('claimed_at').update(movePatch(target, now));
+  const moveRows = async (rows, target) => {
+    let moved = 0;
+    for (const row of rows) {
+      const patch = movePatch(row, target, now);
+      if (!patch) continue;
+      moved += await q('seo_link_prospects').where({ id: row.id }).whereNull('claimed_at').update(patch);
+    }
+    return moved;
+  };
   if (successor && successor.id && Array.isArray(pathIds)) {
     if (!pathIds.length) return 0;
-    return move(q('seo_link_prospects').whereIn('path_id', pathIds), successor);
+    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').select(...PLACEMENT_MOVE_COLUMNS);
+    return moveRows(rows || [], successor);
   }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
-  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select('id', 'path_id');
+  const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select(...PLACEMENT_MOVE_COLUMNS);
   let moved = 0;
   for (const r of rows) {
     let cur = await q('seo_link_acquisition_paths').where({ id: r.path_id }).first(...SUCCESSOR_COLUMNS);
@@ -405,7 +439,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
       cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).first(...SUCCESSOR_COLUMNS);
     }
     if (!cur || cur.id === r.path_id || cur.superseded_by) continue; // already live, or the chain did not resolve
-    moved += await move(q('seo_link_prospects').where({ id: r.id }), cur);
+    moved += await moveRows([r], cur);
   }
   return moved;
 }

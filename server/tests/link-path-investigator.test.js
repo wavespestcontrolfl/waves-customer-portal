@@ -2568,4 +2568,51 @@ describe('full run', () => {
     expect(dom.score_reasons).toContain('parked: 6 consecutive investigation failures');
     expect(Number(dom.probe_coverage_mask)).toBe(0); // month-old coverage never survives into the recheck
   });
+
+  // ---- Codex PR round 22 -------------------------------------------------
+
+  test('a cross-lane move resets an unsent draft and REFUSES in-flight or sent outreach (Codex PR r22 P1)', async () => {
+    const { settleRetiredPlacements } = require('../services/seo/link-registry');
+    const d = domainRow();
+    const old = { id: uid(), domain_id: d.id, submission_url: null, link_type: 'editorial', superseded_by: null };
+    const signup = { id: uid(), domain_id: d.id, submission_url: 'https://example.com/add', link_type: 'directory', superseded_by: null };
+    old.superseded_by = signup.id;
+    const base = { domain_id: d.id, path_id: old.id, claimed_at: null, link_type: 'editorial', target_url: null, automation_policy: null };
+    const drafted = { ...base, id: uid(), outreach_status: 'drafted', outreach_to_email: 'ed@example.com', outreach_subject: 'Pitch', outreach_body: 'Hi', outreach_send_token: 'tok-1' };
+    const sending = { ...base, id: uid(), outreach_status: 'sending' };
+    const sent = { ...base, id: uid(), outreach_status: 'none', outreach_sent_at: new Date('2026-08-20') };
+    const errored = { ...base, id: uid(), outreach_status: 'send_error' };
+    const fresh = { ...base, id: uid(), outreach_status: 'none' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [old, signup], seo_link_prospects: [drafted, sending, sent, errored, fresh] });
+    const moved = await settleRetiredPlacements(db, { pathIds: [old.id], successor: signup, now: NOW });
+    expect(moved).toBe(2);
+    expect(drafted).toMatchObject({ path_id: signup.id, link_type: 'directory', target_url: 'https://example.com/add', outreach_status: 'none', outreach_to_email: null, outreach_subject: null, outreach_body: null, outreach_send_token: null });
+    expect(fresh).toMatchObject({ path_id: signup.id, link_type: 'directory' });
+    for (const locked of [sending, sent, errored]) expect(locked).toMatchObject({ path_id: old.id, link_type: 'editorial' }); // never moved: a send may be executing or needs reconciliation
+    // the worker-side mode applies the same rule
+    const moved2 = await settleRetiredPlacements(db, { prospectIds: [sending.id, sent.id], now: NOW });
+    expect(moved2).toBe(0);
+  });
+
+  test('supersession uses the RECONCILED disproof set — an apex 404 answered by www never retires the live predecessor (Codex PR r22 P2)', async () => {
+    const d = domainRow();
+    const pred = {
+      id: uid(), domain_id: d.id, acquisition_type: 'self_service_free', submission_url: 'https://example.com', link_type: 'directory',
+      path_key: 'self_service_free:https://example.com', superseded_by: null, baseline: false, confidence: 0.6, last_investigated_at: null,
+      investigation: JSON.stringify({}), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: pred.id, status: 'prospect', claimed_at: null, link_type: 'directory', target_url: 'https://example.com' };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [pred], seo_link_prospects: [placement] });
+    const fetcher = async (url) => {
+      if (url === 'https://example.com') return { status: 404, finalUrl: url, html: null, blocked: false }; // apex vhost 404s…
+      if (url.startsWith('https://www.example.com')) return okFetch(url); // …the same site answers on www
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' };
+    };
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ replaces_path_id: pred.id })]) }) }));
+    expect(r.superseded).toBe(0);
+    expect(pred.superseded_by).toBeNull();
+    expect(placement.path_id).toBe(pred.id);
+    const written = db._tables.seo_link_acquisition_paths.find((p) => p.id !== pred.id);
+    expect(JSON.parse(written.investigation).replaces_rejected).toMatchObject({ id: pred.id, reason: 'no_deterministic_predecessor_evidence' });
+  });
 });

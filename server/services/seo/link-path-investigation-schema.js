@@ -18,8 +18,14 @@
 const Ajv = require('ajv');
 const {
   ACQUISITION_TYPES, PATH_LINK_TYPES, EXPECTED_REL, EXPECTED_INDEXABILITY,
-  EXPECTED_PERSISTENCE, RENEWAL_PERIODS, FEE_SCOPES, pathKey,
+  EXPECTED_PERSISTENCE, RENEWAL_PERIODS, FEE_SCOPES, OUTREACH_ACQUISITION_TYPES, pathKey,
 } = require('./link-registry');
+
+// Board lanes by executor — mirrors link-prospect-worker's SIGNUP_TYPES /
+// OUTREACH_TYPES (asserted equal by the schema contract test; the worker
+// module is not required here because it binds the DB on load).
+const SIGNUP_LINK_TYPES = Object.freeze(['directory', 'citation', 'social']);
+const OUTREACH_LINK_TYPES = Object.freeze(['editorial', 'resource', 'guest_post', 'haro']);
 
 const VERDICTS = Object.freeze(['qualified', 'not_reproducible', 'watching']);
 
@@ -154,6 +160,17 @@ const PATH_SCHEMA = {
       if: { properties: { acquisition_type: { const: 'self_service_free' } } },
       then: { properties: { payment_required: { const: false } } },
     },
+    // Lane consistency: the path's link_type is the board lane a placement
+    // moved onto it inherits, and the worker routes lanes to executors —
+    // outreach lanes to the outreach worker, directory/citation/social to
+    // the signup runner. An outreach acquisition type in a signup lane (or
+    // a site-executed type in an outreach lane) would hand the placement to
+    // the wrong executor.
+    {
+      if: { properties: { acquisition_type: { enum: [...OUTREACH_ACQUISITION_TYPES] } } },
+      then: { properties: { link_type: { enum: [...OUTREACH_LINK_TYPES] } } },
+      else: { properties: { link_type: { enum: [...SIGNUP_LINK_TYPES] } } },
+    },
   ],
 };
 
@@ -248,4 +265,4 @@ function validateInvestigation(data) {
   return { valid: true, errors: [] };
 }
 
-module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, URL_REQUIRED_ACQUISITION_TYPES, MAX_MODEL_PATHS, validateInvestigation };
+module.exports = { INVESTIGATION_SCHEMA, PATH_SCHEMA, VERDICTS, EXECUTABLE_ACQUISITION_TYPES, URL_REQUIRED_ACQUISITION_TYPES, SIGNUP_LINK_TYPES, OUTREACH_LINK_TYPES, MAX_MODEL_PATHS, validateInvestigation };
