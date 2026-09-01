@@ -343,10 +343,9 @@ describe('onEstimateViewed (view-event rules)', () => {
     expect(JSON.parse(rawJobs[0].bindings[3])).toEqual(expect.objectContaining({ enqueued_dark: true }));
   });
 
-  test('terminal/archived/email-less estimates never evaluate', async () => {
+  test('terminal/archived estimates never evaluate (an email-less one evaluates for the owner bell but never queues — see the phone-only test)', async () => {
     await Engine.onEstimateViewed(baseEstimate({ status: 'accepted' }));
     await Engine.onEstimateViewed(baseEstimate({ archived_at: new Date() }));
-    await Engine.onEstimateViewed(baseEstimate({ customer_email: null }));
     expect(db).not.toHaveBeenCalled();
   });
 
