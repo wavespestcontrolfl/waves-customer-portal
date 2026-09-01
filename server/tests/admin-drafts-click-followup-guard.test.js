@@ -540,13 +540,13 @@ describe('reject — pending-only claim (concurrent owner sessions)', () => {
 describe('list — send-path recipient resolution + paging', () => {
   test('GET / resolves recipient/from from the sms_log thread (same authority as Approve) and accepts a cursor', async () => {
     TWILIO_NUMBERS.findByNumber.mockImplementation((n) => (n === '+19415551000' ? { number: n } : null));
-    enqueue('message_drafts', { first: { id: 'draft-9' } }); // cursor anchor exists
+    enqueue('message_drafts', { first: { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } }); // cursor anchor exists
     enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: 'sms-1' })] }); // page query
     enqueue('sms_log', { first: { id: 'sms-1', from_phone: '+19415550777', to_phone: '+19415551000', customer_id: 'cust-1' } });
     enqueue('message_drafts', { first: { count: '7' } }); // pendingCount
 
     const body = await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/drafts?status=pending&before=draft-9`);
+      const res = await fetch(`${base}/admin/drafts?status=pending&before=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`);
       expect(res.status).toBe(200);
       return res.json();
     });
@@ -582,8 +582,15 @@ describe('list — send-path recipient resolution + paging', () => {
   test('GET / rejects an unknown before cursor (anchor row must exist)', async () => {
     enqueue('message_drafts', { first: undefined }); // anchor lookup misses
     await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/drafts?status=pending&before=garbage`);
+      const res = await fetch(`${base}/admin/drafts?status=pending&before=11111111-2222-3333-4444-555555555555`);
       expect(res.status).toBe(400);
+    });
+  });
+
+  test('GET / rejects a non-UUID cursor BEFORE touching the uuid column (22P02 guard)', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/drafts?status=pending&before=garbage`);
+      expect(res.status).toBe(400); // shape check, no db lookup enqueued
     });
   });
 });

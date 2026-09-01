@@ -630,6 +630,12 @@ router.get('/', async (req, res, next) => {
     let cursorId = null;
     if (req.query.before) {
       cursorId = String(req.query.before);
+      // UUID-shape check BEFORE the lookup: binding a malformed value
+      // against the uuid id column raises 22P02 and turns the intended 400
+      // into a 500 (Codex #3700 r3 P2).
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursorId)) {
+        return res.status(400).json({ error: 'Invalid before cursor' });
+      }
       const anchor = await db('message_drafts').where({ id: cursorId }).first('id');
       if (!anchor) return res.status(400).json({ error: 'Invalid before cursor' });
     }
