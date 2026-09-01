@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   completionAreasForTypedFindings,
+  labelsPresentInMarkerNotes,
   specialtyActionScope,
   typedTreatmentAreaField,
   typedFieldValueConflicts,
@@ -101,6 +102,15 @@ describe("specialty treatment scope", () => {
     expect(specialtyActionScope({
       specialtyKey: "mud_dauber_removal", label: "Active nests treated", areas: ["Attic / structural interior"], defaultScope: "exterior",
     })).toBe("interior");
+  });
+});
+
+describe("structured note marker matching", () => {
+  it("does not retain an active label through an overlapping inactive label", () => {
+    expect(labelsPresentInMarkerNotes(
+      "[Found] Inactive or abandoned nests",
+      ["Active mud nests", "Inactive or abandoned nests"],
+    )).toEqual(["Inactive or abandoned nests"]);
   });
 });
 

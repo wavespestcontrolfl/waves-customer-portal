@@ -320,6 +320,16 @@ export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, 
   // value; new typed selections remain authoritative once present.
   return typedAreas.length ? typedAreas : (genericAreas || []);
 }
+export function labelsPresentInMarkerNotes(notes, labels) {
+  const markerValues = new Set(String(notes || "")
+    .split("\n")
+    .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
+    .map((line) => line.replace(/^\s*\[[^\]]+\]\s*/, "").trim().toLowerCase())
+    .filter(Boolean));
+  return (Array.isArray(labels) ? labels : []).filter((label) => (
+    markerValues.has(String(label || "").trim().toLowerCase())
+  ));
+}
 export function specialtyActionScope({ specialtyKey, label, areas, defaultScope }) {
   const normalizedSpecialty = String(specialtyKey || "").toLowerCase();
   const selectedAreas = (areas || []).map((area) => String(area).toLowerCase());
@@ -12321,14 +12331,7 @@ export function CompletionPanel({
     // arrays are only ever populated alongside a marker (the chip handlers, or
     // a restored pre-draft whose saved notes carry the markers), so deleting a
     // marker line truly deselects the item.
-    const markerLines = notes
-      .split("\n")
-      .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
-      .map((line) => line.toLowerCase());
-    return (Array.isArray(labels) ? labels : []).filter((label) => {
-      const text = String(label || "").trim().toLowerCase();
-      return text && markerLines.some((line) => line.includes(text));
-    });
+    return labelsPresentInMarkerNotes(notes, labels);
   }
   // The still-selected structured labels, honoring whichever deselect model is
   // active: before an AI draft, the [Protocol]/[Found]/[Next] chip lines in the

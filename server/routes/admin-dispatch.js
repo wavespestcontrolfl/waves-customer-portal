@@ -4328,7 +4328,7 @@ const {
   splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
 } = require('../services/completion-invoice-candidate');
-const { SPECIALTY_SERVICE_OBSERVATION_SET } = require('../../shared/specialty-service-observations');
+const { observationsForSpecialtyService } = require('../../shared/specialty-service-observations');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -5284,8 +5284,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const formObservations = normalizeCompletionTextArray(
       Array.isArray(structuredObservations) ? structuredObservations : [],
     );
+    const allowedStructuredObservations = new Set(
+      observationsForSpecialtyService(completionProfile?.serviceKey),
+    );
     const invalidStructuredObservation = formObservations.find(
-      (value) => !SPECIALTY_SERVICE_OBSERVATION_SET.has(value),
+      (value) => !allowedStructuredObservations.has(value),
     );
     if (invalidStructuredObservation) {
       return res.status(422).json({

@@ -9,14 +9,15 @@ import {
 } from "./service-completion-presets";
 import observationAllowlist from "../../../shared/specialty-service-observations";
 
-const { SPECIALTY_SERVICE_OBSERVATION_SET } = observationAllowlist;
+const { observationsForSpecialtyService } = observationAllowlist;
 
 describe("specialty pest completion configuration", () => {
   test("every dropdown observation is server-approved for customer report egress", () => {
-    for (const preset of Object.values(SERVICE_COMPLETION_PRESETS)) {
+    for (const [key, preset] of Object.entries(SERVICE_COMPLETION_PRESETS)) {
+      const allowed = new Set(observationsForSpecialtyService(key));
       for (const group of preset.findingGroups) {
         for (const item of group.options) {
-          expect(SPECIALTY_SERVICE_OBSERVATION_SET.has(item.value)).toBe(true);
+          expect(allowed.has(item.value)).toBe(true);
         }
       }
     }
