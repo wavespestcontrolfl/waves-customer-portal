@@ -596,13 +596,15 @@ async function finalizeDraftSend(draft, updates) {
 router.get('/', async (req, res, next) => {
   try {
     const { status = 'pending', campaign_type: campaignType } = req.query;
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     let query = db('message_drafts')
       .where(status === 'all' ? {} : { status })
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage')
       .orderBy('message_drafts.created_at', 'desc')
-      .limit(50);
+      .limit(50)
+      .offset(offset);
     if (campaignType === 'none') {
       query = query.whereNull('message_drafts.campaign_type');
     } else if (campaignType) {
@@ -610,15 +612,24 @@ router.get('/', async (req, res, next) => {
     }
     const drafts = await query;
 
+    // The list must promise the SAME recipient/from the approve path will
+    // use (resolveDraftRecipient: sms_log thread first, then flags, then
+    // customer) — the flags-only guess could name one number while Approve
+    // texts another (Codex #3700 P1). Resolution failure falls back to the
+    // legacy guess rather than dropping the row.
+    const resolved = await Promise.all(drafts.map((d) => resolveDraftRecipient(d).catch(() => null)));
+
     res.json({
-      drafts: drafts.map(d => {
+      drafts: drafts.map((d, i) => {
         const flags = parseFlags(d.flags);
+        const r = resolved[i];
         return {
           id: d.id, smsLogId: d.sms_log_id,
           customerId: d.customer_id,
           customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
           customerPhone: d.phone || null,
-          recipientPhone: flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+          recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+          resolvedFromNumber: r?.fromNumber || null,
           tier: d.waveguard_tier, stage: d.pipeline_stage,
           inboundMessage: d.inbound_message,
           draftResponse: d.draft_response,
@@ -1014,13 +1025,16 @@ router.get('/:id', async (req, res, next) => {
     if (!d) return res.status(404).json({ error: 'Draft not found' });
 
     const flags = parseFlags(d.flags);
+    // Same resolved recipient/from contract as the list (see GET / above).
+    const r = await resolveDraftRecipient(d).catch(() => null);
     res.json({
       id: d.id,
       smsLogId: d.sms_log_id,
       customerId: d.customer_id,
       customerName: d.first_name ? `${d.first_name} ${d.last_name}` : 'Unknown',
       customerPhone: d.phone || null,
-      recipientPhone: flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+      recipientPhone: r?.toPhone || flags.phone || flags.toPhone || flags.leadPhone || d.phone || null,
+      resolvedFromNumber: r?.fromNumber || null,
       tier: d.waveguard_tier,
       stage: d.pipeline_stage,
       inboundMessage: d.inbound_message,

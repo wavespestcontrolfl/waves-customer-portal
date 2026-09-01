@@ -35,6 +35,7 @@ const DRAFTS = {
       intent: "scheduling",
       campaignType: null,
       contextSummary: null,
+      resolvedFromNumber: "+19415551000",
       createdAt: new Date().toISOString(),
     },
   ],
@@ -59,7 +60,11 @@ describe("PendingDraftsTab", () => {
     expect(screen.getByText("Click follow-up")).toBeInTheDocument();
     expect(screen.getByText("Reply draft")).toBeInTheDocument();
     const links = screen.getAllByText("Open in Communications");
-    expect(links[0]).toHaveAttribute("href", "/admin/communications?draftId=d1");
+    // The deep link pins the composer to the draft's own thread: recipient
+    // always; the sms_log-anchored From number when the send path resolved
+    // one (without it the composer's default From splits the conversation).
+    expect(links[0]).toHaveAttribute("href", "/admin/communications?draftId=d1&phone=%2B19415550100");
+    expect(links[1]).toHaveAttribute("href", "/admin/communications?draftId=d2&phone=%2B19415550101&fromNumber=%2B19415551000");
     expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending");
   });
 
@@ -113,5 +118,46 @@ describe("PendingDraftsTab", () => {
     adminFetch.mockResolvedValue({ drafts: [], pendingCount: 0 });
     render(<PendingDraftsTab embedded />);
     expect(await screen.findByText("No pending drafts", { exact: false })).toBeInTheDocument();
+  });
+
+  it("a terminal 422 (campaign retired) also reloads the live queue", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    const ineligible = Object.assign(new Error("Campaign no longer eligible"), { status: 422 });
+    adminFetch.mockRejectedValueOnce(ineligible);
+    adminFetch.mockResolvedValueOnce({ drafts: [DRAFTS.drafts[1]], pendingCount: 1 });
+    fireEvent.click(screen.getAllByText("Approve & send")[0]);
+    await waitFor(() => expect(screen.getByText("Campaign no longer eligible")).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Pat Customer")).not.toBeInTheDocument());
+    expect(screen.getByText("Sam Owner")).toBeInTheDocument();
+  });
+
+  it("a vanished lane filter falls back to All instead of stranding an empty view", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    fireEvent.click(screen.getByText("Click follow-up 1")); // filter to Pat's lane
+    expect(screen.queryByText("Sam Owner")).not.toBeInTheDocument();
+    adminFetch.mockResolvedValueOnce({ success: true });
+    fireEvent.click(screen.getByText("Reject")); // action the lane's last draft
+    await waitFor(() => expect(screen.queryByText("Pat Customer")).not.toBeInTheDocument());
+    expect(screen.getByText("Sam Owner")).toBeInTheDocument(); // fell back to All
+  });
+
+  it("pages older drafts with offset and appends without duplicates", async () => {
+    adminFetch.mockResolvedValue({ drafts: DRAFTS.drafts, pendingCount: 3 });
+    render(<PendingDraftsTab embedded />);
+    await screen.findByText("Pat Customer");
+    expect(screen.getByText("3 pending drafts")).toBeInTheDocument();
+    expect(screen.getByText("(showing 2)")).toBeInTheDocument();
+    adminFetch.mockResolvedValueOnce({
+      drafts: [DRAFTS.drafts[1], { ...DRAFTS.drafts[0], id: "d3", customerName: "Old Draft" }],
+      pendingCount: 3,
+    });
+    fireEvent.click(screen.getByText("Load older drafts (1 more)"));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/drafts?status=pending&offset=2"));
+    await waitFor(() => expect(screen.getByText("Old Draft")).toBeInTheDocument());
+    expect(screen.getAllByText("Sam Owner")).toHaveLength(1); // dedup by id
   });
 });

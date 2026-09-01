@@ -52,6 +52,19 @@ function laneLabel(lane) {
   return LANE_LABELS[lane] || String(lane).replace(/_/g, " ");
 }
 
+// Deep link that keeps the composer on the draft's own thread: phone pins
+// the recipient, and resolvedFromNumber (the send path's sms_log-anchored
+// Waves number) pins the From + thread lock — without it the composer's
+// default From is submitted as an explicit override and an inbound
+// conversation on another office number would split.
+function communicationsHref(draft) {
+  const params = new URLSearchParams({ draftId: draft.id });
+  const to = draft.recipientPhone || draft.customerPhone;
+  if (to) params.set("phone", to);
+  if (draft.resolvedFromNumber) params.set("fromNumber", draft.resolvedFromNumber);
+  return `/admin/communications?${params.toString()}`;
+}
+
 function timeLabel(value) {
   if (!value) return "-";
   const date = new Date(value);
@@ -202,7 +215,7 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
             Reject
           </ActionButton>
           <a
-            href={`/admin/communications?draftId=${encodeURIComponent(draft.id)}`}
+            href={communicationsHref(draft)}
             style={{ marginLeft: "auto", fontSize: 13, color: D.blue, textDecoration: "none" }}
           >
             Open in Communications
@@ -215,7 +228,9 @@ function DraftCard({ draft, busy, onApprove, onRevise, onReject }) {
 
 export default function PendingDraftsTab({ embedded = false }) {
   const [drafts, setDrafts] = useState([]);
+  const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -227,12 +242,32 @@ export default function PendingDraftsTab({ embedded = false }) {
     try {
       const data = await adminFetch("/admin/drafts?status=pending");
       setDrafts(Array.isArray(data?.drafts) ? data.drafts : []);
+      setPendingCount(Number(data?.pendingCount) || 0);
     } catch (err) {
       setError(err.message || "Failed to load drafts");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // The API pages newest-first, 50 at a time; without this, older drafts
+  // past the first page would be unreachable and silently starve.
+  const loadOlder = useCallback(async () => {
+    setLoadingMore(true);
+    try {
+      const data = await adminFetch(`/admin/drafts?status=pending&offset=${drafts.length}`);
+      const older = Array.isArray(data?.drafts) ? data.drafts : [];
+      setPendingCount(Number(data?.pendingCount) || 0);
+      setDrafts((current) => {
+        const seen = new Set(current.map((d) => d.id));
+        return [...current, ...older.filter((d) => !seen.has(d.id))];
+      });
+    } catch (err) {
+      setNotice({ tone: "err", text: err.message || "Failed to load older drafts" });
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [drafts.length]);
 
   useEffect(() => {
     load();
@@ -247,11 +282,19 @@ export default function PendingDraftsTab({ embedded = false }) {
     return [...seen.entries()];
   }, [drafts]);
 
-  const visible = laneFilter === "all" ? drafts : drafts.filter((d) => laneOf(d) === laneFilter);
+  // A filtered lane whose last draft was just actioned would otherwise
+  // strand the tab on an empty view (the chips row hides itself when only
+  // one lane remains) — a vanished selection falls back to All.
+  const effectiveFilter = laneFilter !== "all" && !lanes.some(([lane]) => lane === laneFilter)
+    ? "all"
+    : laneFilter;
+  const visible = effectiveFilter === "all" ? drafts : drafts.filter((d) => laneOf(d) === effectiveFilter);
 
   // 409 = another session (or an auto-send race) already actioned the
-  // draft; 503 = the pre-send gate was unreachable and the draft was left
-  // pending. Both resolve by reloading the live queue.
+  // draft; 422 = a campaign gate retired the row as terminally ineligible.
+  // Both mean the card no longer reflects reality — reload the live queue.
+  // 503 = the pre-send gate was unreachable and the draft was left
+  // pending; the card stays for a retry.
   const runAction = useCallback(async (draft, label, fn) => {
     setBusyId(draft.id);
     setNotice(null);
@@ -259,9 +302,10 @@ export default function PendingDraftsTab({ embedded = false }) {
       await fn();
       setNotice({ tone: "ok", text: `${label} — ${draft.customerName || "draft"}` });
       setDrafts((current) => current.filter((d) => d.id !== draft.id));
+      setPendingCount((n) => Math.max(0, n - 1));
     } catch (err) {
       setNotice({ tone: "err", text: err.message || `${label} failed` });
-      if (err.status === 409) load();
+      if (err.status === 409 || err.status === 422) load();
     } finally {
       setBusyId(null);
     }
@@ -300,15 +344,18 @@ export default function PendingDraftsTab({ embedded = false }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-          {loading ? "Loading pending drafts" : `${drafts.length} pending draft${drafts.length === 1 ? "" : "s"}`}
+          {loading ? "Loading pending drafts" : `${pendingCount} pending draft${pendingCount === 1 ? "" : "s"}`}
+          {!loading && drafts.length < pendingCount && (
+            <span style={{ fontWeight: 500, color: D.muted }}> (showing {drafts.length})</span>
+          )}
         </span>
         {lanes.length > 1 && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginLeft: 8 }}>
-            <button type="button" onClick={() => setLaneFilter("all")} style={{ background: laneFilter === "all" ? D.heading : "#FFFFFF", color: laneFilter === "all" ? "#FFFFFF" : D.text, border: `1px solid ${D.border}`, borderRadius: 999, padding: "3px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            <button type="button" onClick={() => setLaneFilter("all")} style={{ background: effectiveFilter === "all" ? D.heading : "#FFFFFF", color: effectiveFilter === "all" ? "#FFFFFF" : D.text, border: `1px solid ${D.border}`, borderRadius: 999, padding: "3px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
               All
             </button>
             {lanes.map(([lane, count]) => (
-              <button key={lane} type="button" onClick={() => setLaneFilter(lane)} style={{ background: laneFilter === lane ? D.heading : "#FFFFFF", color: laneFilter === lane ? "#FFFFFF" : D.text, border: `1px solid ${D.border}`, borderRadius: 999, padding: "3px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              <button key={lane} type="button" onClick={() => setLaneFilter(lane)} style={{ background: effectiveFilter === lane ? D.heading : "#FFFFFF", color: effectiveFilter === lane ? "#FFFFFF" : D.text, border: `1px solid ${D.border}`, borderRadius: 999, padding: "3px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
                 {laneLabel(lane)} {count}
               </button>
             ))}
@@ -345,6 +392,17 @@ export default function PendingDraftsTab({ embedded = false }) {
           onReject={reject}
         />
       ))}
+
+      {!loading && drafts.length < pendingCount && (
+        <button
+          type="button"
+          onClick={loadOlder}
+          disabled={loadingMore}
+          style={{ justifySelf: "start", background: "#FFFFFF", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8, padding: "7px 14px", fontSize: 14, fontWeight: 500, cursor: loadingMore ? "default" : "pointer" }}
+        >
+          {loadingMore ? "Loading older drafts" : `Load older drafts (${pendingCount - drafts.length} more)`}
+        </button>
+      )}
     </div>
   );
 }

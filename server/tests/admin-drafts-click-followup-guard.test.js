@@ -55,6 +55,7 @@ jest.mock('../services/click-followup-gate', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { evaluateClickFollowupGate } = require('../services/click-followup-gate');
 const router = require('../routes/admin-drafts');
@@ -64,7 +65,7 @@ const updates = [];
 
 function makeBuilder(table, cfg = {}) {
   const b = {};
-  for (const m of ['where', 'whereIn', 'leftJoin', 'join', 'select', 'orderBy', 'limit', 'count']) {
+  for (const m of ['where', 'whereIn', 'leftJoin', 'join', 'select', 'orderBy', 'limit', 'offset', 'count']) {
     b[m] = jest.fn(() => b);
   }
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
@@ -533,5 +534,26 @@ describe('reject — pending-only claim (concurrent owner sessions)', () => {
       { table: 'message_drafts', payload: expect.objectContaining({ status: 'rejected' }) },
       { table: 'click_followup_actions', payload: expect.objectContaining({ status: 'dismissed' }) },
     ]));
+  });
+});
+
+describe('list — send-path recipient resolution + paging', () => {
+  test('GET / resolves recipient/from from the sms_log thread (same authority as Approve) and honors offset', async () => {
+    TWILIO_NUMBERS.findByNumber.mockImplementation((n) => (n === '+19415551000' ? { number: n } : null));
+    enqueue('message_drafts', { rows: [draftRow({ status: 'pending', sms_log_id: 'sms-1' })] }); // page query
+    enqueue('sms_log', { first: { id: 'sms-1', from_phone: '+19415550777', to_phone: '+19415551000', customer_id: 'cust-1' } });
+    enqueue('message_drafts', { first: { count: '7' } }); // pendingCount
+
+    const body = await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/drafts?status=pending&offset=2`);
+      expect(res.status).toBe(200);
+      return res.json();
+    });
+
+    // The card promises what Approve will actually do: the inbound thread's
+    // phone, not the flags/customer guess, and the thread's Waves number.
+    expect(body.drafts[0].recipientPhone).toBe('+19415550777');
+    expect(body.drafts[0].resolvedFromNumber).toBe('+19415551000');
+    expect(body.pendingCount).toBe(7);
   });
 });
