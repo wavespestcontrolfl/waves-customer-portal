@@ -293,18 +293,17 @@ function businessProfile() {
 /** Reclaim leases older than maxHours back to the pool (stuck-worker recovery). */
 async function sweepExpiredClaims(maxHours = 6) {
   const cutoff = new Date(Date.now() - maxHours * 3600 * 1000);
-  const stale = await db('seo_link_prospects')
+  // ONE atomic statement: the state predicate rides the UPDATE (a row that
+  // left `prospect` between a read and a write must keep its lease) and
+  // RETURNING hands back exactly the rows it released, for settlement.
+  const rows = await db('seo_link_prospects')
     .whereNotNull('claimed_at')
     .where('claimed_at', '<', cutoff)
     .where({ status: 'prospect' }) // only release ones still unworked
-    .select('id');
-  const ids = (stale || []).map((r) => r.id);
-  if (!ids.length) return { released: 0 };
-  const released = await db('seo_link_prospects')
-    .whereIn('id', ids)
-    .whereNotNull('claimed_at')
-    .where('claimed_at', '<', cutoff)
-    .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+    .update({ claimed_at: null, claimed_by: null, updated_at: new Date() })
+    .returning(['id']);
+  const ids = (rows || []).map((r) => (r && typeof r === 'object' ? r.id : r)).filter(Boolean);
+  const released = ids.length;
   if (released) {
     logger.info(`[link-worker] released ${released} stale claim(s)`);
     await settleReleased(ids);
