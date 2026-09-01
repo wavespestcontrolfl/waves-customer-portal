@@ -325,10 +325,13 @@ describe('POST / — admin create', () => {
     recurringPattern: 'monthly',
     recurringCount: 3,
     boosterMonths: [11],
-    // Priced on purpose: these tests are about occupancy locking, and an
-    // unpriced recurring plan for a rate-less customer is refused up front by
-    // recurringWithoutBillableAmount before any locking happens.
+    // Priced AND invoice-stamped on purpose: these tests are about occupancy
+    // locking, and a recurring plan that would complete without ever minting
+    // an invoice is refused by recurringWithoutBillableAmount before any
+    // locking happens. CreateAppointmentModal always sends createInvoice on a
+    // real booking, so this mirrors production rather than relaxing the gate.
     estimatedPrice: 89,
+    createInvoice: true,
   };
   // monthly from Fri 07-03 ×3 anchors on the ordinal weekday → children on
   // the first Fridays 08-07, 09-04; November booster → 11-03.

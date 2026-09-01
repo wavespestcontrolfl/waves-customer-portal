@@ -78,122 +78,74 @@ describe('unbilledVisitAlert (day-view money-gap flag)', () => {
   });
 });
 
-describe('recurringWithoutBillableAmount (booking gate, canonical prediction)', () => {
+describe('recurringWithoutBillableAmount (booking gate)', () => {
   const { recurringWithoutBillableAmount } = adminScheduleRouter._test;
 
-  // A recurring plan with no resolved price and no billable rate: every visit
-  // completes at $0, forever (prod 2026-08-31).
-  const unbillable = {
+  const C = (patch) => ({ billing_mode: null, monthly_rate: 0, waveguard_tier: null, per_application_fee: null, ...patch });
+  const base = {
     isRecurring: true,
     recurringFloorPrice: 0,
-    customer: { billing_mode: null, monthly_rate: 0, waveguard_tier: 'Bronze', per_application_fee: null },
-    prepaid: null,
+    createInvoiceOnComplete: true,
     isCallback: false,
     serviceType: 'Monthly Pest Control Service',
+    customer: C({}),
   };
-  const withCustomer = (patch) => ({ ...unbillable, customer: { ...unbillable.customer, ...patch } });
 
-  test('refuses a recurring plan with no number anywhere', () => {
-    const out = recurringWithoutBillableAmount(unbillable);
+  test('refuses a recurring plan with no billable amount', () => {
+    const out = recurringWithoutBillableAmount(base);
     expect(out).toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
-    expect(out.error).toMatch(/monthly rate/i);
   });
 
   test('a one-off visit is never blocked — booking stays instant', () => {
-    expect(recurringWithoutBillableAmount({ ...unbillable, isRecurring: false })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...base, isRecurring: false })).toBeNull();
   });
 
-  test('the RESOLVED floor price satisfies it — including one the server derived', () => {
-    // Post-buildAppointmentPricing, so a booking that sent no explicit price
-    // but priced off services.base_price passes (Codex P1).
-    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
-    // The FLOOR, not the anchor total: a series whose anchor is priced only
-    // by a seasonal add-on has a $0 floor, and its children — recomputed from
-    // date-filtered add-ons — would complete unbilled (Codex P0).
-    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 0 })).toBeTruthy();
+  test('asks whether an invoice will MINT, not what it would bill (Codex P0)', () => {
+    // A priced visit predicts 'invoice', but shouldAutoInvoiceCompletion still
+    // declines when create_invoice_on_complete is false, no explicit lane or
+    // membership tier applies, and GATE_AUTOINVOICE_PRICED_VISITS is off —
+    // those visits complete unbilled.
+    expect(recurringWithoutBillableAmount({ ...base, recurringFloorPrice: 89 })).toBeNull();
+    expect(recurringWithoutBillableAmount({
+      ...base, recurringFloorPrice: 89, createInvoiceOnComplete: false,
+    })).toBeTruthy();
+    // A real membership tier DOES mint on completion, so it clears the gate.
+    expect(recurringWithoutBillableAmount({
+      ...base, recurringFloorPrice: 89, createInvoiceOnComplete: false, customer: C({ waveguard_tier: 'Bronze' }),
+    })).toBeNull();
   });
 
-  test('a monthly rate satisfies it ONLY on a lane that actually consumes it (Codex P0)', () => {
-    // Inferred membership: real tier + positive rate → dues cover the visits.
-    expect(recurringWithoutBillableAmount(withCustomer({ monthly_rate: 46.33 }))).toBeNull();
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'monthly_membership', monthly_rate: 46.33 }))).toBeNull();
-    // Explicit per_visit / one_time lanes IGNORE a lingering monthly_rate —
-    // completionInvoiceAmount refuses that fallback, so the rate is not a
-    // billing arrangement and the series would still complete unbilled.
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_visit', monthly_rate: 46.33 }))).toBeTruthy();
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'one_time', monthly_rate: 46.33 }))).toBeTruthy();
+  test('membership dues are real coverage — but only with a rate to collect', () => {
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ waveguard_tier: 'Bronze', monthly_rate: 46.33 }) })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'monthly_membership' }) })).toBeTruthy();
   });
 
-  test('per_application passes ONLY with an acceptance fee on file (Codex P0)', () => {
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: 98 }))).toBeNull();
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: null }))).toBeTruthy();
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'per_application', per_application_fee: 0 }))).toBeTruthy();
+  test('an annual-prepay lane or a stale rate on an explicit lane is no amount (Codex P0)', () => {
+    // Neither an inherited prepay lane (its term invoice is created
+    // post-commit and may never exist) nor a monthly rate an explicit
+    // per_visit lane deliberately ignores.
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'annual_prepay', waveguard_tier: 'Bronze', monthly_rate: 46.33 }) })).toBeTruthy();
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'per_visit', monthly_rate: 46.33 }) })).toBeTruthy();
   });
 
-  test('an UNPRICED annual-prepay booking is still refused (Codex P0)', () => {
-    // The prepay term invoice is created post-commit by
-    // markEstimateManuallyAccepted, which may fail with the booking left
-    // standing — so a requested prepay term is not an amount. A real prepay
-    // booking carries its quoted price and passes on that.
-    expect(recurringWithoutBillableAmount(unbillable)).toBeTruthy();
-    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
+  test('per_application clears only with an acceptance fee on file', () => {
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'per_application', per_application_fee: 98 }) })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'per_application' }) })).toBeTruthy();
   });
 
-  test('an annual-prepay customer with a STALE tier + rate cannot infer coverage (Codex P0)', () => {
-    // Nulling the mode let resolveBillingLane infer monthly_membership from a
-    // retained tier + positive rate. Completion sees billing_mode
-    // 'annual_prepay', ignores the monthly rate, and bills nothing — so the
-    // gate must force an explicit non-membership lane, not merely clear it.
-    const stale = withCustomer({ billing_mode: 'annual_prepay', monthly_rate: 46.33, waveguard_tier: 'Bronze' });
-    expect(recurringWithoutBillableAmount(stale)).toBeTruthy();
-    expect(recurringWithoutBillableAmount({ ...stale, recurringFloorPrice: 89 })).toBeNull();
-    // A genuine member (no annual mode) with the same rate is still covered.
-    expect(recurringWithoutBillableAmount(withCustomer({ monthly_rate: 46.33 }))).toBeNull();
+  test('free-by-design work passes — the only exemption left', () => {
+    expect(recurringWithoutBillableAmount({ ...base, isCallback: true })).toBeNull();
+    expect(recurringWithoutBillableAmount({ ...base, serviceType: 'Pest Control Re-Service' })).toBeNull();
   });
 
-  test('the annual-prepay LANE is no exemption either — priced or refused (Codex P0)', () => {
-    // The prepay invoice + term are created post-commit and may never exist,
-    // so neither a requested prepay term nor an inherited prepay lane can
-    // stand in for an amount. A genuine prepay booking carries its quote.
-    const annualCustomer = withCustomer({ billing_mode: 'annual_prepay' });
-    expect(recurringWithoutBillableAmount(annualCustomer)).toBeTruthy();
-    expect(recurringWithoutBillableAmount({ ...annualCustomer, recurringFloorPrice: 46.33 })).toBeNull();
-  });
-
-  test('an explicit member with a ZERO rate has no collectible dues (Codex P0)', () => {
-    // memberSeriesCovered strips the primary price from covered rows, so the
-    // caller passes the addon-only floor; with rate 0 there are no dues to
-    // cover them either and the series would run entirely free.
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'monthly_membership' }))).toBeTruthy();
-    expect(recurringWithoutBillableAmount(withCustomer({ billing_mode: 'monthly_membership', monthly_rate: 46.33 }))).toBeNull();
-    // The inferred-membership shape (real tier + rate) is covered as before.
-    expect(recurringWithoutBillableAmount(withCustomer({ monthly_rate: 46.33 }))).toBeNull();
-  });
-
-  test('free-by-design work passes — the only exemptions left', () => {
-    // The gate now carries NO bespoke exemptions: every verdict comes from the
-    // canonical prediction. The payer, recorded-prepayment and
-    // requested-annual-prepay exemptions were each removed after Codex showed
-    // that none of them supplies an AMOUNT.
-    expect(recurringWithoutBillableAmount({ ...unbillable, isCallback: true })).toBeNull();
-    expect(recurringWithoutBillableAmount({ ...unbillable, serviceType: 'Pest Control Re-Service' })).toBeNull();
-  });
-
-  test('a recorded prepayment is not a price for the plan (Codex P0)', () => {
-    // stampSeriesPrepaid spreads the operator's total across the visits seeded
-    // NOW; an ongoing series keeps generating unstamped, unpriced visits after
-    // it, and those complete unbilled.
-    expect(recurringWithoutBillableAmount(unbillable)).toBeTruthy();
-  });
-
-  test('a payer does NOT substitute for a price (Codex P0)', () => {
-    // A payer says who owes; completion still refuses to mint at <= 0, so an
-    // unpriced payer-billed series bills nobody. Only a real amount clears it.
-    expect(recurringWithoutBillableAmount(unbillable)).toBeTruthy();
-    expect(recurringWithoutBillableAmount({ ...unbillable, recurringFloorPrice: 46.33 })).toBeNull();
-  });
-
-  test('a zero-amount prepay is not an arrangement', () => {
-    expect(recurringWithoutBillableAmount({ ...unbillable, prepaid: { totalAmount: 0 } })).toBeTruthy();
+  test('the remedy names the amount source the lane can actually use (Codex P1)', () => {
+    // Telling a per_visit or per_application customer to set a monthly rate
+    // sends the operator after a fix that cannot clear the gate.
+    expect(recurringWithoutBillableAmount(base).fix).toMatchObject({ monthlyRate: true, perApplicationFee: false });
+    expect(recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'per_visit', monthly_rate: 46.33 }) }).fix)
+      .toMatchObject({ monthlyRate: false, visitPrice: true });
+    const perApp = recurringWithoutBillableAmount({ ...base, customer: C({ billing_mode: 'per_application' }) });
+    expect(perApp.fix).toMatchObject({ perApplicationFee: true, monthlyRate: false });
+    expect(perApp.error).toMatch(/per-application fee/i);
   });
 });

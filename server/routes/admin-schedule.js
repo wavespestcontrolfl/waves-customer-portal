@@ -3268,74 +3268,98 @@ function recurringWithoutBillableAmount({
   isRecurring,
   recurringFloorPrice,
   customer,
+  createInvoiceOnComplete,
   isCallback,
   serviceType,
 }) {
   if (!isRecurring) return null;
-  // NO annual-prepay exemption either. The term invoice that would BE the
-  // money is created by markEstimateManuallyAccepted, which runs AFTER the
-  // appointment transaction commits and is explicitly allowed to fail with
-  // the booking left standing. A failed or raced acceptance would leave an
-  // unpriced recurring series with no prepay invoice and no term — the same
-  // lost-AR condition (Codex P0). A real prepay booking carries its quoted
-  // price on the series anyway, so this costs nothing legitimate: it only
-  // refuses a prepay booking that has no amount on it at all.
-  // NO prepayment exemption either. stampSeriesPrepaid distributes the
-  // operator's total across the visits seeded NOW; an ongoing series keeps
-  // generating later visits that carry no stamp and no price, and those
-  // complete unbilled (Codex P0). A recorded prepayment is a settlement for
-  // some visits, never a price for the plan.
-  // NO payer exemption. An active payer identifies who owes the invoice; it
-  // supplies no amount, and completion derives invoiceAmount from the visit
-  // price / rate alone and categorically refuses to mint at <= 0. An
-  // unpriced payer-billed series therefore completes at $0 and bills nobody
-  // — the exact lost-AR case this gate exists to stop (Codex P0). A payer
-  // still needs a price or a rate behind it.
+  // Free BY DESIGN — completion suppresses these before any amount matters.
+  if (isCallback || isAlwaysFreeServiceType(serviceType)) return null;
 
-  // The annual-prepay lane is neutralized UNCONDITIONALLY for this gate. An
-  // unpriced recurring booking on that lane predicts 'annual_renewal_owned',
-  // which unbilledCompletionGap deliberately does not treat as a gap because
-  // coverage belongs to the renewal flow — but the thing that would provide
-  // that coverage (the prepay invoice + term) is created by
-  // markEstimateManuallyAccepted AFTER this transaction commits, inside a
-  // catch that leaves the booking standing on failure. Whether the booking
-  // requests prepay or merely inherits the lane, an unpriced series can
-  // therefore commit and complete at $0 (Codex P0, twice: once for the
-  // downgraded-term path, once for the requested-term path).
-  //
-  // A genuine prepay booking carries its quoted price, so this refuses
-  // nothing legitimate — only a prepay booking with no amount at all.
   // Forced to an EXPLICIT non-membership lane, not to null. Nulling the mode
   // lets resolveBillingLane INFER monthly_membership from a retained
   // WaveGuard tier + positive monthly_rate — a supported production shape for
-  // an annual-prepay customer — and the prediction would then treat that
-  // stale rate as billable. Completion sees billing_mode='annual_prepay',
-  // ignores the monthly rate entirely, and bills nothing (Codex P0).
+  // an annual-prepay customer — while completion sees
+  // billing_mode='annual_prepay', ignores the monthly rate, and bills
+  // nothing. The annual lane is neutralized unconditionally: the prepay
+  // invoice + term are created post-commit inside a catch that leaves the
+  // booking standing, so neither a requested term nor an inherited lane is
+  // an amount.
   const customerForLane = customer?.billing_mode === 'annual_prepay'
     ? { ...customer, billing_mode: 'per_visit' }
     : customer;
   const lane = resolveBillingLane(customerForLane);
-  const prediction = predictCompletionBilling({
-    lane: lane.mode,
-    billingMode: customerForLane?.billing_mode || null,
-    // Settlement state (autopay, dues, stamps) cannot create or cure "no
-    // number exists"; the conservative defaults keep this a pure amount test.
-    autopayActive: false,
-    estimatedPrice: Number(recurringFloorPrice) > 0 ? Number(recurringFloorPrice) : null,
-    monthlyRate: customer?.monthly_rate,
-    perApplicationFee: customer?.per_application_fee,
-    isRecurring: true,
+  const explicitMembership = customerForLane?.billing_mode === 'monthly_membership';
+  const explicitPerVisitLane = ['per_visit', 'one_time'].includes(customerForLane?.billing_mode);
+  const perApplicationBilling = customerForLane?.billing_mode === 'per_application';
+  const monthlyRate = Number(customerForLane?.monthly_rate) || 0;
+
+  // MEMBERSHIP DUES are real coverage: the 8AM cron collects them and the
+  // visit is free by design — but only when there is a rate to collect.
+  if (lane.mode === 'monthly_membership' && monthlyRate > 0) return null;
+
+  // Otherwise the series must actually MINT. Asking the advisory prediction
+  // was not enough (Codex P0): it answers "what would this bill", while
+  // shouldAutoInvoiceCompletion answers "will an invoice exist", and the two
+  // diverge — a NULL-mode customer with a rate or a stamped price predicts
+  // 'invoice' yet mints nothing when create_invoice_on_complete is false, no
+  // explicit lane/tier applies, and GATE_AUTOINVOICE_PRICED_VISITS is off.
+  // Lazy require: admin-dispatch pulls admin-schedule helpers, so a
+  // top-level import would close a cycle.
+  const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+  const { completionInvoiceAmount } = require('../services/billing-lane');
+  const invoiceAmount = completionInvoiceAmount({
+    estimatedPrice: Number(recurringFloorPrice) > 0 ? recurringFloorPrice : null,
     isCallback,
-    serviceType,
-    payerBilled: false,
-    prepaidAmount: null,
-    prepaidMethod: null,
+    perApplicationBilling,
+    perApplicationFee: customerForLane?.per_application_fee,
+    monthlyRate: customerForLane?.monthly_rate,
+    billingMode: customerForLane?.billing_mode || null,
   });
-  if (!unbilledCompletionGap({ prediction })) return null;
+  const willMint = shouldAutoInvoiceCompletion({
+    // Completion-time suppressors cannot be known at booking and are all
+    // reasons NOT to mint, so leaving them false asks the most permissive
+    // question: "even at its best, does this series bill?"
+    recapReviewOnly: false,
+    alreadyPaid: false,
+    prepaidCovered: false,
+    autopayCoversVisit: false,
+    preMintedInvoice: false,
+    existingCompletionInvoice: false,
+    createInvoiceOnComplete,
+    waveguardTier: customerForLane?.waveguard_tier || null,
+    explicitMembership,
+    explicitPerVisitLane,
+    perApplicationBilling,
+    annualPrepayBilling: false,
+    hasVisitPrice: Number(recurringFloorPrice) > 0,
+    invoiceAmount,
+    autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+    serviceType,
+    isCallback,
+    visitPerformed: true,
+  });
+  if (willMint) return null;
+
+  // Lane-specific guidance: recommending a monthly rate to a customer whose
+  // lane deliberately IGNORES monthly rates leaves the operator stuck
+  // following advice that cannot clear the gate (Codex P1).
+  const acceptsMonthlyRate = !explicitPerVisitLane && !perApplicationBilling
+    && customer?.billing_mode !== 'annual_prepay';
+  const needsPerApplicationFee = perApplicationBilling;
+  const remedy = needsPerApplicationFee
+    ? 'set a per-application fee on the customer profile, or price the visit'
+    : acceptsMonthlyRate
+      ? 'set a monthly rate on the customer profile, or price the visit'
+      : 'price the visit (this customer\'s billing lane does not bill from a monthly rate)';
   return {
-    error: 'This recurring plan has no price and the customer has no billable rate — every visit would complete without billing. Set a monthly rate on the customer profile (or price the visit) before booking.',
+    error: `This recurring plan has no billable amount — every visit would complete without an invoice. Please ${remedy} before booking.`,
     code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT',
-    fix: { monthlyRate: true, visitPrice: true },
+    fix: {
+      monthlyRate: acceptsMonthlyRate,
+      perApplicationFee: needsPerApplicationFee,
+      visitPrice: true,
+    },
   };
 }
 
@@ -5183,6 +5207,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         isRecurring,
         recurringFloorPrice: Number.isFinite(recurringFloorPrice) ? recurringFloorPrice : 0,
         customer,
+        createInvoiceOnComplete: createInvoiceStamp,
         isCallback: resolvedIsCallback,
         serviceType,
       });
