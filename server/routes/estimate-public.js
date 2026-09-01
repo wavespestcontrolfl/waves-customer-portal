@@ -16419,6 +16419,12 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
+  // ruling requires every restart price to be a CURRENT recompute — the
+  // customer's path back is the Restart button, which re-prices; an
+  // auto-extension would revive the expired token's frozen dollars with no
+  // recompute in the loop.
+  if (String(estimate.source || '') === 'plan_restart') return false;
   if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;

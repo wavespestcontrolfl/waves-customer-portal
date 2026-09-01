@@ -303,17 +303,31 @@ describe('mintRestartEstimate', () => {
       .rejects.toThrow('note insert boom');
   });
 
-  test('a second tap reuses the live restart estimate instead of minting beside it — after re-verifying its price', async () => {
-    tables.estimates.push({
-      id: 'est-live', customer_id: 'cust-1', source: 'plan_restart', status: 'sent', token: 'live-tok', expires_at: '2099-01-01', archived_at: null,
-      monthly_total: 138, annual_total: 1656, onetime_total: 99,
-      estimate_data: JSON.stringify({ planRestart: { families: ['pest_control', 'lawn_care'] } }),
-    });
-    const result = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
-    expect(result).toEqual({ estimateId: 'est-live', token: 'live-tok', url: '/estimate/live-tok', reused: true });
-    // Called ONCE — the reuse-time price verification, no mint recompute.
+  test('a second tap reuses the live restart estimate instead of minting beside it — only when today\'s full offer matches', async () => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(first.reused).toBe(false);
+    recompute.mockClear();
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps() });
+    expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
+    // The second tap still recomputed today's offer (the reuse comparison
+    // needs it) but minted nothing beside the live row.
     expect(recompute).toHaveBeenCalledTimes(1);
     expect(tables.estimates).toHaveLength(1);
+    expect(tables.estimates[0].archived_at == null).toBe(true);
+  });
+
+  test('same totals but a drifted offer body does NOT reuse — the full fingerprint decides (codex GH r9 P1)', async () => {
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    // Offsetting price changes: aggregates identical, per-service result
+    // different from what the live row stored.
+    const drifted = JSON.parse(tables.estimates[0].estimate_data);
+    drifted.result = { engineVersion: 'v9.9', lineItems: [{ service: 'pest', mo: 61 }] };
+    tables.estimates[0].estimate_data = JSON.stringify(drifted);
+    recompute.mockClear();
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
+    expect(again.estimateId).not.toBe(first.estimateId);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
   });
 
   test('a live estimate whose price no longer recomputes to its frozen totals is archived and re-priced (codex pre-push P0)', async () => {
@@ -497,6 +511,18 @@ describe('mintRestartEstimate', () => {
     ];
     const found = await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table));
     expect(found).toEqual({ families: ['pest_control'], caseId: 'case-new', source: 'cancelled_rows' });
+  });
+
+  test('a request-linked attempt with no row evidence FAILS CLOSED — an earlier scoped note inside the window supplies nothing (codex GH r9 P1)', async () => {
+    tables.cancellation_cases = [{
+      id: 'case-4', customer_id: 'cust-1', status: 'committed', scope: '[]', created_at: '2026-08-23T12:00:00Z', service_request_id: 'req-7',
+    }];
+    tables.scheduled_services = []; // e.g. the attempt's only service was rodent-led
+    tables.customer_interactions = [{
+      customer_id: 'cust-1', interaction_type: 'note', subject: 'Cancelled Lawn Care — plan continues with Pest Control', created_at: '2026-08-23T11:30:00Z',
+    }];
+    expect(await actualRestart.cancelledFamiliesFor('cust-1', (table) => builder(table)))
+      .toEqual({ families: [], caseId: 'case-4', source: 'none' });
   });
 
   test('falls back to the scoped churn note, then reports nothing to restart', async () => {

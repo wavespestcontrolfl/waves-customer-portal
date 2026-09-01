@@ -53,6 +53,17 @@ function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+// Key-order-independent serialization for the reuse fingerprint (same shape
+// as previsit-brief's stableStringify; local because that module drags the
+// whole briefing stack in).
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 // Families the customer cancelled, tied to the LATEST cancellation attempt.
 // The processor stamps this attempt's rows before the case row exists, so
 // "belongs to the latest attempt" tolerates an hour of skew.
@@ -155,22 +166,27 @@ async function cancelledFamiliesFor(customerId, dbh = db) {
   const fromRows = uniqueServiceFamilies(keys).filter((f) => RESTARTABLE_FAMILIES.includes(f));
   if (fromRows.length) return { families: fromRows, caseId: current ? current.id : null, source: 'cancelled_rows' };
 
-  // Last resort: the scoped-cancel audit note ("Cancelled Pest Control, Lawn
-  // Care — plan continues with …") names families by label — again bounded
-  // to the latest attempt when a case exists.
-  let noteQuery = dbh('customer_interactions')
-    .where({ customer_id: customerId, interaction_type: 'note' })
-    .where('subject', 'like', 'Cancelled %')
-    .orderBy('created_at', 'desc');
-  if (attemptAnchor) noteQuery = noteQuery.where('created_at', '>=', attemptBoundFor(attemptAnchor));
-  const note = await noteQuery.first('subject');
-  if (note && note.subject) {
-    const named = String(note.subject).split(' — ')[0].replace(/^Cancelled\s+/, '');
-    const fromNote = Object.entries(FAMILY_LABELS)
-      .filter(([, label]) => named.includes(label))
-      .map(([key]) => key)
-      .filter((f) => RESTARTABLE_FAMILIES.includes(f));
-    if (fromNote.length) return { families: fromNote, caseId: current ? current.id : null, source: 'churn_note' };
+  // Last resort — LEGACY attempts only: the scoped-cancel audit note
+  // ("Cancelled Pest Control, Lawn Care — plan continues with …") names
+  // families by label, but it carries no request correlation, so a
+  // request-linked attempt whose rows produced nothing must FAIL CLOSED
+  // rather than let an earlier scoped cancellation's note inside the slack
+  // window supply unrelated families (codex GH r9 P1).
+  if (!attemptRequestId) {
+    let noteQuery = dbh('customer_interactions')
+      .where({ customer_id: customerId, interaction_type: 'note' })
+      .where('subject', 'like', 'Cancelled %')
+      .orderBy('created_at', 'desc');
+    if (attemptAnchor) noteQuery = noteQuery.where('created_at', '>=', attemptBoundFor(attemptAnchor));
+    const note = await noteQuery.first('subject');
+    if (note && note.subject) {
+      const named = String(note.subject).split(' — ')[0].replace(/^Cancelled\s+/, '');
+      const fromNote = Object.entries(FAMILY_LABELS)
+        .filter(([, label]) => named.includes(label))
+        .map(([key]) => key)
+        .filter((f) => RESTARTABLE_FAMILIES.includes(f));
+      if (fromNote.length) return { families: fromNote, caseId: current ? current.id : null, source: 'churn_note' };
+    }
   }
   return { families: [], caseId: current ? current.id : null, source: 'none' };
 }
@@ -492,15 +508,28 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     // current price; idempotent button, one honorable price at a time).
     const live = liveRestartEstimate(priorRows, nowDate);
     if (live) {
-      const liveFamilies = parseJson(live.estimate_data, {})?.planRestart?.families;
+      const liveData = parseJson(live.estimate_data, {});
+      const liveFamilies = liveData?.planRestart?.families;
       const sameScope = Array.isArray(liveFamilies)
         && liveFamilies.length === eligibleFamilies.length
         && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
       const cents = (v) => Math.round(Number(v || 0) * 100);
+      // Full-offer fingerprint, not just the three aggregates (codex GH r9
+      // P1): offsetting price changes across families can keep the totals
+      // identical while per-service application prices or the default
+      // option drifted — and acceptance converts the STORED estimate_data,
+      // so reuse requires the stored offer to EQUAL today's recompute:
+      // engine inputs, qualifiers, and the full server result.
+      const offerFingerprint = (data) => stableStringify({
+        engineInputs: data?.engineInputs ?? null,
+        priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
+        result: data?.result ?? null,
+      });
       if (sameScope
         && cents(monthlyTotal) === cents(live.monthly_total)
         && cents(annualTotal) === cents(live.annual_total)
-        && cents(onetimeTotal) === cents(live.onetime_total)) {
+        && cents(onetimeTotal) === cents(live.onetime_total)
+        && offerFingerprint(liveData) === offerFingerprint(estimateData)) {
         return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
       }
     }
