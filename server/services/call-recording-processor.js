@@ -14324,6 +14324,11 @@ const CallRecordingProcessor = {
           // produced (2026-08-31). The column sits outside
           // STAMPED_LEAD_RESTORE_FIELDS, so that loss is not even rollback-able.
           const synopsisIsGateRefusal = /^\s*\**\s*not a new lead/i.test(synopsis);
+          // The gate above ran BEFORE this provider await, so ownership can
+          // have moved while the synopsis was generating. Re-check before
+          // writing rather than letting a superseded pass overwrite the new
+          // owner's synopsis (codex #3677 P1).
+          if (!(await stillOwnsClaim())) return abandonToPeer('the synopsis write');
           await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
           await updateUnifiedVoiceMessage(call, { ai_summary: synopsis });
           // Also write to lead if one was created — never the gate refusal.
@@ -14343,7 +14348,10 @@ const CallRecordingProcessor = {
     // /inbound-forward-accept webhook. Resolve that to a CSR name when mapped,
     // and fall back to 'Unknown' so analytics aren't silently booked to one name.
     let csrScoreResult = null;
-    if (transcription && transcription.length > 50) {
+    // Re-checked here too: the synopsis above is a provider await, so
+    // ownership can have moved since the last gate. Scoring writes its own
+    // row, so a superseded pass must not start one (codex #3677 P1).
+    if (transcription && transcription.length > 50 && await stillOwnsClaim()) {
       try {
         const callMeta = typeof call.metadata === 'string'
           ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()

@@ -172,13 +172,14 @@ describe('claim ceiling is derived from the provider budgets', () => {
 
   test('the mirrored budget counts every sequential leg at the processor timeouts', () => {
     // Primary + provider fallback + contact dictation transcriptions, two
-    // labeling attempts, two V1 extraction attempts PLUS the CSR scoring leg,
+    // labeling attempts, two V1 extraction attempts PLUS the CSR scoring and
+    // lead-synopsis legs,
     // the download and the V2 fallback chain — the worst case a HEALTHY pass
     // can reach while holding its claim.
     const expected = PROVIDER_FETCH_TIMEOUTS_MS.recording_download
       + (3 * PROVIDER_FETCH_TIMEOUTS_MS.transcription)
       + (2 * PROVIDER_FETCH_TIMEOUTS_MS.transcript_label)
-      + (3 * PROVIDER_FETCH_TIMEOUTS_MS.extraction)
+      + (4 * PROVIDER_FETCH_TIMEOUTS_MS.extraction)
       + require('../services/llm/call').DEFAULT_FALLBACK_BUDGET_MS;
     expect(providerBudgetMs()).toBe(expected);
   });
