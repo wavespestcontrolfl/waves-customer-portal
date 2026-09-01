@@ -43,7 +43,7 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - Stacked PRs: open children as DRAFT and retarget them to `main` BEFORE the parent squash-merges — squash merges strand children (recurred 4×; GitHub only auto-retargets on head-branch deletion, which squash-merge flows don't guarantee).
 - Run the full merge gate in CHECKLIST.md. Core rules:
   - Clean = an ISSUE comment containing the Reviewed-commit SHA that matches your final HEAD. A clean top-level with unresolved inline threads on the current head is NOT clean — check `original_commit_id`.
-  - Inline findings lag the top-level wrapper by 1–2 minutes; poll until comment count is stable ~90s.
+  - Inline findings lag the top-level wrapper — usually 1–2 minutes, but up to ~12 minutes on a heavy round (bit #3669 r4: three findings landed 12 min after the wrapper, after the fix for the first had already been pushed). Poll until comment count is stable for 15 minutes after the wrapper before treating a round as fully delivered.
   - "Clean" includes P2s: fix every finding or rebut inline with file:line evidence. Never self-downgrade a P2 to a follow-up.
   - NEVER merge until Codex has completed on the final commit. Green CI + COMMENTED is not enough.
   - During Codex usage limits, a bounced re-tag is not queued — post a fresh one after reset. >15–20 min of silence on a heavy day usually means limits, not clean.

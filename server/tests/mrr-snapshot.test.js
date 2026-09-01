@@ -1,6 +1,17 @@
-jest.mock('../services/mrr-breakdown', () => ({ computeMrrBreakdown: jest.fn() }));
+jest.mock('../services/mrr-breakdown', () => ({
+  computeMrrBreakdown: jest.fn(),
+  // The population query is the REAL shared builder — the snapshot's whole
+  // contract is that its tier / per-customer rows come from the same
+  // population as the breakdown, so the tests assert against the real chain.
+  mrrPopulationQuery: jest.requireActual('../services/mrr-breakdown').mrrPopulationQuery,
+}));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getPaymentPendingCustomerIds: jest.fn(async () => new Set()),
+}));
 
+const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { computeMrrBreakdown } = require('../services/mrr-breakdown');
+const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const {
   recordMrrSnapshot,
   recordCustomerMrrSnapshots,
@@ -19,9 +30,11 @@ function makeFakeDb({ tierRows = [], customerRows = [], capture = {}, custFail =
   function makeCustomers() {
     let grouped = false;
     const b = {
-      where: () => b,
+      where: (a) => { if (typeof a === 'function') a.call(b, b); return b; },
       whereNull: () => b,
+      whereRaw: (sql) => { capture.whereRaw = sql; return b; },
       whereNotIn: (col, list) => { capture.tierExcluded = list; return b; },
+      orWhereIn: (col, ids) => { capture.pendingUnion = [col, ids]; return b; },
       modify: (fn) => { fn(b); return b; },
       select: () => b,
       groupBy: () => { grouped = true; return b; },
@@ -82,6 +95,16 @@ describe('tierBreakdown', () => {
     const db = makeFakeDb({ tierRows: [], capture });
     await tierBreakdown(db);
     expect(capture.tierExcluded).toEqual(INTERNAL_TEST_CUSTOMERS);
+    // Snapshot population = monthly LANE, not merely monthly_rate > 0 (#3140).
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
+  });
+
+  test('payment-pending prepay ids are unioned into the tier population (#3669 r1)', async () => {
+    const capture = {};
+    getPaymentPendingCustomerIds.mockResolvedValueOnce(new Set(['cust-pending-1']));
+    await tierBreakdown(makeFakeDb({ tierRows: [], capture }));
+    expect(capture.pendingUnion).toEqual(['c.id', ['cust-pending-1']]);
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
 });
 
@@ -103,6 +126,24 @@ describe('customerRateRows', () => {
     const capture = {};
     await customerRateRows(makeFakeDb({ customerRows: [], capture }));
     expect(capture.tierExcluded).toEqual(INTERNAL_TEST_CUSTOMERS);
+    // Snapshot population = monthly LANE, not merely monthly_rate > 0 (#3140).
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
+  });
+
+  test('payment-pending prepay ids are NOT unioned into the longitudinal per-customer population (#3669 r2)', async () => {
+    // The pending-prepay set is an aggregate-only at-risk overlay. Unioning it
+    // here would put a pending customer into month M's per-customer snapshot;
+    // paying the prepay stamps billing_mode 'annual_prepay' and drops the id
+    // from month M+1, so the Net MRR bridge would report the successful
+    // collection as churned MRR (mrr-bridge prior-only branch).
+    const capture = {};
+    // No mockResolvedValueOnce here: customerRateRows must not even CALL the
+    // pending lookup (a queued once-value would leak into later tests).
+    getPaymentPendingCustomerIds.mockClear();
+    await customerRateRows(makeFakeDb({ customerRows: [], capture }));
+    expect(getPaymentPendingCustomerIds).not.toHaveBeenCalled();
+    expect(capture.pendingUnion).toBeUndefined();
+    expect(capture.whereRaw).toBe(MONTHLY_LANE_SQL);
   });
 });
 
@@ -116,14 +157,14 @@ describe('recordCustomerMrrSnapshots', () => {
       ],
       capture,
     });
-    const out = await recordCustomerMrrSnapshots('2026-06-01', db);
+    const out = await recordCustomerMrrSnapshots('2026-10-01', db);
 
-    expect(out).toEqual({ period_month: '2026-06-01', count: 2, removed: 0 });
+    expect(out).toEqual({ period_month: '2026-10-01', count: 2, removed: 0 });
     expect(capture.custConflict).toEqual(['period_month', 'customer_id']);
     expect(capture.custMerged).toBe(true);
     expect(capture.custRows).toEqual([
-      expect.objectContaining({ period_month: '2026-06-01', customer_id: 'c1', monthly_rate: 120, waveguard_tier: 'Gold' }),
-      expect.objectContaining({ period_month: '2026-06-01', customer_id: 'c2', monthly_rate: 40, waveguard_tier: 'Bronze' }),
+      expect.objectContaining({ period_month: '2026-10-01', customer_id: 'c1', monthly_rate: 120, waveguard_tier: 'Gold' }),
+      expect.objectContaining({ period_month: '2026-10-01', customer_id: 'c2', monthly_rate: 40, waveguard_tier: 'Bronze' }),
     ]);
   });
 
@@ -134,10 +175,10 @@ describe('recordCustomerMrrSnapshots', () => {
       capture,
       removedCount: 3, // 3 stale rows (deactivated/soft-deleted/rate→0 mid-month) deleted
     });
-    const out = await recordCustomerMrrSnapshots('2026-06-01', db);
+    const out = await recordCustomerMrrSnapshots('2026-10-01', db);
 
-    expect(out).toEqual({ period_month: '2026-06-01', count: 1, removed: 3 });
-    expect(capture.pruneWhere).toEqual({ period_month: '2026-06-01' });
+    expect(out).toEqual({ period_month: '2026-10-01', count: 1, removed: 3 });
+    expect(capture.pruneWhere).toEqual({ period_month: '2026-10-01' });
     expect(capture.pruneCol).toBe('customer_id');
     expect(capture.pruneKeep).toEqual(['c1']); // only the surviving population is kept
     expect(capture.pruneDel).toBe(true);
@@ -145,16 +186,55 @@ describe('recordCustomerMrrSnapshots', () => {
 
   test('writes nothing AND prunes nothing when the population is empty', async () => {
     const capture = {};
-    const out = await recordCustomerMrrSnapshots('2026-06-01', makeFakeDb({ customerRows: [], capture }));
-    expect(out).toEqual({ period_month: '2026-06-01', count: 0, removed: 0 });
+    const out = await recordCustomerMrrSnapshots('2026-10-01', makeFakeDb({ customerRows: [], capture }));
+    expect(out).toEqual({ period_month: '2026-10-01', count: 0, removed: 0 });
     expect(capture.custRows).toBeUndefined();
     expect(capture.pruneDel).toBeUndefined(); // a transient empty read must not wipe the month
+  });
+
+  test('a PRE-BOUNDARY month is never rewritten to the corrected population (Codex #3669 r6 P1)', async () => {
+    // Deploy before the 11:50pm ET month-end capture: the closing month must
+    // keep its old-definition rows, or the bridge's prior→closing diff reads
+    // every pruned residue row as churn while the boundary still calls that
+    // month old-definition.
+    const capture = {};
+    const out = await recordCustomerMrrSnapshots('2026-08-01', makeFakeDb({
+      customerRows: [{ customer_id: 'c1', monthly_rate: '120', waveguard_tier: 'Gold' }],
+      capture,
+    }));
+    expect(out).toEqual({ period_month: '2026-08-01', count: 0, removed: 0, skipped: 'lane_definition_boundary' });
+    expect(capture.custRows).toBeUndefined(); // no insert
+    expect(capture.pruneDel).toBeUndefined(); // and no prune
   });
 });
 
 describe('recordMrrSnapshot', () => {
   beforeEach(() => {
     computeMrrBreakdown.mockResolvedValue({ total: 1000, committed: 800, atRisk: 200, totalCount: 25, atRiskCount: 4 });
+  });
+
+  test('a PRE-BOUNDARY month is never written at all — aggregate included (Codex #3669 r14)', async () => {
+    computeMrrBreakdown.mockClear();
+    const capture = {};
+    const db = makeFakeDb({ tierRows: [], customerRows: [], capture });
+    const out = await recordMrrSnapshot('2026-08-01', db);
+    expect(out).toEqual({ period_month: '2026-08-01', skipped: 'lane_definition_boundary' });
+    expect(capture.row).toBeUndefined(); // no aggregate upsert
+    expect(computeMrrBreakdown).not.toHaveBeenCalled();
+  });
+
+  test('a FAILED pending-prepay lookup skips the write — an empty union must never be persisted as truth (Codex #3669 r14)', async () => {
+    const { getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
+    computeMrrBreakdown.mockClear();
+    getPaymentPendingCustomerIds.mockReset(); // drop any stale once-queue before rejecting
+    getPaymentPendingCustomerIds.mockRejectedValueOnce(new Error('prepay table down'));
+    const capture = {};
+    const db = makeFakeDb({ tierRows: [], customerRows: [], capture });
+    const out = await recordMrrSnapshot('2026-10-01', db);
+    expect(out).toEqual({ period_month: '2026-10-01', skipped: 'pending_prepay_unavailable' });
+    expect(capture.row).toBeUndefined(); // previous snapshot row stands
+    expect(computeMrrBreakdown).not.toHaveBeenCalled();
+    getPaymentPendingCustomerIds.mockImplementation(async () => new Set()); // restore default for later tests
   });
 
   test('upserts the aggregate snapshot AND per-customer rows', async () => {
@@ -164,14 +244,17 @@ describe('recordMrrSnapshot', () => {
       customerRows: [{ customer_id: 'c1', monthly_rate: '600', waveguard_tier: 'Gold' }],
       capture,
     });
-    const out = await recordMrrSnapshot('2026-06-01', db);
+    const out = await recordMrrSnapshot('2026-10-01', db);
 
-    expect(computeMrrBreakdown).toHaveBeenCalledWith(db, expect.any(String));
+    // ONE pending-prepay set fetched up front and shared with the breakdown
+    // (and tierBreakdown) so the persisted aggregate cannot be internally
+    // inconsistent across a transient lookup failure (Codex #3669 r4).
+    expect(computeMrrBreakdown).toHaveBeenCalledWith(db, expect.any(String), expect.any(Array));
     // aggregate
     expect(capture.conflict).toBe('period_month');
     expect(capture.merged).toBe(true);
     expect(capture.row).toMatchObject({
-      period_month: '2026-06-01',
+      period_month: '2026-10-01',
       total_mrr: 1000,
       committed_mrr: 800,
       at_risk_mrr: 200,
@@ -184,9 +267,9 @@ describe('recordMrrSnapshot', () => {
     // per-customer
     expect(capture.custConflict).toEqual(['period_month', 'customer_id']);
     expect(capture.custRows).toEqual([
-      expect.objectContaining({ period_month: '2026-06-01', customer_id: 'c1', monthly_rate: 600 }),
+      expect.objectContaining({ period_month: '2026-10-01', customer_id: 'c1', monthly_rate: 600 }),
     ]);
-    expect(out).toMatchObject({ period_month: '2026-06-01', total: 1000, customerSnapshot: { period_month: '2026-06-01', count: 1 } });
+    expect(out).toMatchObject({ period_month: '2026-10-01', total: 1000, customerSnapshot: { period_month: '2026-10-01', count: 1 } });
   });
 
   test('a per-customer failure does not break the aggregate snapshot', async () => {
@@ -197,11 +280,11 @@ describe('recordMrrSnapshot', () => {
       capture,
       custFail: true,
     });
-    const out = await recordMrrSnapshot('2026-06-01', db);
+    const out = await recordMrrSnapshot('2026-10-01', db);
 
     // aggregate still committed; the call resolves; per-customer is isolated to null
     expect(capture.merged).toBe(true);
     expect(capture.custMerged).toBe(true); // it tried, then rejected internally
-    expect(out).toMatchObject({ period_month: '2026-06-01', total: 1000, customerSnapshot: null });
+    expect(out).toMatchObject({ period_month: '2026-10-01', total: 1000, customerSnapshot: null });
   });
 });

@@ -8,6 +8,7 @@
  */
 
 const db = require('../../models/db');
+const { computeMrrBreakdown } = require('../mrr-breakdown');
 const logger = require('../logger');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 
@@ -176,7 +177,10 @@ async function getRevenueOverview(period = 'month') {
   const prevServices = await fetchServiceRecords(prevStart, prevEnd);
   const prevTopline = computeTopline(prevServices);
 
-  const mrr = await db('customers').where({ active: true }).whereNull('deleted_at').where('monthly_rate', '>', 0).sum('monthly_rate as total').first();
+  // Headline MRR = the shared breakdown (monthly lane ∪ payment-pending
+  // prepay, internal excluded) — one definition with the dashboard tile and
+  // the snapshot (Codex #3669 r3).
+  const mrr = await computeMrrBreakdown(db);
   const mrrVal = parseFloat(mrr?.total || 0);
 
   return {

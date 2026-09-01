@@ -63,21 +63,27 @@ function notMembershipCustomerSql(alias = 'c') {
 // false (treat as a non-member / new customer) on a missing customer or any
 // lookup error — the safe default is to charge the setup fee and offer annual
 // prepay, never to silently waive them for a non-member.
-async function isActivePlanCustomer(database, customerId) {
+// strict: a failed read THROWS instead of reading as "no plan" — the
+// verification callers (setup-waiver re-check, codex #3591 r68 P1) must tell
+// "not a member" apart from "unknown", or a transient outage reprices a
+// member's quote.
+async function isActivePlanCustomer(database, customerId, { strict = false } = {}) {
   if (!database || !customerId) return false;
   try {
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer || customer.active === false) return false;
     return isMembershipCustomerRow(customer);
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return false;
   }
 }
 
 // Map a free-text service name (scheduled_services.service_type or an estimate
-// line label) to a WaveGuard qualifying service key. Scoped to the five
-// qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers,
-// and one-time treatments (one_time_pest etc.) never count toward the tier.
+// line label) to a WaveGuard qualifying service key. Scoped to the six
+// qualifiers (rodent_bait joined 2026-08-29, owner directive) —
+// palm_injection is explicitly NOT a qualifier, and one-time treatments
+// (one_time_pest etc.) never count toward the tier.
 // One rodent-token regex for qualification AND ownership — a second copy
 // would drift (the qualifying classifier additionally requires the row to be
 // rodent-LED; ownership below must not).
@@ -113,7 +119,26 @@ function toQualifyingKeys(raw) {
   if (!palmService && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) keys.add('tree_shrub');
   if (s.includes('mosquito')) keys.add('mosquito');
   if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
+  // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive): a
+  // rodent-LED bait/station/monitoring row is a qualifier. Separators are
+  // normalized first so key-shaped text ('rodent_bait_quarterly') fires the
+  // \b-anchored rodent token; pest-primary combined names ("Pest & Rodent
+  // Bait...") stay pest-only, and trapping/exclusion rows (no bait token)
+  // still never qualify.
+  // Gated on the LIVE flag (codex #3591 r13 P1): pricing_config.
+  // rodent_waveguard.tier_qualifier=false removes rodent_bait from the
+  // engine's WAVEGUARD.qualifyingServices — this classifier must stop
+  // returning it too, or alignment keeps enrolling on a family the pricing
+  // engine no longer recognizes.
+  const w = s.replace(/[_-]+/g, ' ');
+  if (isRodentLedText(w) && /bait|station|monitor/.test(w) && rodentBaitQualifiesLive()) keys.add('rodent_bait');
   return [...keys];
+}
+
+function rodentBaitQualifiesLive() {
+  try {
+    return require('./pricing-engine/discount-engine').serviceCountsTowardWaveGuardTier('rodent_bait');
+  } catch { return true; }
 }
 
 function toQualifyingKey(raw) {
@@ -250,7 +275,7 @@ async function loadCatalogFieldsByRowId(database, customerId) {
     const catalogRows = await database('scheduled_services as s')
       .leftJoin('services as svc', 's.service_id', 'svc.id')
       .where({ 's.customer_id': customerId })
-      .select('s.id', 'svc.service_key', 'svc.name as service_name');
+      .select('s.id', 'svc.service_key', 'svc.name as service_name', 'svc.billing_type as catalog_billing_type');
     return new Map(catalogRows.map((row) => [row.id, row]));
   } catch {
     return null;
@@ -260,6 +285,14 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
+// opts.planGate: false skips the membership-stamp gate (isActivePlanCustomer)
+// and qualifies on the LIVE rows alone. The rodent SETUP-WAIVER reads pass
+// this (codex #3591 r73 P1): the owner rule is "any OTHER qualifying
+// recurring service on the account", not plan membership — a customer whose
+// qualifying row is active but whose tier/monthly-rate stamp has not landed
+// yet (direct admin booking enrolls AFTER resolving the setup, or auto-enroll
+// is gated off) must not be stamped a $99 the rule waives. TIER derivation
+// always keeps the gate.
 // opts.catalogFieldsByRowId: a caller that ALSO classifies rows by catalog
 // identity (the spend panel) passes its already-loaded map — including a
 // null from a failed load — so qualification and that caller's own
@@ -267,11 +300,18 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // #3359 r4: two sequential loads meant one could transiently fail while the
 // other succeeded, splitting tier and spend onto different identities).
 // Omitted (every other caller), the loader fetches its own.
-async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId } = {}) {
-  if (!(await isActivePlanCustomer(database, customerId))) return [];
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId, strict = false, planGate = true } = {}) {
+  if (planGate && !(await isActivePlanCustomer(database, customerId, { strict }))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('autoWaveguardTierEnroll')) {
+  // The legacy label-only branch is TIER-read behavior under the rollout
+  // gate. A planGate: false read is the rodent SETUP-WAIVER (codex #3591
+  // r79 P1) — it exists precisely for accounts the auto-tier rollout has
+  // not stamped, so it must run the canonical qualification (catalog join,
+  // date/callback/source predicates, commercial and non-bait-rodent
+  // exclusions) regardless of the gate, or a stale past row or a
+  // generically-labelled commercial row waives the $99.
+  if (planGate && !isEnabled('autoWaveguardTierEnroll')) {
     return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
   }
   const { etDateString } = require('../utils/datetime-et');
@@ -281,12 +321,18 @@ async function loadExistingRecurringQualifyingRows(database, customerId, { catal
   // fields say rodent_general_one_time / "Rodent Pest Control" must be
   // excluded from pricing evidence exactly as tier derivation excludes it —
   // otherwise pricing counts a family the tier does not).
-  const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  // isNonBaitRodentServiceRow since 2026-08-29: bait-station rows ARE
+  // qualifying/pricing evidence now; only trapping/exclusion/one-time
+  // rodent rows stay excluded (mirrors the tier-derivation change).
+  const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
-  const catalogById = (catalogFieldsByRowId !== undefined
+  const catalogLoaded = catalogFieldsByRowId !== undefined
     ? catalogFieldsByRowId
-    : await loadCatalogFieldsByRowId(database, customerId)) || new Map();
+    : await loadCatalogFieldsByRowId(database, customerId);
+  // strict: an unreadable catalog is UNKNOWN evidence, never a degrade.
+  if (strict && catalogLoaded === null) throw new Error('qualifying-service catalog read failed');
+  const catalogById = catalogLoaded || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -298,7 +344,7 @@ async function loadExistingRecurringQualifyingRows(database, customerId, { catal
   for (const r of rows) {
     if (!rowPassesGatedPricingEvidence(r, today)) continue;
     const joined = { ...r, ...(catalogById.get(r.id) || {}) };
-    if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) continue;
+    if (isCommercialServiceRow(joined) || isNonBaitRodentServiceRow(joined)) continue;
     // Qualify from the same catalog-authoritative classifier the downstream
     // reducer uses (Codex #3011 r10-r12): a stale 'Tree & Shrub Care'
     // service_type linked to palm_injection resolves no family, and a
@@ -326,6 +372,14 @@ function qualifyingKeysForRow(row = {}) {
   if (!catalogText) return toQualifyingKeys(row.service_type);
   const catalogKeys = toQualifyingKeys(catalogText);
   if (catalogKeys.length) return catalogKeys;
+  // A RECOGNIZED rodent bait catalog identity that resolved no key means the
+  // live rodent_waveguard.tier_qualifier flag is off — the row is a
+  // non-qualifying bait plan, never "fall back to the stale label" (a
+  // generic 'Pest Control' service_type would otherwise re-admit it as pest
+  // evidence and waive setups / raise tiers while rodent is disabled —
+  // codex #3591 r25 P1).
+  const catalogLower = catalogText.toLowerCase();
+  if (isRodentLedText(catalogLower) && /bait|station|monitor/.test(catalogLower)) return [];
   return toQualifyingKeys(`${String(row.service_type || '')} ${catalogText}`.trim());
 }
 
@@ -349,9 +403,73 @@ function qualifyingKeysFromRows(rows = []) {
 // address, then the customer's primary street; a row that still can't be
 // located is EXCLUDED (counting an unlocatable plan toward another property's
 // tier would hand out an unearned discount).
-async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
-  const rows = await loadExistingRecurringQualifyingRows(database, customerId);
+async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null, strict = false, planGate = true } = {}) {
+  const rows = await loadExistingRecurringQualifyingRows(database, customerId, { strict, planGate });
   return qualifyingKeysFromRows(await filterRowsToStreet(database, rows, streetScope));
+}
+
+// Existing-customer qualifying evidence for an estimate, split by PURPOSE
+// (codex #3591 r34 P1) — one resolver for the save
+// (admin-estimate-persistence) and the estimator preview
+// (/calculate-estimate) so the two can never scope differently:
+//   • tierKeys — the WaveGuard TIER context. Per-property (codex #3244
+//     r1/r5/r6; owner ruling 2026-08-06: each property is its OWN plan at
+//     its OWN service-count tier): a grouped estimate, or one quoting a
+//     NON-primary street, counts only the qualifying services already
+//     active at THAT street; other properties' plans stay excluded.
+//   • setupWaiverKeys — the rodent bait-station SETUP WAIVER. ACCOUNT-wide
+//     (owner 2026-08-29: "member" = any OTHER qualifying recurring service on
+//     the account, on the estimate or already active), so a plan at another
+//     address still waives the $99.
+// Both streets must parse cleanly to flip to per-property scope — parse
+// uncertainty keeps the long-standing combined behavior for same-property
+// requotes with formatting drift (address check is best-effort; the key
+// LOOKUPS throw so callers refuse retryably instead of pricing a member as
+// a non-member). `loadKeys` lets a caller thread its own (mockable) loader.
+async function resolveCustomerQualifyingEvidence(database, {
+  customerId,
+  address = null,
+  groupedEstimate = false,
+  logger = null,
+  loadKeys = null,
+} = {}) {
+  const out = { tierKeys: [], setupWaiverKeys: [], groupedEstimate: !!groupedEstimate, perPropertyStreetScope: null };
+  if (customerId == null || String(customerId).trim() === '') return out;
+  const load = loadKeys || module.exports.loadExistingQualifyingServiceKeys;
+  if (address) {
+    try {
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
+      const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+      const estimateStreet = normalizedEstimateStreet(address);
+      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+      if (estimateStreet) {
+        out.perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
+      }
+      if (!out.groupedEstimate && estimateStreet && customerStreet && !sameScopeKey(estimateStreet, customerStreet)) {
+        out.groupedEstimate = true;
+      }
+    } catch (err) {
+      if (logger) logger.warn(`[waveguard-existing-services] per-property tier address check skipped: ${err.message}`);
+    }
+  }
+  const clean = (keys) => (Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : []);
+  // The WAIVER purpose reads live qualifying rows without the membership-
+  // stamp gate (codex #3591 r73 P1 — see loadExistingRecurringQualifyingRows
+  // planGate): the owner's waiver rule is "any OTHER qualifying recurring
+  // service", so a not-yet-enrolled customer's active plan still waives the
+  // $99. The TIER purpose keeps the plan gate below.
+  // STRICT throughout (codex #3591 r75 P1): the default loader converts a
+  // failed membership/catalog read into [] — an empty tier list and a
+  // label-only waiver — so the callers' 503/catch refusal paths (estimate
+  // save, /calculate-estimate) would never run and an existing customer
+  // could be priced without their tier or with a spurious $99 setup.
+  out.setupWaiverKeys = clean(await load(database, customerId, { planGate: false, strict: true }));
+  if (!out.groupedEstimate) {
+    out.tierKeys = clean(await load(database, customerId, { strict: true }));
+  } else if (out.perPropertyStreetScope) {
+    out.tierKeys = clean(await load(database, customerId, { streetScope: out.perPropertyStreetScope, strict: true }));
+  }
+  return out;
 }
 
 // One street filter for every per-property consumer (qualifying keys AND the
@@ -587,6 +705,7 @@ module.exports = {
   qualifyingKeysForRow,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
+  resolveCustomerQualifyingEvidence,
   loadOwnedRecurringServiceKeys,
   ownershipKeysForRow,
   isMembershipCustomerRow,

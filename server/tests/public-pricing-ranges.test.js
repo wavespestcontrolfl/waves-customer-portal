@@ -66,6 +66,57 @@ describe('public pricing ranges', () => {
     }
   });
 
+  test('rodent bait sweeps the LIVE bracket ladder — an operator-added narrow bracket is sampled (codex #3591 r9 P2)', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const original = constants.RODENT.baitBrackets;
+    constants.RODENT.baitBrackets = [{ maxSqFt: 900, stations: 3, perVisit: 59 }, ...original];
+    try {
+      const refreshed = computePublicPricingRanges({ refresh: true });
+      const row = refreshed.services.find((svc) => svc.key === 'rodent_bait_program');
+      // 900 sf is not a hardcoded sample point; only the live ladder reaches it.
+      expect(row.low).toBeLessThanOrEqual(59);
+      // ...and the DISCOUNTED sweep reaches it too (codex #3591 r15 P2).
+      const constants2 = require('../services/pricing-engine/constants');
+      const maxTier = Math.max(...Object.values(constants2.WAVEGUARD.tiers).map((t) => t.discount || 0));
+      expect(row.low).toBeLessThanOrEqual(Math.round(59 * (1 - maxTier) * 100) / 100 + 0.01);
+    } finally {
+      constants.RODENT.baitBrackets = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+
+  test('a bracket boundary beyond the 20,000 sf public cap is never sampled (codex #3591 r26 P2)', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const original = constants.RODENT.baitBrackets;
+    // 20,000 sf itself prices at the last bracket a public quote can reach
+    // ($300); the 50,000 sf boundary ($999) is beyond the cap and never sampled.
+    constants.RODENT.baitBrackets = [...original, { maxSqFt: 20000, stations: 20, perVisit: 300 }, { maxSqFt: 50000, stations: 40, perVisit: 999 }];
+    try {
+      const row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
+      expect(row.high).toBe(300);
+    } finally {
+      constants.RODENT.baitBrackets = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+
+  test('rodent bait note tracks the live setup fee to the cent and disappears when the fee is disabled (codex #3591 r10 P2)', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const original = constants.RODENT.baitSetupFee;
+    try {
+      constants.RODENT.baitSetupFee = 99.5;
+      let row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
+      expect(row.notes).toContain('a one-time $99.50 setup applies only without another WaveGuard recurring service');
+      constants.RODENT.baitSetupFee = 0;
+      row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
+      expect(row.notes).not.toMatch(/setup/);
+      expect(row.notes).toMatch(/station allowance by home size\.$/);
+    } finally {
+      constants.RODENT.baitSetupFee = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+
   test('every service sweeps without errors', () => {
     expect(payload.errors).toEqual([]);
   });

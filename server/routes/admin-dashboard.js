@@ -235,6 +235,16 @@ router.get('/', dashboardCache, async (req, res, next) => {
     const monW = mondayThisWeek();
     const sunW = sundayThisWeek();
 
+    // ONE pending-prepay set shared by the headline breakdown and the tier
+    // rows, so revenueByTier sums to the same response's MRR tile even
+    // across a transient lookup failure (Codex #3669 r4/r8).
+    // A FAILED lookup (null) flows through: computeMrrBreakdown and
+    // tierBreakdown each degrade it to their own fail-soft read — this is a
+    // read surface, and the snapshot writer (not this route) is what must
+    // refuse to persist on a failed lookup (r14).
+    const { pendingPrepayIds } = require('../services/mrr-snapshot');
+    const pendingIds = await pendingPrepayIds(db);
+
     const [
       revMTD, revLastMonth, activeCustomers, newThisMonth,
       estimatesPending, servicesWeek, avgResponse, mrrBreakdown, oneTimeMonth,
@@ -263,7 +273,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
       ).first(),
       db('estimates').where({ status: 'accepted' }).whereNotNull('accepted_at').whereNotNull('sent_at').where('accepted_at', '>=', som)
         .select(db.raw("AVG(EXTRACT(EPOCH FROM (accepted_at - sent_at)) / 3600) as avg_hrs")).first(),
-      computeMrrBreakdown(db, today),
+      computeMrrBreakdown(db, today, pendingIds),
       db('payments').where({ status: 'paid' }).where('payment_date', '>=', som).where('description', 'not ilike', '%monthly%').where('description', 'not ilike', '%waveguard%').sum('amount as total').first(),
       // Today's schedule
       db('scheduled_services')
@@ -276,8 +286,11 @@ router.get('/', dashboardCache, async (req, res, next) => {
         .orderBy('scheduled_services.window_start'),
       // Recent activity
       db('activity_log').orderBy('created_at', 'desc').limit(15),
-      // Tier revenue
-      db('customers').where({ active: true }).whereNull('deleted_at').select('waveguard_tier').count('* as count').sum('monthly_rate as revenue').groupBy('waveguard_tier'),
+      // Tier revenue — the shared breakdown population (monthly lane ∪
+      // payment-pending prepay, internal excluded), so revenueByTier
+      // reconciles to the headline MRR in the same response (Codex #3669
+      // r8): the raw sum counted every rate-bearing row, monthly or not.
+      require('../services/mrr-snapshot').tierBreakdown(db, pendingIds),
       // Google reviews — use Places API totals from _stats rows, fallback to actual review count
       (async () => {
         try {
@@ -417,7 +430,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
         createdAt: a.created_at,
       })),
       revenueByTier: tierRevenue.map(t => ({
-        tier: t.waveguard_tier || 'None', count: parseInt(t.count), revenue: parseFloat(t.revenue || 0),
+        tier: t.tier, count: t.count, revenue: t.mrr,
       })),
     });
   } catch (err) { next(err); }
@@ -1261,6 +1274,8 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
         'deleted_at',
         'pipeline_stage',
         'monthly_rate',
+        'billing_mode',
+        'waveguard_tier',
         db.raw("to_char(churned_at, 'YYYY-MM') as churned_month"),
         db.raw("to_char((pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as stage_changed_month"),
         db.raw("to_char((deleted_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM') as deleted_month"),
@@ -1275,15 +1290,35 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
     // environment without the table is a clean no-op (everything falls back).
     const rateByCustomer = new Map(); // customerId -> Map('YYYY-MM' -> rate)
     const snapshottedMonths = new Set(); // months with ANY snapshot row (vs none yet)
+    const { resolveBillingLane } = require('../services/billing-lane');
     try {
       const snapRows = await db('customer_mrr_snapshots')
         .where('period_month', '>=', rangeStart)
         .select('customer_id', db.raw("to_char(period_month, 'YYYY-MM') as ym"), 'monthly_rate');
+      // #3669: snapshots before the lane-definition boundary hold the old wide
+      // population (per-visit / prepay / per-application residue rows
+      // included); from the boundary on they hold the corrected monthly-lane
+      // population. Reading a residue member's wide pre-boundary rows against
+      // their missing post-boundary rows would produce a false NRR cliff at
+      // the boundary (Codex r7 P1), while discarding pre-boundary months
+      // wholesale would erase genuine monthly members' real expansion /
+      // contraction history (Codex r10). So: pre-boundary months stay
+      // authoritative, and ONLY the rows of members whose CURRENT lane is
+      // non-monthly are skipped there — those members read as $0 in every
+      // month, consistently (the same current-state approximation the live
+      // fallbacks use; a member who genuinely paid dues and later switched
+      // lanes is zeroed on both sides, so no false churn signal — the loss
+      // of their true contribution is the documented approximation).
+      const { LANE_DEFINITION_BOUNDARY } = require('../services/mrr-bridge');
+      const nonMonthlyIds = new Set(
+        rows.filter((r) => resolveBillingLane(r).mode !== 'monthly_membership').map((r) => String(r.id)),
+      );
       for (const s of snapRows) {
         // The in-progress month's snapshot (written once at 6:05am ET) is stale for
         // same-day conversions/price changes, so treat it as unsnapshotted → those
         // cells use the live current rate (which IS the point-in-time truth for now).
         if (s.ym !== nowMonth) snapshottedMonths.add(s.ym);
+        if (`${s.ym}-01` < LANE_DEFINITION_BOUNDARY && nonMonthlyIds.has(String(s.customer_id))) continue;
         if (!rateByCustomer.has(s.customer_id)) rateByCustomer.set(s.customer_id, new Map());
         rateByCustomer.get(s.customer_id).set(s.ym, Number(s.monthly_rate) || 0);
       }
@@ -1325,7 +1360,14 @@ router.get('/retention-cohort', dashboardCache, async (req, res, next) => {
         churnIdx = Math.max(cIdx, monthIndexOf(exitMonth));
       }
       if (!byCohort.has(cohort)) byCohort.set(cohort, []);
-      byCohort.get(cohort).push({ churnIdx, customerId: r.id, currentRate: Number(r.monthly_rate) || 0 });
+      // Lane-aware fallback rate (#3140, Codex #3669 r7): a per-visit /
+      // prepay / per-application member's legacy monthly_rate is residue,
+      // not recurring revenue — counting it in a flat-basis cohort would
+      // book the residue as MRR (and its churn as lost MRR). Matches the
+      // corrected snapshot population, so the fallback and point-in-time
+      // bases agree on who carries a rate.
+      const monthlyLaneMember = resolveBillingLane(r).mode === 'monthly_membership';
+      byCohort.get(cohort).push({ churnIdx, customerId: r.id, currentRate: monthlyLaneMember ? (Number(r.monthly_rate) || 0) : 0 });
     }
 
     const cohorts = [];

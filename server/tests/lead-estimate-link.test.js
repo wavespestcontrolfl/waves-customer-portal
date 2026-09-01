@@ -18,6 +18,10 @@ jest.mock('../services/lead-funnel-bridge', () => ({
 }));
 
 const db = require('../models/db');
+// The qualify-on-send lane wraps its flag+audit writes in
+// database.transaction (savepoint semantics on a trx); mocks run the
+// callback against the same handle.
+db.transaction = async (fn) => fn(db);
 const leadAttribution = require('../services/lead-attribution');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
@@ -58,6 +62,7 @@ function makeDb(lead, estimate = null) {
     },
   });
 
+  database.transaction = async (fn) => fn(database);
   return { database, updates, activities };
 }
 
@@ -156,7 +161,7 @@ describe('lead-estimate link service', () => {
     const activities = [];
     db.mockImplementation((table) => ({
       where(clause) {
-        if (table === 'leads' && clause.estimate_id === 'estimate-1') {
+        if (table === 'leads' && clause.estimate_id === 'estimate-1' && !clause.id) {
           return Promise.resolve([lead]);
         }
         const update = async (patch) => {
@@ -164,7 +169,7 @@ describe('lead-estimate link service', () => {
           return 1;
         };
         return {
-          whereIn: () => ({ update }),
+          whereIn: () => ({ update, whereRaw: () => ({ update }) }),
           whereNull: () => ({ update }),
           update,
         };
@@ -189,7 +194,7 @@ describe('lead-estimate link service', () => {
         patch: expect.objectContaining({ response_time_minutes: expect.any(Number) }),
       }),
     ]));
-    expect(activities.map((a) => a.row.activity_type)).toEqual(['first_response', 'estimate_sent']);
+    expect(activities.map((a) => a.row.activity_type)).toEqual(['qualified', 'first_response', 'estimate_sent']);
   });
 
   test('rejects unknown leads before creating activity rows', async () => {
@@ -1389,6 +1394,16 @@ describe('linkLeadEstimatesToCustomer', () => {
 });
 
 describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
+  // Every send flow attempts the qualify-on-send write right after the
+  // status flip (sending an estimate IS qualification); the fixture-backed
+  // mock applies it only when the lead exists in leadsById, is open, and is
+  // not yet qualified — otherwise it records the attempt and touches 0 rows.
+  const QUALIFY_ATTEMPT = (id) => ({
+    id,
+    whereIn: ['new', 'contacted', 'estimate_sent', 'estimate_viewed'],
+    whereRaw: 'is_qualified IS DISTINCT FROM TRUE AND deleted_at IS NULL',
+    patch: expect.objectContaining({ is_qualified: true }),
+  });
   // Mock supporting both branches of resolveEstimateEventLeads:
   //   leads.where({estimate_id})            -> FK-linked rows (array)
   //   estimates.where({id}).first()         -> the estimate
@@ -1403,7 +1418,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     const leadsById = opts.leadsById || {};
     const database = (table) => ({
       where(clause) {
-        if (table === 'leads' && clause && 'estimate_id' in clause) {
+        if (table === 'leads' && clause && 'estimate_id' in clause && !('id' in clause)) {
           return Promise.resolve(opts.linked || []);
         }
         if (table === 'estimates') return { first: async () => opts.estimate || null };
@@ -1441,6 +1456,27 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
                 // status is already outside the whitelist (won/lost/…).
                 return opts.statusRows == null ? 1 : opts.statusRows;
               },
+              // The estimate-send qualification write:
+              // .whereIn('status', OPEN).whereRaw('is_qualified IS DISTINCT
+              // FROM TRUE').update(...). Applies the real predicate against
+              // the fixture so tests exercise the qualify-once semantics.
+              whereRaw: (sql) => ({
+                update: async (patch) => {
+                  updates.push({ id: clause.id, whereIn: vals, whereRaw: sql, patch });
+                  const row = leadsById[clause.id];
+                  if (!row) return 0;
+                  const statusOk = vals.includes(row.status);
+                  const notAlready = row.is_qualified !== true;
+                  const notDeleted = !row.deleted_at;
+                  const linkOk = !('estimate_id' in clause) || row.estimate_id === undefined
+                    || row.estimate_id === clause.estimate_id;
+                  if (statusOk && notAlready && notDeleted && linkOk) {
+                    row.is_qualified = true;
+                    return 1;
+                  }
+                  return 0;
+                },
+              }),
             }),
             update: async (patch) => {
               updates.push({ id: clause.id, patch });
@@ -1472,6 +1508,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
         return [row];
       },
     });
+    database.transaction = async (fn) => fn(database);
     database._updates = updates;
     database._activities = activities;
     return database;
@@ -1494,6 +1531,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
 
     expect(database._updates).toEqual([
       { id: 'L1', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L1'),
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
     // Funnel-row mirror fires with the caller's database handle.
@@ -1513,9 +1551,71 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     // The status update was attempted (and applied nothing)…
     expect(database._updates).toEqual([
       { id: 'L-won', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-won'),
     ]);
     // …so the funnel row must NOT be advanced for a deal that never transitioned.
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
+  test('qualify-on-send never re-qualifies or re-logs an already-qualified lead', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-q', status: 'new', estimate_id: 'e-q' }],
+      leadsById: { 'L-q': { id: 'L-q', status: 'new', is_qualified: true } },
+    });
+    await markLinkedLeadEstimateSent({ estimateId: 'e-q', sendMethod: 'sms', database });
+    // The attempt runs (guard lives in SQL), applies 0 rows, logs nothing.
+    expect(types(database)).toEqual(['estimate_sent']);
+  });
+
+  test('qualify-on-send treats a never-judged (NULL) lead as qualifiable', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-null', status: 'new', estimate_id: 'e-n' }],
+      leadsById: { 'L-null': { id: 'L-null', status: 'new', is_qualified: null } },
+    });
+    await markLinkedLeadEstimateSent({ estimateId: 'e-n', sendMethod: 'sms', database });
+    expect(types(database)).toEqual(['qualified', 'estimate_sent']);
+  });
+
+  test('a fully suppressed send (sentChannels: []) does not qualify', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-supp', status: 'new', estimate_id: 'e-supp' }],
+      leadsById: { 'L-supp': { id: 'L-supp', status: 'new', is_qualified: null, estimate_id: 'e-supp' } },
+    });
+    await markLinkedLeadEstimateSent({ estimateId: 'e-supp', sendMethod: 'sms', sentChannels: [], database });
+    // Status bookkeeping still runs; qualification does not.
+    expect(types(database)).toEqual(['estimate_sent']);
+    expect(database._updates.some((u) => u.patch && u.patch.is_qualified === true)).toBe(false);
+  });
+
+  test('qualify-on-send cannot touch a lead soft-deleted between resolve and write', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-del', status: 'new', estimate_id: 'e-del' }],
+      statusRows: 0,
+      // Re-read state: an admin deleted the lead after the resolve read.
+      leadsById: { 'L-del': { id: 'L-del', status: 'new', is_qualified: null, deleted_at: '2026-08-31T12:00:00Z', estimate_id: 'e-del' } },
+    });
+    await markLinkedLeadEstimateSent({ estimateId: 'e-del', sendMethod: 'sms', database });
+    expect(types(database)).toEqual(['estimate_sent']);
+  });
+
+  test('qualify-on-send cannot touch a lead whose estimate link moved', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-moved', status: 'new', estimate_id: 'e-old' }],
+      statusRows: 0,
+      leadsById: { 'L-moved': { id: 'L-moved', status: 'new', is_qualified: null, estimate_id: 'e-OTHER' } },
+    });
+    await markLinkedLeadEstimateSent({ estimateId: 'e-old', sendMethod: 'sms', database });
+    expect(types(database)).toEqual(['estimate_sent']);
+  });
+
+  test('qualify-on-send cannot touch a lead a human closed or disqualified', async () => {
+    const database = makeEventDb({
+      linked: [{ id: 'L-dq', status: 'new', estimate_id: 'e-dq' }],
+      // Re-read row shows the lead was disqualified between load and write.
+      leadsById: { 'L-dq': { id: 'L-dq', status: 'disqualified', is_qualified: false } },
+    });
+    await markLinkedLeadEstimateSent({ estimateId: 'e-dq', sendMethod: 'sms', database });
+    expect(types(database)).toEqual(['estimate_sent']);
   });
 
   test('replayed view on a closed lead does NOT bridge the funnel row', async () => {
@@ -1541,6 +1641,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([
       { id: 'L-unlinked', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-3' }) },
       { id: 'L-unlinked', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-unlinked'),
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
   });
@@ -1586,8 +1687,11 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([
       { id: 'L-qw', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-6' }) },
       { id: 'L-qw', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-qw'),
     ]);
-    expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
+    // The fixture lead is open and unqualified, so the qualify-on-send
+    // write applies and records its activity.
+    expect(types(database)).toEqual(['estimate_created', 'qualified', 'estimate_sent']);
   });
 
   test('viewed: rescues a contact-matched lead — links it then flips to estimate_viewed (no first-response)', async () => {
@@ -1641,6 +1745,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([
       { id: 'L-same', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-10' }) },
       { id: 'L-same', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-same'),
     ]);
     expect(types(database)).toEqual(['estimate_sent']);
   });
@@ -1709,6 +1814,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([
       { id: 'L-older', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-13' }) },
       { id: 'L-older', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-older'),
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
   });
@@ -1728,8 +1834,11 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([
       { id: 'L-mirror', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-14' }) },
       { id: 'L-mirror', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-mirror'),
     ]);
-    expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
+    // The fixture lead is open and unqualified, so the qualify-on-send
+    // write applies and records its activity.
+    expect(types(database)).toEqual(['estimate_created', 'qualified', 'estimate_sent']);
   });
 
   test('respondedAt times first response from the historical send, not "now" (backfill KPI safety)', async () => {
@@ -1769,6 +1878,7 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._updates).toEqual([
       { id: 'L-cust', whereNull: 'estimate_id', whereNotIn: CLOSED, patch: expect.objectContaining({ estimate_id: 'e-16' }) },
       { id: 'L-cust', whereIn: ['new', 'contacted'], patch: expect.objectContaining({ status: 'estimate_sent' }) },
+      QUALIFY_ATTEMPT('L-cust'),
     ]);
     expect(types(database)).toEqual(['estimate_created', 'estimate_sent']);
   });
@@ -1867,6 +1977,7 @@ function makeContactDb({ leads = [], estimate = null } = {}) {
     };
     return q;
   };
+  database.transaction = async (fn) => fn(database);
   return { database, updates, activities };
 }
 

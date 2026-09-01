@@ -29,6 +29,19 @@
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const ymOf = (monthKey) => String(monthKey).slice(0, 7); // 'YYYY-MM-01' → 'YYYY-MM'
 
+// #3669: customer_mrr_snapshots months before this boundary were captured
+// with the old wide `monthly_rate > 0` population; months from the boundary
+// on hold the corrected monthly-lane population. Historical rows are
+// PRESERVED (never rewritten — deleting them would zero valid history under
+// the retention cohort, Codex r4 P0), so a diff that CROSSES the boundary
+// would misread every residue row as churned MRR. Cross-boundary month
+// pairs therefore degrade to the customers-table approximation, exactly
+// like months with no snapshot; wide-vs-wide pairs inside history stay
+// diffable (internally consistent). First full month on the corrected
+// population: 2026-09. If this ships later than September, bump the
+// boundary to the first month fully captured post-deploy.
+const LANE_DEFINITION_BOUNDARY = '2026-09-01';
+
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function monthLabelOf(monthKey) {
   const ym = ymOf(monthKey);
@@ -43,6 +56,15 @@ function monthLabelOf(monthKey) {
  * @param {Map<string, {newMrr:number,newCount:number,churnedMrr:number,churnedCount:number}>} degradedByMonth
  *   customers-table approximation for months that can't diff snapshots
  * @param {string} currentMonthKey 'YYYY-MM-01' of the in-progress ET month
+ * @param {Map<string, Set<string>>} laneSwitchedIdsByMonth monthKey → ids
+ *   that LEFT the population in that month's diff while the customer stayed
+ *   live on a non-monthly lane (a monthly member who bought an annual
+ *   prepay, was moved to per-application, …). Their dues stream ended but
+ *   the CUSTOMER was retained, so the prior-only branch books them as
+ *   CONTRACTION (dues → 0), never churn (Codex #3669 r10). Resolved PER
+ *   EXIT MONTH by the caller — a customer who genuinely churned in an
+ *   earlier displayed month and only later reactivated on a non-monthly
+ *   lane keeps that earlier churn.
  */
 function buildBridgeMonths({
   monthKeys = [],
@@ -50,14 +72,17 @@ function buildBridgeMonths({
   conversionMonthById = new Map(),
   degradedByMonth = new Map(),
   currentMonthKey = null,
+  laneBoundaryKey = LANE_DEFINITION_BOUNDARY,
+  laneSwitchedIdsByMonth = new Map(),
 } = {}) {
   return monthKeys.map((key, i) => {
     const prevKey = i > 0 ? monthKeys[i - 1] : prevMonthKey(key);
     const curr = snapshotsByMonth.get(key);
     const prev = snapshotsByMonth.get(prevKey);
     const inProgress = key === currentMonthKey;
+    const crossesLaneBoundary = !!laneBoundaryKey && prevKey < laneBoundaryKey && key >= laneBoundaryKey;
 
-    if (!curr || !prev) {
+    if (!curr || !prev || crossesLaneBoundary) {
       // Degrade, don't hide: two-sided customers-table approximation.
       const d = degradedByMonth.get(key) || { newMrr: 0, newCount: 0, churnedMrr: 0, churnedCount: 0 };
       return {
@@ -99,8 +124,12 @@ function buildBridgeMonths({
       startMrr += prevRate;
       const currRate = curr.get(id);
       if (currRate == null) {
-        buckets.churned.mrr += prevRate;
-        buckets.churned.count += 1;
+        // Still a live customer on a non-monthly lane = a lane SWITCH, not
+        // a lost customer: the dues stream contracted to zero.
+        const switched = laneSwitchedIdsByMonth.get(key);
+        const b = switched && switched.has(String(id)) ? buckets.contraction : buckets.churned;
+        b.mrr += prevRate;
+        b.count += 1;
       } else if (currRate > prevRate) {
         buckets.expansion.mrr += currRate - prevRate;
         buckets.expansion.count += 1;
@@ -168,6 +197,7 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   const { etMonthStart, etDateString } = require('../utils/datetime-et');
   const { CONVERSION_DATE_SQL, CUSTOMER_STAGES } = require('./customer-stages');
   const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+  const { MONTHLY_LANE_SQL } = require('./billing-lane');
 
   const n = Math.max(2, Math.min(12, parseInt(months, 10) || 6));
   const currentMonthKey = etMonthStart();
@@ -193,12 +223,18 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
 
   // In-progress month: recompute from live rates via the SAME population query
   // the snapshot cron writes from (customerRateRows — active, not-deleted,
-  // rate > 0, internal excluded), so today's adds/churns/reprices show now
-  // instead of after the next 6:05am upsert. Falls back to the snapshot rows.
-  try {
-    const { customerRateRows } = require('./mrr-snapshot');
-    overlayLiveCurrentMonth(snapshotsByMonth, currentMonthKey, await customerRateRows(db));
-  } catch { /* live read failed — keep the (possibly stale) snapshot rows */ }
+  // rate > 0, monthly lane, internal excluded), so today's adds/churns/reprices
+  // show now instead of after the next 6:05am upsert. Falls back to the
+  // snapshot rows. Suppressed for a PRE-BOUNDARY current month (deploy lands
+  // mid-month): the live read is the corrected narrow population while that
+  // month's frozen neighbors are wide — overlaying would manufacture the
+  // cross-population churn surge inside a nominally diffable pair.
+  if (currentMonthKey >= LANE_DEFINITION_BOUNDARY) {
+    try {
+      const { customerRateRows } = require('./mrr-snapshot');
+      overlayLiveCurrentMonth(snapshotsByMonth, currentMonthKey, await customerRateRows(db));
+    } catch { /* live read failed — keep the (possibly stale) snapshot rows */ }
+  }
 
   // Conversion months for customers ENTERING a diffable month (new vs
   // reactivated split). One query over just those ids.
@@ -218,6 +254,47 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     for (const r of rows) conversionMonthById.set(r.id, r.conv_month);
   }
 
+  // Ids EXITING the IN-PROGRESS month's diff whose customer is still LIVE
+  // on a non-monthly lane — a monthly member who converted to annual
+  // prepay / per-application (payment stamps the new billing_mode and the
+  // narrowed population drops the row). Booked as CONTRACTION, not churn
+  // (Codex #3669 r10). Restricted to the current month DELIBERATELY (Codex
+  // r10 follow-up): only there is the live customers row the exit-TIME
+  // state — no per-month lane history exists, so classifying an older
+  // frozen exit from today's row would relabel a genuine June churn as
+  // contraction after a prepay reactivation (reactivation clears
+  // churned_at, customer-stages.js), or miss a June switch that later
+  // churned. Historical exits therefore keep the conservative churn label;
+  // a durable historical classification needs a dated lane-change record,
+  // which this PR does not introduce. Fail-soft to "churned" on a read
+  // failure.
+  const laneSwitchedIdsByMonth = new Map();
+  const currIdx = monthKeys.indexOf(currentMonthKey);
+  const currDiff = currIdx >= 0 ? snapshotsByMonth.get(currentMonthKey) : null;
+  const currPrev = currIdx >= 0
+    ? snapshotsByMonth.get(currIdx > 0 ? monthKeys[currIdx - 1] : prevMonthKey(currentMonthKey))
+    : null;
+  if (currDiff && currPrev) {
+    const exitedNow = [...currPrev.keys()].filter((id) => !currDiff.has(id));
+    if (exitedNow.length) {
+      try {
+        const { resolveBillingLane } = require('./billing-lane');
+        const { CUSTOMER_STAGES: liveStages } = require('./customer-stages');
+        const rows = await db('customers')
+          .whereIn('id', exitedNow)
+          .where('active', true)
+          .whereNull('deleted_at')
+          .whereIn('pipeline_stage', liveStages)
+          .select('id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+        const switched = new Set();
+        for (const r of rows) {
+          if (resolveBillingLane(r).mode !== 'monthly_membership') switched.add(String(r.id));
+        }
+        if (switched.size) laneSwitchedIdsByMonth.set(currentMonthKey, switched);
+      } catch { /* unresolvable — exits stay classified as churn */ }
+    }
+  }
+
   // Customers-table approximation for months that can't diff snapshots.
   // Same population + exit convention as the retention cohort: converted
   // customers only (customer stages + churned/dormant), internal excluded;
@@ -225,8 +302,9 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   // the exit, else deleted month. Valued at CURRENT rates — that's the
   // documented approximation, not an error.
   const degradedKeys = monthKeys.filter((key, i) => {
-    const prev = snapshotsByMonth.get(i > 0 ? monthKeys[i - 1] : prevMonthKey(key));
-    return !snapshotsByMonth.get(key) || !prev;
+    const prevKey = i > 0 ? monthKeys[i - 1] : prevMonthKey(key);
+    const crossesLaneBoundary = prevKey < LANE_DEFINITION_BOUNDARY && key >= LANE_DEFINITION_BOUNDARY;
+    return !snapshotsByMonth.get(key) || !snapshotsByMonth.get(prevKey) || crossesLaneBoundary;
   });
   const degradedByMonth = new Map();
   if (degradedKeys.length) {
@@ -234,7 +312,8 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     try {
       const qb = db('customers')
         .whereIn('pipeline_stage', [...CUSTOMER_STAGES, 'churned', 'dormant'])
-        .where('monthly_rate', '>', 0);
+        .where('monthly_rate', '>', 0)
+        .whereRaw(MONTHLY_LANE_SQL);
       if (INTERNAL_TEST_CUSTOMERS.length) {
         qb.whereNotIn(
           db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
@@ -287,6 +366,7 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
     conversionMonthById,
     degradedByMonth,
     currentMonthKey,
+    laneSwitchedIdsByMonth,
   });
 
   return {
@@ -296,4 +376,4 @@ async function computeMrrBridge({ months = 6, conn } = {}) {
   };
 }
 
-module.exports = { buildBridgeMonths, computeMrrBridge, overlayLiveCurrentMonth, prevMonthKey, periodKeyOf, monthLabelOf };
+module.exports = { buildBridgeMonths, computeMrrBridge, overlayLiveCurrentMonth, prevMonthKey, periodKeyOf, monthLabelOf, LANE_DEFINITION_BOUNDARY };

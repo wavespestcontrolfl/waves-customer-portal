@@ -524,7 +524,7 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
  */
 async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, trx) {
   const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
-    .first('id', 'customer_id', 'invoice_number', 'status', 'credit_applied', 'line_items');
+    .first('id', 'customer_id', 'invoice_number', 'status', 'credit_applied', 'line_items', 'scheduled_service_id');
   if (!inv) return { restored: 0 };
   const restore = round2(inv.credit_applied);
   // A FULL refund TERMINALIZES the invoice to 'refunded' from ANY non-terminal
@@ -543,6 +543,11 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
     await trx('invoices').where({ id: invoiceId }).update(updates);
   }
   if (!alreadyTerminal) {
+    // Transition winner is HERE, not the callers' later status flips (codex
+    // #3591 r45 P1): a refunded invoice that billed the rodent bait-station
+    // setup restores the obligation on the living series exactly once, under
+    // the same row lock and terminal gate. Best-effort inside the helper.
+    await require('./invoice').restoreRodentSetupObligationForReversedInvoice(trx, inv);
     // Transition winner: give back the deposit dollars this invoice consumed
     // (credited → received, roll-forward-eligible). Restore-based-on-line-items
     // must run at most once per invoice, which the terminal gate guarantees.

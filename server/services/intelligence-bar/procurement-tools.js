@@ -659,6 +659,18 @@ async function approvePrice(input) {
 
   const approval = await db('price_approvals').where('id', approval_id).first();
   if (!approval) return { error: 'Approval not found' };
+  // W0B pin (codex r4): the card's fingerprint is asserted on the SAME row
+  // this executor hands to applyPriceApproval — an edited/re-vendored
+  // approval refuses here instead of applying values the card never showed.
+  if (input._approval_fingerprint) {
+    const { priceApprovalFingerprint } = require('./proposal-pins');
+    if (priceApprovalFingerprint(approval) !== String(input._approval_fingerprint)) {
+      return {
+        error: 'This price approval changed after the card was shown — nothing was applied. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+  }
 
   if (action === 'approve') {
     // ONE atomic approval writer (codex r4-push P1): the shared
@@ -1114,6 +1126,20 @@ async function adjustStock(input) {
     const locked = computeStockChange(fresh, { movementType, qty, setTotal, unit: input.unit });
     if (locked.error) return locked;
 
+    // The card's approved before/after totals bind under THIS lock (GH r12
+    // P1, same contract as the receive pin): the movement is re-derived
+    // from the freshly locked balance, so a concurrent inventory change
+    // must refuse rather than land totals the operator never saw.
+    const approvedAdjustment = input._verified_adjustment;
+    if (approvedAdjustment && (round4(locked.stockBefore) !== round4(toNumber(approvedAdjustment.stock_before) ?? NaN)
+      || round4(locked.stockAfter) !== round4(toNumber(approvedAdjustment.stock_after) ?? NaN)
+      || String(locked.inventoryUnit) !== String(approvedAdjustment.unit))) {
+      return {
+        error: 'The stock numbers changed after the card was shown (product or inventory level edited) — nothing was adjusted. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+
     await trx('products_catalog').where('id', fresh.id).update({
       inventory_on_hand: locked.stockAfter,
       inventory_unit: locked.inventoryUnit,
@@ -1194,33 +1220,59 @@ async function createRestockRequest(input) {
     };
   }
 
-  const [request] = await db('product_restock_requests').insert({
-    product_id: product.id,
-    status: 'open',
-    priority,
-    requested_quantity: qty,
-    unit,
-    current_stock: currentStock,
-    vendor,
-    needed_by: neededBy,
-    reason: input.reason || null,
-    source: 'intelligence_bar',
-    created_by_name: 'Intelligence Bar',
-  }).returning('*');
+  // The stored snapshot fields (current_stock, product-derived unit, vendor
+  // fallback) came from an unlocked read — re-derive them under the product
+  // row lock and, when a card approved this request, refuse if they no
+  // longer match what the operator saw (GH r12 P1, same contract as the
+  // receive pin).
+  return db.transaction(async (trx) => {
+    const fresh = await trx('products_catalog').where('id', product.id).forUpdate().first();
+    if (!fresh) return { error: 'Product not found' };
+    const lockedUnit = input.unit || fresh.inventory_unit;
+    if (!lockedUnit) return { error: 'unit is required — this product has no inventory unit set' };
+    if (!unitDefinition(lockedUnit)) return { error: `Unsupported unit "${lockedUnit}". Supported: fl_oz, gal, qt, pt, ml, l, oz, lb, g, kg` };
+    const lockedVendor = input.vendor || fresh.best_vendor || null;
+    const lockedStock = toNumber(fresh.inventory_on_hand);
 
-  return {
-    success: true,
-    request: {
-      id: request?.id || null,
-      product: product.name,
+    const approvedRequest = input._verified_request;
+    const sameStock = (a, b) => (a == null && b == null) || (a != null && b != null && round4(a) === round4(b));
+    if (approvedRequest && (!sameStock(lockedStock, toNumber(approvedRequest.current_stock))
+      || String(lockedUnit) !== String(approvedRequest.unit)
+      || String(lockedVendor ?? '') !== String(approvedRequest.vendor ?? ''))) {
+      return {
+        error: 'This product changed after the card was shown (stock level, unit, or vendor) — nothing was requested. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+
+    const [request] = await trx('product_restock_requests').insert({
+      product_id: product.id,
       status: 'open',
-      requested_quantity: qty,
-      unit,
       priority,
-      vendor,
+      requested_quantity: qty,
+      unit: lockedUnit,
+      current_stock: lockedStock,
+      vendor: lockedVendor,
       needed_by: neededBy,
-    },
-  };
+      reason: input.reason || null,
+      source: 'intelligence_bar',
+      created_by_name: 'Intelligence Bar',
+    }).returning('*');
+
+    return {
+      success: true,
+      request: {
+        id: request?.id || null,
+        product: product.name,
+        status: 'open',
+        requested_quantity: qty,
+        unit: lockedUnit,
+        priority,
+        vendor: lockedVendor,
+        needed_by: neededBy,
+      },
+    };
+  });
 }
 
 async function updateRestockRequest(input) {
@@ -1306,6 +1358,24 @@ async function updateRestockRequest(input) {
     const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
     const stockAfter = round4(stockBefore + received.amount);
 
+    // The card approved an EXACT stock delta (GH r11 P1): re-assert it
+    // here, under the request + product row locks — the entered quantity
+    // and unit were derived from unlocked reads, so a request or product
+    // edited after the confirm-time preview could otherwise add a
+    // different amount than the operator saw.
+    const approvedReceive = input._verified_receive;
+    if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
+      || String(inventoryUnit) !== String(approvedReceive.unit)
+      // The card shows exact before/after totals — the starting balance
+      // binds too (pre-push r11 P1), so a concurrent movement refuses
+      // rather than landing an unapproved final balance.
+      || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
+      return {
+        error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
+        preview_changed: true,
+      };
+    }
+
     await trx('products_catalog').where('id', fresh.id).update({
       inventory_on_hand: stockAfter,
       inventory_unit: inventoryUnit,
@@ -1355,6 +1425,10 @@ async function updateRestockRequest(input) {
     } catch (recheckErr) {
       logger.warn(`[intelligence-bar:procurement] restock readiness recheck failed: ${recheckErr.message}`);
       result.readiness_recheck = { error: recheckErr.message };
+      // The card renders only result.warning, and the contract promises a
+      // recheck failure is reported (GH r16 P2) — promote it there, never
+      // leave it buried in a field the operator never sees.
+      result.warning = [result.warning, 'Stock received, but the WaveGuard lawn-readiness recheck failed — open readiness alerts in the Command Center may be stale until the next recheck.'].filter(Boolean).join(' ');
     }
   }
   return result;

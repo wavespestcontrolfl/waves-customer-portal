@@ -370,19 +370,35 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(r).toMatchObject({ service: 'commercial_termite_bait', annual: 1014.55, visitsPerYear: 4, taxable: true });
   });
 
-  test('rodent-bait golden anchor (footprint-driven, 4 visits)', () => {
+  test('rodent-bait golden anchor (footprint brackets, 4 visits)', () => {
+    // Owner directive 2026-08-29: commercial rodent bait uses the SAME
+    // footprint-bracket ladder as residential. 20,000 sf = 14 extension
+    // steps past the 6,750 top bracket → 23 stations, $269/visit × 4.
     const r = priceCommercialRodentBait({ footprint: 20000 });
-    expect(r).toMatchObject({ service: 'commercial_rodent_bait', annual: 1080.61, visitsPerYear: 4, taxable: true });
+    expect(r).toMatchObject({
+      service: 'commercial_rodent_bait',
+      annual: 1076,
+      perVisit: 269,
+      stations: 23,
+      visitsPerYear: 4,
+      taxable: true,
+      pricingBasis: 'RODENT_BAIT_BRACKET',
+    });
   });
 
-  test('termite/rodent small buildings price at the raw buildup — floor disarmed', () => {
-    // Floors disarmed (owner 2026-08-17): sub-$900 buildups are no longer
-    // clamped to the account minimum; minApplied stays as the report-only flag.
+  test('termite/rodent small buildings — termite keeps the raw buildup, rodent uses the bracket ladder', () => {
+    // Floors disarmed (owner 2026-08-17): sub-$900 termite buildups are no
+    // longer clamped to the account minimum; minApplied stays report-only.
+    // Rodent left the cost-buildup entirely (owner 2026-08-29): 10,000 sf =
+    // 4 steps past 6,750 → 13 stations, $169/visit × 4, no minimum concept.
     const termite = priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 });
     const rodent = priceCommercialRodentBait({ footprint: 10000 });
     expect(termite.annual).toBeCloseTo(850.91, 2);
     expect(termite.minApplied).toBe(true);
-    expect(rodent.annual).toBeCloseTo(781.21, 2);
+    expect(rodent.annual).toBe(676);
+    expect(rodent.perVisit).toBe(169);
+    expect(rodent.stations).toBe(13);
+    // Report-only: under $900 flags minApplied but nothing clamps unarmed.
     expect(rodent.minApplied).toBe(true);
   });
 

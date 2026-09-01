@@ -191,8 +191,14 @@ async function planScopedWindDown(customerId, scopedFamilies, dbh = db) {
   const discountAfter = tierDiscountRate(tierAfter);
 
   const components = await loadComponents(dbh, customerId);
-  const monthlyLane = Number(customer.monthly_rate) > 0 && String(customer.billing_mode || '') !== 'per_application';
-  const perApplicationLane = String(customer.billing_mode || '') === 'per_application';
+  // Lane via the canonical resolver (#3140): a positive monthly_rate on a
+  // per-visit / annual-prepay / one-time row is legacy residue, not dues —
+  // the old rate>0 shortcut demanded attribution and repriced monthly
+  // components for lanes the dues cron never bills (Codex #3669 r3 P2).
+  const { resolveBillingLane } = require('./billing-lane');
+  const laneMode = resolveBillingLane(customer).mode;
+  const monthlyLane = laneMode === 'monthly_membership';
+  const perApplicationLane = laneMode === 'per_application';
   const byFamily = new Map(components.map((c) => [c.family_key, Number(c.monthly_rate) || 0]));
   // A family on HOLD carries its real price in plan_holds.held_monthly_rate
   // (its component is 0) — reprice THAT and leave the component/source

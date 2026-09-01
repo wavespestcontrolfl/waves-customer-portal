@@ -612,6 +612,59 @@ describe('OneTimeModeToggle labels', () => {
 });
 
 describe('estimateAddServiceOffer', () => {
+  it('pest + rodent bait is already Silver — the lawn offer takes the multi-service copy, never "Silver / 10%" (codex #3591 r12 P2)', () => {
+    const offer = estimateAddServiceOffer([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4 },
+      ] }],
+    }], 'recurring');
+    expect(offer).toEqual(expect.objectContaining({ serviceKey: 'lawn_care' }));
+    expect(offer.body).not.toMatch(/Silver|10%/);
+    // Rodent trapping is not a plan service and must not move the copy.
+    const trapping = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 }] }],
+      services: [{ name: 'Rodent Trapping' }],
+    }], 'recurring');
+    expect(trapping.body).toMatch(/Silver|10%|next/);
+    // A rodent row the server flagged non-qualifying (live rodent_waveguard
+    // flags) does not count either (codex #3591 r15 P2).
+    const flaggedOff = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, countsTowardWaveGuardTier: false },
+      ] }],
+    }], 'recurring');
+    expect(flaggedOff.body).toMatch(/Silver|10%|next/);
+    // …even when the section's raw memberKeys still list rodent_bait ahead
+    // of the flagged row (codex #3591 r41 P2): the row verdict wins.
+    const flaggedOffWithMemberKey = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control', 'rodent_bait'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, countsTowardWaveGuardTier: false },
+      ] }],
+    }], 'recurring');
+    expect(flaggedOffWithMemberKey.body).toMatch(/Silver|10%|next/);
+    // Discount eligibility is NOT tier qualification: a tier-counted rodent
+    // row that is merely excluded from the % still makes pest + rodent
+    // Silver, so the lawn offer takes the multi-service copy (codex #3591 r26 P1).
+    const discountOnly = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, waveGuardDiscountEligible: false },
+      ] }],
+    }], 'recurring');
+    expect(discountOnly.body).not.toMatch(/Silver|10%/);
+  });
+
   it('uses member keys from collapsed bundle sections', () => {
     expect(estimateAddServiceOffer([{
       key: 'bundle',
@@ -1422,6 +1475,23 @@ describe('oneTimeExtrasForPaymentNote', () => {
       },
     };
     expect(oneTimeExtrasForPaymentNote(setupOnly, {}, 'recurring')).toBe(0);
+  });
+
+  it('subtracts the rodent bait-station setup too — it is invoiced up front, not after completion (codex #3591 r33 P1)', () => {
+    const rodent = {
+      oneTimeBreakdown: {
+        total: 348,
+        items: [
+          { service: 'flea_treatment', name: 'Flea treatment', price: 249 },
+          { service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 },
+        ],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(rodent, {}, 'recurring')).toBe(249);
+    const labeled = {
+      oneTimeBreakdown: { total: 149, items: [{ name: 'Rodent exclusion', price: 50 }, { name: 'Bait Station Setup', price: 99 }] },
+    };
+    expect(oneTimeExtrasForPaymentNote(labeled, {}, 'recurring')).toBe(50);
   });
 
   it('matches setup rows by label when the service key is missing', () => {

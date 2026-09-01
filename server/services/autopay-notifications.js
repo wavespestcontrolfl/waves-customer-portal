@@ -29,13 +29,7 @@ async function sendPreChargeReminders() {
 
   logger.info(`[autopay-notifications] Pre-charge reminders for billing_day=${targetDay}`);
 
-  // Active autopay customers whose billing_day matches 3 days from now
-  let customersQuery = db('customers')
-    .where({ active: true, autopay_enabled: true })
-    .where('monthly_rate', '>', 0)
-    .where('billing_day', targetDay)
-    .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier', 'billing_mode');
+  // Active autopay customers whose billing_day matches 3 days from now.
   // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
   // but the monthly cron never charges them (GUARD 3b) — never text a
   // reminder for a monthly charge that will not run (Codex round-2 + 5):
@@ -52,9 +46,16 @@ async function sendPreChargeReminders() {
   // dropped, and 12 prepay / per-application customers were texted about a
   // "monthly charge" that would never run. billing_mode has existed since
   // migration 20260709000010, so the probe is gone: the lane filter is
-  // unconditional, and if the column were ever missing the query throws and
+  // unconditional (the .whereRaw(MONTHLY_LANE_SQL) in the chain below),
+  // and if the column were ever missing the query throws and
   // the run aborts instead of texting everyone.
-  customersQuery = customersQuery.whereRaw(MONTHLY_LANE_SQL);
+  const customersQuery = db('customers')
+    .where({ active: true, autopay_enabled: true })
+    .where('monthly_rate', '>', 0)
+    .whereRaw(MONTHLY_LANE_SQL)
+    .where('billing_day', targetDay)
+    .whereNull('deleted_at')
+    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier', 'billing_mode');
   const customers = await customersQuery;
 
   let sent = 0;

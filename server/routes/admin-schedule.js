@@ -15,6 +15,7 @@ const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { openInvoiceFacts } = require('../services/visit-context/balance');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
@@ -69,8 +70,9 @@ const {
 const {
   detectWaveGuardPlanKeys,
   isCommercialServiceRow,
-  isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
   syncCustomerWaveGuardPlanFromScheduledServices,
+  uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
@@ -1110,7 +1112,11 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // the provider handoff if the visit moved again or went terminal, and closes/
 // re-arms the covered reminder windows guarded on the pre-send snapshot.
 // Returns { sent, error }.
-async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
+// expectedPhone semantics (GH r18/r19 P1): undefined = unpinned caller
+// (no enforcement); a string = the card-approved number; null = the card
+// showed NO SMS recipient — a phone that appears afterwards must refuse,
+// never receive a text the operator did not approve.
+async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = undefined } = {}) {
   // Shared belt for every notice path (update-details, bulk reschedule, IB
   // schedule tools): a LEGACY outbound-review row (pending before the
   // 2026-08-11 review-hold removal) must be activated — reminders armed,
@@ -1144,6 +1150,13 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
     if (!customer) {
       error = 'Customer not found';
+    } else if (expectedPhone !== undefined
+      && String(require('../services/customer-contact').getServiceContactSmsRecipient(customer).phone || '') !== String(expectedPhone || '')) {
+      // W0B pinned recipient at the sender's own customer read (GH r18
+      // P1): a card-confirmed batch move approved a specific number — a
+      // phone changed after the card must refuse here, never text an
+      // unapproved number. Callers without a pin are unchanged.
+      error = 'The recipient phone changed after the card was shown — reschedule text not sent to the new number.';
     } else {
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
       // sentinel) — safeSendAppointment then treats the primary as opted
@@ -1329,79 +1342,16 @@ async function voidOpenInvoicesForCancelledService(scheduledServiceId) {
   }
 }
 
-// Apply a discount to a price. Returns the discounted price (>= 0).
-function applyDiscount(price, type, amount) {
-  if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
-  const p = Number(price);
-  const a = Number(amount);
-  if (type === 'percentage' || type === 'variable_percentage') return Math.max(0, +(p * (1 - a / 100)).toFixed(2));
-  if (type === 'fixed_amount' || type === 'variable_amount') return Math.max(0, +(p - a).toFixed(2));
-  if (type === 'free_service') return 0;
-  return price;
-}
-
-function copyLineDiscountFields(target, source, cols) {
-  if (!target || !source || !cols) return;
-  if (cols.primary_line_price && source.primary_line_price != null) target.primary_line_price = source.primary_line_price;
-  if (cols.line_discount_id && source.line_discount_id) target.line_discount_id = source.line_discount_id;
-  if (cols.line_discount_name && source.line_discount_name) target.line_discount_name = source.line_discount_name;
-  if (cols.line_discount_type && source.line_discount_type) target.line_discount_type = source.line_discount_type;
-  if (cols.line_discount_amount && source.line_discount_amount != null) target.line_discount_amount = source.line_discount_amount;
-  if (cols.line_discount_dollars && source.line_discount_dollars != null) target.line_discount_dollars = source.line_discount_dollars;
-  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
-  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
-}
-
-function copyAppointmentDiscountFields(target, source, cols) {
-  if (!target || !source || !cols) return;
-  if (cols.discount_id && source.discount_id) target.discount_id = source.discount_id;
-  if (cols.discount_name && source.discount_name) target.discount_name = source.discount_name;
-  if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
-  if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
-  if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
-  if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
-  if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
-  if (cols.discount_max_dollars) target.discount_max_dollars = source.discount_max_dollars ?? null;
-}
-
-// Third-party Bill-To stamp (payer / PO / self-pay override): a spawned
-// series row must resolve billing exactly like the rest of the series at
-// completion. The PARENT is the canonical source — Bill-To edits propagate
-// parent → children (the PUT payer-propagation and update-details child
-// spawn both treat it that way), so the parent is never staler than a
-// sibling. Without this, a payer-billed series (or an explicit self-pay
-// override on a customer with a default payer) refills a visit whose
-// completion-time COALESCE(visit payer, customer payer) resolves to the
-// WRONG party — invoicing the homeowner instead of the payer, or vice versa.
-function copyBillToFields(target, source, cols) {
-  if (!target || !source || !cols) return;
-  if (cols.payer_id) target.payer_id = source.payer_id ?? null;
-  if (cols.po_number) target.po_number = source.po_number ?? null;
-  if (cols.self_pay_override) target.self_pay_override = source.self_pay_override === true;
-}
-
-// Stamped service address (property linkage): a series booked for a
-// secondary/rental property carries a visit-level service_address_* stamp
-// plus property_id and stamped coords. A spawned row must inherit the stamp
-// or every reader's COALESCE(scheduled_services.service_address_*,
-// customers.address_*) falls back to the customer's PRIMARY address and the
-// visit is scheduled/dispatched to the wrong property. Parent-sourced, same
-// as the recurring seeder's follow-up rows. (scheduled_services has no
-// plain address/city/state/zip columns — the seeder's legacy names there
-// are inert; these are the live stamp columns from the property-linkage
-// migration, plus lat/lng.)
-function copyStampedServiceAddressFields(target, source, cols) {
-  if (!target || !source || !cols) return;
-  const stampFields = [
-    'property_id',
-    'service_address_line1', 'service_address_line2',
-    'service_address_city', 'service_address_state', 'service_address_zip',
-    'lat', 'lng',
-  ];
-  for (const f of stampFields) {
-    if (cols[f] && source[f] !== undefined) target[f] = source[f];
-  }
-}
+// Financial/lineage stamp helpers (applyDiscount + the copy*Fields family)
+// live in the shared booking module so booking writers outside this route
+// can stamp the same discount/Bill-To/address lineage.
+const {
+  applyDiscount,
+  copyLineDiscountFields,
+  copyAppointmentDiscountFields,
+  copyBillToFields,
+  copyStampedServiceAddressFields,
+} = require('../services/booking/visit-financial-stamps');
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
@@ -1874,9 +1824,15 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
     service_type: serviceType,
     service_key: serviceRecord?.service_key,
     service_name: serviceRecord?.name,
+    catalog_billing_type: serviceRecord?.billing_type,
   };
-  if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return false;
-  return detectWaveGuardPlanKeys(row).length > 0;
+  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
+  // Through the LIVE family mapper (codex #3591 r23 P1): a detected
+  // rodent_bait key is not coverage while rodent_waveguard.tier_qualifier
+  // is off — the same rule the tier sync enforces, so a booking discount
+  // whose requirement is WaveGuard membership is never granted to a plan
+  // the sync will refuse to enroll.
+  return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
 async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false }) {
@@ -3696,18 +3652,7 @@ router.get('/', async (req, res, next) => {
       // failing the whole schedule payload.
       let openInvoices = { balance: 0, count: 0, overdue: false };
       try {
-        const inv = await db('invoices')
-          .where({ customer_id: s.customer_id })
-          .whereIn('status', ['sent', 'viewed', 'overdue'])
-          // Payer-billed invoices are the third party's AR — never the
-          // homeowner's balance (Codex r1).
-          .whereNull('payer_id')
-          .first(
-            db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
-            db.raw('COUNT(*)::int as count'),
-            db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
-          );
-        if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
+        openInvoices = await openInvoiceFacts(s.customer_id);
       } catch { /* non-blocking */ }
       let duesPaidThisMonth = null;
       // Visit-month dues for the coverage prediction — keyed on the VISIT's
@@ -4217,18 +4162,7 @@ router.get('/week', async (req, res, next) => {
         // failing the whole schedule payload.
         let openInvoices = { balance: 0, count: 0, overdue: false };
         try {
-          const inv = await db('invoices')
-            .where({ customer_id: s.customer_id })
-            .whereIn('status', ['sent', 'viewed', 'overdue'])
-            // Payer-billed invoices are the third party's AR — never the
-            // homeowner's balance (Codex r1).
-            .whereNull('payer_id')
-            .first(
-              db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
-              db.raw('COUNT(*)::int as count'),
-              db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
-            );
-          if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
+          openInvoices = await openInvoiceFacts(s.customer_id);
         } catch { /* non-blocking */ }
         let duesPaidThisMonth = null;
         // Visit-month dues for the prediction (see day view).
@@ -5311,6 +5245,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
 
     let waveguardPlanSync = null;
+    // Rodent-bait setup stamped inside the booking transaction; an
+    // accept-on-book success retires it (the acceptance bills the setup from
+    // the estimate's frozen disclosure), a failed attach/accept leaves it so
+    // the first completion still collects (codex #3591 r62 P1).
+    let directRodentSetupStamp = 0;
     await db.transaction(async (trx) => {
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
       // occupancy lock, FIRST statement of the trx, before the comms lock
@@ -5683,6 +5622,95 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
       }
 
+      // A direct rodent-bait series owes its setup AT CREATION (codex #3591
+      // r58/r59 P1): stamp it in the SAME transaction as the series —
+      // financial state never rides a post-response side effect. A resolver
+      // failure rolls the booking back (retryable) rather than committing a
+      // series whose first completion under-bills; the /secure page, if a
+      // link is later sent, freezes/consumes this same stamp.
+      // A booking linked to an ALREADY-ACCEPTED estimate never stamps here
+      // (codex #3591 r61 P1): that acceptance already made and billed the
+      // setup decision from the estimate's frozen disclosure — a stamp would
+      // be collected AGAIN at a post-coverage completion. An ACCEPT-ON-BOOK
+      // series, however, DOES stamp (codex #3591 r62 P1): the acceptance it
+      // depends on runs post-commit and explicitly leaves the appointment
+      // standing when the estimate attach loses a race or
+      // markEstimateManuallyAccepted throws — without a stamp those paths
+      // commit a series whose first completion permanently under-bills. The
+      // stamp is retired below the moment acceptance succeeds (the accept
+      // bills the setup itself), so the exemption is deferred until the
+      // acceptance actually lands instead of assumed up front.
+      if (isRecurring && (!linkedEstimateId || acceptEstimateOnBook)) {
+        const plans = require('../services/secure-appointment-plans');
+        const owedSetup = await plans.resolveDirectRodentSetupObligation(trx, { id: svc.id });
+        if (owedSetup > 0) {
+          // A Customer 360 coverage-only prepay already billed this setup
+          // before any series existed (codex #3591 r73 P1): its claim sits
+          // anchor-less on the live prepay invoice. This booking IS the
+          // covered series — anchor the claim to it (so a later refund
+          // restores here) instead of stamping a second collectible setup.
+          // The mint takes the same customer-row lock this transaction
+          // holds, so the claim is either committed and visible here or the
+          // mint waits and sees this root.
+          const coverageClaim = await plans.liveAnchorlessCoverageSetupClaim(trx, { customerId, rootId: svc.id });
+          if (coverageClaim) {
+            await plans.anchorSetupFeeClaim(trx, { claimId: coverageClaim.id, anchorId: svc.id });
+            logger.info(`[schedule] rodent bait setup already billed on prepay invoice ${coverageClaim.invoice_id} — claim anchored to booking ${svc.id}, no stamp`);
+          } else {
+            await trx('scheduled_services')
+              .where({ id: svc.id })
+              .whereNull('pending_setup_fee')
+              .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
+            directRodentSetupStamp = owedSetup;
+            logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on booking ${svc.id} — billed at first completion unless estimate acceptance bills it`);
+          }
+        }
+      } else if (isRecurring && linkedEstimateId) {
+        // A PREVIOUSLY accepted estimate booked afterward (codex #3591 r66
+        // P1): the standard Mark Won already ran with skipSetupInvoice, so
+        // nothing recorded the DISCLOSED setup — without a stamp the first
+        // completion bills only the application. Stamp the estimate's
+        // frozen figure unless an acceptance settled it (prepay claim via
+        // the term), the estimate disclosed none, or another series booked
+        // from it already carries/collected it.
+        const plans = require('../services/secure-appointment-plans');
+        if (plans.isRodentBaitProgramKey(await plans.authoritativeServiceKey(trx, svc))) {
+          const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+          const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
+          if (disclosed > 0) {
+            const settledClaim = await plans.settledSetupClaimForEstimate(trx, linkedEstimateId);
+            // Serialized with a concurrent void/refund (codex #3591 r75 P1):
+            // the settled read above is unlocked, so a reversal can turn the
+            // claim's invoice terminal between it and the anchor — leaving
+            // this series with neither a stamp nor a collectible invoice.
+            // Lock the claim's INVOICE row (the reversal transaction updates
+            // it, so the loser waits), then re-verify liveness under the
+            // lock; a claim whose invoice went terminal is an open
+            // obligation and the booking stamps the disclosed figure below.
+            let liveClaim = null;
+            if (settledClaim) {
+              await trx('invoices').where({ id: settledClaim.invoice_id }).forUpdate().first('id');
+              liveClaim = await plans.settledSetupClaimForInvoice(trx, settledClaim.invoice_id);
+            }
+            if (liveClaim) {
+              // The invoice-mode/standard accept billed the setup before
+              // this series existed — anchor its claim to the root being
+              // booked (codex #3591 r72 P1) so a later void/refund of that
+              // invoice restores onto THIS series instead of paging.
+              if (!liveClaim.scheduled_service_id) {
+                await plans.anchorSetupFeeClaim(trx, { claimId: liveClaim.id, anchorId: svc.id });
+              }
+            } else if (!(await plans.estimateSetupCarriedElsewhere(trx, linkedEstimateId, svc.id))) {
+              await trx('scheduled_services')
+                .where({ id: svc.id })
+                .whereNull('pending_setup_fee')
+                .update({ pending_setup_fee: disclosed, updated_at: new Date() });
+              logger.info(`[schedule] rodent bait setup ($${disclosed}, disclosed on accepted estimate ${linkedEstimateId}) stamped on booking ${svc.id} — billed at first completion`);
+            }
+          }
+        }
+      }
+
       // Re-align the customer's WaveGuard tier from the just-created recurring rows
       // INSIDE the transaction, so a sync failure rolls back the appointment series
       // rather than committing recurring rows with a stale tier/monthly_rate/member_since
@@ -5736,14 +5764,135 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (acceptEstimateOnBook && !estimateAttachRaceLost) {
       // Link the just-created rows to the estimate once it's a recorded win —
       // shared by the prepay path and the overlap-race standard fallback.
+      // Returns whether the source-estimate link is DURABLY written (retried
+      // once) — the stamp retire below keys on it (codex #3591 r88 P1): the
+      // link is the acceptance provenance the setup resolver reads, so
+      // retiring the stamp without it leaves the series with no estimate, no
+      // claim, and no stamp, and a later family lapse re-derives a setup the
+      // accepted quote already decided.
       const linkCreatedRowsToEstimate = async () => {
-        if (!(cols.source_estimate_id && createdAppointments.length)) return;
+        if (!(cols.source_estimate_id && createdAppointments.length)) return true;
+        const writeLink = () => db('scheduled_services')
+          .whereIn('id', createdAppointments.map((a) => a.id))
+          .update({ source_estimate_id: linkedEstimateId });
         try {
-          await db('scheduled_services')
-            .whereIn('id', createdAppointments.map((a) => a.id))
-            .update({ source_estimate_id: linkedEstimateId });
+          await writeLink();
+          return true;
         } catch (e) {
-          logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
+          try {
+            await writeLink();
+            return true;
+          } catch (e2) {
+            logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed (retried): ${e2.message}`);
+            return false;
+          }
+        }
+      };
+      // Acceptance landed → the accept path billed (or deliberately waived)
+      // the setup from the estimate's frozen disclosure, so the booking-time
+      // stamp must not ALSO bill at first completion (codex #3591 r62 P1 —
+      // the stamp exists precisely for the failure paths below, where the
+      // appointment stands but no acceptance ever bills the setup).
+      // Best-effort: booking and acceptance stand either way, but a retire
+      // failure is a live double-bill hazard, so it warns the operator
+      // instead of failing silently. CAS on the exact stamped amount so a
+      // concurrently frozen/consumed stamp is never clobbered.
+      // A zero-row CAS is NOT success (codex #3591 r63 P1): Knex returns 0
+      // when the stamp was already consumed/frozen (a completion charged it,
+      // or the secure-plan flow froze a different figure) while the
+      // acceptance was billing its own setup invoice — that is the
+      // double-charge case, so it is reported like a thrown retire.
+      // Only an acceptance that actually SETTLED the setup retires the stamp
+      // (codex #3591 r64 P1): a standard verbal win converts with
+      // skipSetupInvoice (estimate-manual-acceptance) — no invoice carries
+      // the setup — so the stamp must stay for the first completion to
+      // collect. Settlement evidence is the immutable setup_fee_claims row
+      // the prepay mint ledgered against the acceptance's invoice, or the
+      // estimate's explicit rodent-setup waiver (the quote disclosed no
+      // setup, so a live stamp would charge one the customer never saw).
+      // An acceptance WON BY ANOTHER SESSION (alreadyAccepted, no conversion)
+      // resolves the winner's prepay claim through the estimate's term (codex
+      // #3591 r65 P1). The waiver is the estimate's DISCLOSED setup figure
+      // (frozenRodentBaitSetupAmount — engine result + persisted zero
+      // decision), not the wizard-only setupFeeQuote: an admin estimate
+      // with rodent bait beside another qualifying family omits the setup
+      // line and persists no quote object (codex #3591 r65 P1).
+      const rodentSetupSettledByAcceptance = async (acceptResult) => {
+        const { settledSetupClaimForInvoice, settledSetupClaimForEstimate } = require('../services/secure-appointment-plans');
+        const claim = acceptResult?.alreadyAccepted
+          ? await settledSetupClaimForEstimate(db, linkedEstimateId)
+          : await settledSetupClaimForInvoice(db, acceptResult?.conversion?.draftInvoiceId || null);
+        if (claim) return { claim };
+        const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+        const disclosed = frozenRodentBaitSetupAmount(linkedEstimate?.estimate_data || {});
+        return disclosed > 0 ? { disclosed } : { waived: 'estimate_disclosed_no_setup' };
+      };
+      const retireRodentSetupStampAfterAcceptance = async (acceptResult) => {
+        if (!(directRodentSetupStamp > 0)) return;
+        try {
+          const settled = await rodentSetupSettledByAcceptance(acceptResult);
+          if (settled.disclosed) {
+            // Standard verbal win: nothing billed the setup, so the stamp
+            // stays for the first completion — at the figure the estimate
+            // DISCLOSED, never the live constant the booking priced.
+            if (Math.round(settled.disclosed * 100) !== Math.round(directRodentSetupStamp * 100)) {
+              const aligned = await db('scheduled_services')
+                .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
+                .update({ pending_setup_fee: settled.disclosed, updated_at: new Date() });
+              if (Number(aligned) === 1) {
+                logger.info(`[schedule] rodent setup stamp on ${svc.id} aligned to the estimate's disclosed $${settled.disclosed} (booking priced $${directRodentSetupStamp})`);
+                directRodentSetupStamp = settled.disclosed;
+              } else {
+                logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} could not be aligned to the estimate's disclosed $${settled.disclosed} (stamp changed under us) — reconcile before the first completion bills it`);
+                bookingWarnings.push('The estimate disclosed a different bait-station setup than the booking stamped — check the pending setup fee on the new series before its first completion.');
+              }
+            } else {
+              logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the estimate acceptance billed no setup — first completion collects it`);
+            }
+            return;
+          }
+          // ONE transaction for the retire + anchor (codex #3591 r76 P1):
+          // the settlement read above is unlocked, and the old path cleared
+          // the stamp and anchored the claim in separate autocommitted
+          // statements — a void/refund of the acceptance's setup invoice in
+          // that gap would clear the stamp beside a now-terminal claim,
+          // leaving the series with no carrier at all. Lock the claim's
+          // INVOICE row (the reversal transaction updates it, so the loser
+          // waits), re-verify liveness under the lock, and KEEP the stamp
+          // when the reversal won — the first completion collects it.
+          await db.transaction(async (trx) => {
+            let liveClaim = null;
+            if (settled.claim) {
+              const { settledSetupClaimForInvoice } = require('../services/secure-appointment-plans');
+              await trx('invoices').where({ id: settled.claim.invoice_id }).forUpdate().first('id');
+              liveClaim = await settledSetupClaimForInvoice(trx, settled.claim.invoice_id);
+              if (!liveClaim) {
+                logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the acceptance's setup invoice was reversed before the retire — first completion collects it`);
+                return;
+              }
+            }
+            const retired = await trx('scheduled_services')
+              .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
+              .update({ pending_setup_fee: null, updated_at: new Date() });
+            if (Number(retired) !== 1) {
+              const live = await trx('scheduled_services').where({ id: svc.id }).first('pending_setup_fee');
+              logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} was ${live?.pending_setup_fee ?? 'null'} (expected ${directRodentSetupStamp}) when estimate acceptance tried to retire it — the stamp was consumed or refrozen while the acceptance billed the setup; reconcile the two setup charges`);
+              bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed — check the customer for a second setup charge and clear or refund it.');
+              return;
+            }
+            directRodentSetupStamp = 0;
+            // The prepay mint ledgered its claim before this series existed
+            // (anchor-less); anchor it now — in the SAME transaction as the
+            // retire — so a later refund of that prepay restores the stamp
+            // onto THIS series instead of paging.
+            if (liveClaim && !liveClaim.scheduled_service_id) {
+              const { anchorSetupFeeClaim } = require('../services/secure-appointment-plans');
+              await anchorSetupFeeClaim(trx, { claimId: liveClaim.id, anchorId: svc.id });
+            }
+          });
+        } catch (e) {
+          logger.error(`[schedule] FIX: could not retire the rodent setup stamp on ${svc.id} after estimate acceptance — first completion would bill a setup the acceptance already covered: ${e.message}`);
+          bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp could not be cleared — clear the pending setup fee on the new series to avoid double-billing.');
         }
       };
       try {
@@ -5787,7 +5936,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // double-texted.
         if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
         // Link the just-created rows now that the estimate is a recorded win.
-        await linkCreatedRowsToEstimate();
+        // The stamp retires ONLY once the link is durable (codex #3591 r88
+        // P1) — an unlinked series keeps the stamp as its provenance, and
+        // the operator is paged to relink before the double-bill hazard the
+        // stamp now carries can fire at first completion.
+        if (await linkCreatedRowsToEstimate()) {
+          await retireRodentSetupStampAfterAcceptance(acceptResult);
+        } else {
+          logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
+        }
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
         // An overlap that RACED in between the preflight check and the atomic
@@ -5810,7 +5967,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
             estimateAutoAccepted = true;
             downgradedAfterOverlapRace = true;
             if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
-            await linkCreatedRowsToEstimate();
+            if (await linkCreatedRowsToEstimate()) {
+              await retireRodentSetupStampAfterAcceptance(retryResult);
+            } else {
+              logger.error(`[schedule] FIX: estimate ${linkedEstimateId} accepted (overlap fallback) but the appointment link could not be written — setup stamp KEPT as provenance; relink the series and retire the stamp (or it double-bills at first completion)`);
+            }
             bookingWarnings.push('Appointment booked and the estimate was marked accepted as standard — an annual prepay term covering this date already exists (it landed during booking), so no new prepay invoice/term was created. Manage prepay from Customer 360.');
           } catch (retryErr) {
             logger.warn(`[schedule] standard-accept fallback after prepay overlap failed for estimate ${linkedEstimateId}: ${retryErr.message}`);
@@ -8674,7 +8835,39 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           priceServiceBeforeRow = preTupleRow
             || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         }
+        // Make-this-recurring before-image for the rodent setup stamp below
+        // (codex #3591 r88 P1) — read under the trx before the update lands.
+        const makeRecurringPreRow = updates.is_recurring === true
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('id', 'customer_id', 'is_recurring', 'recurring_parent_id')
+          : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // A row ACTIVATED to recurring becomes a series root NOW (codex
+        // #3591 r88 P1): a phone-booked catalog bait visit (the call
+        // pipeline inserts single visits only) or any other one-off being
+        // turned into a program never passed the creation path's setup
+        // stamp, so its first completion would bill no setup. Derive and
+        // stamp exactly like the creation path — including anchoring a
+        // Customer 360 coverage-only prepay's anchor-less claim instead of
+        // stamping a second collectible setup. A derivation failure fails
+        // the save (fail-closed, same as the creation transaction) — the
+        // operator retries.
+        if (makeRecurringPreRow && makeRecurringPreRow.is_recurring !== true && !makeRecurringPreRow.recurring_parent_id) {
+          const plans = require('../services/secure-appointment-plans');
+          const owedSetup = await plans.resolveDirectRodentSetupObligation(trx, { id: req.params.id });
+          if (owedSetup > 0) {
+            const coverageClaim = await plans.liveAnchorlessCoverageSetupClaim(trx, { customerId: makeRecurringPreRow.customer_id, rootId: req.params.id });
+            if (coverageClaim) {
+              await plans.anchorSetupFeeClaim(trx, { claimId: coverageClaim.id, anchorId: req.params.id });
+              logger.info(`[schedule] rodent bait setup already billed on prepay invoice ${coverageClaim.invoice_id} — claim anchored to activated series ${req.params.id}, no stamp`);
+            } else {
+              await trx('scheduled_services')
+                .where({ id: req.params.id })
+                .whereNull('pending_setup_fee')
+                .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
+              logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on series ${req.params.id} activated as recurring — billed at first completion`);
+            }
+          }
+        }
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the
         // flip on the trx; the tech_status release + customer tracker
@@ -13003,6 +13196,11 @@ function invoiceLineItems(raw) {
 // One definition — the resolver's supersede match and the supersede
 // endpoint's idempotent re-report must agree on what "this accept's
 // invoice" means.
+// The accept-minted rodent bait-station setup line (estimate-public.js) —
+// recognized by the supersede resolver and carried onto the prepay by the
+// preview (codex #3591 r38 P1).
+const RODENT_SETUP_ACCEPT_LINE_RE = /^Bait Station Setup — one-time setup fee$/;
+
 function acceptProvenanceRe(estimateId) {
   return new RegExp(
     `Auto-generated from accepted estimate #${String(estimateId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
@@ -13117,7 +13315,10 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // mints exactly a setup-fee line and/or a first-application line, and
     // ANYTHING else means sibling charges ride this invoice and voiding it
     // would erase them.
-    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|First service application)$/;
+    // The non-member rodent accept bills its bait-station setup beside the
+    // first application (estimate-public.js) — a recognized accept line,
+    // carried onto the prepay rather than waived (codex #3591 r38 P1).
+    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|Bait Station Setup — one-time setup fee|First service application)$/;
     // deposit_credit lines are exempt here only so the DEDICATED guard below
     // refuses them with its accurate ledger-restore reason.
     const unrecognized = lines.find((li) => String(li?.category || '') !== 'deposit_credit'
@@ -13300,6 +13501,8 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
       annualPrepayOverlapStatusClause,
+      resolveDirectRodentSetupObligation,
+      authoritativeServiceKey,
     } = require('../services/secure-appointment-plans');
 
     // Local-calendar date-only reads (NOT toISOString) — a UTC slice on a
@@ -13329,14 +13532,14 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     if (scheduledServiceId) {
       const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+        .first('id', 'customer_id', 'service_type', 'service_id', 'estimated_price', 'scheduled_date', 'window_start',
           'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
           'recurring_ongoing', 'booster_months', 'source_estimate_id');
       if (!visit) return { httpStatus: 404, httpBody: { error: 'Scheduled service not found' } };
       const parent = visit.recurring_parent_id
         ? await conn('scheduled_services')
           .where({ id: visit.recurring_parent_id })
-          .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+          .first('id', 'service_type', 'service_id', 'estimated_price', 'scheduled_date', 'window_start',
             'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'recurring_ongoing',
             'booster_months', 'source_estimate_id')
         : visit;
@@ -13408,6 +13611,10 @@ async function computeAnnualPrepayPreview(query, conn = db) {
         bookedVisitCount,
         customerId: String(anchor.customer_id || visit.customer_id || ''),
         coverageServiceType: String(anchor.service_type || '').trim(),
+        // The PERSISTED anchor identity (codex #3591 r33 P1): plan class and
+        // setup obligation derive from its catalog identity, never from the
+        // label alone (a repointed catalog leaves service_type stale).
+        anchorVisit: { id: anchor.id, service_type: anchor.service_type, service_id: anchor.service_id || null },
         perVisit: anchor.estimated_price != null ? Number(anchor.estimated_price) : null,
         rawCadence: String(anchor.recurring_pattern || '').trim(),
         intervalDays: Number(anchor.recurring_interval_days),
@@ -13565,7 +13772,12 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // residential programs take the percentage. Anything unlisted (commercial
     // keys, unclassifiable names) has no owner-approved prepay incentive.
     const { recurringServiceKey } = require('../services/estimate-converter');
-    const planClass = PLAN_CLASS_BY_SERVICE_KEY[recurringServiceKey({ name: coverageServiceType })] || null;
+    // Committed series: catalog-first identity from the persisted anchor
+    // (codex #3591 r33 P1); the draft probe has only the label.
+    const coverageServiceKey = input.anchorVisit
+      ? await authoritativeServiceKey(conn, input.anchorVisit)
+      : recurringServiceKey({ name: coverageServiceType });
+    const planClass = PLAN_CLASS_BY_SERVICE_KEY[coverageServiceKey] || null;
     if (!planClass) return blocked('isn’t available for this service');
 
     // The term is anchored on the visit being booked, so the coverage seeder
@@ -13649,7 +13861,36 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       if (!resolved.ok) return blocked(resolved.blockReason);
     }
 
-    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
+    // Rodent bait booked directly (no estimate) owes the one-time setup
+    // unless ANOTHER qualifying recurring service already exists — the same
+    // shared resolver the secure-plan page and autoSecure run, so the
+    // prepay-on-book lane cannot activate the series without collecting it.
+    // Estimate-anchored series carry their own frozen decision (0 here).
+    // A committed series hands the resolver its PERSISTED id so the
+    // catalog-first re-read decides (codex #3591 r33 P1); only the draft
+    // probe (no row yet) prices from the fragment.
+    const directSetupFee = await resolveDirectRodentSetupObligation(conn, input.anchorVisit
+      ? { id: input.anchorVisit.id }
+      : {
+        customer_id: customerId,
+        service_type: coverageServiceType,
+        source_estimate_id: anchorEstimateId || null,
+      });
+    // ESTIMATE-origin rodent series (codex #3591 r38 P1): the accept billed
+    // the non-member bait-station setup on the per-application invoice this
+    // switch supersedes. Unlike the WaveGuard membership fee it is NOT
+    // waivable with prepay, so the superseded line's exact amount rides the
+    // prepay as its own line — voiding the accept invoice never forgives it.
+    // The direct resolver is 0 for estimate-origin rows by design, so the two
+    // sources never overlap; a later void/refund of the prepay re-mints the
+    // superseded invoice (line included) through its marker, which is why
+    // the write path ledgers no separate claim for this lane.
+    const supersededRodentSetup = Math.round(supersedes
+      .flatMap((inv) => inv.lines)
+      .filter((li) => RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
+      .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
+    const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
+    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
     // The setup fee is only real — and therefore only waivable — when it is
@@ -13657,9 +13898,10 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // items, never assumed from the plan class (the manual prepay-on-book
     // lane never writes the fee, so it has nothing to waive; see setupFee
     // below).
+    // The rodent bait-station setup is excluded: it is carried, never waived.
     const supersededSetupFee = supersedes
       .flatMap((inv) => inv.lines)
-      .filter((li) => /setup fee/i.test(li.description))
+      .filter((li) => /setup fee/i.test(li.description) && !RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
 
     return {
@@ -13688,6 +13930,13 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       setupFee: supersededSetupFee > 0
         ? { amount: Math.round(supersededSetupFee * 100) / 100, waivedWithPrepay: true }
         : null,
+      // The rodent bait-station setup the prepay BILLS as its own line (a
+      // direct non-member series' live obligation, or the estimate-origin
+      // line carried off the superseded accept invoice). Never waived; the
+      // sheet shows it beside the year so the total is itemized.
+      rodentSetupFee: pricing.prepay.setupAmount > 0
+        ? { amount: pricing.prepay.setupAmount, waivedWithPrepay: false }
+        : null,
       // Invoices the prepaid year replaces. The caller retires them through
       // POST /:id/prepay-switch/supersede BEFORE minting the prepay, so there
       // is never a window where both are payable; an abandoned switch calls
@@ -13699,7 +13948,14 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
       // relays server-derived values instead of composing an amount itself.
       mintPayload: {
-        amount: pricing.prepay.total,
+        amount: pricing.prepay.coverageTotal,
+        // Billed as its own invoice line by the mint; never folded into the
+        // coverage basis the term splits across visits. The committed series
+        // anchor rides with it (codex #3591 r36 P1): the Customer 360 mint
+        // re-derives the setup from THAT row and ledgers the claim against
+        // the prepay so a later void/refund can restore it.
+        ...(pricing.prepay.setupAmount > 0 ? { setupFeeAmount: pricing.prepay.setupAmount } : {}),
+        ...(pricing.prepay.setupAmount > 0 && input.anchorVisit?.id ? { scheduledServiceId: String(input.anchorVisit.id) } : {}),
         visitCount: visitsPerYear,
         coverageCadence,
         serviceType: coverageServiceType,
@@ -13961,6 +14217,14 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         }
         voided = resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
 
+        // A direct (non-estimate) rodent series' non-member setup rides the
+        // recomputed payload as setupFeeAmount — billed as its OWN line
+        // (codex #3591 r33 P1): the sheet's prepayTotal included it, and the
+        // coverage amount stays the term basis the renewals slice.
+        const switchSetupFee = Number(mintPayload.setupFeeAmount) > 0
+          ? Math.round(Number(mintPayload.setupFeeAmount) * 100) / 100
+          : 0;
+        const expectedSwitchTotal = Math.round((Number(mintPayload.amount) + switchSetupFee) * 100) / 100;
         invoice = await InvoiceService.create({
           database: trx,
           customerId: liveVisit.customer_id,
@@ -13970,17 +14234,44 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             quantity: 1,
             unit_price: mintPayload.amount,
             category: 'Annual prepay',
-          }],
+          },
+          ...(switchSetupFee > 0 ? [{
+            description: 'Bait Station Setup — one-time setup fee',
+            quantity: 1,
+            unit_price: switchSetupFee,
+            category: 'Setup fee',
+          }] : [])],
           notes: `${mintPayload.note} (visit ${target.visit.id})`,
           dueDate: etDateString(),
         });
         // The sheet displayed a tax-free residential total; anything else
         // coming back (unexpected tax, payer accrual) aborts the whole
         // switch rather than charging a number nobody was shown.
-        if (Math.round(Number(invoice.total) * 100) !== Math.round(Number(mintPayload.amount) * 100)) {
+        if (Math.round(Number(invoice.total) * 100) !== Math.round(expectedSwitchTotal * 100)) {
           const err = new Error('The minted total did not match the quoted total — switch aborted');
           err.switchConflict = true;
           throw err;
+        }
+        // A DIRECT series may still hold the per-application setup claim an
+        // earlier secure-plan selection stamped on its parent; the line just
+        // minted bills that same setup, so the claim must not survive to the
+        // first completion after the prepaid term (codex #3591 r34 P1).
+        // Service-side (the claims ledger is server-mint-only): records the
+        // fee against this prepay — the term void/refund sync restores the
+        // claim from that record — then retires the stamp by exact-value
+        // CAS; a mid-mint (negative) stamp refuses the switch.
+        // ESTIMATE-origin lanes deliberately skip this (codex #3591 r38 P1):
+        // their setup line was carried off the superseded accept invoice,
+        // and a void/refund of this prepay re-mints that invoice — line
+        // included — through its marker (restoreSwitchSupersededInvoicesForPrepay).
+        // A ledger record here would re-stamp the claim on top of that
+        // re-minted line and bill the setup twice.
+        if (switchSetupFee > 0 && !target.estimateId) {
+          await require('../services/secure-appointment-plans').retireDirectSetupClaimForPrepay(trx, {
+            anchorId: anchorRowId,
+            invoiceId: invoice.id,
+            amount: switchSetupFee,
+          });
         }
 
         // Durable pointer FROM each retired row TO the prepay that replaced
@@ -14007,7 +14298,8 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           prepayInvoiceId: invoice.id,
           planLabel: mintPayload.planLabel,
           monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
-          prepayAmount: Math.round(Number(invoice.total) * 100) / 100,
+          // Coverage money only — the setup line is not per-visit coverage.
+          prepayAmount: Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100,
           termStart: mintPayload.termStart,
           coverageServiceType: mintPayload.serviceType,
           coverageVisitCount: mintPayload.visitCount,

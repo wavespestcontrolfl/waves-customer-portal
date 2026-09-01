@@ -103,7 +103,11 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     estimateData: data,
   });
   if (resolved?.amount == null) return null;
-  const amount = Number(resolved.amount);
+  // The frozen bait-station setup rides the prepay invoice as its own
+  // (taxed) line — the operator preview must equal the minted invoice
+  // (codex #3591 r24 P1).
+  const frozenSetupForPreview = Number(EstimateConverter.frozenRodentBaitSetupAmount(data)) || 0;
+  const amount = Math.round((Number(resolved.amount) + frozenSetupForPreview) * 100) / 100;
   // Same commercial detection as the converter (recurringServiceKey prefix) —
   // non-commercial prepay stays residential-exempt, so no tax leg at all.
   const hasCommercialRecurring = (recurringSvcList || []).some(
@@ -122,6 +126,12 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
       prepayDiscountApplied: Number(resolved.discount) > 0,
       baseRate,
+      // The taxable setup joins BOTH sides of the converter's blend
+      // (estimate-converter prepayTaxRate, r55 P1) — omitting it here taxed
+      // the setup at only the recurring blended rate for a commercial mix of
+      // taxable bait + non-taxable lawn/tree, so the minted invoice exceeded
+      // this preview (codex #3591 r62 P1).
+      taxableOneTimeAmount: frozenSetupForPreview,
     });
     const taxDollars = Math.round(amount * taxRate * 100) / 100;
     total = Math.round((amount + taxDollars) * 100) / 100;
@@ -155,6 +165,11 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
 // booking/modal preflight (prepayBookingEligibility) AND the accept
 // transaction itself, so a quote edit racing the preflight — or a caller that
 // never preflights — can't slip a billable one-time line through.
+function isRodentBaitSetupRow(row = {}) {
+  return String(row?.service || '').toLowerCase() === 'rodent_bait_setup'
+    || /bait station setup/i.test(String(row?.name || row?.label || ''));
+}
+
 function manualPrepayBlockingOneTimeCharge(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   try {
@@ -163,15 +178,20 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
       isNonBillableOneTimeRow,
       normalizeOneTimeBreakdown,
     } = require('../routes/estimate-public');
+    // The rodent bait-station setup is INVOICED by the annual-prepay
+    // converter (its own line on the prepay invoice — codex #3591 r4/r24),
+    // so it is never a dropped charge; only a genuinely uninvoiced one-time
+    // line blocks the manual lane.
+    const blocksPrepay = (row) => !isNonBillableOneTimeRow(row) && !isRodentBaitSetupRow(row);
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
-    if (oneTimeRows.some((row) => !isNonBillableOneTimeRow(row))) return true;
+    if (oneTimeRows.some(blocksPrepay)) return true;
     // The raw-rows list masks the residual: when ANY raw one-time row exists,
     // acceptanceServiceLists never consults normalizeOneTimeBreakdown, which
     // is what synthesizes the positive one_time_adjustment for
     // oneTime.total − rows. A nonbillable raw row plus a positive residual
     // would pass the check above — re-check the normalized breakdown too.
     const normalizedRows = normalizeOneTimeBreakdown(data)?.items || [];
-    if (normalizedRows.some((row) => !isNonBillableOneTimeRow(row))) return true;
+    if (normalizedRows.some(blocksPrepay)) return true;
     // normalizeOneTimeBreakdown reads only WRAPPED shapes (result /
     // engineResult); for legacy top-level estData.oneTime it returns NO items,
     // so the synthetic residual row the check above depends on never exists —
