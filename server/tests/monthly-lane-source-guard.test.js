@@ -41,6 +41,17 @@ const SERVER_ROOT = path.join(__dirname, '..');
 // exact predicate line, and why the raw predicate is legitimate there.
 const ALLOWLIST = [
   {
+    file: 'services/intelligence-bar/authorization-contract.js',
+    match: "Number(params?.updates?.monthly_rate) > 0",
+    context: 'waveguard_tier !== undefined',
+    count: 1,
+    // DISCLOSURE predicate on an UPDATE PAYLOAD, not a lane selection: it
+    // decides whether the confirm card must disclose the executor's own
+    // monthly_membership stamping side effect (whose condition it mirrors
+    // verbatim). No row is selected or labeled by it.
+    reason: 'confirm-card disclosure trigger mirroring the executor stamp condition on the update payload — no row selection',
+  },
+  {
     file: 'services/billing-cron.js',
     match: ".where('monthly_rate', '>', 0)",
     context: ".whereNull('service_paused_at')",
