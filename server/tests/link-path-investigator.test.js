@@ -145,18 +145,18 @@ function makeDb(seed = {}) {
         return hit.length;
       },
       insert(row) {
-        return {
-          onConflict: () => ({
-            async ignore() {
-              if (table === 'seo_link_acquisition_paths') {
-                const dup = tables[table].some((r) => r.domain_id === row.domain_id && r.path_key === row.path_key && r.superseded_by == null);
-                if (dup) return [];
-              }
-              tables[table].push({ id: uid(), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1, ...row });
-              return [];
-            },
-          }),
+        // knex shape: insert().onConflict().ignore() is thenable, and
+        // .returning(['id']) yields [{ id }] only when THIS insert won
+        const run = async () => {
+          if (table === 'seo_link_acquisition_paths') {
+            const dup = tables[table].some((r) => r.domain_id === row.domain_id && r.path_key === row.path_key && r.superseded_by == null);
+            if (dup) return [];
+          }
+          const created = { id: uid(), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1, ...row };
+          tables[table].push(created);
+          return [{ id: created.id }];
         };
+        return { onConflict: () => ({ ignore() { const pr = run(); return { returning: () => pr, then: (res, rej) => pr.then(res, rej) }; } }) };
       },
       then(res, rej) { return Promise.resolve(resolve()).then(res, rej); },
     };
@@ -1558,16 +1558,14 @@ describe('full run', () => {
     };
     const legal = (n) => modelPath({ submission_url: `https://example.com/join-${n}`, legal_attestation: true, legal_terms_url: `https://example.com/terms-${n}` });
     const verdict = async () => ({ ok: true, json: verdictOf([legal('a'), legal('b'), legal('c')]) });
-    const run = async (now) => {
-      const d = domainRow();
-      const db = makeDb({ seo_link_domains: [d] });
-      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: verdict }), now });
-    };
-    await run(NOW);
-    await run(new Date(NOW.getTime() + 60 * 60 * 1000)); // one sweep later
-    await run(new Date(NOW.getTime() + 2 * 60 * 60 * 1000));
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const dom = () => db._tables.seo_link_domains[0];
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: verdict })); // budget 2: two hashed, the third unstamped → retry
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: verdict }), now: dom().investigate_after, domainIds: [d.id] });
     const attempted = new Set(termsFetches.map((u) => u.slice(-1)));
-    expect([...attempted].sort()).toEqual(['a', 'b', 'c']); // every terms URL got its attempt across passes
+    expect([...attempted].sort()).toEqual(['a', 'b', 'c']); // every terms URL got its attempt across the retry
+    expect(db._tables.seo_link_acquisition_paths.every((p) => p.legal_terms_hash)).toBe(true);
   });
 
   test('truncated range and qualifier price claims never verify (Codex PR r9 P1)', () => {
@@ -1584,23 +1582,25 @@ describe('full run', () => {
     expect(claim(mk('Listings cost USD 95 / year'), 'USD 95 / year')).toBe('USD 95 / year'); // the plain quote still verifies
   });
 
-  test('the terms rotation start avalanches — a 6h-stride retry cannot pin the same two of three URLs (Codex PR r10 P1)', async () => {
+  test('the terms rotation cursor is durable — failing retries advance it by one, so no URL is pinned out (Codex PR r10 P1 + r20 P2)', async () => {
     const termsFetches = [];
-    const agreement = `<html><body>Membership agreement. ${'By joining you agree to the listing terms and renewal policy. '.repeat(8)}</body></html>`;
     const fetcher = async (url) => {
-      if (url.includes('/terms-')) { termsFetches.push(url); return { status: 200, finalUrl: url, contentType: 'text/html', html: agreement, blocked: false, truncated: false }; }
+      if (url.includes('/terms-')) { termsFetches.push(url); return { status: 503, finalUrl: url, html: null, blocked: false, error: 'http_503' }; } // every agreement fetch fails
       return okFetch(url);
     };
     const legal = (n) => modelPath({ submission_url: `https://example.com/join-${n}`, legal_attestation: true, legal_terms_url: `https://example.com/terms-${n}` });
     const verdict = async () => ({ ok: true, json: verdictOf([legal('a'), legal('b'), legal('c')]) });
-    // 8 passes exactly six hours apart — the failure-backoff stride
-    for (let i = 0; i < 8; i++) {
-      const d = domainRow();
-      const db = makeDb({ seo_link_domains: [d] });
-      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: verdict }), now: new Date(NOW.getTime() + i * 6 * 60 * 60 * 1000) });
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const dom = () => db._tables.seo_link_domains[0];
+    let t = NOW;
+    for (let i = 0; i < 3; i++) {
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: verdict }), now: t, domainIds: [d.id] });
+      t = dom().investigate_after; // the escalating retry (6h, 12h, …) — a modulo of the hour could repeat
     }
     const attempted = new Set(termsFetches.map((u) => u.slice(-1)));
-    expect([...attempted].sort()).toEqual(['a', 'b', 'c']);
+    expect([...attempted].sort()).toEqual(['a', 'b', 'c']); // three retries × budget 2, cursor advancing one per retry
+    expect(Number(dom().investigate_failures)).toBe(3);
   });
 
   test('an invalid host defers with backoff BEFORE any claim — no hourly re-selection (Codex PR r10 P1)', async () => {
@@ -2344,7 +2344,7 @@ describe('full run', () => {
     expect(fetched.some((u) => u.startsWith('https://www.example.com/'))).toBe(true);
   });
 
-  test('supersession onto a gated or paid successor re-derives the placement policy with the classifier rules (local Codex P1)', async () => {
+  test('supersession onto a gated or paid successor leaves the placement unclassified — never the old policy (local Codex P1 / PR r20 P1)', async () => {
     const d = domainRow();
     const oldPath = {
       id: uid(), domain_id: d.id, acquisition_type: 'self_service_free', submission_url: 'https://example.com/old-join',
@@ -2358,7 +2358,137 @@ describe('full run', () => {
     // the successor is a PAID listing (modelPath default: paid_listing, payment_required true, no account)
     await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([modelPath({ replaces_path_id: oldPath.id, account_required: false, email_verification: false })]) }) }));
     const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
-    expect(signup).toMatchObject({ path_id: fresh.id, target_url: 'https://example.com/join', automation_policy: 'pay_and_submit', last_classified_at: NOW });
+    expect(signup).toMatchObject({ path_id: fresh.id, target_url: 'https://example.com/join', automation_policy: null, last_classified_at: null }); // unclassified until the weekly classifier reads the successor (r20: never a synthesized policy)
     expect(outreach).toMatchObject({ path_id: fresh.id, target_url: 'https://example.com/join', automation_policy: null }); // not in the signup lane — policy stays null
+  });
+
+  // ---- Codex PR round 20 -------------------------------------------------
+
+  test('a moved placement takes the successor LANE and is left unclassified for the weekly classifier (Codex PR r20 P1)', async () => {
+    const d = domainRow();
+    const oldPath = {
+      id: uid(), domain_id: d.id, acquisition_type: 'self_service_free', submission_url: 'https://example.com/old-join', link_type: 'directory',
+      path_key: 'self_service_free:https://example.com/old-join', superseded_by: null, last_investigated_at: null,
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    const placement = { id: uid(), domain_id: d.id, path_id: oldPath.id, status: 'prospect', claimed_at: null, link_type: 'directory', target_url: 'https://example.com/old-join', automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01') };
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [oldPath], seo_link_prospects: [placement] });
+    const goneFetch = async (url) => (url.includes('/old-join') ? { status: 404, finalUrl: url, html: null, blocked: false } : okFetch(url));
+    const bare = { payment_required: false, fee_scope: null, price_text: null, price_page_url: null, renewal_price_text: null, renewal_price_page_url: null, currency_evidence: null, renewal_period: null };
+    const outreach = modelPath({ acquisition_type: 'editorial_outreach', link_type: 'editorial', submission_url: null, replaces_path_id: oldPath.id, ...bare });
+    await investigatePaths(db, runOpts(db, { fetchPage: goneFetch, llmDispatch: async () => ({ ok: true, json: verdictOf([outreach]) }) }));
+    const fresh = db._tables.seo_link_acquisition_paths.find((p) => p.id !== oldPath.id);
+    expect(placement).toMatchObject({ path_id: fresh.id, link_type: 'editorial', automation_policy: null, last_classified_at: null, target_url: 'https://example.com/old-join' });
+  });
+
+  test('an http fallback homepage reconciles the https apex identity — an apex 404 is not a disproof of the baseline (Codex PR r20 P2)', async () => {
+    const d = domainRow({ agent_state: 'acquired' });
+    const baseline = {
+      id: uid(), domain_id: d.id, acquisition_type: 'editorial_outreach', submission_url: 'https://example.com', baseline: true,
+      path_key: 'editorial_outreach:https://example.com', superseded_by: null, last_investigated_at: null, confidence: 0.1,
+      investigation: JSON.stringify({ baseline: true }), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    };
+    d.best_path_id = baseline.id;
+    const db = makeDb({ seo_link_domains: [d], seo_link_acquisition_paths: [baseline] });
+    const fetcher = async (url) => {
+      if (url === 'https://example.com') return { status: 404, finalUrl: url, html: null, blocked: false };
+      if (url.startsWith('http://example.com')) return okFetch(url); // plain-http only
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' };
+    };
+    await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }), domainIds: [d.id] });
+    expect(db._tables.seo_link_domains[0].best_path_id).toBe(baseline.id);
+    expect(db._tables.seo_link_acquisition_paths[0].last_investigated_at).toEqual(NOW); // covered under its https identity
+  });
+
+  test('a concurrent catch-up that wins the path insert still receives this pass\'s fields and evidence (Codex PR r20 P2)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    let placeholder = null;
+    const llm = async () => {
+      // the boot/runner board catch-up lands the same active identity mid-call
+      placeholder = { id: uid(), domain_id: d.id, acquisition_type: 'paid_listing', submission_url: 'https://example.com/join', path_key: 'paid_listing:https://example.com/join', superseded_by: null, baseline: false, confidence: 0.2, last_investigated_at: null, investigation: JSON.stringify({ legacy: true }), revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1 };
+      db._tables.seo_link_acquisition_paths.push(placeholder);
+      return { ok: true, json: verdictOf([modelPath()]) };
+    };
+    const r = await investigatePaths(db, runOpts(db, { llmDispatch: llm }));
+    expect(r.pathsWritten).toBe(1);
+    expect(db._tables.seo_link_acquisition_paths).toHaveLength(1); // no duplicate identity
+    expect(placeholder).toMatchObject({ confidence: 0.7, estimated_cost_cents: 9500, last_investigated_at: NOW, revision: 2 }); // the winner carries the investigation
+    expect(JSON.parse(placeholder.investigation).price_text).toBe('USD 95 / year');
+    expect(db._tables.seo_link_domains[0].best_path_id).toBe(placeholder.id);
+  });
+
+  test('a URL-less path is disproven only when its evidence pages were re-read; otherwise preserved and the domain backs off (Codex PR r20 P2)', async () => {
+    const mk = (domainId) => ({
+      id: uid(), domain_id: domainId, acquisition_type: 'editorial_outreach', submission_url: null, link_type: 'editorial', path_key: 'editorial_outreach:-',
+      superseded_by: null, baseline: false, confidence: 0.8, last_investigated_at: new Date('2026-05-01'),
+      investigation: JSON.stringify({ pages_fetched: ['https://example.com/about'] }),
+      revision: 1, revision_payment: 1, revision_communication: 1, revision_execution: 1,
+    });
+    const omit = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
+    // evidence page unreachable this pass → preserved, unstamped, domain unsettled (backoff), never a close
+    const d1 = domainRow({ agent_state: 'qualified' }); const p1 = mk(d1.id);
+    const db1 = makeDb({ seo_link_domains: [d1], seo_link_acquisition_paths: [p1] });
+    const fetched = [];
+    const down = async (url) => { fetched.push(url); return url.includes('/about') ? { status: 503, finalUrl: url, html: null, blocked: false, error: 'http_503' } : okFetch(url); };
+    await investigatePaths(db1, { ...runOpts(db1, { fetchPage: down, llmDispatch: omit }), domainIds: [d1.id] });
+    expect(fetched).toContain('https://example.com/about'); // the evidence page is in the fetch set
+    expect(p1.confidence).toBe(0.8);
+    expect(p1.last_investigated_at).toEqual(new Date('2026-05-01'));
+    expect(db1._tables.seo_link_domains[0].investigate_after).toBeTruthy(); // unsettled — not re-spent hourly
+    expect(db1._tables.seo_link_domains[0].agent_state).toBe('watching'); // an uncovered active path remains
+    // evidence page covered again and the model still omits it → disproven
+    const d2 = domainRow({ agent_state: 'qualified' }); const p2 = mk(d2.id);
+    const db2 = makeDb({ seo_link_domains: [d2], seo_link_acquisition_paths: [p2] });
+    await investigatePaths(db2, { ...runOpts(db2, { llmDispatch: omit }), domainIds: [d2.id] });
+    expect(p2.confidence).toBe(0);
+    expect(JSON.parse(p2.investigation).disproven_reason).toMatch(/did not reproduce/);
+  });
+
+  test('each domain takes its own clock — a late domain in a long run is not stamped hours in the past (Codex PR r20 P2)', async () => {
+    jest.useFakeTimers({ now: NOW, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const a = domainRow({ domain: 'a-first.com', created_at: new Date('2026-08-01') });
+      const b = domainRow({ domain: 'b-second.com', created_at: new Date('2026-08-02') });
+      const db = makeDb({ seo_link_domains: [a, b] });
+      const fetcher = async (url) => {
+        if (url.includes('a-first.com')) jest.setSystemTime(new Date(NOW.getTime() + 3 * 60 * 60 * 1000)); // the first domain's work takes three hours
+        return okFetch(url);
+      };
+      const path = (host) => modelPath({ submission_url: `https://${host}/join`, price_page_url: `https://${host}/join`, renewal_price_page_url: `https://${host}/join` });
+      const llm = async (route, payload) => ({ ok: true, json: verdictOf([path(/b-second/.test(payload.text) ? 'b-second.com' : 'a-first.com')]) });
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: undefined });
+      const stampOf = (dom) => db._tables.seo_link_acquisition_paths.find((p) => p.domain_id === dom.id).last_investigated_at.getTime();
+      expect(stampOf(a)).toBe(NOW.getTime());
+      expect(stampOf(b)).toBe(NOW.getTime() + 3 * 60 * 60 * 1000); // stamped when ITS work ran
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('a pathless not_reproducible close carries its own 90-day reinvestigation date (Codex PR r20 P2)', async () => {
+    const d = domainRow({ probe_coverage_mask: (1 << investigator.PROBE_PATHS.length) - 1 });
+    const db = makeDb({ seo_link_domains: [d] });
+    await investigatePaths(db, runOpts(db, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('not_reproducible');
+    expect(dom.watch_recheck_at.getTime() - NOW.getTime()).toBe(90 * 24 * 60 * 60 * 1000);
+    // not due yet → not selected; past the date → selected as a claim and re-decided
+    expect((await investigatePaths(db, { ...runOpts(db), now: new Date(NOW.getTime() + 89 * 24 * 60 * 60 * 1000) })).selected).toBe(0);
+    const later = new Date(NOW.getTime() + 91 * 24 * 60 * 60 * 1000);
+    const r = await investigatePaths(db, { ...runOpts(db), now: later }); // a route has since appeared (default qualified verdict)
+    expect(r.selected).toBe(1);
+    expect(dom.agent_state).toBe('qualified');
+  });
+
+  test('a non-text 2xx probe body is inconclusive, never probe coverage (Codex PR r20 P2)', async () => {
+    const registerBit = 1 << investigator.PROBE_PATHS.indexOf('/register');
+    const d = domainRow({ agent_state: 'investigating', probe_coverage_mask: ((1 << investigator.PROBE_PATHS.length) - 1) & ~registerBit });
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetcher = async (url) => (url.endsWith('/register')
+      ? { status: 200, finalUrl: url, contentType: 'application/pdf', html: '%PDF-1.7 application form binary', blocked: false, truncated: false }
+      : okFetch(url));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching');
+    expect(Number(dom.probe_coverage_mask) & registerBit).toBe(0);
   });
 });

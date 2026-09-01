@@ -58,13 +58,12 @@ test('claim hands out a placement on its LIVE successor path, moving the executi
   mockStore.seo_link_prospects.push(stale, current);
 
   const claimed = await worker.claim({ n: 5, type: 'signup' });
-  const got = Object.fromEntries(claimed.map((r) => [r.id, r]));
-  expect(got['r-stale']).toMatchObject({ path_id: 'p-live', target_url: 'https://example.com/join', claimed_by: worker.WORKER }); // the runner will submit at the live route
-  expect(got['r-stale'].lease_token).toBe(got['r-stale'].claimed_at.toISOString());
-  expect(got['r-current']).toMatchObject({ path_id: 'p-live', target_url: 'https://example.com/join' });
-  // …and the store agrees: settled AND leased
-  expect(stale).toMatchObject({ path_id: 'p-live', target_url: 'https://example.com/join' });
-  expect(stale.claimed_at).toBeInstanceOf(Date);
+  expect(claimed.map((r) => r.id)).toEqual(['r-current']); // only the already-live placement is leased
+  expect(claimed[0].lease_token).toBe(claimed[0].claimed_at.toISOString());
+  // the stale one was settled onto the live successor (execution URL included) and left UNCLASSIFIED for the
+  // weekly classifier — its policy described the retired path, so it is never leased in the same claim
+  expect(stale).toMatchObject({ path_id: 'p-live', target_url: 'https://example.com/join', automation_policy: null, last_classified_at: null, claimed_at: null });
+  expect(current.claimed_at).toBeInstanceOf(Date);
 });
 
 test('a placement on a live path claims unchanged; preview claims settle nothing and lease nothing', async () => {
@@ -77,31 +76,23 @@ test('a placement on a live path claims unchanged; preview claims settle nothing
   expect(preview).toHaveLength(1);
   expect(row).toMatchObject({ path_id: 'p-old', claimed_at: null }); // read-only preview: no writes of any kind
   const claimed = await worker.claim({ n: 5, type: 'signup' });
-  expect(claimed[0]).toMatchObject({ path_id: 'p-live', target_url: 'https://example.com/join' });
+  expect(claimed).toEqual([]); // settled, unclassified, not leased
+  expect(row).toMatchObject({ path_id: 'p-live', target_url: 'https://example.com/join', automation_policy: null, claimed_at: null });
 });
 
-test('a submit_free placement whose successor is paid or gated is settled with the successor-derived policy and NOT leased (local Codex P1)', async () => {
-  const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/free-listing', superseded_by: 'p-paid', account_required: false, email_verification: false, payment_required: false, legal_attestation: false, agent_completable: true };
-  const paid = { id: 'p-paid', domain_id: 'd1', submission_url: 'https://example.com/sponsor', superseded_by: null, account_required: false, email_verification: false, payment_required: true, legal_attestation: false, agent_completable: true, expected_rel: 'dofollow' };
-  const old2 = { id: 'p-old2', domain_id: 'd2', submission_url: 'https://gated.example/free', superseded_by: 'p-gated', payment_required: false };
-  const gated = { id: 'p-gated', domain_id: 'd2', submission_url: 'https://gated.example/apply', superseded_by: null, account_required: false, email_verification: false, payment_required: false, legal_attestation: true, agent_completable: true };
-  const stillFree = { id: 'p-free', domain_id: 'd3', submission_url: 'https://free.example/add', superseded_by: null, account_required: false, email_verification: false, payment_required: false, legal_attestation: false, agent_completable: true };
-  const old3 = { id: 'p-old3', domain_id: 'd3', submission_url: 'https://free.example/old-add', superseded_by: 'p-free' };
-  mockStore.seo_link_acquisition_paths.push(old, paid, old2, gated, old3, stillFree);
-  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', priority: 'high', domain_rating: 40 };
+test('a moved placement never keeps a policy classified for the old path — and a lane change leaves the signup lane (local Codex P1 / PR r20 P1)', async () => {
+  const oldA = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/free-listing', superseded_by: 'p-paid', link_type: 'directory' };
+  const paid = { id: 'p-paid', domain_id: 'd1', submission_url: 'https://example.com/sponsor', superseded_by: null, link_type: 'directory' };
+  const oldB = { id: 'p-old2', domain_id: 'd2', submission_url: 'https://gated.example/free', superseded_by: 'p-outreach', link_type: 'directory' };
+  const outreach = { id: 'p-outreach', domain_id: 'd2', submission_url: null, superseded_by: null, link_type: 'editorial' };
+  mockStore.seo_link_acquisition_paths.push(oldA, paid, oldB, outreach);
+  const base = { status: 'prospect', link_type: worker.SIGNUP_TYPES[0], claimed_at: null, claimed_by: null, automation_policy: 'submit_free', last_classified_at: new Date('2026-08-01'), priority: 'high', domain_rating: 40 };
   const toPaid = { ...base, id: 'r-paid', target_domain: 'example.com', path_id: 'p-old', target_url: 'https://example.com/free-listing' };
-  const toGated = { ...base, id: 'r-gated', target_domain: 'gated.example', path_id: 'p-old2', target_url: 'https://gated.example/free' };
-  const toFree = { ...base, id: 'r-free', target_domain: 'free.example', path_id: 'p-old3', target_url: 'https://free.example/old-add' };
-  mockStore.seo_link_prospects.push(toPaid, toGated, toFree);
+  const toOutreach = { ...base, id: 'r-out', target_domain: 'gated.example', path_id: 'p-old2', target_url: 'https://gated.example/free' };
+  mockStore.seo_link_prospects.push(toPaid, toOutreach);
 
-  const claimed = await worker.claim({ n: 5, type: 'signup' });
-  expect(claimed.map((r) => r.id)).toEqual(['r-free']); // only the still-free successor is leased
-  expect(claimed[0]).toMatchObject({ path_id: 'p-free', target_url: 'https://free.example/add', automation_policy: 'submit_free' });
-  // the others were settled onto their successors under the classifier's rules and left un-leased for their lanes
-  expect(toPaid).toMatchObject({ path_id: 'p-paid', target_url: 'https://example.com/sponsor', automation_policy: 'pay_and_submit', claimed_at: null });
-  expect(toGated).toMatchObject({ path_id: 'p-gated', target_url: 'https://gated.example/apply', automation_policy: 'needs_account', claimed_at: null });
-  expect(toPaid.last_classified_at).toBeInstanceOf(Date); // the weekly classifier will not revert the runtime decision
-  // a second claim finds nothing eligible — the reclassified rows never re-enter the free lane
-  expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]);
+  expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]); // nothing eligible: both moved, both unclassified
+  expect(toPaid).toMatchObject({ path_id: 'p-paid', target_url: 'https://example.com/sponsor', link_type: 'directory', automation_policy: null, last_classified_at: null, claimed_at: null });
+  expect(toOutreach).toMatchObject({ path_id: 'p-outreach', target_url: 'https://gated.example/free', link_type: 'editorial', automation_policy: null, claimed_at: null }); // left the signup lane; URL-less successor keeps target_url
+  expect(await worker.claim({ n: 5, type: 'signup' })).toEqual([]); // still not the free lane's until the classifier has read the successor
 });
-

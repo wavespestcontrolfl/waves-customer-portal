@@ -125,14 +125,15 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // closed: a settlement error aborts the claim (nothing leased).
     const settled = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: ids, now: new Date() });
     if (settled) {
-      const moved = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url', 'automation_policy', 'last_classified_at');
+      const moved = await trx('seo_link_prospects').whereIn('id', ids).select('id', 'path_id', 'target_url', 'link_type', 'automation_policy', 'last_classified_at');
       const byId = new Map((moved || []).map((m) => [m.id, m]));
       rows = rows.map((r) => ({ ...r, ...(byId.get(r.id) || {}) }));
-      // The safety filter above ran against the PRE-settlement policy.
-      // Settlement re-derives automation_policy from the successor's gates
-      // (registry.successorPolicy), so a row whose policy just changed is
-      // no longer eligible for THIS claim: it stays un-leased under its new
-      // policy for the lane that owns it (a human, or the pay lane).
+      // The lane/policy filters above ran against the PRE-settlement row.
+      // A moved placement takes the successor's lane and is left
+      // UNCLASSIFIED (policy null until the weekly classifier has read the
+      // successor's page), so it is no longer eligible for THIS claim: it
+      // stays un-leased for the lane that owns it.
+      rows = rows.filter((r) => types.includes(r.link_type));
       if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
       if (rows.length === 0) return [];
     }

@@ -190,6 +190,13 @@ function hostBound(host, url) {
 }
 
 /** URLs worth fetching for a domain, own-host only, deduped, uncapped (the fetch loop caps). */
+/** The pages a URL-less path's evidence was read from — the only pages a refresh can re-read to confirm or disprove it. */
+function evidencePagesOf(path) {
+  let inv = path && path.investigation;
+  try { inv = typeof inv === 'string' ? JSON.parse(inv) : (inv || {}); } catch { inv = {}; }
+  return Array.isArray(inv.pages_fetched) ? inv.pages_fetched.filter((u) => typeof u === 'string') : [];
+}
+
 function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths = [], probeOffset = 0, probeMask = 0 } = {}) {
   const seen = new Set();
   const out = [];
@@ -209,6 +216,11 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   // domain every sweep).
   push(`https://${host}`);
   for (const p of existingPaths) push(p.submission_url);
+  // A URL-less path (outreach, partnership) has no page of its own: the
+  // pages its evidence was read from are what a refresh must re-read
+  // before its omission can mean anything — they queue right behind the
+  // paths' own URLs (bounded: ≤ MAX_FETCHES_PER_DOMAIN per path).
+  for (const p of existingPaths) if (!p.submission_url) for (const u of evidencePagesOf(p)) push(u);
   for (const u of competitorUrls) push(u);
   // provenance details can be COMPOSITE ("paste:2026-09-01 https://…/apply",
   // CSV context + resolved URL) — extract every embedded URL rather than
@@ -407,7 +419,10 @@ async function selectTargets(db, { domainIds = null, limit, now = new Date() } =
   // normal `new` rows.
   const [fresh, watchingDue] = await Promise.all([
     seedFirst(db('seo_link_domains').whereIn('agent_state', CLAIMABLE_STATES).where(backoffDue()).select('*')),
-    seedFirst(db('seo_link_domains').where('agent_state', 'watching').where('watch_recheck_at', '<=', now).where(backoffDue()).select('*')),
+    // watching rows past their recheck, AND not_reproducible closes past
+    // their 90-day reinvestigation date (a pathless close has no path row
+    // for the refresh buckets to find — the domain carries the date)
+    seedFirst(db('seo_link_domains').whereIn('agent_state', ['watching', 'not_reproducible']).where('watch_recheck_at', '<=', now).where(backoffDue()).select('*')),
   ]);
   const claimPool = [...(fresh || []), ...(watchingDue || [])].sort((a, b) => {
     const seed = (d) => (d.discovery_priority === 'owner_seed' ? 0 : 1);
@@ -533,9 +548,26 @@ function pathRowFrom(modelPath, { legalTermsHash, now, evidence }) {
  * Returns the path row id.
  */
 async function upsertPath(trx, domainId, row, { replacesPathId = null, now, preserveTermsHash = false }) {
-  const existing = await trx('seo_link_acquisition_paths')
+  let existing = await trx('seo_link_acquisition_paths')
     .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('*');
   let id;
+  if (!existing) {
+    // Insert against the partial unique; a CONCURRENT winner (the boot/
+    // runner board catch-up, the baseline importer) that landed between the
+    // lookup and this statement is not ours to ignore — its placeholder
+    // would otherwise be stamped investigated with none of this pass's
+    // derived fields or evidence. Re-read it and fall through to the
+    // in-place update, exactly as if the lookup had found it.
+    const ins = await trx('seo_link_acquisition_paths')
+      .insert({ domain_id: domainId, ...row })
+      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore()
+      .returning(['id']);
+    if (ins && ins.length) id = ins[0].id;
+    else {
+      existing = await trx('seo_link_acquisition_paths')
+        .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('*');
+    }
+  }
   if (existing) {
     // An INCONCLUSIVE terms pass (budget exhausted, failed/blocked fetch,
     // off-claim redirect, truncated/non-text/empty body) carries no verdict
@@ -580,13 +612,6 @@ async function upsertPath(trx, domainId, row, { replacesPathId = null, now, pres
     if (bump.revision_payment || bump.revision_communication || bump.revision_execution) patch.revision = Number(existing.revision) + 1;
     await trx('seo_link_acquisition_paths').where({ id: existing.id }).update(patch);
     id = existing.id;
-  } else {
-    await trx('seo_link_acquisition_paths')
-      .insert({ domain_id: domainId, ...row })
-      .onConflict(trx.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore();
-    const inserted = await trx('seo_link_acquisition_paths')
-      .where({ domain_id: domainId, path_key: row.path_key }).whereNull('superseded_by').first('id');
-    id = inserted && inserted.id;
   }
   // §3.2 supersession, step-3 minimal form (nothing executes yet — no
   // purchases, approvals or authority instances exist to pin or carry):
@@ -866,9 +891,12 @@ async function deferFailedDomain(db, domain, now, { claim = true, observedState 
  * - skipped: 'lease_held' when another run holds the session lock.
  */
 async function investigatePaths(db, {
-  limit = batchSize(), dryRun = false, domainIds = null, now = new Date(),
+  limit = batchSize(), dryRun = false, domainIds = null, now: fixedNow = null,
   fetchPage: fetcher = fetchPage, llmDispatch = dispatch, exclusive = defaultExclusive,
 } = {}) {
+  // selection runs on the run-start clock; each domain's writes take their own (see the loop)
+  const clock = fixedNow ? () => fixedNow : () => new Date();
+  const now = clock();
   const gated = !isEnabled('linkInvestigator');
   limit = Math.max(1, Math.min(Math.floor(Number(limit) || 0) || batchSize(), RUN_LIMIT_MAX));
   const targets = await selectTargets(db, { domainIds, limit, now });
@@ -892,6 +920,13 @@ async function investigatePaths(db, {
   const ran = await exclusive(LOCK_KEY, async () => {
     for (const { domain, claimState } of targets) {
       let claimToken = null; // minted by the claim CAS below; read by the catch-path defer too
+      // Per-domain clock: a live run is sequential (up to 500 domains, each
+      // with network timeouts and two 60s model calls), so a single run-start
+      // timestamp would stamp late domains hours in the past and expire
+      // their six-hour backoff at commit. An injected `now` (tests, replay)
+      // stays fixed; otherwise every domain's claim/stamp/backoff is taken
+      // when ITS work runs.
+      const now = clock();
       try {
         const host = canonicalProspectDomain(domain.domain);
         if (!host) {
@@ -988,6 +1023,10 @@ async function investigatePaths(db, {
         // redirects off-site (a parked/social landing) while www still
         // serves the real site: try the bounded alternatives next.
         const enqueueFallbacks = (at) => {
+          // each fallback homepage stands in for the CANONICAL apex: its
+          // evidence (coverage, a later 404 reconciliation) is keyed on
+          // https://<host>, the identity every baseline/path row carries
+          for (const fb of fallbackOrigins) rebasedFrom.set(fb, `https://${host}`);
           urlQueue.splice(at + 1, 0, ...fallbackOrigins);
           reserveRemaining(at + 1); // the fallbacks spend slots the reservation never saw
         };
@@ -1005,7 +1044,11 @@ async function investigatePaths(db, {
             // page text: it must never become model input, coverage, or
             // disproof — same textual-MIME rule the terms branch enforces
             fetchErrors.push({ url: claimUrl, reason: 'non_text_body' });
-            probeDefinitive = true; // the route exists and will never be readable text
+            // NOT definitive: nothing of this route reached the model (a
+            // PDF application form, a legacy page with no MIME header), so
+            // its coverage bit stays unset and the no-progress valve parks
+            // the domain for review rather than letting a terminal verdict
+            // close a route nobody read
           } else if (page && page.html && !page.blocked && !page.error && hostBound(host, finalUrl)) {
             const text = canonicalizeTerms(page.html);
             redirectMap.set(registry.normalizeSubmissionUrl(claimUrl), registry.normalizeSubmissionUrl(finalUrl));
@@ -1159,6 +1202,14 @@ async function investigatePaths(db, {
         const coverageKeys = new Set(pages
           .filter((pg) => !pg.truncated && pg.text.length >= MIN_COVERAGE_TEXT_CHARS && pg.text.length <= PAGE_EXCERPT_CHARS)
           .flatMap(pageKeys));
+        // The pages a URL-less path's truth rests on: the pages its evidence
+        // was read from, or — for a path that recorded none — the homepage
+        // (the domain-level evidence). Disproof by omission and stamping both
+        // require every one of them covered again this pass.
+        const urllessEvidenceKeys = (p) => {
+          const ev = evidencePagesOf(p);
+          return (ev.length ? ev : [`https://${host}`]).map(registry.normalizeSubmissionUrl);
+        };
         // A DETERMINISTIC 404/410 on a path's own URL is disproof of that
         // path (transient errors, blocks, and timeouts are not): the dead
         // path must retire and stamp instead of holding best_path_id and
@@ -1208,22 +1259,17 @@ async function investigatePaths(db, {
         // with the hourly pass offset — a third legal path is not stuck
         // behind the same two on every retry.
         const hashOnFile = (p) => existingPaths.some((e) => e.path_key === registry.pathKey(p.acquisition_type, p.submission_url) && e.legal_terms_hash);
-        // The rotation start comes from a MIXED hour value, never the raw
-        // hour: retries advance by the 6-hour backoff, and a linear offset
-        // modulo a path count that divides 6 (2, 3, 6) would land on the
-        // same start forever — the avalanche makes successive passes hit
-        // every start regardless of the count.
-        const mix32 = (h) => {
-          let x = h >>> 0;
-          x = (((x >>> 16) ^ x) * 0x45d9f3b) >>> 0;
-          x = (((x >>> 16) ^ x) * 0x45d9f3b) >>> 0;
-          return ((x >>> 16) ^ x) >>> 0;
-        };
+        // The rotation cursor is DURABLE and MONOTONIC: an inconclusive terms
+        // pass leaves the path unstamped, which makes the pass unsettled and
+        // advances the domain's investigate_failures by exactly one — so each
+        // retry starts one slot further along, and every un-hashed path gets
+        // its bounded attempt before the failure ceiling, whatever the clock
+        // stride (a hashed hour could repeat the same modulo indefinitely).
         const legalOrder = (() => {
           const legal = writable.filter((p) => p.legal_attestation && p.legal_terms_url);
           const unhashed = legal.filter((p) => !hashOnFile(p));
           const hashed = legal.filter(hashOnFile);
-          const start = unhashed.length ? mix32(Math.floor(now.getTime() / (60 * 60 * 1000))) % unhashed.length : 0;
+          const start = unhashed.length ? (Number(domain.investigate_failures) || 0) % unhashed.length : 0;
           return [...unhashed.slice(start), ...unhashed.slice(0, start), ...hashed];
         })();
         for (const p of legalOrder) {
@@ -1417,11 +1463,20 @@ async function investigatePaths(db, {
           for (const ap of activeAll) {
             if (unstampedIds.has(ap.id)) continue; // transient verification failure — retryable next pass
             const k = ap.submission_url ? registry.normalizeSubmissionUrl(ap.submission_url) : null;
-            if (!k || coverageKeys.has(k) || goneKeys.has(k)) stampIds.add(ap.id); // a 404/410 page IS a verdict on its path
+            if (k) { if (coverageKeys.has(k) || goneKeys.has(k)) stampIds.add(ap.id); continue; } // a 404/410 page IS a verdict on its path
+            // URL-less: stamped when its evidence pages were re-read (the
+            // homepage, for a path that recorded none)
+            if (urllessEvidenceKeys(ap).every((u) => coverageKeys.has(u))) stampIds.add(ap.id);
           }
           if (stampIds.size) {
             await trx('seo_link_acquisition_paths').whereIn('id', [...stampIds]).update({ last_investigated_at: now, updated_at: now });
           }
+          // An active path this pass could neither stamp nor retire (its
+          // page — or a URL-less path's evidence pages — outside the
+          // budget, failed, or only partially observed) leaves the domain
+          // UNSETTLED like an unstamped write: it re-selects on the
+          // escalating backoff, never on every hourly sweep.
+          const activeLeftUnstamped = activeAll.some((ap) => !stampIds.has(ap.id) && !unstampedIds.has(ap.id));
 
           // A re-investigation DISPROVES only what it actually COVERED: a
           // previously active, non-baseline path absent from this verdict is
@@ -1450,7 +1505,13 @@ async function investigatePaths(db, {
                 const k = s.submission_url ? registry.normalizeSubmissionUrl(s.submission_url) : null;
                 if (k && goneKeys.has(k)) return true;
                 if ((verdict.paths || []).length >= MAX_MODEL_PATHS) return false;
-                return !k || coverageKeys.has(k);
+                // a URL-less path is disproven only when EVERY page its
+                // evidence was read from was covered again this pass — the
+                // model saw the same evidence and still did not report it;
+                // a path with no recorded evidence pages (legacy shape) rests
+                // on the domain-level evidence, i.e. the homepage
+                if (!k) return urllessEvidenceKeys(s).every((u) => coverageKeys.has(u));
+                return coverageKeys.has(k);
               });
             for (const s of stale) {
               const prior = typeof s.investigation === 'string' ? (() => { try { return JSON.parse(s.investigation); } catch { return {}; } })() : (s.investigation || {});
@@ -1497,7 +1558,7 @@ async function investigatePaths(db, {
           // domain: back its re-selection off instead of letting the
           // never-stamped path re-select it on every hourly sweep and
           // re-spend a model call each time.
-          const unsettled = unstampedIds.size > 0 || uncoveredEcho;
+          const unsettled = unstampedIds.size > 0 || uncoveredEcho || activeLeftUnstamped;
           const newProbeMask = priorProbeMask | passProbeMask;
           // An UNSETTLED pass (unstamped writes, an uncovered echo) is a
           // retryable non-verdict exactly like a failed fetch or model call:
@@ -1585,9 +1646,16 @@ async function investigatePaths(db, {
               patch.investigate_after = null;
             }
             if (effectiveVerdict === 'watching' && transientDowngrade) patch.probe_coverage_mask = newProbeMask; // the chain continues
+            // A not_reproducible close commonly writes NO path rows, so the
+            // path-based refresh buckets can never revisit it: the domain
+            // itself carries its 90-day reinvestigation date instead (a
+            // submission route added after the close is picked up on the
+            // documented cadence, not only by an owner Reopen).
             patch.watch_recheck_at = effectiveVerdict === 'watching'
               ? new Date(now.getTime() + (transientDowngrade ? deferMs : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))
-              : null;
+              : effectiveVerdict === 'not_reproducible'
+                ? new Date(now.getTime() + REINVESTIGATE_AFTER_DAYS * 24 * 60 * 60 * 1000)
+                : null;
             if (downgradeNote) patch.score_reasons = `${patch.score_reasons} · downgraded: ${downgradeNote}`;
           }
           await trx('seo_link_domains').where({ id: domain.id }).update(patch);

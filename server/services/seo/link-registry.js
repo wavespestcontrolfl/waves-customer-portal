@@ -368,44 +368,33 @@ const SUPERSESSION_MAX_HOPS = 8;
  * the board catch-up keys legacy placements on it); a URL-less successor
  * (outreach) leaves target_url alone. Returns the number of rows moved.
  */
-const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'account_required', 'email_verification', 'payment_required', 'legal_attestation', 'agent_completable', 'expected_rel'];
+const SUCCESSOR_COLUMNS = ['id', 'superseded_by', 'submission_url', 'link_type'];
 
 /**
- * The signup lane's automation_policy was classified for the path the
- * placement was on; a successor with different gates (account, verification,
- * payment, a legal attestation, not agent-completable) must re-derive it
- * with the SAME rules the weekly classifier applies (`decide`), so a
- * placement classified submit_free can never be leased against a paid or
- * gated successor. Only signup-lane rows carry a policy (outreach rows are
- * null and stay null). Stamped last_classified_at, like every runtime
- * reclassification, so the weekly pass does not revert it.
+ * A moved placement takes the successor's LANE and is left UNCLASSIFIED:
+ *   - `link_type` follows the successor's path lane (the worker claims by
+ *     the placement's link_type — a directory placement superseded by an
+ *     outreach path must leave the signup lane, or the runner would execute
+ *     the retired route while the ledger names the outreach successor);
+ *   - `automation_policy` / `last_classified_at` are cleared. The policy was
+ *     classified for the OLD path; the successor's CAPTCHA / category /
+ *     account gates are only known once the weekly classifier has fetched
+ *     ITS page (a null last_classified_at puts it first in line), and until
+ *     then no runner may lease it (claim() filters on the policy). Fail
+ *     closed — never a synthesized policy from an incomplete signal.
  */
-function successorPolicy(successor) {
-  const { decide } = require('./signup-classifier')._internals;
-  const gated = successor.legal_attestation === true || successor.agent_completable === false;
-  return decide({
-    requires_account: successor.account_required === true || gated,
-    requires_email_verification: successor.email_verification === true,
-    requires_payment: successor.payment_required === true,
-    requires_captcha: false,
-    offered_link_rel: successor.expected_rel,
-  }).automation_policy;
+function movePatch(target, now) {
+  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null };
+  if (target.submission_url) patch.target_url = target.submission_url;
+  if (target.link_type && CLAIMABLE_LINK_TYPES.has(target.link_type)) patch.link_type = target.link_type;
+  return patch;
 }
 
 async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
-  const move = async (whereFn, target) => {
-    const patch = { path_id: target.id, updated_at: now };
-    if (target.submission_url) patch.target_url = target.submission_url;
-    const policy = successorPolicy(target);
-    // policy rows only — an outreach placement (policy null) is not in the signup lane
-    let moved = await whereFn().whereNull('claimed_at').whereNotNull('automation_policy')
-      .update({ ...patch, automation_policy: policy, last_classified_at: now });
-    moved += await whereFn().whereNull('claimed_at').whereNull('automation_policy').update(patch);
-    return moved;
-  };
+  const move = (where, target) => where.whereNull('claimed_at').update(movePatch(target, now));
   if (successor && successor.id && Array.isArray(pathIds)) {
     if (!pathIds.length) return 0;
-    return move(() => q('seo_link_prospects').whereIn('path_id', pathIds), successor);
+    return move(q('seo_link_prospects').whereIn('path_id', pathIds), successor);
   }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
   const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').select('id', 'path_id');
@@ -416,7 +405,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
       cur = await q('seo_link_acquisition_paths').where({ id: cur.superseded_by }).first(...SUCCESSOR_COLUMNS);
     }
     if (!cur || cur.id === r.path_id || cur.superseded_by) continue; // already live, or the chain did not resolve
-    moved += await move(() => q('seo_link_prospects').where({ id: r.id }), cur);
+    moved += await move(q('seo_link_prospects').where({ id: r.id }), cur);
   }
   return moved;
 }
