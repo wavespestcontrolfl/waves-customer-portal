@@ -534,6 +534,36 @@ describe('full run', () => {
     expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected'); // the admin's state stands
   });
 
+  test('the claim itself is compare-and-set: a state change between selection and claim abandons the domain unfetched (Codex r4 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetcher = jest.fn(okFetch);
+    const llm = jest.fn();
+    // the admin rejects the domain between selection and the exclusive run
+    const raceExclusive = (name, fn) => { db._tables.seo_link_domains[0].agent_state = 'rejected'; return fn(); };
+    const r = await investigatePaths(db, runOpts(db, { exclusive: raceExclusive, fetchPage: fetcher, llmDispatch: llm }));
+    expect(r.staleClaims).toBe(1);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(llm).not.toHaveBeenCalled();
+    expect(db._tables.seo_link_domains[0].agent_state).toBe('rejected');
+  });
+
+  test('the terms budget caps ATTEMPTS — failed fetches spend it too (Codex r4 P1)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const paths = Array.from({ length: 6 }, (_, i) => modelPath({
+      submission_url: `https://example.com/join-${i}`,
+      legal_attestation: true,
+      legal_terms_url: `https://example.com/terms-${i}`,
+    }));
+    const fetcher = jest.fn(async (url) => (url.includes('/terms')
+      ? { status: 500, finalUrl: url, html: null, blocked: false, error: 'http_500' }
+      : okFetch(url)));
+    await investigatePaths(db, runOpts(db, { fetchPage: fetcher, llmDispatch: async () => ({ ok: true, json: verdictOf(paths) }) }));
+    const termsCalls = fetcher.mock.calls.filter(([u]) => u.includes('/terms')).length;
+    expect(termsCalls).toBe(investigator.TERMS_FETCH_BUDGET);
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {

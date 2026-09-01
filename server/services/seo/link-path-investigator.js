@@ -509,8 +509,14 @@ async function investigatePaths(db, {
 
         // Claim: stamp `investigating` so the queue and UI show the domain in
         // flight (states 1–2 only; path refreshes never touch agent_state).
+        // Compare-and-set against the SELECTED state — an admin reject/watch
+        // or a lane move between selection and this statement wins, and the
+        // claim is abandoned before any fetch is spent.
         if (claimState && domain.agent_state !== 'investigating') {
-          await db('seo_link_domains').where({ id: domain.id }).update({ agent_state: 'investigating', updated_at: now });
+          const claimed = await db('seo_link_domains')
+            .where({ id: domain.id, agent_state: domain.agent_state })
+            .update({ agent_state: 'investigating', updated_at: now });
+          if (!claimed) { out.staleClaims += 1; continue; }
         }
 
         const [touches, existingPaths, competitorRows] = await Promise.all([
@@ -577,9 +583,11 @@ async function investigatePaths(db, {
         // probes), and a legal_attestation path with no hash is INVALID under
         // §6.3, so sharing one budget would starve every legal path.
         const termsHashByUrl = new Map();
+        const termsAttempted = new Set(); // the budget caps ATTEMPTS — a failed or off-site fetch spends it too
         for (const p of writable) {
-          if (!p.legal_attestation || !p.legal_terms_url || termsHashByUrl.has(p.legal_terms_url)) continue;
-          if (termsHashByUrl.size >= TERMS_FETCH_BUDGET) break;
+          if (!p.legal_attestation || !p.legal_terms_url || termsAttempted.has(p.legal_terms_url)) continue;
+          if (termsAttempted.size >= TERMS_FETCH_BUDGET) break;
+          termsAttempted.add(p.legal_terms_url);
           out.fetches += 1;
           const t = await fetcher(p.legal_terms_url);
           // same redirect rule as candidate pages: an agreement that redirects
