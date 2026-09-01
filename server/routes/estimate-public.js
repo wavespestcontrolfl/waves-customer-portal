@@ -21909,7 +21909,13 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // sections, so its chip is missing from the section-derived list. Prepend it (so
   // it survives the 6-chip cap), matching the merged one-time rows the SSR Ask
   // Waves prompt builder now reads.
-  const askChips = hasRegulatedCertificateServiceMix(services, oneTimeBreakdownItems)
+  // Regulated check sees the RAW normalized rows too: the contract's aligned
+  // breakdown (show_one_time_option) can drop a WDO row, and the Ask bar must
+  // not surface on an FDACS certificate surface (pre-push codex P1).
+  const askChips = hasRegulatedCertificateServiceMix(services, [
+    ...oneTimeBreakdownItems,
+    ...(normalizeOneTimeBreakdown(estData)?.items || []),
+  ])
     ? []
     : oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
       ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
@@ -24354,14 +24360,24 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
+    // Category + regulated-surface decisions see the RAW normalized rows
+    // unioned with the bundle items (same union as the glass scope check
+    // below): alignOneTimeChoiceBreakdown (show_one_time_option) replaces raw
+    // rows with the synthetic choice + preserved pest/Bora add-ons, which
+    // would drop a WDO row and let the AI narrative + Ask bar render on an
+    // FDACS certificate surface (pre-push codex P1).
+    const oneTimeItemsForCategory = [
+      ...(normalizeOneTimeBreakdown(estimateDataForIntelligence)?.items || []),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+    ];
     const serviceCategory = deriveServiceCategory(
       estimateDataForIntelligence,
       recurringServicesForIntelligence,
-      pricingBundle?.oneTimeBreakdown?.items || []
+      oneTimeItemsForCategory,
     );
     const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(
       recurringServicesForIntelligence,
-      pricingBundle?.oneTimeBreakdown?.items || [],
+      oneTimeItemsForCategory,
     );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
