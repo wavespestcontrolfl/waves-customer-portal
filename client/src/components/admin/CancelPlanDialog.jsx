@@ -258,6 +258,24 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
                   )}
                 </div>
               )}
+              {/* Unfinished SCOPED runs whose family already lost its live
+                  rows never appear in the checkboxes above — the durable
+                  acceptance scope is the only way back to the repair. */}
+              {(preview?.openScopedRepairs || [])
+                .filter((r) => wholeAccount || r.families.join(",") !== [...families].sort().join(","))
+                .map((r) => (
+                  <div key={r.families.join(",")} className="px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 flex items-center justify-between gap-2">
+                    <span>An unfinished cancellation of {r.labels.join(", ")} still has follow-up steps open.</span>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={running}
+                      onClick={() => { setWholeAccount(false); setFamilies([...r.families]); }}
+                    >
+                      Retry it
+                    </Button>
+                  </div>
+                ))}
             </fieldset>
 
             {/* EFFECTIVE DATE — only a choice for an annual-prepay whole-account cancel */}

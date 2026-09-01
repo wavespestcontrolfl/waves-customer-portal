@@ -791,6 +791,19 @@ describe('processCancellationRequest', () => {
     expect(db.__tables.scheduled_services[0].status).toBe('confirmed');
   });
 
+  test('feeEvaluationAt freezes the fee rails\' clock — the sweep judges cancel windows at the approved instant, not mid-run', async () => {
+    db.__tables.scheduled_services = [
+      { id: 'f1', customer_id: 'c1', status: 'confirmed', scheduled_date: '2099-02-01', track_state: null, cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, termite_stations_rented: false }];
+    db.__tables.termite_stations = [];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+    const approvedAt = new Date('2026-08-31T12:00:00Z');
+    await processCancellationRequest({ customerId: 'c1', requestId: 'reqF', feeEvaluationAt: approvedAt });
+    expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 'f1', now: approvedAt });
+  });
+
   test('a RESCHEDULED covered termite visit never dates the retrieval — the sweep pulls open rebook intents, so nothing deliverable remains', async () => {
     db.__tables.scheduled_services = [
       // Covered by the term but sitting as an open rebook intent (stale

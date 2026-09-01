@@ -303,6 +303,23 @@ describe('CancelPlanDialog', () => {
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).not.toBeDisabled();
   });
 
+  it('an orphaned scoped repair surfaces with a Retry action — the durable scope is reachable even with its family gone from live rows', async () => {
+    stubFetch((path, body) => (path.endsWith('/cancel-plan/preview')
+      ? response(previewBody({
+        openScopedRepairs: [{ families: ['lawn_care'], labels: ['Lawn Care'] }],
+        ...(body && body.families && body.families.length ? { repairRetry: true } : {}),
+      }))
+      : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
+    await screen.findByText(/An unfinished cancellation of Lawn Care still has follow-up steps open/);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry it' }));
+    // The retry drives a scoped preview for the durable acceptance scope.
+    await waitFor(() => {
+      const last = calls.filter((c) => c.path.endsWith('/cancel-plan/preview')).pop();
+      expect(last.body.families).toEqual(['lawn_care']);
+    });
+  });
+
   it('a repair retry syncs the ACCEPTED choices into the controls — the dialog never shows an unchecked waiver over a run that waives', async () => {
     stubFetch((path) => (path.endsWith('/cancel-plan/preview')
       ? response(previewBody({ eligible: true, repairRetry: true, waiveLateFee: true, sendConfirmation: false }))

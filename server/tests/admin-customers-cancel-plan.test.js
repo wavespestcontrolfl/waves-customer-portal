@@ -82,7 +82,9 @@ jest.mock('../services/cancellation-processor', () => ({
   processCancellationRequest: (...args) => mockProcess(...args),
   planScopedWindDown: (...args) => mockPlan(...args),
   raiseTermiteRetrievalTask: (...args) => mockRaiseTermite(...args),
-  familyOfServiceRow: (row) => row.family || null,
+  familyOfServiceRow: (row) => row.family
+    || ({ 'Quarterly Pest Control': 'pest_control', 'Lawn Care Monthly': 'lawn_care' })[row.service_type]
+    || null,
   CHURN_REASON: 'Customer cancellation request',
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
@@ -199,6 +201,7 @@ function builderFor(table) {
   });
   b.whereIn = jest.fn((c, vals) => { conds.push((r) => vals.includes(r[col(c)])); return b; });
   b.whereNull = jest.fn((c) => { conds.push((r) => r[col(c)] == null); return b; });
+  b.whereNotNull = jest.fn((c) => { conds.push((r) => r[col(c)] != null); return b; });
   b.whereBetween = jest.fn((c, [lo, hi]) => { conds.push((r) => r[col(c)] >= lo && r[col(c)] <= hi); return b; });
   // resolveReviewBell matches the bell by its metadata dedupeKey.
   b.whereRaw = jest.fn((sql, bindings) => {
@@ -351,6 +354,10 @@ describe('POST /:id/cancel-plan/preview', () => {
       // the canonical helper filters it by service type).
       { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-05-01', non_coverage: true },
       { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      // Full covered set: coverage_visit_count is 4 and a short set now
+      // refuses end_of_coverage (coverage_rows_incomplete).
+      { id: 's4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 's5', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
     ];
     let body = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'end_of_coverage' })).json();
     expect(body.effectiveDate).toBe('end_of_coverage');
@@ -359,7 +366,7 @@ describe('POST /:id/cancel-plan/preview', () => {
     const { buildCancellationImpact } = require('../services/cancellation-resolution/impact');
     // The preview hands the impact math the LIVE term's canonical covered
     // rows (coverageRowsForTerm) — the same set the processor will keep.
-    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28', keepVisitIds: ['s1', 's3'] });
+    expect(buildCancellationImpact).toHaveBeenLastCalledWith('cust-1', [], { after: '2027-02-28', keepVisitIds: ['s1', 's3', 's4', 's5'] });
     expect(body.effectiveOn).toBe('2027-02-28');
     expect(body.prepay).toEqual(expect.objectContaining({ termId: 'term-1', termEnd: '2027-02-28', disposition: 'end_at_term', refund: null }));
 
@@ -587,6 +594,12 @@ describe('POST /:id/cancel-plan', () => {
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'cancelled', renewal_decision: 'cancel',
     }];
+    mockState.scheduled_services = [
+      { id: 'cv1', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+      { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
+      { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-12-01' },
+      { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+    ];
     // The old cancellation's acceptance resolved DAYS ago; the customer was
     // re-won back and now cancels again.
     mockState.service_requests = [{
@@ -916,6 +929,15 @@ describe('POST /:id/cancel-plan', () => {
         id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
         prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
       }];
+      // Fully seeded covered set (coverage_visit_count 4): a SHORT set now
+      // refuses end_of_coverage (coverage_rows_incomplete) — tests that
+      // need a different world overwrite scheduled_services themselves.
+      mockState.scheduled_services = [
+        { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
+        { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-11-01' },
+        { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
+      ];
     });
 
     test('end_of_coverage: processor keeps visits through term_end, the term is decided cancel (no renewal), no refund, no office task', () => withServer(async (baseUrl) => {
@@ -1450,6 +1472,83 @@ describe('POST /:id/cancel-plan', () => {
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledIds: [], cancelledCount: 0 });
       const clean = await (await post(baseUrl, '/cancel-plan', {})).json();
       expect(clean.errors || []).not.toContain('visits_pulled_beyond_preview');
+    }));
+
+    test('an unpaid payment_pending prepay invoice refuses the whole-plan cancel — money paid later must not re-activate a churned account', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [{
+        id: 'term-p', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
+        status: 'payment_pending', renewal_decision: null, prepay_invoice_id: 'inv-p',
+      }];
+      mockState.invoices = [{ id: 'inv-p', status: 'sent', invoice_number: 'WPC-2026-0009' }];
+      const res = await post(baseUrl, '/cancel-plan/preview', {});
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('pending_prepay_invoice');
+      // A VOIDED prepay invoice no longer trips the pending guard (the
+      // remaining term-state handling belongs to coveredTermsAsOf).
+      mockState.invoices[0].status = 'void';
+      const after = await post(baseUrl, '/cancel-plan/preview', {});
+      expect((await after.json()).code).not.toBe('pending_prepay_invoice');
+    }));
+
+    test('a multi-family retry matches the acceptance on the REQUESTED scope — ownership normalization must not open a second request', () => withServer(async (baseUrl) => {
+      mockState.service_requests = [{
+        id: 'req-multi', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel Lawn Care, Pest Control (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: {
+          scope: ['lawn_care', 'pest_control'], waiveLateFee: false, sendConfirmation: true,
+          effectiveDate: 'now', prepayDisposition: null,
+        } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      mockState.annual_prepay_terms = [];
+      // Run 1 already cancelled lawn's rows — ownership reduces to pest only.
+      mockPlan.mockResolvedValue({ ok: true, inScope: ['pest_control'], remaining: [], remainingRates: [], tierBefore: 'Silver', tierAfter: null });
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, churned: false, scopedWoundDown: true, scope: ['pest_control'], remaining: [] });
+      const body = await (await post(baseUrl, '/cancel-plan', { families: ['pest_control', 'lawn_care'] })).json();
+      expect(body.requestId).toBe('req-multi');
+      expect((mockState.inserted || []).filter((i) => i.table === 'service_requests')).toHaveLength(0);
+    }));
+
+    test('a fingerprinted commit freezes the fee evaluation instant for the processor', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [];
+      const body = await (await postCancel(baseUrl)).json();
+      expect(body.processed).toBe(true);
+      expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ feeEvaluationAt: expect.any(Date) }));
+    }));
+
+    test('a SHORT covered set refuses end_of_coverage — the cancel must not strand paid visits a reseed has not replaced yet', () => withServer(async (baseUrl) => {
+      // Drop one covered row: 3 of 4 on the calendar.
+      mockState.scheduled_services = mockState.scheduled_services.slice(0, 3);
+      const res = await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'end_of_coverage' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('coverage_rows_incomplete');
+      expect(mockProcess).not.toHaveBeenCalled();
+    }));
+
+    test('the term COVERAGE IDENTITY blocks a scoped cancel of its family even with no upcoming covered rows — the renewal must not outlive the service', () => withServer(async (baseUrl) => {
+      // All covered visits delivered; the family stays selectable through a
+      // live recurring row outside the term relationship.
+      mockState.scheduled_services = [
+        { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 'live1', customer_id: 'cust-1', status: 'confirmed', family: 'pest_control', scheduled_date: '2027-06-01' },
+      ];
+      mockPlan.mockResolvedValue({ ok: true, inScope: ['pest_control'], remaining: ['lawn_care'], remainingRates: [], tierBefore: 'Silver', tierAfter: null });
+      const body = await (await post(baseUrl, '/cancel-plan/preview', { families: ['pest_control'] })).json();
+      expect(body.scopedSupported).toBe(false);
+      expect(body.scopeError).toBe('scoped_covers_prepaid');
+    }));
+
+    test('open scoped acceptances surface on every preview — the dialog can reach a repair whose family lost its live rows', () => withServer(async (baseUrl) => {
+      mockState.annual_prepay_terms = [];
+      mockState.service_requests = [{
+        id: 'req-s', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+        subject: 'Cancel Lawn Care (Admin (user admin-1))', description: '',
+        metadata: JSON.stringify({ cancel_plan: { scope: ['lawn_care'], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'now', prepayDisposition: null } }),
+        created_at: new Date(Date.now() - 60 * 60 * 1000),
+      }];
+      const body = await (await post(baseUrl, '/cancel-plan/preview', {})).json();
+      expect(body.openScopedRepairs).toEqual([expect.objectContaining({ families: ['lawn_care'] })]);
     }));
 
     test('a repair whose case stamp FAILS clears nothing and keeps the acceptance open — retryable, never stale-resolved', () => withServer(async (baseUrl) => {

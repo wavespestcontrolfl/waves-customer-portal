@@ -146,6 +146,22 @@ async function loadCustomer(customerId) {
 async function resolveLiveTerm(customerId, wholeAccount) {
   if (!wholeAccount) return null;
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  // An UNPAID payment_pending term is invisible to coveredTermsAsOf, but
+  // its standalone prepay invoice stays payable through the public link —
+  // a payment landing AFTER the churn re-activates coverage and seeds
+  // visits on a cancelled account (syncTermForInvoicePayment). Refuse
+  // until the invoice is disposed of; the invoice tools own that void.
+  const pending = await db('annual_prepay_terms')
+    .where({ customer_id: customerId, status: 'payment_pending' })
+    .whereNotNull('prepay_invoice_id')
+    .select('id', 'prepay_invoice_id', 'plan_label');
+  for (const p of pending) {
+    const inv = await db('invoices').where({ id: p.prepay_invoice_id }).first('id', 'status', 'invoice_number');
+    if (inv && String(inv.status) !== 'void') {
+      throw new CancelPlanError(409, 'pending_prepay_invoice',
+        `An unpaid annual-prepay invoice (${inv.invoice_number || inv.id}${p.plan_label ? `, ${p.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`);
+    }
+  }
   // ALL still-paid terms, current AND future: a renewal is a NEW row
   // starting the day after the old term ends, so an as-of-today query would
   // dispose only the current term while the sweep pulls the paid
@@ -427,7 +443,18 @@ async function liveCoveredKeepIds(term, customerId) {
     throw new CancelPlanError(409, 'coverage_rows_unavailable',
       'Could not resolve which visits the prepay term covers. Nothing was cancelled — try again.');
   }
-  return (Array.isArray(rows) ? rows : []).map((r) => r.id);
+  const ids = (Array.isArray(rows) ? rows : []).map((r) => r.id);
+  // A SHORT covered set (fewer rows than coverage_visit_count — e.g. a
+  // skipped visit whose replacement is not reseeded yet) must refuse: the
+  // cancel decision flips the term's status, refreshTermSnapshot stops
+  // seeding, and the customer silently loses part of the purchased
+  // coverage. Completed rows count toward the set, so a healthy mid-term
+  // account always passes.
+  if (ids.length < Number.parseInt(term.coverage_visit_count, 10)) {
+    throw new CancelPlanError(409, 'coverage_rows_incomplete',
+      `The prepay term's covered visits are not fully on the calendar right now (${ids.length} of ${term.coverage_visit_count} — a skipped visit's replacement may still be reseeding). Nothing was cancelled — retry shortly, or cancel effective now with the refund.`);
+  }
+  return ids;
 }
 
 // A scoped cancel must never pull PREPAID visits: resolveLiveTerm only
@@ -453,6 +480,13 @@ async function scopedCoverageConflict(customerId, scope) {
     // A live term whose coverage identity cannot be read could cover ANY of
     // the selected families — same fail-closed refusal as a failed read.
     if (!termCoverageResolvable(t)) return true;
+    // The term's COVERAGE IDENTITY conflicts even when no upcoming covered
+    // row exists right now (all completed, or a replacement mid-reseed):
+    // a scoped cancel of that family would stop the service with no term
+    // decision recorded, and the renewal workflow could later renew or
+    // charge a service the operator cancelled.
+    const identityFamily = familyOfServiceRow({ service_type: t.coverage_service_type });
+    if (identityFamily && scope.includes(identityFamily)) return true;
     let covered;
     try {
       covered = await coverageRowsForTerm({ ...t, customer_id: customerId });
@@ -627,6 +661,21 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   if (!customerId) throw new CancelPlanError(400, 'customer_id_required', 'customerId is required');
   const input = normalizeInput(raw);
   const customer = await loadCustomer(customerId);
+  // Requested-scope acceptance FIRST (mirrors the commit): normalizing
+  // against live ownership before the lookup reduces a multi-family retry
+  // to the still-visible subset and misses the original acceptance.
+  let requestedAcceptance = null;
+  if (Array.isArray(input.families) && input.families.length) {
+    try {
+      requestedAcceptance = await findCancelAcceptance(customerId, false, [...input.families].sort(), 'new');
+    } catch (reqErr) {
+      logger.warn(`[admin-cancellation] requested-scope preview lookup failed for ${customerId}: ${reqErr.message}`);
+    }
+    if (requestedAcceptance) {
+      const durable = requestCancelPlanMeta(requestedAcceptance);
+      if (durable && Array.isArray(durable.scope) && durable.scope.length) input.families = [...durable.scope];
+    }
+  }
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
   // Repair-retry awareness: a partial run leaves its acceptance open, and
   // the account may now have nothing cancellable (or the scoped family gone
@@ -635,7 +684,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
   // attempt's failed side effects are stranded. Mirrors the commit gate.
   let repairRetry = false;
   try {
-    const acceptance = await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
+    const acceptance = requestedAcceptance || await findCancelAcceptance(customerId, wholeAccount, scope, 'new');
     repairRetry = !!acceptance;
     if (acceptance) {
       // The commit inherits the FIRST attempt's accepted choices (sticky
@@ -690,6 +739,23 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     ? await computePrepayRefund({ ...term, customer_id: customerId })
     : null;
   const visitFees = await previewVisitFees(impact ? impact.pulledVisitKeys : null);
+  // Every open SCOPED acceptance (any scope): the dialog derives its
+  // checkboxes from LIVE rows, so a scoped partial run whose family already
+  // lost its rows would otherwise be unreachable from the UI — surface the
+  // durable scopes so the dialog can offer the retry directly.
+  let openScopedRepairs = [];
+  try {
+    const openRows = await db('service_requests')
+      .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new' })
+      .orderBy('created_at', 'desc')
+      .select('*');
+    openScopedRepairs = (openRows || [])
+      .map((r) => requestCancelPlanMeta(r))
+      .filter((m) => m && Array.isArray(m.scope) && m.scope.length)
+      .map((m) => ({ families: [...m.scope], labels: m.scope.map(familyLabelOf) }));
+  } catch (openErr) {
+    logger.warn(`[admin-cancellation] open-scoped-repairs listing failed for ${customerId}: ${openErr.message}`);
+  }
   const today = etDateString();
   return {
     previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount }),
@@ -698,6 +764,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     eligible: eligible || repairRetry,
     // The dialog/IB card can say "this retries an unfinished cancellation".
     repairRetry,
+    openScopedRepairs,
     wholeAccount,
     scope,
     scopeLabels: scope.map(familyLabelOf),
@@ -778,6 +845,27 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
 
   const customer = await loadCustomer(customerId);
 
+  // The acceptance is matched on the CALLER'S canonical requested scope
+  // FIRST: normalizing against live ownership first would reduce a
+  // multi-family retry to the subset still on live rows (the cancelled
+  // family's rows are gone), miss the original acceptance, open a second
+  // request, and strand run 1's failed side effects forever. Fail closed
+  // like the normalized lookup below.
+  let requestedAcceptance = null;
+  if (Array.isArray(input.families) && input.families.length) {
+    try {
+      requestedAcceptance = await findCancelAcceptance(customerId, false, [...input.families].sort(), 'new');
+    } catch (reqErr) {
+      logger.error(`[admin-cancellation] requested-scope acceptance lookup failed for ${customerId}: ${reqErr.message}`);
+      throw new CancelPlanError(503, 'acceptance_check_unavailable',
+        'Could not verify whether an unfinished cancellation already exists for this customer — nothing was changed. Try again shortly.');
+    }
+    if (requestedAcceptance) {
+      const durable = requestCancelPlanMeta(requestedAcceptance);
+      if (durable && Array.isArray(durable.scope) && durable.scope.length) input.families = [...durable.scope];
+    }
+  }
+
   // Scoped feasibility BEFORE the request row exists (fail closed).
   const { wholeAccount, scope, scopeError } = await resolveScope(customerId, input.families);
   const subject = wholeAccount ? `Cancel plan (${actorLabel})` : `Cancel ${scope.map(familyLabelOf).join(', ')} (${actorLabel})`;
@@ -799,7 +887,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
         'Could not verify whether an unfinished cancellation already exists for this customer — nothing was changed. Try again shortly.');
     }
   };
-  const openAcceptance = await findOpenAcceptance();
+  const openAcceptance = requestedAcceptance || await findOpenAcceptance();
   // Durable approved facts, inherited BEFORE prepay resolution: a
   // fingerprint-exempt repair retry from dialog defaults must never flip a
   // refunded end-now into end-at-term (or move the approved boundary) on
@@ -1169,6 +1257,11 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   let approvedPulled = null;
   let approvedPulledIds = null;
   let approvedPulledKeysForMeta = null;
+  // The instant the approved facts were validated against live state — the
+  // processor's fee rails evaluate their cancel windows at THIS time, so a
+  // slow sweep crossing a visit's fee cutoff mid-run cannot charge a fee
+  // that was absent from the approved fingerprint.
+  let feeEvaluationAt = null;
   // The approval boundary is MANDATORY for new destructive commits: both
   // first-party surfaces always carry the preview's fingerprint, so a
   // commit without one is a stale or hand-built call bypassing the facts
@@ -1190,6 +1283,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       approvedPulledIds = new Set(liveImpact.pulledVisitKeys.map((k) => String(k).split(':')[0]));
       approvedPulledKeysForMeta = liveImpact.pulledVisitKeys.map(String);
     }
+    feeEvaluationAt = new Date();
   }
 
   let caseSnapshot = null;
@@ -1328,6 +1422,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
       keepThrough: prepayPlan.keepThrough,
       keepVisitIds,
       waiveLateFee: input.waiveLateFee,
+      feeEvaluationAt,
     });
   } catch (err) {
     logger.error(`[admin-cancellation] processor threw for request ${request.id}: ${err.message}`);

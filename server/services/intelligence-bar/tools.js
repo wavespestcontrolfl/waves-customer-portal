@@ -1799,7 +1799,15 @@ async function cancelPlan(input, actionContext = {}) {
       prepay_disposition: outcome.prepayDisposition,
       ...(outcome.refund ? { refund: outcome.refund } : {}),
       confirmation_channels: outcome.confirmationChannels,
-      ...(outcome.errors.length ? { warning: `Auto-processing did not fully complete (${outcome.errors.join(', ')}) — an office review alert was raised.` } : {}),
+      ...(outcome.errors.length ? {
+        // review_alert_failed IS the alert write failing — claiming an
+        // alert was raised in exactly that case sends the operator to rely
+        // on follow-up that will never come (same truth rule as the dialog).
+        warning: `Auto-processing did not fully complete (${outcome.errors.join(', ')})`
+          + (outcome.errors.includes('review_alert_failed')
+            ? ' — the office review alert could NOT be raised; flag the office manually.'
+            : ' — an office review alert was raised.'),
+      } : {}),
     };
   } catch (err) {
     if (err && err.code) return { error: err.message, code: err.code };

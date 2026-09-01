@@ -379,6 +379,13 @@ async function processCancellationRequest({
   //                appointment-card rail closes 'waived'; recorded on the
   //                result and the timeline note.
   actor = null, keepThrough = null, keepVisitIds = null, waiveLateFee = false,
+  //   feeEvaluationAt (C3): the instant the operator's approved fee
+  //                exposure was validated — both fee rails judge their
+  //                cancel windows AT this time, so a slow sweep crossing a
+  //                visit's cutoff mid-run cannot charge a fee absent from
+  //                the approved fingerprint. Null (portal path / repair
+  //                retries) = live now, byte-identical to old behavior.
+  feeEvaluationAt = null,
   // historyNote (C3): an IMMUTABLE request-scoped marker for the visit
   // history notes and the retry repair matching. The recorded REASON is
   // operator text (churn detail/classification) and may change between a
@@ -925,6 +932,7 @@ async function processCancellationRequest({
       // was waived — a parked hold is deferred collection, not a waiver.
       const holdResult = await CardHolds.handleCardHoldCancellation({
         scheduledServiceId: svc.id,
+        ...(feeEvaluationAt ? { now: feeEvaluationAt } : {}),
         ...(lateFeeWaived ? { waiveFee: true, intent: 'offboard' } : {}),
       });
       // released === false is unresolved money even with NO reason (a lost
@@ -946,6 +954,7 @@ async function processCancellationRequest({
         const ApptCardRequests = require('./appointment-card-request');
         const apptResult = await ApptCardRequests.handleAppointmentCardCancellation({
           scheduledServiceId: svc.id,
+          ...(feeEvaluationAt ? { now: feeEvaluationAt } : {}),
           ...(lateFeeWaived ? { waiveFee: true } : {}),
         });
         // Any non-released outcome from the appt-fee rail is unresolved
