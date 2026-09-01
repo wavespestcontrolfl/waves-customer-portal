@@ -108,6 +108,10 @@ describe('glassServiceSlug regulated certificate routing', () => {
   it('maps the legacy termite_inspection alias to the regulated WDO category', () => {
     expect(glassServiceSlug('termite_inspection')).toBe('wdo_inspection');
   });
+
+  it('does not classify ordinary termiticide treatment as pre-slab certificate work', () => {
+    expect(glassServiceSlug('Liquid termiticide treatment')).not.toBe('pre_slab_termiticide');
+  });
 });
 
 describe('glassCtaMicroFor', () => {

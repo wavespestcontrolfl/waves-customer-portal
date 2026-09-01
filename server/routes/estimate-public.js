@@ -3275,7 +3275,7 @@ function boraCareCustomerCopy() {
 function hasRegulatedCertificateServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
-  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab|termiticide/i.test(
+  const isRegulatedRow = (row = {}) => /\bwdo\b|wood destroying|pre slab/i.test(
     [row.key, row.service, row.name, row.label].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
   );
   return recurringRows.some(isRegulatedRow)

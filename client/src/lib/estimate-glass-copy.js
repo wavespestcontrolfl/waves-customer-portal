@@ -460,7 +460,7 @@ export function glassCtaMicroForKeys(keys) {
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
   if (raw.includes('wdo') || raw.includes('wood destroying') || raw.includes('termite_inspection')) return 'wdo_inspection';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('pre slab') || raw.includes('termiticide')) return 'pre_slab_termiticide';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('pre slab')) return 'pre_slab_termiticide';
   if (raw.includes('trap_only') || raw.includes('trap-only')) return 'trap_only';
   if (raw.includes('termite_foam') || (raw.includes('termite') && raw.includes('foam'))) return 'termite_foam';
   // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"

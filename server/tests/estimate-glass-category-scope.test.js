@@ -63,6 +63,10 @@ describe('glassCategoryEligible service-category scope (GATE_ESTIMATE_GLASS_CATE
       [{ service: 'pest_control', name: 'Pest Control' }],
       [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment' }],
     )).toBe(true);
+    expect(hasRegulatedCertificateServiceMix(
+      [],
+      [{ service: 'termite_trenching', name: 'Liquid Termiticide Treatment' }],
+    )).toBe(false);
   });
 
   test('empty scope list releases every estimate', () => {
