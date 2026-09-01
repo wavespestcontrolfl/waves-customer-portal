@@ -1676,7 +1676,7 @@ describe('full run', () => {
     expect(Number(seventh.confidence)).toBe(0.7); // omission at the cap proves nothing
   });
 
-  test('a transient probe failure is not coverage — the route retries before any terminal close (Codex PR r13 P1)', async () => {
+  test('a transient probe failure is not coverage — bounded retries then park for review, never a close (Codex PR r13+r15 P1)', async () => {
     const d = domainRow();
     const db = makeDb({ seo_link_domains: [d] });
     const submitAttempts = [];
@@ -1685,14 +1685,18 @@ describe('full run', () => {
       return okFetch(url);
     };
     const llm = async () => ({ ok: true, json: verdictOf([], 'not_reproducible') });
-    let passes = 0;
-    while (db._tables.seo_link_domains[0].agent_state !== 'not_reproducible' && passes < 12) {
+    // run past the failure ceiling — the domain must NEVER close on a route
+    // that only ever timed out; it parks watching for review instead
+    for (let i = 0; i < 10; i++) {
       const dom = db._tables.seo_link_domains[0];
-      dom.watch_recheck_at = new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000);
-      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: new Date(NOW.getTime() + passes * 6 * 60 * 60 * 1000), domainIds: [dom.id] });
-      passes += 1;
+      dom.watch_recheck_at = new Date(NOW.getTime() + i * 6 * 60 * 60 * 1000);
+      await investigatePaths(db, { ...runOpts(db, { fetchPage: fetcher, llmDispatch: llm }), now: new Date(NOW.getTime() + i * 6 * 60 * 60 * 1000), domainIds: [dom.id] });
+      const st = db._tables.seo_link_domains[0];
+      if (st.agent_state === 'not_reproducible' || /parked for review/.test(String(st.score_reasons))) break;
     }
-    expect(db._tables.seo_link_domains[0].agent_state).toBe('not_reproducible'); // still bounded (no-progress valve)
+    const dom = db._tables.seo_link_domains[0];
+    expect(dom.agent_state).toBe('watching'); // parked for review — no-progress is not proof of absence
+    expect(dom.score_reasons).toContain('parked for review');
     expect(submitAttempts.length).toBeGreaterThan(1); // the timeout was RETRIED, never counted as coverage
   });
 

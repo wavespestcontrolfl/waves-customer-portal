@@ -1385,7 +1385,26 @@ async function investigatePaths(db, {
             // new probes (hints consumed every slot: nothing more to learn).
             const probesRemain = (newProbeMask & FULL_PROBE_MASK) !== FULL_PROBE_MASK;
             const probeProgress = newProbeMask !== priorProbeMask;
-            if (verdict.verdict === 'not_reproducible' && !best && cappedTail && probesRemain && probeProgress) { effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: unfetched candidate URLs remain'; tailDeferred = true; }
+            if (verdict.verdict === 'not_reproducible' && !best && probesRemain) {
+              if (probeProgress) {
+                // coverage is advancing — keep the near-term chain going
+                effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: unfetched candidate URLs remain'; tailDeferred = true;
+              } else {
+                // NO progress is not proof of absence: a route that only
+                // times out or 5xxes must not be closed away during an
+                // outage. Retry on the escalating failure backoff; at the
+                // ceiling, PARK FOR REVIEW on the normal watch cadence
+                // (mask resets — the next generation re-earns coverage)
+                // instead of ever closing on an uninspected route.
+                const failures = (Number(domain.investigate_failures) || 0) + 1;
+                if (failures >= MAX_INVESTIGATE_FAILURES) {
+                  effectiveVerdict = 'watching'; downgradeNote = 'probe routes never reached a definitive result — parked for review';
+                } else {
+                  effectiveVerdict = 'watching'; downgradeNote = 'terminal verdict deferred: an uncovered probe has no definitive result yet'; tailDeferred = true;
+                  patch.investigate_failures = failures;
+                }
+              }
+            }
             patch.agent_state = effectiveVerdict === 'qualified' ? 'qualified' : effectiveVerdict === 'watching' ? 'watching' : 'not_reproducible';
             // A downgrade caused by TRANSIENT verification (an unstamped
             // path — failed probe, inconclusive terms, exhausted budget)
