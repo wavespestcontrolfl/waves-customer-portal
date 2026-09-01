@@ -219,7 +219,11 @@ function candidateUrls(host, { touches = [], competitorUrls = [], existingPaths 
   const probeKey = (u) => registry.normalizeSubmissionUrl(u);
   const allProbeKeys = new Set(PROBE_PATHS.map((pp) => probeKey(`https://${host}${pp}`)));
   const uncoveredProbeKeys = new Set(uncovered.map((i) => probeKey(`https://${host}${PROBE_PATHS[i]}`)));
-  const probeBlock = out.filter((u) => allProbeKeys.has(probeKey(u))); // keeps uncovered-first order
+  const probeBlock = out.filter((u) => allProbeKeys.has(probeKey(u)))
+    // uncovered-first even when a covered probe entered `out` EARLIER as a
+    // path/hint alias — the reserved slots must inspect new routes, not
+    // re-fetch covered aliases (stable sort keeps each group's order)
+    .sort((a, b) => (uncoveredProbeKeys.has(probeKey(a)) ? 0 : 1) - (uncoveredProbeKeys.has(probeKey(b)) ? 0 : 1));
   if (probeBlock.some((u) => uncoveredProbeKeys.has(probeKey(u)))) {
     const others = out.filter((u) => !allProbeKeys.has(probeKey(u)));
     const head = Math.max(0, MAX_FETCHES_PER_DOMAIN - PROBE_SLOT_RESERVE);
@@ -801,7 +805,9 @@ async function investigatePaths(db, {
         const fetchErrors = [];
         const redirectMap = new Map(); // normalized requested URL → normalized final URL (supersession evidence)
         let cappedTail = false;
-        for (const url of urls) {
+        const urlQueue = [...urls];
+        for (let qi = 0; qi < urlQueue.length; qi++) {
+          const url = urlQueue[qi];
           if (pages.length + fetchErrors.length >= MAX_FETCHES_PER_DOMAIN) { cappedTail = true; break; }
           const probeIdx = probeIndexByKey.get(registry.normalizeSubmissionUrl(url));
           out.fetches += 1;
@@ -835,6 +841,12 @@ async function investigatePaths(db, {
             const reason = (page && (page.error || (page.blocked && 'blocked'))) || `status_${page && page.status}`;
             fetchErrors.push({ url, reason });
             probeDefinitive = /^status_(404|410)$/.test(reason); // gone is a verdict; timeouts/blocks/5xx retry
+            // BOUNDED origin fallbacks: a site reachable only via www or
+            // plain http would otherwise fail every candidate at the
+            // canonical https apex and park a domain with a valid route —
+            // when the apex homepage itself fails, try its two origin
+            // variants next (same cap, same host-bound rules).
+            if (url === `https://${host}`) urlQueue.splice(qi + 1, 0, `https://www.${host}`, `http://${host}`);
           }
           // Coverage records only DEFINITIVE probe outcomes — a transient
           // failure leaves the bit unset so the uncovered-first ordering
@@ -1243,7 +1255,14 @@ async function investigatePaths(db, {
           // re-spend a model call each time.
           const unsettled = unstampedIds.size > 0 || uncoveredEcho;
           const newProbeMask = priorProbeMask | passProbeMask;
-          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null, probe_coverage_mask: newProbeMask };
+          // The mask accumulates ONLY across a near-term deferral chain; a
+          // CONCLUDED generation (qualified, not_reproducible, a plain
+          // 30-day watching park, or a lane-owned refresh) resets it to 0 —
+          // a recheck months later must re-earn probe coverage, or a route
+          // added since (a new /register) could be closed on stale bits.
+          // The decideState block below overrides this back to newProbeMask
+          // when the pass defers near-term.
+          const patch = { best_path_id: best ? best.id : null, score, score_reasons: `${reasons}${watchNote}`, updated_at: now, investigate_failures: 0, investigate_after: unsettled ? new Date(now.getTime() + INVESTIGATE_BACKOFF_BASE_MS) : null, probe_coverage_mask: 0 };
           if (decideState) {
             // Defensive downgrades, both directions: a qualified verdict with
             // no executable best path parks `watching` (never a qualified
@@ -1272,6 +1291,7 @@ async function investigatePaths(db, {
             // rechecks on the failure-backoff horizon, not the 30-day watch
             // cadence: the advertised rotated retry must actually be near.
             const transientDowngrade = downgradeNote && (unstampedIds.size > 0 || tailDeferred);
+            if (effectiveVerdict === 'watching' && transientDowngrade) patch.probe_coverage_mask = newProbeMask; // the chain continues
             patch.watch_recheck_at = effectiveVerdict === 'watching'
               ? new Date(now.getTime() + (transientDowngrade ? INVESTIGATE_BACKOFF_BASE_MS : WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000))
               : null;

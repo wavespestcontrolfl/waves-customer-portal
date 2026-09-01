@@ -1717,6 +1717,46 @@ describe('full run', () => {
     expect(JSON.parse(p.investigation).disproven_reason).toBe('submission URL returned 404/410');
   });
 
+  test('a covered probe entering as a path alias never displaces uncovered probes (Codex PR r14 P1)', () => {
+    const { candidateUrls } = _internals;
+    // bit 0 (/submit) covered, and /submit ALSO rides in as an existing path
+    const urls = candidateUrls('example.com', {
+      existingPaths: [{ submission_url: 'https://example.com/submit' }],
+      probeMask: 1,
+    });
+    expect(urls.indexOf('https://example.com/join')).toBeLessThan(urls.indexOf('https://example.com/submit')); // uncovered first
+  });
+
+  test('a CONCLUDED generation resets probe coverage; the deferral chain keeps it (Codex PR r14 P1)', async () => {
+    // concluded: a qualified close writes mask 0 — a recheck months later re-earns coverage
+    const d = domainRow({ probe_coverage_mask: 42 });
+    const db = makeDb({ seo_link_domains: [d] });
+    await investigatePaths(db, runOpts(db));
+    expect(Number(db._tables.seo_link_domains[0].probe_coverage_mask)).toBe(0);
+    // deferral chain: a tail-deferred terminal pass carries its mask forward
+    const d2 = domainRow({ domain: 'other.com' });
+    const db2 = makeDb({ seo_link_domains: [d2] });
+    await investigatePaths(db2, runOpts(db2, { llmDispatch: async () => ({ ok: true, json: verdictOf([], 'not_reproducible') }) }));
+    expect(db2._tables.seo_link_domains[0].agent_state).toBe('watching');
+    expect(Number(db2._tables.seo_link_domains[0].probe_coverage_mask)).toBeGreaterThan(0);
+  });
+
+  test('an unreachable https apex falls back to www/http origins (Codex PR r14 P2)', async () => {
+    const d = domainRow();
+    const db = makeDb({ seo_link_domains: [d] });
+    const fetched = [];
+    const fetcher = async (url) => {
+      fetched.push(url);
+      if (url === 'https://example.com') return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' };
+      if (url.startsWith('https://www.example.com')) return okFetch(url);
+      if (url.startsWith('http://')) return okFetch(url);
+      return { status: null, finalUrl: null, html: null, blocked: false, error: 'tls_error' };
+    };
+    const r = await investigatePaths(db, runOpts(db, { fetchPage: fetcher }));
+    expect(fetched).toContain('https://www.example.com'); // the origin variant was tried
+    expect(r.investigated).toBe(1); // the www page carried the run — no evidence-less failure
+  });
+
   test('path refresh on an acquired domain stamps last_investigated_at but NEVER the aggregate state', async () => {
     const d = domainRow({ agent_state: 'acquired' });
     const baseline = {
