@@ -44,7 +44,9 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // await db(TABLE).insert(` pattern — cf. services/local-news-store.js).
 function knexInsertPatterns(token) {
   return [
-    new RegExp(String.raw`\b[A-Za-z_$][\w$]*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+    // Optional factory call between the identifier and the table argument —
+    // the `getDb()('leads')` callable-factory style (routes/knowledge.js).
+    new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
     // `.table(X)` with ANY prefix — `db.table(...)`, `db.withSchema('public').table(...)`.
     new RegExp(String.raw`\.\s*table\s*\(\s*${token}\s*\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
     new RegExp(String.raw`\.into\(\s*${token}\s*\)`, 'g'),
@@ -152,7 +154,7 @@ function blankCommentsAndStrings(code) {
 // reads as one argument.
 const DYN_EXPR = String.raw`((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)`;
 const DYNAMIC_INSERT_PATTERNS = [
-  new RegExp(String.raw`\b[A-Za-z_$][\w$]*\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
+  new RegExp(String.raw`\b[A-Za-z_$][\w$]*(?:\s*\([^()]*\))?\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
   new RegExp(String.raw`\.\s*table\s*\(${DYN_EXPR}\)${CHAIN}\s*\.\s*insert\s*\(`, 'g'),
   new RegExp(String.raw`\bbatchInsert\s*\(${DYN_EXPR},`, 'g'),
   new RegExp(String.raw`\.into\(${DYN_EXPR}\)`, 'g'),
@@ -210,7 +212,9 @@ function scanSourceForDynamicTableInserts(src) {
   // offsets are interchangeable). Same rule as the knex shapes: resolved
   // only by a SCREAMING_SNAKE module const, else allowlist or reject.
   const RAW_DYNAMIC_RES = [
-    /\binsert\s+into\s+(?:only\s+)?\$\{([^}]+)\}/gi,
+    // Optional identifier quote around the interpolated target —
+    // `INSERT INTO "${table}"` is valid PostgreSQL.
+    /\binsert\s+into\s+(?:only\s+)?["'`]?\$\{([^}]+)\}/gi,
     /\binsert\s+into\s+(?:only\s+)?['"`]\s*\+\s*([\w$.[\]]+)/gi,
     // Knex identifier bindings at the table position — positional (??) or
     // named (:table:) — the bound value is runtime data, so it is dynamic
@@ -324,6 +328,7 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
     ['constant table name via batchInsert', "const TABLE = 'leads';\nawait db.batchInsert(TABLE, rows);"],
     ['constant table name through stored builder', "const TABLE = 'leads';\nconst b = trx(TABLE);\nawait b.insert({ a: 1 });"],
     ['schema-qualified table literal', "await db('public.leads').insert({ a: 1 });"],
+    ['callable-factory builder', "await getDb()('leads').insert(row);"],
     ['nested-paren chain segment', "await db('leads').modify((qb) => qb.where('active', true)).insert(row);"],
     ['doubly nested chain segment', "await db('leads').modify(qb => qb.whereIn('id', ids.map(fn))).insert(row);"],
     ['raw SQL insert with ONLY', "await db.raw('INSERT INTO ONLY leads (name) VALUES (?)', [name]);"],
@@ -425,6 +430,12 @@ describe('lead insert scanner — supported knex chain shapes (synthetic fixture
       "await db(resolveTable(config.get('kind'))).insert(row);"
     );
     expect(nestedComputed).toHaveLength(1);
+    const quotedRawTemplate = scanSourceForDynamicTableInserts(
+      'await db.raw(`INSERT INTO "${table}" (a) VALUES (?)`, [a]);'
+    );
+    expect(quotedRawTemplate).toHaveLength(1);
+    const factoryDynamic = scanSourceForDynamicTableInserts('await getDb()(table).insert(row);');
+    expect(factoryDynamic).toHaveLength(1);
     // A literal raw table with interpolated VALUES stays with the literal scan.
     const rawLiteralTable = scanSourceForDynamicTableInserts(
       'await db.raw(`INSERT INTO other_things (a) VALUES (${a})`);'
@@ -474,6 +485,57 @@ describe('lead-writer registry (#3137 groundwork)', () => {
       expect({ site: key(w), reason: typeof w.reason }).toEqual({ site: key(w), reason: 'string' });
       expect(w.reason.length).toBeGreaterThan(10);
       expect(/never leads/i.test(w.reason)).toBe(true);
+    }
+  });
+
+  test("dynamic-table helpers: every CALLER supplies a table from a finite non-leads set (the allowlist reason isn't just prose)", () => {
+    const files = walk(SERVER_ROOT).map((abs) => ({
+      rel: path.relative(SERVER_ROOT, abs).split(path.sep).join('/'),
+      src: fs.readFileSync(abs, 'utf8'),
+    }));
+    const leadsShaped = (t) => /^(?:[\w$]+\.)?leads$/i.test(t);
+
+    // utils/funnel-photos storeFunnelPhotos({ table }) — the param crosses
+    // file boundaries, so every call site anywhere under server/ must bind
+    // `table:` to a string literal or to config.photoTable (whose values are
+    // proven literal below). An unbindable caller fails.
+    let funnelCallers = 0;
+    for (const { rel, src } of files) {
+      const re = /(?<!function )storeFunnelPhotos\s*\(\s*\{/g;
+      let m;
+      while ((m = re.exec(src))) {
+        funnelCallers += 1;
+        const win = src.slice(m.index, m.index + 400);
+        const bound = win.match(/\btable\s*:\s*(?:'([\w]+)'|config\.photoTable)/);
+        expect({ caller: `${rel}@${m.index}`, bound: Boolean(bound) })
+          .toEqual({ caller: `${rel}@${m.index}`, bound: true });
+        if (bound[1]) {
+          expect({ caller: rel, table: bound[1], leads: leadsShaped(bound[1]) })
+            .toEqual({ caller: rel, table: bound[1], leads: false });
+        }
+      }
+    }
+    expect(funnelCallers).toBeGreaterThanOrEqual(3);
+
+    // routes/admin-photo-assessments — config.table / config.photoTable come
+    // from the in-file FUNNEL_CONFIGS literals; every such literal is
+    // non-leads.
+    const apa = files.find((f) => f.rel === 'routes/admin-photo-assessments.js').src;
+    const configTables = [...apa.matchAll(/\b(?:photoTable|table)\s*:\s*'([\w]+)'/g)].map((m) => m[1]);
+    expect(configTables.length).toBeGreaterThanOrEqual(4);
+    for (const t of configTables) {
+      expect({ table: t, leads: leadsShaped(t) }).toEqual({ table: t, leads: false });
+    }
+
+    // services/property-lookup/manatee-permit-sync upsertChunked(trx, table)
+    // — module-internal; every call must pass a literal, non-leads table.
+    const mps = files.find((f) => f.rel === 'services/property-lookup/manatee-permit-sync.js').src;
+    const upserts = [...mps.matchAll(/(?<!function )upsertChunked\s*\(\s*[\w$]+\s*,\s*('[\w]+'|[^,]+),/g)];
+    expect(upserts.length).toBeGreaterThanOrEqual(3);
+    for (const c of upserts) {
+      const lit = c[1].match(/^'([\w]+)'$/);
+      expect({ call: c[0], literal: Boolean(lit), leads: lit ? leadsShaped(lit[1]) : null })
+        .toEqual({ call: c[0], literal: true, leads: false });
     }
   });
 
