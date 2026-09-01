@@ -31,7 +31,7 @@
 //   (operator double-clicks "Complete" should not double-bill).
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 
@@ -10463,6 +10463,15 @@ export function CompletionPanel({
   // keep their chip selections.
   const [observationsText, setObservationsText] = useState("");
   const [recommendationsText, setRecommendationsText] = useState("");
+  // Tips from your tech (GATE_TECH_TIPS): the picker library for this visit
+  // and the tech's picks. `techTips.available === false` (gate off) keeps
+  // the observations/recommendations textareas above in place.
+  const [techTips, setTechTips] = useState(null);
+  const [techTipsLoading, setTechTipsLoading] = useState(true);
+  const [techTipsError, setTechTipsError] = useState("");
+  const [selectedTipIds, setSelectedTipIds] = useState([]);
+  const [customTip, setCustomTip] = useState("");
+  const techTipsAvailable = techTipsLoading || techTips?.available === true;
   // Flips true once Generate AI report replaces the notes with clean prose.
   // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
   // selection source of truth (delete a line = deselect); after, the label
@@ -11269,6 +11278,32 @@ export function CompletionPanel({
 
   useEffect(() => {
     let cancelled = false;
+    setTechTips(null);
+    setTechTipsError("");
+    if (!service.id) {
+      setTechTipsLoading(false);
+      return () => { cancelled = true; };
+    }
+    setTechTipsLoading(true);
+    adminFetch(`/admin/dispatch/${service.id}/tech-tips`)
+      .then((data) => {
+        if (!cancelled) setTechTips(data && typeof data === "object" ? data : { available: false });
+      })
+      .catch((err) => {
+        // A failed load must not strand the tech without an input: the
+        // textareas come back (available:false) and the error is noted.
+        if (cancelled) return;
+        setTechTips({ available: false });
+        setTechTipsError(err.message || "Could not load tips");
+      })
+      .finally(() => {
+        if (!cancelled) setTechTipsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [service.id]);
+
+  useEffect(() => {
+    let cancelled = false;
     setProtocolActions([]);
     setProtocolActionMeta(null);
     setProtocolActionError("");
@@ -11459,6 +11494,8 @@ export function CompletionPanel({
       selectedRecommendationLabels.length ||
       observationsText.trim() ||
       recommendationsText.trim() ||
+      selectedTipIds.length ||
+      customTip.trim() ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
       reviewTiming !== "120" ||
@@ -11567,6 +11604,8 @@ export function CompletionPanel({
         selectedRecommendationLabels,
         observationsText,
         recommendationsText,
+        selectedTipIds,
+        customTip,
         // Which deselect model the label arrays were saved under — a restored
         // post-AI-draft (no chip lines in notes) must restore as detached or
         // labelsStillInNotes would silently drop every structured selection.
@@ -11663,6 +11702,8 @@ export function CompletionPanel({
     selectedRecommendationLabels,
     observationsText,
     recommendationsText,
+    selectedTipIds,
+    customTip,
     chipLinesDetached,
     aiReportUsed,
     nextVisitNote,
@@ -11865,6 +11906,12 @@ export function CompletionPanel({
         ? savedDraft.recommendationsText
         : "",
     );
+    setSelectedTipIds(
+      Array.isArray(savedDraft.selectedTipIds)
+        ? savedDraft.selectedTipIds.filter((id) => typeof id === "string").slice(0, TECH_TIP_MAX)
+        : [],
+    );
+    setCustomTip(typeof savedDraft.customTip === "string" ? savedDraft.customTip : "");
     // Drafts saved before the detached-selection model lack the field → false,
     // which matches their notes still carrying the chip-marker lines.
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
@@ -12102,11 +12149,11 @@ export function CompletionPanel({
             // way they ground the AI report (owner 2026-07-30).
             observations: [
               ...activeSelectedLabels(selectedObservationLabels),
-              ...freeTextLines(observationsText),
+              ...observationFreeText(),
             ],
             recommendations: [
               ...activeSelectedLabels(selectedRecommendationLabels),
-              ...freeTextLines(recommendationsText),
+              ...recommendationFreeText(),
             ],
             pestActivityRating: clientPestRating,
             willInvoice,
@@ -12188,11 +12235,11 @@ export function CompletionPanel({
           })),
           observations: [
             ...activeSelectedLabels(selectedObservationLabels),
-            ...freeTextLines(observationsText),
+            ...observationFreeText(),
           ],
           recommendations: [
             ...activeSelectedLabels(selectedRecommendationLabels),
-            ...freeTextLines(recommendationsText),
+            ...recommendationFreeText(),
           ],
           pestActivityRating: clientPestRating,
           willInvoice,
@@ -12363,6 +12410,24 @@ export function CompletionPanel({
       .map((line) => line.trim())
       .filter(Boolean);
   }
+  // `[Found] …` / `[Next] …` lines in the technician notes are the typed
+  // observations / recommendations channel — the completion route already
+  // folds them in (taggedCompletionNoteLines); with the tips picker replacing
+  // the textareas they must reach the AI draft, the recap grounding and the
+  // photo-caption context the same way. The textarea text still merges for
+  // gate-off and restored drafts; the server dedupes.
+  function taggedNoteLines(tag) {
+    const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
+    return freeTextLines(notes)
+      .map((line) => line.match(rx)?.[1]?.trim() || "")
+      .filter(Boolean);
+  }
+  function observationFreeText() {
+    return [...freeTextLines(observationsText), ...taggedNoteLines("found")];
+  }
+  function recommendationFreeText() {
+    return [...freeTextLines(recommendationsText), ...taggedNoteLines("next")];
+  }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
   // server can't drift. The payload classifies inputs by provenance so the
@@ -12378,11 +12443,11 @@ export function CompletionPanel({
     // carry chip-label selections, so both merge into the same arrays.
     const observations = [
       ...activeSelectedLabels(selectedObservationLabels),
-      ...freeTextLines(observationsText),
+      ...observationFreeText(),
     ];
     const recommendations = [
       ...activeSelectedLabels(selectedRecommendationLabels),
-      ...freeTextLines(recommendationsText),
+      ...recommendationFreeText(),
       // Typed completions keep their own recommendations box (inside the
       // findings section) — since the recap-only draft was retired, the full
       // generate action is the one AI path and must see that text too.
@@ -13172,13 +13237,13 @@ export function CompletionPanel({
         [
           "Observations",
           activeSelectedLabels(selectedObservationLabels).length +
-            freeTextLines(observationsText).length,
+            observationFreeText().length,
           observationsText,
         ],
         [
           "Recommendations",
           activeSelectedLabels(selectedRecommendationLabels).length +
-            freeTextLines(recommendationsText).length +
+            recommendationFreeText().length +
             (isTypedFindings && typedRecommendations.trim() ? 1 : 0),
           recommendationsText,
         ],
@@ -13504,13 +13569,13 @@ export function CompletionPanel({
         .filter(Boolean);
       const reportObservations = [
         ...activeSelectedLabels(selectedObservationLabels),
-        ...freeTextLines(observationsText),
+        ...observationFreeText(),
       ];
       // Typed mode appends the optional recommendations textarea into the
       // existing recommendations array — no new server field.
       const reportRecommendations = [
         ...activeSelectedLabels(selectedRecommendationLabels),
-        ...freeTextLines(recommendationsText),
+        ...recommendationFreeText(),
         ...(isTypedFindings && typedRecommendations.trim()
           ? [typedRecommendations.trim()]
           : []),
@@ -13518,6 +13583,9 @@ export function CompletionPanel({
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
+        // Tips from your tech — ids only; the server resolves the copy
+        // (ignored until the persistence PR lands, harmless before it).
+        techTips: { ids: selectedTipIds, custom: customTip.trim() || null },
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
         ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
@@ -14186,7 +14254,7 @@ export function CompletionPanel({
                   // Observations only — raw technician notes never reach a
                   // customer-facing LLM (AGENTS.md report/track egress).
                   context: {
-                    observations: freeTextLines(observationsText),
+                    observations: observationFreeText(),
                   },
                 }),
           }),
@@ -14922,7 +14990,9 @@ export function CompletionPanel({
                   placeholder={
                     dictation.listening
                       ? "Listening… speak your notes"
-                      : "What did you do on this visit?"
+                      : techTipsAvailable
+                        ? "What did you do on this visit? [Found] a finding · [Next] a next step"
+                        : "What did you do on this visit?"
                   }
                   style={{
                     ...mTextarea,
@@ -15085,54 +15155,63 @@ export function CompletionPanel({
                 freeze during photo analysis (codex r9): they're the vision
                 prompt's context on basic completions, and captions returned
                 against a stale snapshot would persist under the photos. */}
-            <Field label="Observations">
-              {" "}
-              <textarea
-                aria-label="Observations"
-                value={observationsText}
-                onChange={(e) => setObservationsText(e.target.value)}
-                rows={2}
-                placeholder="Optional — anything you noticed (one per line)"
-                disabled={generating || photoAnalyzing}
-                style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
-              />{" "}
-            </Field>
-            <Field label="Recommendations">
-              {" "}
-              <textarea
-                aria-label="Recommendations"
-                value={recommendationsText}
-                onChange={(e) => setRecommendationsText(e.target.value)}
-                rows={2}
-                placeholder="Optional — next steps if needed (one per line)"
-                disabled={generating}
-                style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
-              />{" "}
-            </Field>
+            {techTipsAvailable ? (
+              <Field label="Tips from your tech">
+                <TechTipPicker
+                  library={techTips}
+                  loading={techTipsLoading}
+                  error={techTipsError}
+                  selectedIds={selectedTipIds}
+                  onChange={setSelectedTipIds}
+                  customTip={customTip}
+                  onCustomTipChange={setCustomTip}
+                  disabled={generating}
+                  theme={{
+                    font,
+                    inputStyle: mInput,
+                    text: M.ink,
+                    labelColor: M.ink4,
+                    mutedText: M.ink3,
+                    hairline: M.hairline,
+                    rowBg: M.card,
+                    groupBg: M.muted,
+                    chipBg: M.muted,
+                    chipBorder: M.hairline,
+                    chipText: M.ink2,
+                  }}
+                />
+              </Field>
+            ) : (
+              <>
+                <Field label="Observations">
+                  {" "}
+                  <textarea
+                    aria-label="Observations"
+                    value={observationsText}
+                    onChange={(e) => setObservationsText(e.target.value)}
+                    rows={2}
+                    placeholder="Optional — anything you noticed (one per line)"
+                    disabled={generating || photoAnalyzing}
+                    style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
+                  />{" "}
+                </Field>
+                <Field label="Recommendations">
+                  {" "}
+                  <textarea
+                    aria-label="Recommendations"
+                    value={recommendationsText}
+                    onChange={(e) => setRecommendationsText(e.target.value)}
+                    rows={2}
+                    placeholder="Optional — next steps if needed (one per line)"
+                    disabled={generating}
+                    style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
+                  />{" "}
+                </Field>
+              </>
+            )}
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
                 concern), for the tech to review/edit before completing. */}
-            {!quickComplete && (
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  fontSize: 13,
-                  color: "#71717A",
-                  cursor: "pointer",
-                  marginBottom: 6,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={aiReportIncludeComms}
-                  onChange={(e) => setAiReportIncludeComms(e.target.checked)}
-                  style={{ width: 16, height: 16 }}
-                />
-                Include recent customer calls/texts/emails
-              </label>
-            )}
             {!quickComplete && (
               <button
                 type="button"
@@ -15179,6 +15258,30 @@ export function CompletionPanel({
               >
                 {generating ? "Generating…" : "Generate AI report"}
               </button>
+            )}
+            {/* Sits under the button it modifies (owner 2026-09-01); 14px is
+                the readable-text floor. */}
+            {!quickComplete && (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 14,
+                  color: "#71717A",
+                  cursor: "pointer",
+                  marginTop: -12,
+                  marginBottom: 20,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={aiReportIncludeComms}
+                  onChange={(e) => setAiReportIncludeComms(e.target.checked)}
+                  style={{ width: 16, height: 16 }}
+                />
+                Include recent customer calls/texts/emails
+              </label>
             )}
             {!quickComplete && generatedReportCleared && (
               <div style={{ fontSize: 13, color: "#B45309", marginTop: -12, marginBottom: 16 }}>
@@ -17210,7 +17313,9 @@ export function CompletionPanel({
               placeholder={
                 dictation.listening
                   ? "Listening… speak your notes"
-                  : "Notes about this service..."
+                  : techTipsAvailable
+                    ? "Notes about this service… [Found] a finding · [Next] a next step"
+                    : "Notes about this service..."
               }
             />
             {dictation.supported && (
@@ -17355,59 +17460,68 @@ export function CompletionPanel({
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
                 the mobile variant. Observations also freeze during photo
                 analysis (codex r9): they're the vision prompt's context. */}
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ ...labelStyle, color: D.amber }}>
-                Observations
-              </label>{" "}
-              <textarea
-                aria-label="Observations"
-                value={observationsText}
-                onChange={(e) => setObservationsText(e.target.value)}
-                rows={2}
-                placeholder="Optional — anything you noticed (one per line)"
-                disabled={generating || photoAnalyzing}
-                style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
-              />{" "}
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ ...labelStyle, color: D.green }}>
-                Recommendations
-              </label>{" "}
-              <textarea
-                aria-label="Recommendations"
-                value={recommendationsText}
-                onChange={(e) => setRecommendationsText(e.target.value)}
-                rows={2}
-                placeholder="Optional — next steps if needed (one per line)"
-                disabled={generating}
-                style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
-              />{" "}
-            </div>{" "}
+            {techTipsAvailable ? (
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>Tips from your tech</label>{" "}
+                <TechTipPicker
+                  library={techTips}
+                  loading={techTipsLoading}
+                  error={techTipsError}
+                  selectedIds={selectedTipIds}
+                  onChange={setSelectedTipIds}
+                  customTip={customTip}
+                  onCustomTipChange={setCustomTip}
+                  disabled={generating}
+                  theme={{
+                    inputStyle,
+                    text: D.text,
+                    labelColor: D.muted,
+                    mutedText: D.muted,
+                    hairline: D.border,
+                    rowBg: D.card,
+                    groupBg: D.input,
+                    chipBg: D.card,
+                    chipBorder: D.border,
+                    chipText: D.text,
+                  }}
+                />
+              </div>
+            ) : (
+              <>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ ...labelStyle, color: D.amber }}>
+                    Observations
+                  </label>{" "}
+                  <textarea
+                    aria-label="Observations"
+                    value={observationsText}
+                    onChange={(e) => setObservationsText(e.target.value)}
+                    rows={2}
+                    placeholder="Optional — anything you noticed (one per line)"
+                    disabled={generating || photoAnalyzing}
+                    style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
+                  />{" "}
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ ...labelStyle, color: D.green }}>
+                    Recommendations
+                  </label>{" "}
+                  <textarea
+                    aria-label="Recommendations"
+                    value={recommendationsText}
+                    onChange={(e) => setRecommendationsText(e.target.value)}
+                    rows={2}
+                    placeholder="Optional — next steps if needed (one per line)"
+                    disabled={generating}
+                    style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
+                  />{" "}
+                </div>
+              </>
+            )}{" "}
           </div>
           {/* AI Service Report — drafts customer-facing visit copy into the
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}
-          {!quickComplete && (
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                fontSize: 13,
-                color: "#71717A",
-                cursor: "pointer",
-                marginTop: 8,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={aiReportIncludeComms}
-                onChange={(e) => setAiReportIncludeComms(e.target.checked)}
-                style={{ width: 16, height: 16 }}
-              />
-              Include recent customer calls/texts/emails
-            </label>
-          )}
           {!quickComplete && (
             <button
               type="button"
@@ -17461,6 +17575,30 @@ export function CompletionPanel({
             >
               {generating ? "Generating Report..." : "Generate AI Service Report"}
             </button>
+          )}
+          {/* Sits under the button it modifies (owner 2026-09-01); 14px is
+              the readable-text floor. */}
+          {!quickComplete && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 14,
+                color: "#71717A",
+                cursor: "pointer",
+                marginTop: -12,
+                marginBottom: 20,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={aiReportIncludeComms}
+                onChange={(e) => setAiReportIncludeComms(e.target.checked)}
+                style={{ width: 16, height: 16 }}
+              />
+              Include recent customer calls/texts/emails
+            </label>
           )}
           {!quickComplete && generatedReportCleared && (
             <div style={{ fontSize: 13, color: "#B45309", marginTop: -14, marginBottom: 18 }}>
@@ -19248,6 +19386,285 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions 
           <option key={p} value={p} />
         ))}
       </datalist>
+    </div>
+  );
+}
+
+
+/* ── Tips from your tech — searchable picker ─────────────────────────
+   Replaces the free-text Observations / Recommendations boxes on the
+   completion screen when GATE_TECH_TIPS is on (scope + owner decisions
+   2026-09-01). The registry ships whole from
+   GET /admin/dispatch/:serviceId/tech-tips and is searched here — label,
+   the tech-vocabulary keywords, then the customer copy. Only ids (and an
+   optional "write your own" line) go on the wire; the server resolves the
+   copy. `theme` carries the branch's palette (M on mobile, D on desktop)
+   so the control matches the protocol-actions field beside it. */
+export const TECH_TIP_MAX = 3;
+const TECH_TIP_SUB_CHARS = 96;
+
+export function techTipSubtext(copy) {
+  const first = String(copy || "").split(/(?<=[.!?])\s/)[0] || "";
+  return first.length > TECH_TIP_SUB_CHARS ? `${first.slice(0, TECH_TIP_SUB_CHARS - 1).trimEnd()}…` : first;
+}
+
+function techTipSentLabel(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `sent ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}`;
+}
+
+export function rankTechTips(tips, q) {
+  const scored = [];
+  for (const tip of tips) {
+    const label = tip.label.toLowerCase();
+    let score = 0;
+    if (label.includes(q)) score = label.startsWith(q) ? 4 : 3;
+    else if ((tip.keywords || []).some((k) => k.includes(q))) score = 2;
+    else if (String(tip.copy || "").toLowerCase().includes(q)) score = 1;
+    if (score) scored.push({ tip, score });
+  }
+  return scored
+    .sort((a, b) => b.score - a.score || a.tip.label.localeCompare(b.tip.label))
+    .map((entry) => entry.tip);
+}
+
+function TechTipPicker({
+  library, loading, error, selectedIds, onChange, customTip, onCustomTipChange, disabled, theme,
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [showCustom, setShowCustom] = useState(() => String(customTip || "").trim() !== "");
+  const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
+  const groups = library?.groups || [];
+  const allTips = useMemo(
+    () => groups.flatMap((g) => (g.tips || []).map((t) => ({ ...t, groupLabel: g.label }))),
+    [groups],
+  );
+  const tipById = useMemo(() => new Map(allTips.map((t) => [t.id, t])), [allTips]);
+  const full = selectedIds.length >= TECH_TIP_MAX;
+  const q = query.trim().toLowerCase();
+  const ranked = q ? rankTechTips(allTips, q) : null;
+  const lastSent = library?.lastSent || {};
+  const conditions = library?.conditions || {};
+  const inactive = disabled || loading || !!error;
+
+  function add(id) {
+    if (full || selectedIds.includes(id) || !tipById.has(id)) return;
+    onChange([...selectedIds, id]);
+    setQuery("");
+    setOpen(false);
+  }
+  function remove(id) {
+    onChange(selectedIds.filter((x) => x !== id));
+  }
+
+  const rowStyle = {
+    width: "100%",
+    textAlign: "left",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: "10px 14px",
+    background: theme.rowBg,
+    border: "none",
+    borderBottom: `1px solid ${theme.hairline}`,
+    color: theme.text,
+    fontFamily: theme.font,
+    fontSize: 15,
+    lineHeight: 1.3,
+    cursor: "pointer",
+  };
+  const subStyle = { display: "block", fontSize: 14, color: theme.mutedText, marginTop: 3, lineHeight: 1.4 };
+  const markStyle = { fontSize: 14, color: theme.mutedText, flex: "0 0 auto", whiteSpace: "nowrap" };
+
+  function renderOption(tip) {
+    const picked = selectedIds.includes(tip.id);
+    const onFile = tip.condition === "irrigation_on_file" && conditions.irrigation_on_file === true;
+    const sent = lastSent[tip.id] ? techTipSentLabel(lastSent[tip.id]) : null;
+    return (
+      <button
+        key={tip.id}
+        type="button"
+        role="option"
+        aria-selected={picked}
+        disabled={picked}
+        // mousedown, not click, so the input's blur can't close the list first
+        onMouseDown={(e) => { e.preventDefault(); add(tip.id); }}
+        style={{ ...rowStyle, opacity: picked ? 0.55 : 1, cursor: picked ? "default" : "pointer" }}
+      >
+        <span>
+          {tip.label}
+          <span style={subStyle}>{techTipSubtext(tip.copy)}</span>
+        </span>
+        {picked ? (
+          <span style={{ ...markStyle, color: "#16A34A" }} aria-hidden="true">✓</span>
+        ) : onFile ? (
+          <span style={markStyle}>already on file</span>
+        ) : sent ? (
+          <span style={markStyle}>{sent}</span>
+        ) : null}
+      </button>
+    );
+  }
+
+  const placeholder = loading
+    ? "Loading tips…"
+    : error
+      ? "Tips unavailable"
+      : full
+        ? `${TECH_TIP_MAX} of ${TECH_TIP_MAX} — remove one to add another`
+        : "Search tips…";
+
+  return (
+    <div>
+      <input
+        type="text"
+        role="combobox"
+        aria-label="Search tips"
+        aria-expanded={open && !full}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        value={query}
+        placeholder={placeholder}
+        disabled={inactive || full}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") { setQuery(""); setOpen(false); }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            const first = ranked?.[0];
+            if (first) add(first.id);
+          }
+        }}
+        style={{ ...theme.inputStyle, opacity: inactive || full ? 0.6 : 1 }}
+      />
+      {error && (
+        <div style={{ fontFamily: theme.font, fontSize: 14, color: theme.mutedText, marginTop: 6 }}>{error}</div>
+      )}
+      {open && !full && !inactive && allTips.length > 0 && (
+        <div
+          id={listId}
+          role="listbox"
+          aria-label="Tips"
+          style={{
+            border: `1px solid ${theme.hairline}`,
+            borderRadius: 12,
+            overflow: "hidden",
+            marginTop: 6,
+            maxHeight: 320,
+            overflowY: "auto",
+            background: theme.rowBg,
+          }}
+        >
+          {ranked ? (
+            ranked.length ? ranked.map(renderOption) : (
+              <div style={{ ...rowStyle, cursor: "default", color: theme.mutedText, fontSize: 14 }}>No tip matches “{query.trim()}”.</div>
+            )
+          ) : (
+            groups.map((g) => (
+              <div key={g.id}>
+                <div
+                  style={{
+                    fontFamily: theme.font,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    letterSpacing: "0.3px",
+                    textTransform: "uppercase",
+                    color: theme.labelColor,
+                    padding: "12px 14px 5px",
+                    background: theme.groupBg,
+                  }}
+                >
+                  {g.label}
+                </div>
+                {(g.tips || []).map(renderOption)}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+      {selectedIds.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+          {selectedIds.map((id) => {
+            const tip = tipById.get(id);
+            return (
+              <span
+                key={id}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontFamily: theme.font,
+                  fontSize: 12,
+                  color: theme.chipText,
+                  background: theme.chipBg,
+                  border: `1px solid ${theme.chipBorder}`,
+                  borderRadius: 999,
+                  padding: "4px 6px 4px 10px",
+                }}
+              >
+                <span style={{ color: theme.mutedText }}>Tip:</span>
+                {tip ? tip.label : id}
+                <button
+                  type="button"
+                  aria-label={`Remove tip: ${tip ? tip.label : id}`}
+                  onClick={() => remove(id)}
+                  disabled={disabled}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: theme.mutedText,
+                    fontSize: 14,
+                    lineHeight: 1,
+                    padding: "2px 4px",
+                    cursor: "pointer",
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ fontFamily: theme.font, fontSize: 14, color: theme.mutedText, marginTop: 6, lineHeight: 1.45 }}>
+        {selectedIds.length} of {TECH_TIP_MAX} · goes on the report as a note from you.{" "}
+        {!showCustom && (
+          <button
+            type="button"
+            onClick={() => setShowCustom(true)}
+            disabled={disabled}
+            style={{
+              border: "none",
+              background: "transparent",
+              padding: 0,
+              font: "inherit",
+              color: theme.text,
+              textDecoration: "underline",
+              textUnderlineOffset: 3,
+              cursor: "pointer",
+            }}
+          >
+            Write your own
+          </button>
+        )}
+      </div>
+      {showCustom && (
+        <input
+          type="text"
+          aria-label="Your own tip"
+          value={customTip || ""}
+          onChange={(e) => onCustomTipChange(e.target.value)}
+          maxLength={240}
+          disabled={disabled}
+          placeholder="One sentence, in your words — it prints in the same note"
+          style={{ ...theme.inputStyle, marginTop: 8 }}
+        />
+      )}
     </div>
   );
 }

@@ -37,6 +37,8 @@ const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApp
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { tipsForVisit } = require('../services/service-report/tip-library');
+const { gateEnvValue } = require('../config/feature-gates');
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -1955,6 +1957,59 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
         pestPressureConfig: config,
         serviceLine,
       }),
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
+// tip-picker payload (tips-from-your-tech PR 2). Gate-off answers
+// { available: false } and the client keeps the free-text Observations /
+// Recommendations boxes. Gate-on returns the whole registry grouped for the
+// visit's service line and season (tip-library.tipsForVisit — nothing is
+// hidden, the client searches), plus two per-customer facts the picker
+// renders as marks: when each tip was last frozen into one of this
+// customer's reports in the last 90 days (so a repeat is deliberate), and
+// whether the property already has irrigation on file (the portal tip's
+// condition). Read-only.
+router.get('/:serviceId/tech-tips', async (req, res, next) => {
+  try {
+    if (!gateEnvValue('GATE_TECH_TIPS')) return res.json({ available: false });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'customer_id', 'service_type', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const visitDate = svc.scheduled_date ? new Date(svc.scheduled_date) : new Date();
+    const library = tipsForVisit({
+      serviceLine: detectServiceLine(svc.service_type),
+      date: Number.isNaN(visitDate.getTime()) ? new Date() : visitDate,
+    });
+    const [sentRows, prefs] = await Promise.all([
+      svc.customer_id
+        ? db('service_records')
+          .where({ customer_id: svc.customer_id })
+          .whereRaw("structured_notes->'techTips' IS NOT NULL")
+          .where('service_date', '>=', db.raw("CURRENT_DATE - INTERVAL '90 days'"))
+          .orderBy('service_date', 'desc')
+          .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
+          .catch(() => [])
+        : [],
+      svc.customer_id
+        ? db('property_preferences').where({ customer_id: svc.customer_id }).first('irrigation_system').catch(() => null)
+        : null,
+    ]);
+    // Newest first, so the first date seen per id is the most recent send.
+    const lastSent = {};
+    for (const row of sentRows) {
+      const tips = Array.isArray(row.tech_tips) ? row.tech_tips : [];
+      for (const tip of tips) {
+        if (tip?.id && !lastSent[tip.id]) lastSent[tip.id] = row.service_date;
+      }
+    }
+    res.json({
+      available: true,
+      ...library,
+      lastSent,
+      conditions: { irrigation_on_file: prefs?.irrigation_system === true },
     });
   } catch (err) { next(err); }
 });
