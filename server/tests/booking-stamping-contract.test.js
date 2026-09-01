@@ -23,9 +23,11 @@ const {
   createScheduledService,
 } = require('../services/booking/create-scheduled-service');
 
-// Minimal knex-shaped conn: services reads resolve from `catalog`;
-// scheduled_services inserts record their chain.
-function makeConn(catalog = []) {
+// Minimal knex-shaped conn: services reads resolve from `catalog` (rows
+// default to live: is_active true, is_archived false); scheduled_services
+// inserts record their chain.
+function makeConn(rows = []) {
+  const catalog = rows.map((r) => ({ is_active: true, is_archived: false, ...r }));
   const calls = { inserts: [], onConflict: [], ignored: 0 };
   const conn = (table) => {
     const chain = { _where: null };
@@ -189,6 +191,20 @@ describe('gate ON — catalog-identity snapshot completion', () => {
     const out = await run({ ...BASE, service_type: 'Pest Control Service' }, catalog);
     expect(out.service_id).toBe('svc-p');
     expect(out.service_key_snapshot).toBe('pest_control');
+  });
+
+  test('an archived row is never linked, and does not make a live name ambiguous', async () => {
+    // archiveService flips is_active false + is_archived true together, but
+    // the lookup filters on BOTH so an active-but-archived row can't be
+    // stamped or shadow the live row (pre-push Codex r6 P1).
+    const catalog = [
+      { id: 'svc-live', name: 'Quarterly Pest Control', service_key: 'pest_quarterly', category: 'pest' },
+      { id: 'svc-arch', name: 'Quarterly Pest Control', service_key: 'pest_q_old', category: 'pest', is_archived: true },
+    ];
+    const byName = await run(BASE, catalog);
+    expect(byName.service_id).toBe('svc-live');
+    const byKey = await run({ ...BASE, service_key_snapshot: 'pest_q_old' }, catalog);
+    expect(byKey.service_id).toBeUndefined();
   });
 
   test('ambiguous name → no stamp (enrichment never guesses)', async () => {

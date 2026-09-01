@@ -68,10 +68,16 @@ async function resolveCatalogIdentity(conn, insertData) {
       .first('id', 'service_key', 'category');
     return row || null;
   }
+  // Fallback lookups link only LIVE catalog rows: is_active AND not
+  // archived (archiveService sets both flags together; the pair is what the
+  // 20260831 typed-visit resolution migration treats as authoritative), so
+  // an archived row can neither be newly stamped nor make an otherwise
+  // unique name ambiguous (pre-push Codex r6 P1).
+  const live = { is_active: true, is_archived: false };
   const snapshotKey = String(insertData.service_key_snapshot || '').trim();
   if (snapshotKey) {
     const byKey = await stable(conn('services')
-      .where({ service_key: snapshotKey, is_active: true }))
+      .where({ service_key: snapshotKey, ...live }))
       .select('id', 'service_key', 'category');
     return byKey.length === 1 ? byKey[0] : null;
   }
@@ -88,7 +94,7 @@ async function resolveCatalogIdentity(conn, insertData) {
   const candidates = serviceNameCandidates(name).map((c) => c.toLowerCase());
   if (!candidates.length) return null;
   const hits = await stable(conn('services')
-    .where({ is_active: true })
+    .where(live)
     .whereRaw(`LOWER(name) IN (${candidates.map(() => '?').join(', ')})`, candidates))
     .select('id', 'service_key', 'category');
   const distinct = [...new Map(hits.map((h) => [h.id, h])).values()];

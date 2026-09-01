@@ -193,6 +193,22 @@ function statementEnd(source, i) {
   return i;
 }
 
+// Start of the statement that contains position `i`: walk BACKWARD over
+// balanced brackets to the previous `;`, an unclosed opener (`{`/`(` of
+// the enclosing block or call), or the file start. The chained expression
+// may span any number of lines.
+function statementStart(source, i) {
+  let depth = 0;
+  while (i > 0) {
+    const ch = source[i - 1];
+    if (')]}'.includes(ch)) depth += 1;
+    else if ('([{'.includes(ch)) { if (depth === 0) return i; depth -= 1; }
+    else if (ch === ';' && depth === 0) return i;
+    i -= 1;
+  }
+  return 0;
+}
+
 // The text inside the `.insert(…)` argument list of a chain/statement.
 function insertArgument(text) {
   const at = text.search(/\.insert\s*\(/);
@@ -277,12 +293,16 @@ function collectInsertSites(source) {
     // Table-LAST builder forms: trx.insert(data).into('scheduled_services')
     // / .table('scheduled_services') put the insert BEFORE the table ref,
     // so the forward chain walk below never sees it (GH Codex r5 P1). The
-    // statement's text up to the ref carries the .insert( in that shape.
+    // WHOLE statement up to the ref — walked backward from the .into/.table
+    // link, any number of lines (pre-push Codex r6 P1) — carries the
+    // .insert( in that shape.
     const before = source.slice(Math.max(0, m.index - 12), m.index);
-    if (/\.(into|table)\s*\($/.test(before)) {
-      const prefix = statementPrefix(source, m.index);
-      if (/\.insert\s*\(/.test(prefix)) {
-        site(`${prefix} table-last:scheduled_services`, insertArgument(prefix));
+    const link = /\.(into|table)\s*\($/.exec(before);
+    if (link) {
+      const linkAt = m.index - link[0].length;
+      const stmt = source.slice(statementStart(source, linkAt), m.index).replace(/\s+/g, ' ').trim();
+      if (/\.insert\s*\(/.test(stmt)) {
+        site(`${stmt} table-last:scheduled_services`, insertArgument(stmt));
       }
       continue;
     }
@@ -374,6 +394,9 @@ describe('booking insert-site contract', () => {
     // Table-last forms and raw SQL are caught (GH Codex r5 P1).
     expect(collectInsertSites("await trx.insert(data).into('scheduled_services');")).toEqual(["await trx.insert(data).into( table-last:scheduled_services"]);
     expect(collectInsertSites("await trx.insert(data).table('scheduled_services');")).toEqual(["await trx.insert(data).table( table-last:scheduled_services"]);
+    // …across any number of lines, inside a block (pre-push Codex r6 P1).
+    expect(collectInsertSites("async function save(trx, data) {\n  await audit();\n  return trx\n    .insert(data)\n    .into('scheduled_services');\n}")).toEqual(["return trx .insert(data) .into( table-last:scheduled_services"]);
+    expect(collectInsertSites("const [row] = await trx\n  .insert(data)\n  .returning('*')\n  .table('scheduled_services');")).toEqual(["const [row] = await trx .insert(data) .returning('*') .table( table-last:scheduled_services"]);
     expect(collectInsertSites("await db.raw(`INSERT INTO scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
     // Schema-qualified forms, raw or builder, are the same table (r5 P2).
     expect(collectInsertSites("await db.raw(`INSERT INTO public.scheduled_services (a) VALUES (?)`, [1]);")).toEqual(["await db.raw(` raw:INSERT INTO scheduled_services"]);
