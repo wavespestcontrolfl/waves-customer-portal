@@ -10337,6 +10337,9 @@ export function CompletionPanel({
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
+  // True between applyGeneratedReport parking [Found]/[Next] note lines and
+  // the generation-inputs watcher absorbing that move (see both sites).
+  const parkedByGenerationRef = useRef(false);
   // Baseline for the generation-inputs watcher below — null means "not yet
   // initialized" (fresh mount or just-restored draft), so the first run
   // records without invalidating.
@@ -12365,9 +12368,15 @@ export function CompletionPanel({
     // them (parkTaggedNoteLines) so completion, regeneration, the photo
     // context and drafts keep them.
     const parkedFound = parkTaggedNoteLines({ notes, tag: "found", labels: selectedObservationLabels, current: observationsText });
-    if (parkedFound !== null) setObservationsText(parkedFound);
     const parkedNext = parkTaggedNoteLines({ notes, tag: "next", labels: selectedRecommendationLabels, current: recommendationsText });
-    if (parkedNext !== null) setRecommendationsText(parkedNext);
+    if (parkedFound !== null || parkedNext !== null) {
+      // The generation-inputs watcher below sees these as post-generation
+      // edits and would clear the draft it just installed — mark the move
+      // as the draft's own so the watcher re-baselines instead.
+      parkedByGenerationRef.current = true;
+      if (parkedFound !== null) setObservationsText(parkedFound);
+      if (parkedNext !== null) setRecommendationsText(parkedNext);
+    }
     setNotes(String(reportText || "").trim());
   }
   // Deselect handle after an AI draft: remove a structured selection from its
@@ -13599,8 +13608,13 @@ export function CompletionPanel({
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
         // Tips from your tech — ids only; the server resolves the copy and
-        // freezes it into structured_notes.techTips (freezeTechTips).
-        techTips: { ids: selectedTipIds, custom: customTip.trim() || null },
+        // freezes it into structured_notes.techTips (freezeTechTips). Only
+        // when the picker actually loaded: a restored draft's picks behind a
+        // failed load (fallback textareas) are invisible to the tech and
+        // must not freeze onto the report.
+        techTips: techTips?.available === true
+          ? { ids: selectedTipIds, custom: customTip.trim() || null }
+          : null,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
         ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
@@ -14089,6 +14103,12 @@ export function CompletionPanel({
       // response invalidates immediately (codex r38).
       if (generating) return;
       generationInputsRef.current = snapshot;
+      // Tagged note lines parked by applyGeneratedReport are part of the
+      // draft being installed, not an edit after it — re-baseline only.
+      if (parkedByGenerationRef.current) {
+        parkedByGenerationRef.current = false;
+        return;
+      }
       invalidateGeneratedReportOnTypedEdit();
     }
   }, [areasServiced, observationsText, recommendationsText,
@@ -19480,6 +19500,12 @@ function TechTipPicker({
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [showCustom, setShowCustom] = useState(() => String(customTip || "").trim() !== "");
+  // A draft restored after mount lands a non-empty customTip through the
+  // prop — reveal it, so counted-and-submitted copy is never hidden from
+  // the tech's final review.
+  useEffect(() => {
+    if (String(customTip || "").trim()) setShowCustom(true);
+  }, [customTip]);
   const listId = useMemo(() => `tech-tips-${Math.random().toString(36).slice(2, 8)}`, []);
   const groups = library?.groups || [];
   const allTips = useMemo(
